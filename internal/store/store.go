@@ -1,0 +1,1219 @@
+package store
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/PixnBits/local-grok-bots/internal/id"
+	_ "modernc.org/sqlite"
+)
+
+const timeLayout = "2006-01-02T15:04:05.000000000Z"
+
+// ErrNotFound is returned when a row does not exist.
+var ErrNotFound = errors.New("not found")
+
+// ErrConflict is returned when a bot name collides case-insensitively.
+var ErrConflict = errors.New("name already exists")
+
+var (
+	clockMu sync.Mutex
+	lastNS  int64
+)
+
+// Now returns a strictly increasing UTC timestamp so lexicographic order
+// matches creation order.
+func Now() time.Time {
+	clockMu.Lock()
+	defer clockMu.Unlock()
+	n := time.Now().UTC().UnixNano()
+	if n <= lastNS {
+		n = lastNS + 1
+	}
+	lastNS = n
+	return time.Unix(0, n).UTC()
+}
+
+func FormatTime(t time.Time) string { return t.UTC().Format(timeLayout) }
+
+type Bot struct {
+	ID            string  `json:"id"`
+	Name          string  `json:"name"`
+	Instructions  string  `json:"instructions,omitempty"`
+	Status        string  `json:"status"`
+	Model         *string `json:"model"`
+	CreatedAt     string  `json:"created_at,omitempty"`
+	UpdatedAt     string  `json:"updated_at,omitempty"`
+	ActiveRunID   *string `json:"active_run_id,omitempty"`
+	LastRunStatus string  `json:"last_run_status,omitempty"`
+	LastRunError  string  `json:"last_run_error,omitempty"`
+}
+
+type Memory struct {
+	Key       string `json:"key"`
+	Value     string `json:"value"`
+	UpdatedAt string `json:"updated_at"`
+}
+
+type Message struct {
+	ID        string  `json:"id"`
+	BotID     string  `json:"bot_id"`
+	Thread    string  `json:"thread"`
+	Role      string  `json:"role"`
+	Content   string  `json:"content"`
+	RunID     *string `json:"run_id"`
+	CreatedAt string  `json:"created_at"`
+}
+
+type Timer struct {
+	ID         string  `json:"id"`
+	BotID      string  `json:"bot_id"`
+	Schedule   string  `json:"schedule"`
+	Prompt     string  `json:"prompt"`
+	Enabled    bool    `json:"enabled"`
+	NextFireAt string  `json:"next_fire_at"`
+	LastFireAt *string `json:"last_fire_at"`
+}
+
+type Run struct {
+	ID         string  `json:"id"`
+	BotID      string  `json:"bot_id"`
+	Status     string  `json:"status"`
+	StartedAt  string  `json:"started_at"`
+	FinishedAt *string `json:"finished_at"`
+	Error      *string `json:"error"`
+}
+
+type LogEvent struct {
+	ID     int64           `json:"id"`
+	TS     string          `json:"ts"`
+	BotID  *string         `json:"bot_id"`
+	Kind   string          `json:"kind"`
+	Detail json.RawMessage `json:"detail"`
+}
+
+type DMPeer struct {
+	BotID  string `json:"bot_id"`
+	Name   string `json:"name"`
+	LastAt string `json:"last_at"`
+}
+
+// Store is the SQLite source of truth. All methods are safe for concurrent use.
+type Store struct {
+	db *sql.DB
+	mu sync.Mutex
+}
+
+func Open(path string) (*Store, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	dsn := "file:" + path + "?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	s := &Store{db: db}
+	if err := s.migrate(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Store) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.db.Close()
+}
+
+func (s *Store) migrate() error {
+	_, err := s.db.Exec(`
+PRAGMA journal_mode=WAL;
+CREATE TABLE IF NOT EXISTS bots (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  name_lower TEXT NOT NULL UNIQUE,
+  instructions TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'idle',
+  model TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS memory (
+  bot_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (bot_id, key)
+);
+CREATE TABLE IF NOT EXISTS messages (
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  thread TEXT NOT NULL,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  run_id TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(bot_id, thread, created_at, id);
+CREATE TABLE IF NOT EXISTS timers (
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  schedule TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  enabled INTEGER NOT NULL,
+  next_fire_at TEXT NOT NULL,
+  last_fire_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_timers_due ON timers(enabled, next_fire_at);
+CREATE TABLE IF NOT EXISTS runs (
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_runs_bot ON runs(bot_id, started_at);
+CREATE TABLE IF NOT EXISTS log_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts TEXT NOT NULL,
+  bot_id TEXT,
+  kind TEXT NOT NULL,
+  detail TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_log_bot ON log_events(bot_id, id);
+CREATE INDEX IF NOT EXISTS idx_log_kind ON log_events(kind, id);
+`)
+	return err
+}
+
+// ReconcileOnBoot marks leftover running runs failed, idles those bots,
+// and records missed timers without running them. It writes daemon_start.
+func (s *Store) ReconcileOnBoot(version string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := FormatTime(Now())
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	rows, err := tx.Query(`SELECT id, bot_id FROM runs WHERE status='running'`)
+	if err != nil {
+		return err
+	}
+	type pair struct{ runID, botID string }
+	var running []pair
+	for rows.Next() {
+		var p pair
+		if err := rows.Scan(&p.runID, &p.botID); err != nil {
+			rows.Close()
+			return err
+		}
+		running = append(running, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, p := range running {
+		if _, err := tx.Exec(`UPDATE runs SET status='error', error='daemon_restart', finished_at=? WHERE id=? AND status='running'`, now, p.runID); err != nil {
+			return err
+		}
+		if err := s.addLogTx(tx, p.botID, "run_finished", map[string]any{
+			"run_id": p.runID, "status": "error", "error": "daemon_restart",
+		}); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`UPDATE bots SET status='idle', updated_at=? WHERE status='running'`, now); err != nil {
+		return err
+	}
+
+	trows, err := tx.Query(`SELECT id, bot_id, schedule, next_fire_at FROM timers WHERE enabled=1 AND next_fire_at < ?`, now)
+	if err != nil {
+		return err
+	}
+	type missed struct{ id, botID, schedule, when string }
+	var late []missed
+	for trows.Next() {
+		var m missed
+		if err := trows.Scan(&m.id, &m.botID, &m.schedule, &m.when); err != nil {
+			trows.Close()
+			return err
+		}
+		late = append(late, m)
+	}
+	trows.Close()
+	if err := trows.Err(); err != nil {
+		return err
+	}
+	for _, m := range late {
+		next, err := nextAfter(Now(), m.schedule)
+		if err != nil {
+			if _, err := tx.Exec(`UPDATE timers SET enabled=0 WHERE id=?`, m.id); err != nil {
+				return err
+			}
+		} else {
+			if _, err := tx.Exec(`UPDATE timers SET next_fire_at=? WHERE id=?`, FormatTime(next), m.id); err != nil {
+				return err
+			}
+		}
+		if err := s.addLogTx(tx, m.botID, "timer_missed", map[string]any{
+			"timer_id": m.id, "scheduled_for": m.when,
+		}); err != nil {
+			return err
+		}
+	}
+	if err := s.addLogTx(tx, "", "daemon_start", map[string]any{"version": version}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func nextAfter(from time.Time, schedule string) (time.Time, error) {
+	d, err := ParseInterval(schedule)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return from.Add(d), nil
+}
+
+// ParseInterval accepts Go durations (30s, 5m, 2h) and day counts (1d),
+// optionally prefixed with "every ".
+func ParseInterval(s string) (time.Duration, error) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	s = strings.TrimPrefix(s, "every ")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, errors.New("schedule must be an interval like 30s, 5m, 2h, or 1d")
+	}
+	if strings.HasSuffix(s, "d") && !strings.ContainsAny(s, "hms") {
+		n, err := parsePositiveInt(strings.TrimSuffix(s, "d"))
+		if err != nil {
+			return 0, errors.New("schedule must be an interval like 30s, 5m, 2h, or 1d")
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < time.Second {
+		return 0, errors.New("schedule must be an interval like 30s, 5m, 2h, or 1d")
+	}
+	return d, nil
+}
+
+func parsePositiveInt(s string) (int, error) {
+	if s == "" {
+		return 0, errors.New("empty")
+	}
+	n := 0
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return 0, errors.New("not int")
+		}
+		n = n*10 + int(c-'0')
+	}
+	if n <= 0 {
+		return 0, errors.New("not positive")
+	}
+	return n, nil
+}
+
+func (s *Store) addLogTx(tx *sql.Tx, botID, kind string, detail any) error {
+	b, err := json.Marshal(detail)
+	if err != nil {
+		return err
+	}
+	var bot any
+	if botID != "" {
+		bot = botID
+	}
+	_, err = tx.Exec(`INSERT INTO log_events(ts, bot_id, kind, detail) VALUES(?,?,?,?)`,
+		FormatTime(Now()), bot, kind, string(b))
+	return err
+}
+
+func (s *Store) AddLog(botID, kind string, detail any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := s.addLogTx(tx, botID, kind, detail); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) CreateBot(name, instructions string, model *string, by string) (Bot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := FormatTime(Now())
+	b := Bot{
+		ID: id.New(), Name: name, Instructions: instructions, Status: "idle",
+		Model: model, CreatedAt: now, UpdatedAt: now,
+	}
+	_, err := s.db.Exec(`INSERT INTO bots(id, name, name_lower, instructions, status, model, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?)`, b.ID, b.Name, strings.ToLower(b.Name), b.Instructions, b.Status, nullStr(model), b.CreatedAt, b.UpdatedAt)
+	if err != nil {
+		if isUnique(err) {
+			return Bot{}, ErrConflict
+		}
+		return Bot{}, err
+	}
+	fields := []string{"name", "instructions"}
+	if model != nil {
+		fields = append(fields, "model")
+	}
+	if err := s.logUnlocked(b.ID, "bot_created", map[string]any{
+		"fields": fields, "by": by, "bot_id": b.ID, "name": b.Name,
+	}); err != nil {
+		return Bot{}, err
+	}
+	return b, nil
+}
+
+func (s *Store) logUnlocked(botID, kind string, detail any) error {
+	b, err := json.Marshal(detail)
+	if err != nil {
+		return err
+	}
+	var bot any
+	if botID != "" {
+		bot = botID
+	}
+	_, err = s.db.Exec(`INSERT INTO log_events(ts, bot_id, kind, detail) VALUES(?,?,?,?)`,
+		FormatTime(Now()), bot, kind, string(b))
+	return err
+}
+
+func isUnique(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "UNIQUE")
+}
+
+func nullStr(p *string) any {
+	if p == nil || *p == "" {
+		return nil
+	}
+	return *p
+}
+
+func (s *Store) GetBot(id string) (Bot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.getBot(id, true)
+}
+
+func (s *Store) getBot(id string, withRun bool) (Bot, error) {
+	row := s.db.QueryRow(`SELECT id, name, instructions, status, model, created_at, updated_at FROM bots WHERE id=?`, id)
+	b, err := scanBot(row, true)
+	if err != nil {
+		return Bot{}, err
+	}
+	if withRun {
+		s.attachRun(&b)
+	}
+	return b, nil
+}
+
+func (s *Store) attachRun(b *Bot) {
+	var runID, status string
+	var errText sql.NullString
+	err := s.db.QueryRow(`SELECT id, status, error FROM runs WHERE bot_id=? ORDER BY started_at DESC LIMIT 1`, b.ID).Scan(&runID, &status, &errText)
+	if err == sql.ErrNoRows {
+		return
+	}
+	if err != nil {
+		return
+	}
+	b.LastRunStatus = status
+	if errText.Valid {
+		b.LastRunError = errText.String
+	}
+	if status == "running" {
+		b.ActiveRunID = &runID
+	}
+}
+
+func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
+	var b Bot
+	var model sql.NullString
+	err := row.Scan(&b.ID, &b.Name, &b.Instructions, &b.Status, &model, &b.CreatedAt, &b.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Bot{}, ErrNotFound
+	}
+	if err != nil {
+		return Bot{}, err
+	}
+	if model.Valid && model.String != "" {
+		s := model.String
+		b.Model = &s
+	}
+	if !full {
+		b.Instructions = ""
+	}
+	return b, nil
+}
+
+func (s *Store) ListBots() ([]Bot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT id, name, instructions, status, model, created_at, updated_at FROM bots ORDER BY name_lower`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Bot
+	for rows.Next() {
+		b, err := scanBot(rows, false)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	for i := range out {
+		s.attachRun(&out[i])
+		out[i].Instructions = ""
+		out[i].CreatedAt = ""
+		out[i].UpdatedAt = ""
+	}
+	if out == nil {
+		out = []Bot{}
+	}
+	return out, nil
+}
+
+type BotPatch struct {
+	Name         *string
+	Instructions *string
+	Model        *string
+	ModelSet     bool
+	Status       *string
+	By           string
+}
+
+func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, err := s.getBot(id, false)
+	if err != nil {
+		return Bot{}, err
+	}
+	fields := []string{}
+	if p.Name != nil && *p.Name != b.Name {
+		b.Name = *p.Name
+		fields = append(fields, "name")
+	}
+	if p.Instructions != nil && *p.Instructions != b.Instructions {
+		b.Instructions = *p.Instructions
+		fields = append(fields, "instructions")
+	}
+	if p.ModelSet {
+		b.Model = p.Model
+		fields = append(fields, "model")
+	}
+	if p.Status != nil && *p.Status != b.Status {
+		b.Status = *p.Status
+		fields = append(fields, "status")
+	}
+	if len(fields) == 0 {
+		s.attachRun(&b)
+		return b, nil
+	}
+	b.UpdatedAt = FormatTime(Now())
+	_, err = s.db.Exec(`UPDATE bots SET name=?, name_lower=?, instructions=?, model=?, status=?, updated_at=? WHERE id=?`,
+		b.Name, strings.ToLower(b.Name), b.Instructions, nullStr(b.Model), b.Status, b.UpdatedAt, b.ID)
+	if err != nil {
+		if isUnique(err) {
+			return Bot{}, ErrConflict
+		}
+		return Bot{}, err
+	}
+	if err := s.logUnlocked(b.ID, "bot_updated", map[string]any{"fields": fields, "by": p.By, "bot_id": b.ID, "name": b.Name}); err != nil {
+		return Bot{}, err
+	}
+	s.attachRun(&b)
+	return b, nil
+}
+
+func (s *Store) SetStatus(id, status string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`UPDATE bots SET status=?, updated_at=? WHERE id=?`, status, FormatTime(Now()), id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) DeleteBot(id, by string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var name string
+	err := s.db.QueryRow(`SELECT name FROM bots WHERE id=?`, id).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, q := range []string{
+		`DELETE FROM memory WHERE bot_id=?`,
+		`DELETE FROM messages WHERE bot_id=?`,
+		`DELETE FROM timers WHERE bot_id=?`,
+		`DELETE FROM runs WHERE bot_id=?`,
+		`DELETE FROM bots WHERE id=?`,
+	} {
+		if _, err := tx.Exec(q, id); err != nil {
+			return err
+		}
+	}
+	if err := s.addLogTx(tx, id, "bot_deleted", map[string]any{"fields": []string{"deleted"}, "by": by, "bot_id": id, "name": name}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) FindBot(nameOrID string) (Bot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row := s.db.QueryRow(`SELECT id, name, instructions, status, model, created_at, updated_at FROM bots WHERE id=?`, nameOrID)
+	b, err := scanBot(row, true)
+	if err == nil {
+		return b, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return Bot{}, err
+	}
+	row = s.db.QueryRow(`SELECT id, name, instructions, status, model, created_at, updated_at FROM bots WHERE name_lower=?`, strings.ToLower(strings.TrimSpace(nameOrID)))
+	return scanBot(row, true)
+}
+
+func (s *Store) ListMemory(botID string) ([]Memory, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT key, value, updated_at FROM memory WHERE bot_id=? ORDER BY key`, botID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Memory{}
+	for rows.Next() {
+		var m Memory
+		if err := rows.Scan(&m.Key, &m.Value, &m.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpsertMemory(botID, key, value string) (Memory, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := FormatTime(Now())
+	_, err := s.db.Exec(`INSERT INTO memory(bot_id, key, value, updated_at) VALUES(?,?,?,?)
+		ON CONFLICT(bot_id, key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at`,
+		botID, key, value, now)
+	if err != nil {
+		return Memory{}, err
+	}
+	return Memory{Key: key, Value: value, UpdatedAt: now}, nil
+}
+
+func (s *Store) DeleteMemory(botID, key string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`DELETE FROM memory WHERE bot_id=? AND key=?`, botID, key)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) AddMessage(m Message) (Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.addMessage(m)
+}
+
+func (s *Store) addMessage(m Message) (Message, error) {
+	if m.ID == "" {
+		m.ID = id.New()
+	}
+	if m.CreatedAt == "" {
+		m.CreatedAt = FormatTime(Now())
+	}
+	_, err := s.db.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at) VALUES(?,?,?,?,?,?,?)`,
+		m.ID, m.BotID, m.Thread, m.Role, m.Content, nullStr(m.RunID), m.CreatedAt)
+	if err != nil {
+		return Message{}, err
+	}
+	return m, nil
+}
+
+// AddDMPair stores both sides of a direct message in one transaction.
+func (s *Store) AddDMPair(fromID, toID, content, runID string) (sent Message, received Message, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Message{}, Message{}, err
+	}
+	defer tx.Rollback()
+	var run any
+	if runID != "" {
+		run = runID
+	}
+	sent = Message{ID: id.New(), BotID: fromID, Thread: "dm:" + toID, Role: "bot", Content: content, CreatedAt: FormatTime(Now())}
+	if runID != "" {
+		sent.RunID = &runID
+	}
+	received = Message{ID: id.New(), BotID: toID, Thread: "dm:" + fromID, Role: "user", Content: content, CreatedAt: FormatTime(Now())}
+	if _, err := tx.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at) VALUES(?,?,?,?,?,?,?)`,
+		sent.ID, sent.BotID, sent.Thread, sent.Role, sent.Content, run, sent.CreatedAt); err != nil {
+		return Message{}, Message{}, err
+	}
+	if _, err := tx.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at) VALUES(?,?,?,?,?,?,?)`,
+		received.ID, received.BotID, received.Thread, received.Role, received.Content, nil, received.CreatedAt); err != nil {
+		return Message{}, Message{}, err
+	}
+	if err := s.addLogTx(tx, fromID, "dm_sent", map[string]any{"message_id": sent.ID, "other_bot_id": toID}); err != nil {
+		return Message{}, Message{}, err
+	}
+	if err := s.addLogTx(tx, toID, "dm_received", map[string]any{"message_id": received.ID, "other_bot_id": fromID}); err != nil {
+		return Message{}, Message{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Message{}, Message{}, err
+	}
+	return sent, received, nil
+}
+
+func (s *Store) ListMessages(botID, thread, before string, limit int) ([]Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit <= 0 {
+		limit = 50
+	}
+	q := `SELECT id, bot_id, thread, role, content, run_id, created_at FROM messages WHERE bot_id=? AND thread=?`
+	args := []any{botID, thread}
+	if before != "" {
+		q += ` AND (created_at < (SELECT created_at FROM messages WHERE id=?) OR (created_at = (SELECT created_at FROM messages WHERE id=?) AND id < ?))`
+		args = append(args, before, before, before)
+	}
+	q += ` ORDER BY created_at DESC, id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var rev []Message
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		rev = append(rev, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]Message, len(rev))
+	for i := range rev {
+		out[len(rev)-1-i] = rev[i]
+	}
+	if out == nil {
+		out = []Message{}
+	}
+	return out, nil
+}
+
+func scanMessage(sc interface{ Scan(...any) error }) (Message, error) {
+	var m Message
+	var run sql.NullString
+	if err := sc.Scan(&m.ID, &m.BotID, &m.Thread, &m.Role, &m.Content, &run, &m.CreatedAt); err != nil {
+		return Message{}, err
+	}
+	if run.Valid {
+		s := run.String
+		m.RunID = &s
+	}
+	return m, nil
+}
+
+// RecentContext returns the newest messages for a bot across the user thread
+// and DM threads, oldest first, capped at limit.
+func (s *Store) RecentContext(botID string, limit int) ([]Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit <= 0 {
+		limit = 40
+	}
+	rows, err := s.db.Query(`SELECT id, bot_id, thread, role, content, run_id, created_at FROM (
+		SELECT id, bot_id, thread, role, content, run_id, created_at FROM messages WHERE bot_id=?
+		ORDER BY created_at DESC, id DESC LIMIT ?
+	) ORDER BY created_at ASC, id ASC`, botID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Message{}
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) NeedsRun(botID string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var started sql.NullString
+	err := s.db.QueryRow(`SELECT started_at FROM runs WHERE bot_id=? ORDER BY started_at DESC LIMIT 1`, botID).Scan(&started)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	var pending sql.NullString
+	err = s.db.QueryRow(`SELECT MAX(created_at) FROM messages WHERE bot_id=? AND (
+		(thread='user' AND role IN ('user','system')) OR (thread LIKE 'dm:%' AND role='user')
+	)`, botID).Scan(&pending)
+	if err != nil {
+		return false, err
+	}
+	if !pending.Valid || pending.String == "" {
+		return false, nil
+	}
+	if !started.Valid || started.String == "" {
+		return true, nil
+	}
+	return pending.String > started.String, nil
+}
+
+func (s *Store) CreateRun(botID string) (Run, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := Run{ID: id.New(), BotID: botID, Status: "running", StartedAt: FormatTime(Now())}
+	_, err := s.db.Exec(`INSERT INTO runs(id, bot_id, status, started_at) VALUES(?,?,?,?)`, r.ID, r.BotID, r.Status, r.StartedAt)
+	if err != nil {
+		return Run{}, err
+	}
+	if err := s.logUnlocked(botID, "run_started", map[string]any{"run_id": r.ID}); err != nil {
+		return Run{}, err
+	}
+	return r, nil
+}
+
+// FinishRun moves a running run to a terminal status. False means it was already finished.
+func (s *Store) FinishRun(id, status, errText string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var botID string
+	err := s.db.QueryRow(`SELECT bot_id FROM runs WHERE id=? AND status='running'`, id).Scan(&botID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	now := FormatTime(Now())
+	var e any
+	if errText != "" {
+		e = errText
+	}
+	if _, err := s.db.Exec(`UPDATE runs SET status=?, finished_at=?, error=? WHERE id=? AND status='running'`, status, now, e, id); err != nil {
+		return false, err
+	}
+	detail := map[string]any{"run_id": id, "status": status}
+	if errText != "" {
+		detail["error"] = errText
+	}
+	if err := s.logUnlocked(botID, "run_finished", detail); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) GetRun(id string) (Run, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var r Run
+	var fin, errText sql.NullString
+	err := s.db.QueryRow(`SELECT id, bot_id, status, started_at, finished_at, error FROM runs WHERE id=?`, id).
+		Scan(&r.ID, &r.BotID, &r.Status, &r.StartedAt, &fin, &errText)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Run{}, ErrNotFound
+	}
+	if err != nil {
+		return Run{}, err
+	}
+	if fin.Valid {
+		r.FinishedAt = &fin.String
+	}
+	if errText.Valid {
+		r.Error = &errText.String
+	}
+	return r, nil
+}
+
+func (s *Store) CreateTimer(botID, schedule, prompt string, enabled bool) (Timer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d, err := ParseInterval(schedule)
+	if err != nil {
+		return Timer{}, err
+	}
+	en := 0
+	if enabled {
+		en = 1
+	}
+	t := Timer{
+		ID: id.New(), BotID: botID, Schedule: strings.TrimSpace(schedule), Prompt: prompt,
+		Enabled: enabled, NextFireAt: FormatTime(Now().Add(d)),
+	}
+	_, err = s.db.Exec(`INSERT INTO timers(id, bot_id, schedule, prompt, enabled, next_fire_at) VALUES(?,?,?,?,?,?)`,
+		t.ID, t.BotID, t.Schedule, t.Prompt, en, t.NextFireAt)
+	return t, err
+}
+
+func (s *Store) ListTimers(botID string) ([]Timer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT id, bot_id, schedule, prompt, enabled, next_fire_at, last_fire_at FROM timers WHERE bot_id=? ORDER BY next_fire_at`, botID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanTimers(rows)
+}
+
+func (s *Store) GetTimer(id string) (Timer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row := s.db.QueryRow(`SELECT id, bot_id, schedule, prompt, enabled, next_fire_at, last_fire_at FROM timers WHERE id=?`, id)
+	t, err := scanTimer(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Timer{}, ErrNotFound
+	}
+	return t, err
+}
+
+type TimerPatch struct {
+	Schedule *string
+	Prompt   *string
+	Enabled  *bool
+}
+
+func (s *Store) UpdateTimer(id string, p TimerPatch) (Timer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row := s.db.QueryRow(`SELECT id, bot_id, schedule, prompt, enabled, next_fire_at, last_fire_at FROM timers WHERE id=?`, id)
+	t, err := scanTimer(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Timer{}, ErrNotFound
+	}
+	if err != nil {
+		return Timer{}, err
+	}
+	if p.Schedule != nil {
+		if _, err := ParseInterval(*p.Schedule); err != nil {
+			return Timer{}, err
+		}
+		t.Schedule = strings.TrimSpace(*p.Schedule)
+		d, _ := ParseInterval(t.Schedule)
+		t.NextFireAt = FormatTime(Now().Add(d))
+	}
+	if p.Prompt != nil {
+		t.Prompt = *p.Prompt
+	}
+	if p.Enabled != nil {
+		t.Enabled = *p.Enabled
+		if t.Enabled {
+			next, err := time.Parse(timeLayout, t.NextFireAt)
+			if err != nil || !next.After(time.Now().UTC()) {
+				d, _ := ParseInterval(t.Schedule)
+				t.NextFireAt = FormatTime(Now().Add(d))
+			}
+		}
+	}
+	en := 0
+	if t.Enabled {
+		en = 1
+	}
+	_, err = s.db.Exec(`UPDATE timers SET schedule=?, prompt=?, enabled=?, next_fire_at=? WHERE id=?`,
+		t.Schedule, t.Prompt, en, t.NextFireAt, t.ID)
+	return t, err
+}
+
+func (s *Store) DeleteTimer(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`DELETE FROM timers WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// ClaimDueTimers returns timers whose next_fire_at has passed and pushes each
+// next fire forward. The caller runs them.
+func (s *Store) ClaimDueTimers(now time.Time) ([]Timer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	stamp := FormatTime(now)
+	rows, err := s.db.Query(`SELECT id, bot_id, schedule, prompt, enabled, next_fire_at, last_fire_at FROM timers WHERE enabled=1 AND next_fire_at <= ?`, stamp)
+	if err != nil {
+		return nil, err
+	}
+	due, err := scanTimers(rows)
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	var claimed []Timer
+	for _, t := range due {
+		d, err := ParseInterval(t.Schedule)
+		if err != nil {
+			continue
+		}
+		next := FormatTime(Now().Add(d))
+		fired := FormatTime(Now())
+		res, err := s.db.Exec(`UPDATE timers SET next_fire_at=?, last_fire_at=? WHERE id=? AND next_fire_at=?`,
+			next, fired, t.ID, t.NextFireAt)
+		if err != nil {
+			return nil, err
+		}
+		n, _ := res.RowsAffected()
+		if n == 1 {
+			claimed = append(claimed, t)
+		}
+	}
+	return claimed, nil
+}
+
+func scanTimers(rows *sql.Rows) ([]Timer, error) {
+	out := []Timer{}
+	for rows.Next() {
+		t, err := scanTimer(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func scanTimer(sc interface{ Scan(...any) error }) (Timer, error) {
+	var t Timer
+	var en int
+	var last sql.NullString
+	err := sc.Scan(&t.ID, &t.BotID, &t.Schedule, &t.Prompt, &en, &t.NextFireAt, &last)
+	if err != nil {
+		return Timer{}, err
+	}
+	t.Enabled = en == 1
+	if last.Valid {
+		t.LastFireAt = &last.String
+	}
+	return t, nil
+}
+
+func (s *Store) ListDMs(botID string) ([]DMPeer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`
+		SELECT substr(m.thread, 4) AS other_id, b.name, MAX(m.created_at)
+		FROM messages m
+		JOIN bots b ON b.id = substr(m.thread, 4)
+		WHERE m.bot_id=? AND m.thread LIKE 'dm:%'
+		GROUP BY other_id
+		ORDER BY MAX(m.created_at) DESC`, botID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []DMPeer{}
+	for rows.Next() {
+		var d DMPeer
+		if err := rows.Scan(&d.BotID, &d.Name, &d.LastAt); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListLog(botID, kind, before string, limit int) ([]LogEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if limit <= 0 {
+		limit = 100
+	}
+	q := `SELECT id, ts, bot_id, kind, detail FROM log_events WHERE 1=1`
+	args := []any{}
+	if botID != "" {
+		q += ` AND bot_id=?`
+		args = append(args, botID)
+	}
+	if kind != "" {
+		q += ` AND kind=?`
+		args = append(args, kind)
+	}
+	if before != "" {
+		q += ` AND id < ?`
+		args = append(args, before)
+	}
+	q += ` ORDER BY id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []LogEvent{}
+	for rows.Next() {
+		var e LogEvent
+		var bot sql.NullString
+		var detail string
+		if err := rows.Scan(&e.ID, &e.TS, &bot, &e.Kind, &detail); err != nil {
+			return nil, err
+		}
+		if bot.Valid {
+			s := bot.String
+			e.BotID = &s
+		}
+		e.Detail = json.RawMessage(detail)
+		if !json.Valid(e.Detail) {
+			e.Detail = json.RawMessage(`{}`)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// InsertRunningRun is for crash-restart tests.
+func (s *Store) InsertRunningRun(botID string) (Run, error) {
+	return s.CreateRun(botID)
+}
+
+func (s *Store) BotNames() (map[string]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT id, name FROM bots`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var id, name string
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		out[id] = name
+	}
+	return out, rows.Err()
+}
+
+// BackdateTimer moves next_fire_at into the past. Test helper.
+func (s *Store) BackdateTimer(id string, when time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`UPDATE timers SET next_fire_at=? WHERE id=?`, FormatTime(when), id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) LogCount(kind string) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM log_events WHERE kind=?`, kind).Scan(&n)
+	return n, err
+}
+
+// FailRunning marks any run still in progress as error. Used on clean shutdown.
+func (s *Store) FailRunning(reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT id, bot_id FROM runs WHERE status='running'`)
+	if err != nil {
+		return err
+	}
+	type pair struct{ runID, botID string }
+	var running []pair
+	for rows.Next() {
+		var p pair
+		if err := rows.Scan(&p.runID, &p.botID); err != nil {
+			rows.Close()
+			return err
+		}
+		running = append(running, p)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	now := FormatTime(Now())
+	for _, p := range running {
+		res, err := s.db.Exec(`UPDATE runs SET status='error', error=?, finished_at=? WHERE id=? AND status='running'`, reason, now, p.runID)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			continue
+		}
+		if err := s.logUnlocked(p.botID, "run_finished", map[string]any{
+			"run_id": p.runID, "status": "error", "error": reason,
+		}); err != nil {
+			return err
+		}
+	}
+	_, err = s.db.Exec(`UPDATE bots SET status='idle', updated_at=? WHERE status='running'`, now)
+	return err
+}

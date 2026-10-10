@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Local Grok Bots</title>
+<style>
+  :root {
+    --bg: #e4ddd0;
+    --paper: #fbf7f1;
+    --ink: #1d1914;
+    --muted: #6e675d;
+    --line: #d5ccbe;
+    --accent: #1b654c;
+    --accent-2: #e7f3ec;
+    --run: #8a4e08;
+    --run-bg: #f8ecd8;
+    --err: #8d2d2d;
+    --err-bg: #f8e6e2;
+    --paused: #4d5966;
+    --shadow: 0 1px 0 rgba(29,25,20,.05), 0 16px 40px rgba(29,25,20,.08);
+    --sans: ui-sans-serif, system-ui, sans-serif;
+    --serif: "Iowan Old Style", Palatino, Georgia, serif;
+    --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    font-family: var(--sans);
+    color: var(--ink);
+    background:
+      radial-gradient(1200px 500px at 10% -10%, #efe6d4 0%, transparent 55%),
+      var(--bg);
+  }
+  button, input, textarea, select { font: inherit; color: inherit; }
+  button, [role="button"] { cursor: pointer; }
+  button { border: 1px solid var(--line); background: var(--paper); border-radius: 10px; padding: 8px 12px; }
+  button.primary { background: var(--accent); color: #f4fbf7; border-color: transparent; }
+  button.ghost { background: transparent; }
+  button:disabled { opacity: .45; cursor: default; }
+  input, textarea, select {
+    width: 100%;
+    border: 1px solid var(--line);
+    background: #fff;
+    border-radius: 10px;
+    padding: 10px 12px;
+  }
+  textarea { resize: vertical; min-height: 72px; }
+  .app { min-height: 100%; display: flex; flex-direction: column; }
+  header.top {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 16px 8px;
+  }
+  header.top h1 {
+    font-family: var(--serif);
+    font-size: 22px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: -.02em;
+  }
+  header.top .sub { color: var(--muted); font-size: 12px; }
+  nav.tabs { display: flex; gap: 6px; padding: 0 16px 12px; }
+  nav.tabs button[aria-selected="true"] { background: var(--ink); color: var(--paper); border-color: var(--ink); }
+  main { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 0 16px 16px; }
+  .panel {
+    background: var(--paper);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    box-shadow: var(--shadow);
+    min-height: 0;
+  }
+  .view { display: none; flex: 1; min-height: 0; }
+  .view.on { display: flex; flex-direction: column; gap: 12px; }
+  .create { padding: 14px; display: grid; gap: 8px; }
+  .create h2, .edit h2, .log head { font-family: var(--serif); font-size: 18px; margin: 0; }
+  .row { display: flex; gap: 8px; }
+  .bots { display: flex; flex-direction: column; gap: 8px; }
+  .bot {
+    text-align: left; padding: 12px 14px; display: flex; justify-content: space-between; align-items: center; gap: 10px;
+  }
+  .bot strong { display: block; }
+  .bot small { color: var(--muted); }
+  .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); text-transform: lowercase; }
+  .dot { width: 8px; height: 8px; border-radius: 99px; background: #b7b1a6; display: inline-block; }
+  .status.running { color: var(--run); }
+  .status.running .dot { background: var(--run); box-shadow: 0 0 0 4px rgba(138,78,8,.15); }
+  .status.paused .dot { background: var(--paused); }
+  .status.idle .dot { background: var(--accent); }
+  .chat-layout { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
+  .thread {
+    flex: 1; min-height: 240px; display: flex; flex-direction: column; overflow: hidden;
+  }
+  .thread-bar, .edit-bar {
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+    padding: 12px 14px; border-bottom: 1px solid var(--line);
+  }
+  .thread-bar h2 { margin: 0; font-family: var(--serif); font-size: 20px; }
+  .msgs { flex: 1; overflow: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .bubble { max-width: 78ch; padding: 10px 12px; border-radius: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .bubble.user { background: var(--accent-2); align-self: flex-end; border-bottom-right-radius: 4px; }
+  .bubble.bot { background: #fff; border: 1px solid var(--line); align-self: flex-start; border-bottom-left-radius: 4px; }
+  .bubble.system { background: transparent; color: var(--muted); font-size: 13px; align-self: center; text-align: center; }
+  .who { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .live { padding: 0 14px 10px; display: flex; flex-direction: column; gap: 6px; }
+  .tool {
+    font-family: var(--mono); font-size: 12px; background: #f3eee6; border-radius: 8px; padding: 6px 8px;
+    overflow-wrap: anywhere;
+  }
+  .banner { margin: 0 14px 10px; background: var(--err-bg); color: var(--err); border-radius: 10px; padding: 8px 10px; font-size: 13px; }
+  .composer { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); align-items: flex-end; }
+  .composer textarea { min-height: 44px; max-height: 140px; }
+  .edit { padding: 14px; display: grid; gap: 8px; }
+  .dms { display: flex; flex-direction: column; gap: 6px; }
+  .dm-btn { text-align: left; }
+  .dm-thread { font-size: 13px; background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 8px; max-height: 180px; overflow: auto; white-space: pre-wrap; }
+  .filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .log { flex: 1; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+  .event { padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  .event .meta { display: flex; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
+  .event .kind { font-family: var(--mono); color: var(--ink); }
+  .event pre { margin: 6px 0 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .empty { color: var(--muted); padding: 8px 2px; }
+  .err { color: var(--err); font-size: 13px; min-height: 1em; }
+  .auth {
+    position: fixed; inset: 0; background: rgba(29,25,20,.45);
+    display: none; align-items: center; justify-content: center; padding: 16px;
+  }
+  .auth.on { display: flex; }
+  .auth .card { width: min(420px, 100%); padding: 16px; display: grid; gap: 10px; }
+  .desktop-log { display: none; }
+  @media (min-width: 980px) {
+    nav.tabs { display: none; }
+    main { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 12px; align-items: stretch; }
+    .view { display: flex !important; }
+    #view-log { display: none !important; }
+    #view-log.on { display: flex !important; grid-column: 1 / -1; }
+    .chat-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; min-height: 0; }
+    #edit[hidden] { display: none !important; }
+    .chat-layout:not(:has(#edit:not([hidden]))) { grid-template-columns: minmax(0, 1fr); }
+    .desktop-log { display: inline-flex; }
+    .thread { min-height: 70vh; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div>
+      <h1>Local Grok Bots</h1>
+      <div class="sub" id="health">connecting…</div>
+    </div>
+    <span style="flex:1"></span>
+    <button class="ghost desktop-log" id="log-toggle" type="button">Log</button>
+  </header>
+  <nav class="tabs" role="tablist">
+    <button type="button" data-view="bots" aria-selected="true">Bots</button>
+    <button type="button" data-view="chat" aria-selected="false">Thread</button>
+    <button type="button" data-view="log" aria-selected="false">Log</button>
+  </nav>
+  <main>
+    <section class="view on" id="view-bots">
+      <form class="panel create" id="create-form">
+        <h2>New bot</h2>
+        <input name="name" placeholder="Name" autocomplete="off" required>
+        <textarea name="instructions" placeholder="Instructions — role, boundaries, what this bot is for"></textarea>
+        <div class="row">
+          <button class="primary" type="submit">Create bot</button>
+        </div>
+        <div class="err" id="create-err"></div>
+      </form>
+      <div class="bots" id="bot-list"></div>
+    </section>
+    <section class="view" id="view-chat">
+      <div class="chat-layout">
+        <div class="panel thread" id="thread">
+          <div class="thread-bar">
+            <div>
+              <h2 id="thread-name">No bot selected</h2>
+              <div class="status" id="thread-status"></div>
+            </div>
+            <button type="button" id="edit-toggle">Edit</button>
+          </div>
+          <div class="banner" id="run-banner" hidden></div>
+          <div class="msgs" id="msgs"><p class="empty">Choose a bot to read its thread.</p></div>
+          <div class="live" id="live"></div>
+          <form class="composer" id="composer">
+            <textarea id="composer-input" placeholder="Message… Enter to send, Shift+Enter for a new line"></textarea>
+            <button class="primary" type="submit" id="send-btn">Send</button>
+          </form>
+        </div>
+        <form class="panel edit" id="edit" hidden>
+          <h2>Bot</h2>
+          <label>Name<input id="edit-name" autocomplete="off"></label>
+          <label>Instructions<textarea id="edit-instructions"></textarea></label>
+          <label>Model override<input id="edit-model" placeholder="blank uses the daemon default" autocomplete="off"></label>
+          <div class="row">
+            <button class="primary" type="submit">Save</button>
+            <button type="button" id="pause-btn">Pause</button>
+            <button type="button" id="delete-btn">Delete</button>
+          </div>
+          <div class="err" id="edit-err"></div>
+          <h2>Direct messages</h2>
+          <div class="dms" id="dms"><p class="empty">No DMs yet.</p></div>
+        </form>
+      </div>
+    </section>
+    <section class="view" id="view-log">
+      <div class="panel" style="display:flex;flex-direction:column;min-height:0;flex:1">
+        <div class="edit-bar">
+          <h2 style="font-family:var(--serif);margin:0">Log</h2>
+          <button type="button" id="log-refresh">Refresh</button>
+        </div>
+        <div style="padding:12px" class="filters">
+          <select id="log-bot"><option value="">All bots</option></select>
+          <select id="log-kind">
+            <option value="">All kinds</option>
+          </select>
+        </div>
+        <div class="log" id="log"></div>
+      </div>
+    </section>
+  </main>
+</div>
+<div class="auth" id="auth">
+  <form class="panel card">
+    <h2 style="font-family:var(--serif);margin:0">Token required</h2>
+    <p class="empty">This daemon has AUTH_TOKEN set. Paste the bearer token to continue. It stays in this browser only.</p>
+    <input id="auth-token" type="password" autocomplete="off" placeholder="Bearer token">
+    <button class="primary" type="submit">Continue</button>
+    <div class="err" id="auth-err"></div>
+  </form>
+</div>
+<script>
+const KINDS = ["user_message","bot_message","dm_sent","dm_received","tool_start","tool_end","bot_created","bot_updated","bot_deleted","timer_fired","timer_missed","model_call","run_started","run_finished","daemon_start","daemon_stop"];
+const state = {
+  view: "bots",
+  botId: null,
+  bots: [],
+  messages: [],
+  token: sessionStorage.getItem("lgb_token") || "",
+  streamCtl: null,
+  streaming: "",
+  editOpen: window.matchMedia("(min-width: 980px)").matches,
+  desktopLog: false
+};
+const $ = (s, r=document) => r.querySelector(s);
+function base() {
+  const m = location.pathname.match(/^(\/hds-[a-z0-9]+-\d+-[a-z0-9]+)/i);
+  return m ? m[1] : "";
+}
+function showAuth() { $("#auth").classList.add("on"); }
+async function api(path, opts={}) {
+  const headers = Object.assign({}, opts.headers || {});
+  if (opts.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+  if (state.token) headers.Authorization = "Bearer " + state.token;
+  const res = await fetch(base() + path, Object.assign({}, opts, {headers}));
+  if (res.status === 401) { showAuth(); throw new Error("unauthorized"); }
+  if (res.status === 204) return null;
+  const text = await res.text();
+  let data = null;
+  if (text) { try { data = JSON.parse(text); } catch { data = {error: text}; } }
+  if (!res.ok) throw new Error((data && data.error) || res.statusText);
+  return data;
+}
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text != null) n.textContent = text;
+  return n;
+}
+function setView(name) {
+  state.view = name;
+  for (const b of document.querySelectorAll("nav.tabs button")) {
+    b.setAttribute("aria-selected", b.dataset.view === name ? "true" : "false");
+  }
+  for (const v of ["bots","chat","log"]) {
+    $("#view-" + v).classList.toggle("on", v === name || (window.innerWidth >= 980 && v !== "log"));
+  }
+  if (window.innerWidth >= 980) {
+    document.body.classList.toggle("logging", state.desktopLog || name === "log");
+    $("#view-log").classList.toggle("on", state.desktopLog || name === "log");
+  }
+  if (name === "log") loadLog();
+}
+document.querySelectorAll("nav.tabs button").forEach(b => b.addEventListener("click", () => setView(b.dataset.view)));
+$("#log-toggle").addEventListener("click", () => {
+  state.desktopLog = !state.desktopLog;
+  setView(state.desktopLog ? "log" : (state.botId ? "chat" : "bots"));
+  if (state.desktopLog) loadLog();
+});
+function statusNode(status) {
+  const s = el("span", "status " + (status || "idle"));
+  s.append(el("i", "dot"), document.createTextNode(status || "idle"));
+  return s;
+}
+function renderBots() {
+  const list = $("#bot-list");
+  list.replaceChildren();
+  if (!state.bots.length) {
+    list.append(el("p", "empty", "No bots yet. Create one to start a thread."));
+    return;
+  }
+  for (const b of state.bots) {
+    const btn = el("button", "bot");
+    btn.type = "button";
+    const left = el("span");
+    left.append(el("strong", null, b.name));
+    if (b.model) left.append(el("small", null, b.model));
+    btn.append(left, statusNode(b.status));
+    btn.addEventListener("click", () => openBot(b.id));
+    list.append(btn);
+  }
+  const sel = $("#log-bot");
+  const cur = sel.value;
+  sel.replaceChildren(new Option("All bots", ""));
+  for (const b of state.bots) sel.append(new Option(b.name, b.id));
+  sel.value = cur;
+}
+async function loadBots() {
+  state.bots = await api("/api/bots");
+  renderBots();
+  if (state.botId) {
+    const b = state.bots.find(x => x.id === state.botId);
+    if (b) paintBot(b);
+  }
+}
+function paintBot(b) {
+  $("#thread-name").textContent = b.name;
+  const st = $("#thread-status");
+  st.className = "status " + b.status;
+  st.replaceChildren(el("i", "dot"), document.createTextNode(b.status));
+  $("#pause-btn").textContent = b.status === "paused" ? "Resume" : "Pause";
+  const banner = $("#run-banner");
+  if (b.status !== "running" && b.last_run_status === "error" && b.last_run_error) {
+    banner.hidden = false;
+    banner.textContent = "Run failed: " + b.last_run_error;
+  } else if (!state.streaming) {
+    banner.hidden = true;
+  }
+}
+async function openBot(id) {
+  state.botId = id;
+  setView("chat");
+  $("#edit").hidden = !state.editOpen;
+  await refreshBot();
+  await loadThread();
+  const b = state.bots.find(x => x.id === id);
+  if (b && b.active_run_id) follow(b.active_run_id);
+}
+async function refreshBot() {
+  if (!state.botId) return;
+  const b = await api("/api/bots/" + state.botId);
+  const i = state.bots.findIndex(x => x.id === b.id);
+  if (i >= 0) state.bots[i] = Object.assign(state.bots[i] || {}, b);
+  else state.bots.push(b);
+  paintBot(b);
+  $("#edit-name").value = b.name || "";
+  $("#edit-instructions").value = b.instructions || "";
+  $("#edit-model").value = b.model || "";
+  renderBots();
+  loadDMs();
+  return b;
+}
+function renderMessages() {
+  const box = $("#msgs");
+  box.replaceChildren();
+  if (!state.messages.length) {
+    box.append(el("p", "empty", "No messages yet. The composer stays available while a run is in progress."));
+    return;
+  }
+  for (const m of state.messages) {
+    const bubble = el("div", "bubble " + (m.role || "system"));
+    const who = m.role === "user" ? "You" : m.role === "bot" ? "Bot" : "Scheduled";
+    bubble.append(el("span", "who", who), document.createTextNode(m.content || ""));
+    box.append(bubble);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+async function loadThread() {
+  if (!state.botId) return;
+  const data = await api("/api/bots/" + state.botId + "/thread?limit=100");
+  state.messages = data.messages || [];
+  renderMessages();
+}
+$("#create-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  $("#create-err").textContent = "";
+  const fd = new FormData(e.target);
+  try {
+    const bot = await api("/api/bots", {method:"POST", body: JSON.stringify({
+      name: fd.get("name"), instructions: fd.get("instructions") || ""
+    })});
+    e.target.reset();
+    await loadBots();
+    openBot(bot.id);
+  } catch (err) { $("#create-err").textContent = err.message; }
+});
+$("#composer").addEventListener("submit", (e) => { e.preventDefault(); send(); });
+$("#composer-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+async function send() {
+  const input = $("#composer-input");
+  const content = input.value.trim();
+  if (!content || !state.botId) return;
+  input.value = "";
+  try {
+    const data = await api("/api/bots/" + state.botId + "/thread/messages", {
+      method: "POST", body: JSON.stringify({content})
+    });
+    await loadThread();
+    if (data.run_id) follow(data.run_id);
+    else pollActive();
+  } catch (err) {
+    $("#run-banner").hidden = false;
+    $("#run-banner").textContent = err.message;
+  }
+}
+function stopStream() {
+  if (state.streamCtl) { state.streamCtl.abort(); state.streamCtl = null; }
+  state.streaming = "";
+  $("#live").replaceChildren();
+}
+async function follow(runId) {
+  if (!runId || state.streaming === runId) return;
+  stopStream();
+  state.streaming = runId;
+  const ctl = new AbortController();
+  state.streamCtl = ctl;
+  const live = $("#live");
+  let acc = "";
+  const bubble = el("div", "bubble bot");
+  bubble.append(el("span", "who", "Bot"));
+  const text = el("span");
+  bubble.append(text);
+  try {
+    const headers = {};
+    if (state.token) headers.Authorization = "Bearer " + state.token;
+    const res = await fetch(base() + "/api/bots/" + state.botId + "/thread/stream?run_id=" + encodeURIComponent(runId), {headers, signal: ctl.signal});
+    if (res.status === 401) { showAuth(); return; }
+    if (!res.ok || !res.body) throw new Error("stream failed");
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const raw = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        let event = "message", data = "";
+        for (const line of raw.split("\n")) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) data += line.slice(5).trim();
+        }
+        if (!data) continue;
+        let payload = {};
+        try { payload = JSON.parse(data); } catch { continue; }
+        if (event === "token") {
+          acc += payload.text || "";
+          text.textContent = acc;
+          if (!bubble.parentNode) live.append(bubble);
+          const msgs = $("#msgs");
+          msgs.scrollTop = msgs.scrollHeight;
+        } else if (event === "tool_call") {
+          live.append(el("div", "tool", "tool " + (payload.name || "") + " " + JSON.stringify(payload.arguments || {})));
+        } else if (event === "tool_result") {
+          const ok = payload.ok ? "ok" : "error";
+          live.append(el("div", "tool", (payload.name || "tool") + " " + ok + ": " + (payload.result_or_error || "")));
+        } else if (event === "done") {
+          stopStream();
+          await loadThread();
+          await refreshBot();
+          pollActive();
+          return;
+        } else if (event === "error") {
+          const banner = $("#run-banner");
+          banner.hidden = false;
+          banner.textContent = "Run failed: " + (payload.error || "unknown error");
+          stopStream();
+          await loadThread();
+          await refreshBot();
+          return;
+        }
+      }
+    }
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    await loadThread();
+  } finally {
+    if (state.streaming === runId) state.streaming = "";
+  }
+}
+async function pollActive() {
+  if (!state.botId) return;
+  const b = await refreshBot();
+  if (b && b.active_run_id && b.active_run_id !== state.streaming) follow(b.active_run_id);
+}
+$("#edit-toggle").addEventListener("click", () => {
+  state.editOpen = !state.editOpen;
+  $("#edit").hidden = !state.editOpen;
+});
+$("#edit").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!state.botId) return;
+  $("#edit-err").textContent = "";
+  const model = $("#edit-model").value.trim();
+  try {
+    await api("/api/bots/" + state.botId, {method:"PATCH", body: JSON.stringify({
+      name: $("#edit-name").value,
+      instructions: $("#edit-instructions").value,
+      model: model || null
+    })});
+    await refreshBot();
+    await loadBots();
+  } catch (err) { $("#edit-err").textContent = err.message; }
+});
+$("#pause-btn").addEventListener("click", async () => {
+  if (!state.botId) return;
+  const b = state.bots.find(x => x.id === state.botId);
+  const next = b && b.status === "paused" ? "idle" : "paused";
+  try {
+    await api("/api/bots/" + state.botId, {method:"PATCH", body: JSON.stringify({status: next})});
+    await refreshBot();
+    await loadBots();
+  } catch (err) { $("#edit-err").textContent = err.message; }
+});
+$("#delete-btn").addEventListener("click", async () => {
+  if (!state.botId) return;
+  if (!confirm("Delete this bot and its thread?")) return;
+  try {
+    await api("/api/bots/" + state.botId, {method:"DELETE"});
+    state.botId = null;
+    stopStream();
+    $("#thread-name").textContent = "No bot selected";
+    $("#msgs").replaceChildren(el("p", "empty", "Choose a bot to read its thread."));
+    await loadBots();
+    setView("bots");
+  } catch (err) { $("#edit-err").textContent = err.message; }
+});
+async function loadDMs() {
+  const box = $("#dms");
+  if (!state.botId) return;
+  const dms = await api("/api/bots/" + state.botId + "/dms");
+  box.replaceChildren();
+  if (!dms.length) { box.append(el("p", "empty", "No DMs yet.")); return; }
+  for (const d of dms) {
+    const btn = el("button", "dm-btn", d.name);
+    btn.type = "button";
+    btn.addEventListener("click", async () => {
+      const data = await api("/api/dms/" + state.botId + "/" + d.bot_id + "?limit=40");
+      const pre = el("div", "dm-thread");
+      pre.textContent = (data.messages || []).map(m => (m.role === "bot" ? "out" : "in") + ": " + m.content).join("\n") || "(empty)";
+      btn.after(pre);
+    });
+    box.append(btn);
+  }
+}
+function fillKinds() {
+  const sel = $("#log-kind");
+  for (const k of KINDS) sel.append(new Option(k, k));
+}
+async function loadLog() {
+  const bot = $("#log-bot").value;
+  const kind = $("#log-kind").value;
+  const q = new URLSearchParams();
+  if (bot) q.set("bot_id", bot);
+  if (kind) q.set("kind", kind);
+  q.set("limit", "150");
+  const events = await api("/api/log?" + q.toString());
+  const box = $("#log");
+  box.replaceChildren();
+  if (!events.length) { box.append(el("p", "empty", "No log lines for this filter.")); return; }
+  for (const ev of events) {
+    const row = el("div", "event");
+    const meta = el("div", "meta");
+    meta.append(el("span", "kind", ev.kind), el("span", null, ev.ts || ""), el("span", null, ev.bot_id || "daemon"));
+    const pre = el("pre");
+    pre.textContent = JSON.stringify(ev.detail || {}, null, 0);
+    row.append(meta, pre);
+    box.append(row);
+  }
+}
+$("#log-refresh").addEventListener("click", loadLog);
+$("#log-bot").addEventListener("change", loadLog);
+$("#log-kind").addEventListener("change", loadLog);
+$("#auth form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  state.token = $("#auth-token").value.trim();
+  sessionStorage.setItem("lgb_token", state.token);
+  $("#auth-err").textContent = "";
+  try {
+    await loadBots();
+    $("#auth").classList.remove("on");
+  } catch (err) { $("#auth-err").textContent = err.message; }
+});
+fillKinds();
+(async function init() {
+  try {
+    const h = await api("/api/health");
+    $("#health").textContent = "daemon " + h.version;
+    await loadBots();
+  } catch (err) {
+    if (err.message !== "unauthorized") $("#health").textContent = err.message;
+  }
+  setInterval(() => { loadBots().catch(() => {}); if (state.view === "log" || state.desktopLog) loadLog().catch(() => {}); }, 3000);
+})();
+</script>
+</body>
+</html>
