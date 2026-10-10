@@ -108,7 +108,7 @@ JSON over HTTP. One SSE stream for a live turn. All routes under `/api`.
 | POST | /api/bots/{id}/runs/{run_id}/cancel | | `{status}` |
 | GET | /api/bots/{id}/memory | | `[{key, value, updated_at}]` |
 | POST | /api/bots/{id}/memory | `{key, value}` | memory row |
-| DELETE | /api/bots/{id}/memory/{key}` | | 204 |
+| DELETE | /api/bots/{id}/memory/{key} | | 204 |
 | GET | /api/bots/{id}/timers | | `[timer]` |
 | POST | /api/bots/{id}/timers | `{schedule, prompt, enabled?}` | timer |
 | PATCH | /api/timers/{id} | `{schedule?, prompt?, enabled?}` | timer |
