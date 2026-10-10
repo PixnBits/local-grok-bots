@@ -22,6 +22,10 @@ Stable ids for anything that gets referenced. Names are for humans and for bot-t
 
 Renaming a bot must not break its thread, its DMs, or its timers. Those reference `id`.
 
+`update_bot` identifies the target by `id` if present, otherwise by `name`. A rename only happens when `id` is set and `name` differs. Passing only `name` selects the bot and does not rename it.
+
+Next, not required for the MVP contract: `subtitle` (short role line) and `mark` (`{shape, color}`). See §9.
+
 ### Memory
 
 Per bot. Not a blob.
@@ -47,7 +51,7 @@ Memory is notes the bot keeps. It is not a substitute for the log.
 | run_id | string, nullable | Set when a bot message or system note was produced by a run. |
 | created_at | timestamp | Order is by this, then by id. |
 
-One primary user thread per bot. DMs are stored as messages on both sides (or once, with both bot ids recorded — either is fine as long as both bots can list the exchange and the log has both directions).
+One primary user thread per bot. DMs are stored as messages on both sides. Both bots can list the exchange, and the log has both directions.
 
 ### Timer
 
@@ -55,7 +59,7 @@ One primary user thread per bot. DMs are stored as messages on both sides (or on
 |---|---|---|
 | id | string (uuid) | |
 | bot_id | string | |
-| schedule | string | Cron expression or a simple interval. MVP may support interval only. |
+| schedule | string | Interval only for MVP: `30s`, `5m`, `2h`, `1d`. Cron is later. |
 | prompt | text | Injected as the turn prompt when the timer fires. |
 | enabled | bool | |
 | next_fire_at | timestamp | Computed by the daemon. |
@@ -70,7 +74,9 @@ One primary user thread per bot. DMs are stored as messages on both sides (or on
 | status | enum | `running` \| `done` \| `error` \| `cancelled`. |
 | started_at | timestamp | |
 | finished_at | timestamp, nullable | |
-| error | text, nullable | |
+| error | text, nullable | Includes `tool round limit`, `daemon_restart`, `timed out`, `shutdown`. |
+
+A run is capped at 8 model rounds. Hitting the cap finishes the run as `error` / `tool round limit` and writes `run_finished`.
 
 ### Log event
 
@@ -81,6 +87,8 @@ One primary user thread per bot. DMs are stored as messages on both sides (or on
 | bot_id | string, nullable | Null for daemon-level events. |
 | kind | enum | Closed set. See §5. |
 | detail | json | Small. See §5. |
+
+`GET /api/log` returns newest-first.
 
 ## 2. Daemon API
 
@@ -100,14 +108,14 @@ JSON over HTTP. One SSE stream for a live turn. All routes under `/api`.
 | POST | /api/bots/{id}/runs/{run_id}/cancel | | `{status}` |
 | GET | /api/bots/{id}/memory | | `[{key, value, updated_at}]` |
 | POST | /api/bots/{id}/memory | `{key, value}` | memory row |
-| DELETE | /api/bots/{id}/memory/{key} | | 204 |
+| DELETE | /api/bots/{id}/memory/{key}` | | 204 |
 | GET | /api/bots/{id}/timers | | `[timer]` |
 | POST | /api/bots/{id}/timers | `{schedule, prompt, enabled?}` | timer |
 | PATCH | /api/timers/{id} | `{schedule?, prompt?, enabled?}` | timer |
 | DELETE | /api/timers/{id} | | 204 |
 | GET | /api/bots/{id}/dms | | list of other bots this bot has exchanged with |
 | GET | /api/dms/{bot_a}/{bot_b} | `?before=&limit=` | messages between the two |
-| GET | /api/log | `?bot_id=&kind=&before=&limit=` | `[event]` newest-first or oldest-first; pick one and document it |
+| GET | /api/log | `?bot_id=&kind=&before=&limit=` | `[event]` newest-first |
 
 SSE events on the stream:
 
@@ -119,7 +127,7 @@ SSE events on the stream:
 
 `POST .../messages` never blocks on the model. It persists the user message and returns. If a run starts, `run_id` is set. If the bot is already running, `run_id` may be null or may be the existing run; the message is still persisted and will be seen.
 
-Optional gate: if `AUTH_TOKEN` is set in the daemon environment, require `Authorization: Bearer <token>` on every route except `/api/health`. Same routes either way.
+Optional gate: if `AUTH_TOKEN` is set in the daemon environment, require `Authorization: Bearer <token>` on every route except `/api/health`. Same routes either way. The HTML page is still served on an unauthenticated `GET /` so the client can collect the token; API calls then 401 until it is set.
 
 ## 3. Turn and queue semantics
 
@@ -131,6 +139,7 @@ Optional gate: if `AUTH_TOKEN` is set in the daemon environment, require `Author
 - Cancel sets the run to `cancelled` and stops further tool calls. Partial output already persisted stays.
 - Bot-to-bot DMs use the same queue on the receiving bot. The sender does not block waiting for a reply.
 - Order is preserved. Nothing is dropped.
+- A run that exceeds 8 model rounds ends `error` / `tool round limit`. The page shows that as a banner on the thread.
 
 ## 4. Bot tool surface
 
@@ -142,18 +151,35 @@ Tools the model can call. Each is logged on start and on finish.
 | read_bot | `{name or id}` | instructions and memory keys/values |
 | send_dm | `{to, content}` | persists a DM, queues a turn on the recipient |
 | create_bot | `{name, instructions, model?}` | same as `POST /api/bots` |
-| update_bot | `{id or name, name?, instructions?, model?}` | same as `PATCH` |
+| update_bot | `{id or name, name?, instructions?, model?}` | same as `PATCH`; rename requires `id` |
 | write_memory | `{key, value}` | upsert on the calling bot |
 | delete_memory | `{key}` | |
 | set_timer | `{schedule, prompt}` | creates an enabled timer on the calling bot |
 | clear_timer | `{id}` | |
 | read_file | `{path}` | inside the workspace directory only |
 | write_file | `{path, content}` | inside the workspace directory only |
-| run_shell | `{command}` | inside the workspace directory; stdout/stderr captured and truncated |
+| run_shell | `{command}` | jailed to the workspace; stdout/stderr captured and truncated |
 
-Paths that escape the workspace are rejected. The meta tools (`create_bot`, `update_bot`) are ordinary tools; the UI performs the same mutations through the API. A change made by a bot is logged with the acting bot id.
+Paths that escape the workspace are rejected, including `..`, absolute host paths, and symlink escapes. The meta tools (`create_bot`, `update_bot`) are ordinary tools; the UI performs the same mutations through the API. A change made by a bot is logged with the acting bot id.
 
 Arguments containing anything that looks like a secret are redacted in the log.
+
+### Workspace and shell jail
+
+```
+<data dir>/workspace/     host path; this is the only tree tools may touch
+```
+
+`read_file` and `write_file` resolve against that directory and reject anything that leaves it.
+
+`run_shell` re-execs under `unshare` into a user and mount namespace, chroots, drops capabilities, and runs with the workspace bind-mounted at `/work`. Inside the jail:
+
+- the working directory is `/work`, not the host path
+- host home, `/root`, `~/projects`, and host `/tmp` are not visible
+- binaries come from the read-only binds of `/bin`, `/lib`, `/usr`
+- if `unshare` or user namespaces are unavailable, the tool fails closed
+
+A bot that says its workspace is `/work` is reporting the jail, not the host path. Giving a bot a real checkout means mounting or copying that checkout into `workspace/`. It does not mean relaxing the jail.
 
 ## 5. Log schema
 
@@ -170,7 +196,7 @@ Append-only. `kind` is a closed set:
 - model: `model`, `ok`, `error`, `tokens` if cheap to capture
 - runs: `run_id`, `status`, `error`
 
-The chat transcript stays readable. The log is allowed to be denser. If it is not in the log, it did not happen for the purposes of this bootstrap.
+The chat transcript stays readable. The log is allowed to be denser. If it is not in the log, it did not happen for the purposes of this bootstrap. `GET /api/log` is newest-first.
 
 ## 6. Persistence
 
@@ -197,19 +223,32 @@ Three views. The page is a client; refreshing reloads from the daemon.
 
 **Bot list.** Name, status, and a running or unread indicator. Click to open.
 
-**Conversation.** History for the selected bot, a composer that is never disabled while a run is in progress, streaming tokens and tool lines for the active run via SSE, and a side panel to edit the bot's name and instructions. If the SSE stream drops, the page refetches the thread.
+**Conversation.** History for the selected bot, a composer that is never disabled while a run is in progress, streaming tokens and tool lines for the active run via SSE, and a side panel to edit the bot's name and instructions. If the SSE stream drops, the page refetches the thread. A failed run shows a banner with the error.
 
 **Log.** Filterable by bot and by kind. Shows the verification surface, including actions that do not appear as chat messages.
 
-DM exchanges are visible in the log at minimum. A small indicator on the conversation, or a simple DM list per bot, is better and still in scope.
+DM exchanges are visible in the log and in a DM list on the edit panel.
 
 ## 8. Process
 
 - Daemon starts on boot via a systemd user or system unit.
-- Binds on the LAN (or localhost behind a reverse proxy already trusted). No public exposure required.
-- Default model is the local Ollama endpoint. If Ollama is down, runs fail with a clear log line and do not hang.
+- Binds on the LAN (or localhost behind a reverse proxy already trusted). No public exposure required. Plain HTTP is fine.
+- Default model is the local Ollama endpoint, overridable by `OLLAMA_MODEL` and per bot. If Ollama is down, runs fail with a clear log line and do not hang.
 - Clean shutdown writes `daemon_stop`. Crash does not; the next start writes `daemon_start` and reconciles runs as above.
+- `unshare` must exist for `run_shell`. Missing, the tool fails; the daemon still serves.
+
+## 9. Next interface deltas
+
+Not part of the MVP contract. Specified here so the next pass does not invent fields.
+
+| Addition | Where | Notes |
+|---|---|---|
+| Routines panel | edit panel | Lists `GET /api/bots/{id}/timers`; add, pause, delete. No new daemon route. |
+| Inbound DM line | user thread | A system message, or a thread annotation, when a DM arrives: “Message from {name}”. DM storage unchanged. |
+| `subtitle` | bot | Short role line. Separate from instructions. Shown under the name. |
+| `mark` | bot | `{shape, color}`. List and thread only. No behavior. |
+| Bubble chrome | conversation | The sender label must not wrap into a vertical strip on a narrow viewport. |
 
 ## Out of these specs
 
-Channels, computer-use, virtual displays, approval cards, multi-user accounts, per-bot microVMs, catch-up of missed timers, mobile layout. The PRD's "later" list still applies. These seven contracts are enough to implement the acceptance criteria.
+Channels, computer-use, virtual displays, approval cards, multi-user accounts, per-bot microVMs, catch-up of missed timers, templates, documents, links, notifications, voice. The PRD's “later” list still applies. The seven contracts plus the workspace rule are enough to implement and operate the acceptance criteria.
