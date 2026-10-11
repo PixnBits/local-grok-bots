@@ -1,6 +1,6 @@
-# Local Grok Bot bootstrap — MVP specifications
+# Local Grok Bot bootstrap — specifications
 
-Contracts the daemon and the web page share. The PRD says what the system is; this says what each side must implement so the other can be built against it.
+Contracts the daemon and the web page share. The PRD is the target; this is what each side implements so the other can be built against it.
 
 Personal use, one machine, no auth required if the daemon binds on the LAN. A shared-secret header is the only optional gate, and it must not change the routes.
 
@@ -14,7 +14,9 @@ Stable ids for anything that gets referenced. Names are for humans and for bot-t
 |---|---|---|
 | id | string (uuid) | Primary key. Never changes. |
 | name | string | Unique, case-insensitive. Used for addressing. |
-| instructions | text | Standing prompt, role, boundaries. |
+| label | string | Short role line, shown under the name. Not the description. |
+| description | text | Standing prompt: role, boundaries, durable rules. |
+| mark | object | `{shape, color}`. Roster and thread only. No behavior. |
 | status | enum | `idle` \| `running` \| `paused`. |
 | model | string, nullable | Override. Null means the daemon default (local Ollama). |
 | created_at | timestamp | |
@@ -24,7 +26,7 @@ Renaming a bot must not break its thread, its DMs, or its timers. Those referenc
 
 `update_bot` identifies the target by `id` if present, otherwise by `name`. A rename only happens when `id` is set and `name` differs. Passing only `name` selects the bot and does not rename it.
 
-Next, not required for the MVP contract: `subtitle` (short role line) and `mark` (`{shape, color}`). See §9.
+`description` is the field the model is prompted with. `label` is display only.
 
 ### Memory
 
@@ -53,13 +55,16 @@ Memory is notes the bot keeps. It is not a substitute for the log.
 
 One primary user thread per bot. DMs are stored as messages on both sides. Both bots can list the exchange, and the log has both directions.
 
+An inbound DM is also represented in the receiving bot’s user thread as a system line: “Message from {name}”. Storage of the DM itself does not change.
+
 ### Timer
 
 | Field | Type | Notes |
 |---|---|---|
 | id | string (uuid) | |
 | bot_id | string | |
-| schedule | string | Interval only for MVP: `30s`, `5m`, `2h`, `1d`. Cron is later. |
+| name | string | Shown on the profile. |
+| schedule | string | Interval for now: `30s`, `5m`, `2h`, `1d`. Cron is later. |
 | prompt | text | Injected as the turn prompt when the timer fires. |
 | enabled | bool | |
 | next_fire_at | timestamp | Computed by the daemon. |
@@ -97,10 +102,10 @@ JSON over HTTP. One SSE stream for a live turn. All routes under `/api`.
 | Method | Path | Body / query | Returns |
 |---|---|---|---|
 | GET | /api/health | | `{status, version}` |
-| GET | /api/bots | | `[{id, name, status, model}]` |
-| POST | /api/bots | `{name, instructions, model?}` | bot |
-| GET | /api/bots/{id} | | bot including instructions |
-| PATCH | /api/bots/{id} | `{name?, instructions?, model?, status?}` | bot |
+| GET | /api/bots | | `[{id, name, label, mark, status, model}]` |
+| POST | /api/bots | `{name, label?, description, mark?, model?}` | bot |
+| GET | /api/bots/{id} | | bot including description |
+| PATCH | /api/bots/{id} | `{name?, label?, description?, mark?, model?, status?}` | bot |
 | DELETE | /api/bots/{id} | | 204 |
 | GET | /api/bots/{id}/thread | `?before=&limit=` | `{messages: [...]}` oldest-first |
 | POST | /api/bots/{id}/thread/messages | `{content}` | `{message, run_id}` immediately |
@@ -110,8 +115,8 @@ JSON over HTTP. One SSE stream for a live turn. All routes under `/api`.
 | POST | /api/bots/{id}/memory | `{key, value}` | memory row |
 | DELETE | /api/bots/{id}/memory/{key} | | 204 |
 | GET | /api/bots/{id}/timers | | `[timer]` |
-| POST | /api/bots/{id}/timers | `{schedule, prompt, enabled?}` | timer |
-| PATCH | /api/timers/{id} | `{schedule?, prompt?, enabled?}` | timer |
+| POST | /api/bots/{id}/timers | `{name?, schedule, prompt, enabled?}` | timer |
+| PATCH | /api/timers/{id} | `{name?, schedule?, prompt?, enabled?}` | timer |
 | DELETE | /api/timers/{id} | | 204 |
 | GET | /api/bots/{id}/dms | | list of other bots this bot has exchanged with |
 | GET | /api/dms/{bot_a}/{bot_b} | `?before=&limit=` | messages between the two |
@@ -119,6 +124,7 @@ JSON over HTTP. One SSE stream for a live turn. All routes under `/api`.
 
 SSE events on the stream:
 
+- `status` — `{state, text?}` while the run is alive. `state` is `working` or a short activity such as a tool name. This drives the animation at the bottom of the thread.
 - `token` — `{text}`
 - `tool_call` — `{name, arguments}`
 - `tool_result` — `{name, ok, result_or_error}`
@@ -139,7 +145,8 @@ Optional gate: if `AUTH_TOKEN` is set in the daemon environment, require `Author
 - Cancel sets the run to `cancelled` and stops further tool calls. Partial output already persisted stays.
 - Bot-to-bot DMs use the same queue on the receiving bot. The sender does not block waiting for a reply.
 - Order is preserved. Nothing is dropped.
-- A run that exceeds 8 model rounds ends `error` / `tool round limit`. The page shows that as a banner on the thread.
+- A run that exceeds 8 model rounds ends `error` / `tool round limit`.
+- While a run is `running`, the stream emits `status` events so the page can show the working animation. The animation clears on `done` or `error`.
 
 ## 4. Bot tool surface
 
@@ -147,20 +154,20 @@ Tools the model can call. Each is logged on start and on finish.
 
 | Tool | Arguments | Effect |
 |---|---|---|
-| list_bots | | `[{id, name, status}]` |
-| read_bot | `{name or id}` | instructions and memory keys/values |
+| list_bots | | `[{id, name, label, status}]` |
+| read_bot | `{name or id}` | description and memory keys/values |
 | send_dm | `{to, content}` | persists a DM, queues a turn on the recipient |
-| create_bot | `{name, instructions, model?}` | same as `POST /api/bots` |
-| update_bot | `{id or name, name?, instructions?, model?}` | same as `PATCH`; rename requires `id` |
+| create_bot | `{name, label?, description, model?}` | same as `POST /api/bots` |
+| update_bot | `{id or name, name?, label?, description?, model?}` | same as `PATCH`; rename requires `id` |
 | write_memory | `{key, value}` | upsert on the calling bot |
 | delete_memory | `{key}` | |
-| set_timer | `{schedule, prompt}` | creates an enabled timer on the calling bot |
+| set_timer | `{name?, schedule, prompt}` | creates an enabled timer on the calling bot |
 | clear_timer | `{id}` | |
 | read_file | `{path}` | inside the workspace directory only |
 | write_file | `{path, content}` | inside the workspace directory only |
 | run_shell | `{command}` | jailed to the workspace; stdout/stderr captured and truncated |
 
-Paths that escape the workspace are rejected, including `..`, absolute host paths, and symlink escapes. The meta tools (`create_bot`, `update_bot`) are ordinary tools; the UI performs the same mutations through the API. A change made by a bot is logged with the acting bot id.
+Paths that escape the workspace are rejected, including `..`, absolute host paths, and symlink escapes. The meta tools (`create_bot`, `update_bot`) are ordinary tools; the profile performs the same mutations through the API. A change made by a bot is logged with the acting bot id.
 
 Arguments containing anything that looks like a secret are redacted in the log.
 
@@ -172,14 +179,9 @@ Arguments containing anything that looks like a secret are redacted in the log.
 
 `read_file` and `write_file` resolve against that directory and reject anything that leaves it.
 
-`run_shell` re-execs under `unshare` into a user and mount namespace, chroots, drops capabilities, and runs with the workspace bind-mounted at `/work`. Inside the jail:
+`run_shell` re-execs under `unshare` into a user and mount namespace, chroots, drops capabilities, and runs with the workspace bind-mounted at `/work`. Inside the jail the working directory is `/work`, not the host path. The host filesystem outside the workspace is not visible. If `unshare` or user namespaces are unavailable, the tool fails closed.
 
-- the working directory is `/work`, not the host path
-- host home, `/root`, `~/projects`, and host `/tmp` are not visible
-- binaries come from the read-only binds of `/bin`, `/lib`, `/usr`
-- if `unshare` or user namespaces are unavailable, the tool fails closed
-
-A bot that says its workspace is `/work` is reporting the jail, not the host path. Giving a bot a real checkout means mounting or copying that checkout into `workspace/`. It does not mean relaxing the jail.
+A bot that reports its workspace as `/work` is reporting the jail. Giving a bot material means mounting or copying it into `workspace/`. It does not mean relaxing the jail.
 
 ## 5. Log schema
 
@@ -196,7 +198,7 @@ Append-only. `kind` is a closed set:
 - model: `model`, `ok`, `error`, `tokens` if cheap to capture
 - runs: `run_id`, `status`, `error`
 
-The chat transcript stays readable. The log is allowed to be denser. If it is not in the log, it did not happen for the purposes of this bootstrap. `GET /api/log` is newest-first.
+The chat transcript stays readable. The log is allowed to be denser. If it is not in the log, it did not happen. `GET /api/log` is newest-first.
 
 ## 6. Persistence
 
@@ -219,15 +221,17 @@ No catch-up of missed timers. No replay of in-flight model calls.
 
 ## 7. Web UI
 
-Three views. The page is a client; refreshing reloads from the daemon.
+The page is a client. Refreshing reloads from the daemon. Four surfaces. The conversation does not contain the editor.
 
-**Bot list.** Name, status, and a running or unread indicator. Click to open.
+**Roster.** Mark, name, label, status. Click to open the conversation. A create control.
 
-**Conversation.** History for the selected bot, a composer that is never disabled while a run is in progress, streaming tokens and tool lines for the active run via SSE, and a side panel to edit the bot's name and instructions. If the SSE stream drops, the page refetches the thread. A failed run shows a banner with the error.
+**Conversation.** The thread and the composer. The composer is never disabled during a run. While a run is in progress, a status animation sits at the bottom of the message list, near the latest messages, driven by `status` events on the stream. It clears when the run ends. Inbound DMs appear as a system line in this thread. There is no description editor on this view.
 
-**Log.** Filterable by bot and by kind. Shows the verification surface, including actions that do not appear as chat messages.
+**Bot menu.** Opened from the conversation header, not as a side panel. Items: View profile, Pin, Hide, Duplicate, Delete.
 
-DM exchanges are visible in the log and in a DM list on the edit panel.
+**Profile.** A separate view. Mark, name, label, description, model override, and the routines list (add, pause, delete, next run). This is the only place the description is edited.
+
+**Log.** Filterable by bot and by kind. The verification surface.
 
 ## 8. Process
 
@@ -237,18 +241,6 @@ DM exchanges are visible in the log and in a DM list on the edit panel.
 - Clean shutdown writes `daemon_stop`. Crash does not; the next start writes `daemon_start` and reconciles runs as above.
 - `unshare` must exist for `run_shell`. Missing, the tool fails; the daemon still serves.
 
-## 9. Next interface deltas
-
-Not part of the MVP contract. Specified here so the next pass does not invent fields.
-
-| Addition | Where | Notes |
-|---|---|---|
-| Routines panel | edit panel | Lists `GET /api/bots/{id}/timers`; add, pause, delete. No new daemon route. |
-| Inbound DM line | user thread | A system message, or a thread annotation, when a DM arrives: “Message from {name}”. DM storage unchanged. |
-| `subtitle` | bot | Short role line. Separate from instructions. Shown under the name. |
-| `mark` | bot | `{shape, color}`. List and thread only. No behavior. |
-| Bubble chrome | conversation | The sender label must not wrap into a vertical strip on a narrow viewport. |
-
 ## Out of these specs
 
-Channels, computer-use, virtual displays, approval cards, multi-user accounts, per-bot microVMs, catch-up of missed timers, templates, documents, links, notifications, voice. The PRD's “later” list still applies. The seven contracts plus the workspace rule are enough to implement and operate the acceptance criteria.
+Channels, computer-use, virtual displays, approval cards, multi-user accounts, per-bot microVMs, catch-up of missed timers, templates, documents, links, notifications, voice. The PRD's later list still applies.
