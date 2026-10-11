@@ -16,6 +16,7 @@ go build -o local-grok-bots ./cmd/local-grok-bots
 | `OLLAMA_MODEL` | `llama3.2` | Model used when a bot has no override. Set this to a model you have pulled. |
 | `BIND_ADDR` | `0.0.0.0:8080` | Address the daemon listens on |
 | `AUTH_TOKEN` | unset | If set, every route except `GET /api/health` requires `Authorization: Bearer <token>` |
+| `SANDBOX_BUILD_BINDS` | unset | Colon-separated absolute paths. With the `build` grant, each path is a read-only bind in the shell jail. |
 
 Paths inside `DATA_DIR`:
 
@@ -30,9 +31,11 @@ data/workspace/    the only tree bots may read, write, or shell in
 
 File tools resolve against `workspace/` and reject `..`, absolute host paths, and symlink escapes.
 
-`run_shell` needs `unshare` and user namespaces. It re-execs into a mount namespace, chroots, and bind-mounts the workspace at `/work`. Inside the jail the bot cannot see the host filesystem outside that directory. If it reports its workspace as `/work`, that is the jail path, not the host path. If `unshare` is missing, shell calls fail closed and the daemon still serves.
+`run_shell` uses bubblewrap when `bwrap` is installed, and otherwise `unshare` with a chroot. The workspace is bind-mounted at `/work`. The host filesystem outside it is not visible, and the shell starts with no network. If it reports its workspace as `/work`, that is the jail path, not the host path. If neither `bwrap` nor `unshare` can build the jail, the shell fails closed and the daemon still serves.
 
-To give a bot material, copy or mount it into `workspace/`. Host binaries are not callable unless they are visible inside the jail.
+Grants on the bot (`net`, `git`, `ssh`, `build`) are set from the profile. A missing grant fails closed. `git push` returns a diff and does not push. The model is `docs/sandbox.md`.
+
+To give a bot material, copy or mount it into `workspace/`. The shell PATH includes `/usr/bin`, `/bin`, and toolchain directories already on the read-only `/usr` mount, such as `/usr/local/go/bin` and `/usr/local/bin` when they exist. Home directories and `/snap` are not added.
 
 ## systemd
 
@@ -56,6 +59,6 @@ The page is plain HTTP on the LAN. The browser warning is expected. Do not port-
 
 The page is a roster (mark, name, label, status), a conversation with a composer that stays enabled during a run, a profile opened from the bot menu, and a separate log. The conversation does not edit the bot. A working animation sits at the bottom of the message list while a run is alive. Pin and hide are roster flags; hide does not pause the bot or its routines.
 
-Streaming tokens and tool lines come from `GET /api/bots/{id}/thread/stream?run_id=`. If Ollama is down, the run fails and the log records `model_call` with the error. A restart marks an in-flight run `error` / `daemon_restart` and does not resume the model call. A timer whose `next_fire_at` is already past at boot is logged as `timer_missed` and rescheduled, not run. A run stops after 8 model rounds with `tool round limit`.
+Streaming tokens and tool lines come from `GET /api/bots/{id}/thread/stream?run_id=`. If Ollama is down, the run fails and the log records `model_call` with the error. A restart marks an in-flight run `error` / `daemon_restart` and does not resume the model call. A timer whose `next_fire_at` is already past at boot is logged as `timer_missed` and rescheduled, not run. A run stops after 8 model rounds with `tool round limit`. The page can continue that transcript for another 8 rounds. A new message, another turn, or a restart drops the offer.
 
 Target shape is in `docs/PRD.md`. Contracts are in `docs/specs.md`.

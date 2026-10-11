@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -34,7 +35,7 @@ func toolDefs() []model.Tool {
 		{Name: "clear_timer", Description: "Delete one of your timers by id.", Parameters: obj(map[string]any{"id": str}, []string{"id"})},
 		{Name: "read_file", Description: "Read a UTF-8 file inside the workspace.", Parameters: obj(map[string]any{"path": str}, []string{"path"})},
 		{Name: "write_file", Description: "Write a UTF-8 file inside the workspace. Creates parent directories.", Parameters: obj(map[string]any{"path": str, "content": str}, []string{"path", "content"})},
-		{Name: "run_shell", Description: "Run a shell command with the workspace as the working directory. Cannot read or write outside the workspace.", Parameters: obj(map[string]any{"command": str}, []string{"command"})},
+		{Name: "run_shell", Description: "Run a shell command inside the workspace jail. Paths outside the workspace are rejected. Network, git push, and SSH fail unless the user granted them.", Parameters: obj(map[string]any{"command": str}, []string{"command"})},
 		{Name: "list_bots", Description: "List bots: id, name, label, and status.", Parameters: obj(map[string]any{}, nil)},
 		{Name: "read_bot", Description: "Read a bot's description and memory by name or id.", Parameters: obj(map[string]any{"name": str}, []string{"name"})},
 		{Name: "send_dm", Description: "Send a direct message to another bot by name or id. Returns immediately; the recipient gets its own turn.", Parameters: obj(map[string]any{"to": str, "content": str}, []string{"to", "content"})},
@@ -244,6 +245,10 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		if err != nil {
 			return "", err
 		}
+		if err := sandbox.CheckWrite(a.ws, path); err != nil {
+			a.log(bot.ID, "sandbox_block", map[string]any{"path": strArg(args, "path"), "detail": err.Error()})
+			return "", err
+		}
 		content := strArg(args, "content")
 		if len(content) > 1<<20 {
 			return "", errors.New("content too large")
@@ -257,16 +262,57 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		return `{"ok":true}`, nil
 	case "run_shell":
 		command := strArg(args, "command")
+		current := bot
+		if fresh, err := a.st.GetBot(bot.ID); err == nil {
+			current = fresh
+		}
 		sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		stdout, stderr, err := sandbox.Run(sctx, a.ws, command)
-		summary := formatShell(stdout, stderr)
+		res, err := sandbox.Run(sctx, sandbox.Request{
+			Workspace:  a.ws,
+			Command:    command,
+			Grants:     current.Grants,
+			NetAllow:   current.NetAllow,
+			SSHAllow:   current.SSHAllow,
+			BuildBinds: a.cfg.BuildBinds,
+			SSHKey:     a.sshKeyPath(),
+			Dial:       a.shellDial,
+		})
+		for _, ev := range res.Events {
+			a.recordSandbox(current.ID, ev)
+		}
+		summary := formatShell(res.Stdout, res.Stderr)
 		if err != nil {
 			return summary, fmt.Errorf("%s\n%s", err.Error(), summary)
 		}
 		return summary, nil
 	default:
 		return "", fmt.Errorf("unknown tool %s", name)
+	}
+}
+
+func (a *App) sshKeyPath() string {
+	return filepath.Join(a.cfg.DataDir, "sandbox", "id_ed25519")
+}
+
+func (a *App) recordSandbox(botID string, ev sandbox.Event) {
+	if ev.Kind != "" {
+		detail := map[string]any{}
+		if ev.Grant != "" {
+			detail["grant"] = ev.Grant
+		}
+		if ev.Host != "" {
+			detail["host"] = ev.Host
+		}
+		if ev.Detail != "" {
+			detail["detail"] = ev.Detail
+		}
+		a.log(botID, ev.Kind, detail)
+	}
+	if ev.Notice != "" {
+		_, _ = a.st.AddMessage(store.Message{
+			BotID: botID, Thread: "user", Role: "system", Content: "Notice: " + ev.Notice,
+		})
 	}
 }
 

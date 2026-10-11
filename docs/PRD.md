@@ -147,7 +147,7 @@ No shared cookie jar, no shared desktop session. Coordination is messages plus t
 
 File and shell tools cannot leave the workspace. Shell runs inside a jail rooted on that directory. Anything the bot should read or run has to be present in the workspace; the host filesystem outside it is not visible. Mounting or copying work into the workspace is how a bot gets material. Per-bot file isolation is desirable later; one shared workspace is enough for this target.
 
-The sandbox model — base jail plus named capability grants for network, git, SSH, builds, and later a headless browser — is in `docs/sandbox.md`. It is how a coding bot gets more reach without a policy language or a microVM. The default remains the locked-down workspace.
+The sandbox model — base jail plus named capability grants for network, git, SSH, builds, and later a headless browser — is in `docs/sandbox.md`. The user sets those grants on the profile. Bots cannot grant them. The default remains the locked-down workspace. The browser grant is not built.
 
 ## 8. Logging
 

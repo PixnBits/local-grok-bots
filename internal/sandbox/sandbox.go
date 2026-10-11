@@ -1,16 +1,11 @@
 package sandbox
 
 import (
-	"bytes"
-	"context"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -21,96 +16,21 @@ func HandleArgs(args []string) bool {
 	if len(args) < 1 || args[0] != "--sandbox-stage2" {
 		return false
 	}
-	if len(args) != 4 {
-		fmt.Fprintln(os.Stderr, "sandbox: expected jail, workspace, command")
+	var err error
+	switch len(args) {
+	case 3:
+		err = stage2FromFile(args[1], args[2])
+	case 4:
+		err = enterJail(args[1], stage2File{Workspace: args[2], Command: args[3]})
+	default:
+		fmt.Fprintln(os.Stderr, "sandbox: expected jail and config")
 		os.Exit(2)
 	}
-	if err := stage2(args[1], args[2], args[3]); err != nil {
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "sandbox:", err)
 		os.Exit(1)
 	}
 	return true
-}
-
-// Run executes command with working directory workspace.
-// The process can read system libraries and write only inside the workspace
-// (plus a private tmpfs). It cannot see the host filesystem.
-func Run(ctx context.Context, workspace, command string) (stdout, stderr string, err error) {
-	if strings.TrimSpace(command) == "" {
-		return "", "", fmt.Errorf("command required")
-	}
-	if strings.ContainsRune(command, 0) {
-		return "", "", fmt.Errorf("invalid command")
-	}
-	ws, err := filepath.Abs(workspace)
-	if err != nil {
-		return "", "", err
-	}
-	if st, err := os.Stat(ws); err != nil || !st.IsDir() {
-		return "", "", fmt.Errorf("workspace unavailable")
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return "", "", err
-	}
-	jail, err := os.MkdirTemp("/tmp", "lgb-jail-")
-	if err != nil {
-		return "", "", err
-	}
-	defer os.RemoveAll(jail)
-
-	if _, err := exec.LookPath("unshare"); err != nil {
-		return "", "", fmt.Errorf("shell sandbox unavailable: %w", err)
-	}
-	cmd := exec.Command("/usr/bin/unshare",
-		"--user", "--mount", "--map-root-user", "--propagation", "private",
-		exe, "--sandbox-stage2", jail, ws, command)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	var outBuf, errBuf bytes.Buffer
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return "", "", err
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return "", "", err
-	}
-	if err := cmd.Start(); err != nil {
-		return "", "", fmt.Errorf("shell sandbox: %w", err)
-	}
-	doneOut := make(chan struct{})
-	doneErr := make(chan struct{})
-	go func() {
-		_, _ = io.Copy(&outBuf, io.LimitReader(stdoutPipe, maxCapture+1))
-		doneOut <- struct{}{}
-	}()
-	go func() {
-		_, _ = io.Copy(&errBuf, io.LimitReader(stderrPipe, maxCapture+1))
-		doneErr <- struct{}{}
-	}()
-	waitErr := make(chan error, 1)
-	go func() { waitErr <- cmd.Wait() }()
-
-	var runErr error
-	select {
-	case <-ctx.Done():
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		<-waitErr
-		runErr = fmt.Errorf("shell timed out")
-	case err := <-waitErr:
-		runErr = err
-	}
-	<-doneOut
-	<-doneErr
-	stdout = truncate(outBuf.String())
-	stderr = truncate(errBuf.String())
-	if runErr != nil {
-		if ctx.Err() != nil && runErr.Error() == "shell timed out" {
-			return stdout, stderr, runErr
-		}
-		return stdout, stderr, fmt.Errorf("exit %s", exitCode(runErr))
-	}
-	return stdout, stderr, nil
 }
 
 const maxCapture = 16 * 1024
@@ -129,7 +49,8 @@ func exitCode(err error) string {
 	return err.Error()
 }
 
-func stage2(jail, workspace, command string) error {
+func enterJail(jail string, cfg stage2File) error {
+	workspace, command := cfg.Workspace, cfg.Command
 	for _, d := range []string{"work", "bin", "lib", "lib64", "usr", "tmp", "dev", "etc"} {
 		if err := os.MkdirAll(filepath.Join(jail, d), 0o755); err != nil {
 			return err
@@ -167,6 +88,11 @@ func stage2(jail, workspace, command string) error {
 	if err := unix.Mount("tmpfs", filepath.Join(jail, "tmp"), "tmpfs", 0, "size=32m,mode=1777"); err != nil {
 		return fmt.Errorf("tmpfs: %w", err)
 	}
+	for _, m := range cfg.Mounts {
+		if err := bindIntoJail(jail, m); err != nil {
+			return err
+		}
+	}
 	if err := unix.Chdir(jail); err != nil {
 		return err
 	}
@@ -184,13 +110,47 @@ func stage2(jail, workspace, command string) error {
 	if err := unix.Capset(&hdr, &data[0]); err != nil {
 		return fmt.Errorf("capset: %w", err)
 	}
-	return unix.Exec("/bin/sh", []string{"sh", "-c", command}, []string{
-		"PATH=/usr/bin:/bin",
-		"HOME=/work",
-		"TMPDIR=/tmp",
-		"PWD=/work",
-		"LANG=C.UTF-8",
-	})
+	env := cfg.Env
+	if len(env) == 0 {
+		env = []string{
+			"PATH=" + jailPATH(),
+			"HOME=/work",
+			"TMPDIR=/tmp",
+			"PWD=/work",
+			"LANG=C.UTF-8",
+		}
+	}
+	return unix.Exec("/bin/sh", []string{"sh", "-c", command}, env)
+}
+
+func bindIntoJail(jail string, m mount) error {
+	if m.Src == "" || !strings.HasPrefix(m.Dst, "/") {
+		return fmt.Errorf("bad mount")
+	}
+	target := filepath.Join(jail, strings.TrimPrefix(m.Dst, "/"))
+	st, err := os.Stat(m.Src)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	if st.IsDir() {
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return err
+		}
+	} else if _, err := os.Lstat(target); err != nil {
+		if err := os.WriteFile(target, nil, 0o644); err != nil {
+			return err
+		}
+	}
+	if err := unix.Mount(m.Src, target, "", unix.MS_BIND, ""); err != nil {
+		return fmt.Errorf("bind %s: %w", m.Dst, err)
+	}
+	if m.RO {
+		_ = unix.Mount("", target, "", unix.MS_BIND|unix.MS_REMOUNT|unix.MS_RDONLY, "")
+	}
+	return nil
 }
 
 // Resolve keeps path inside root, rejecting traversal and symlink escapes.
@@ -262,6 +222,3 @@ func Resolve(root, p string) (string, error) {
 func escapes(rel string) bool {
 	return rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }
-
-// Touch the time import so timeout callers stay obvious at the Run boundary.
-var _ = time.Second

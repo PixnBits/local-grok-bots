@@ -4,8 +4,10 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -79,21 +81,106 @@ func NormalizeMark(m Mark) (Mark, error) {
 	return Mark{Shape: shape, Color: color}, nil
 }
 
+// NormalizeGrants keeps net, git, ssh, and build. Anything else is an error.
+// The browser grant is not settable yet.
+func NormalizeGrants(in []string) ([]string, error) {
+	seen := map[string]bool{}
+	for _, g := range in {
+		g = strings.ToLower(strings.TrimSpace(g))
+		if g == "" {
+			continue
+		}
+		switch g {
+		case "net", "git", "ssh", "build":
+			seen[g] = true
+		default:
+			return nil, fmt.Errorf("unknown grant %q", g)
+		}
+	}
+	out := []string{}
+	for _, g := range []string{"net", "git", "ssh", "build"} {
+		if seen[g] {
+			out = append(out, g)
+		}
+	}
+	return out, nil
+}
+
+// NormalizeAllow keeps explicit hostnames. An empty list allows nothing.
+func NormalizeAllow(in []string) ([]string, error) {
+	if len(in) > 64 {
+		return nil, errors.New("allowlist too long")
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	for _, h := range in {
+		h = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(h, ".")))
+		if h == "" {
+			continue
+		}
+		if len(h) > 253 || strings.Contains(h, "..") {
+			return nil, fmt.Errorf("invalid allowlist host %q", h)
+		}
+		for _, c := range h {
+			if c > 127 || !(c == '.' || c == '-' || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+				return nil, fmt.Errorf("invalid allowlist host %q", h)
+			}
+		}
+		if seen[h] {
+			continue
+		}
+		seen[h] = true
+		out = append(out, h)
+	}
+	return out, nil
+}
+
+func encodeList(v []string) string {
+	if v == nil {
+		v = []string{}
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "[]"
+	}
+	return string(b)
+}
+
+func decodeList(s string) ([]string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return []string{}, nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []string{}
+	}
+	return out, nil
+}
+
 type Bot struct {
-	ID            string  `json:"id"`
-	Name          string  `json:"name"`
-	Label         string  `json:"label"`
-	Description   string  `json:"description,omitempty"`
-	Mark          Mark    `json:"mark"`
-	Pinned        bool    `json:"pinned"`
-	Hidden        bool    `json:"hidden"`
-	Status        string  `json:"status"`
-	Model         *string `json:"model"`
-	CreatedAt     string  `json:"created_at,omitempty"`
-	UpdatedAt     string  `json:"updated_at,omitempty"`
-	ActiveRunID   *string `json:"active_run_id,omitempty"`
-	LastRunStatus string  `json:"last_run_status,omitempty"`
-	LastRunError  string  `json:"last_run_error,omitempty"`
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Label         string   `json:"label"`
+	Description   string   `json:"description,omitempty"`
+	Mark          Mark     `json:"mark"`
+	Pinned        bool     `json:"pinned"`
+	Hidden        bool     `json:"hidden"`
+	Grants        []string `json:"grants"`
+	NetAllow      []string `json:"net_allow"`
+	SSHAllow      []string `json:"ssh_allow"`
+	Status        string   `json:"status"`
+	Model         *string  `json:"model"`
+	CreatedAt     string   `json:"created_at,omitempty"`
+	UpdatedAt     string   `json:"updated_at,omitempty"`
+	ActiveRunID   *string  `json:"active_run_id,omitempty"`
+	LastRunStatus string   `json:"last_run_status,omitempty"`
+	LastRunError  string   `json:"last_run_error,omitempty"`
+	// ContinueRunID is not a column. The daemon fills it from the in-memory offer.
+	ContinueRunID string `json:"continue_run_id,omitempty"`
 }
 
 type Memory struct {
@@ -190,6 +277,9 @@ CREATE TABLE IF NOT EXISTS bots (
   mark_color TEXT NOT NULL DEFAULT '#1b654c',
   pinned INTEGER NOT NULL DEFAULT 0,
   hidden INTEGER NOT NULL DEFAULT 0,
+  grants TEXT NOT NULL DEFAULT '[]',
+  net_allow TEXT NOT NULL DEFAULT '[]',
+  ssh_allow TEXT NOT NULL DEFAULT '[]',
   status TEXT NOT NULL DEFAULT 'idle',
   model TEXT,
   created_at TEXT NOT NULL,
@@ -269,6 +359,9 @@ func (s *Store) evolve() error {
 		{"bots", "mark_color", "TEXT NOT NULL DEFAULT '#1b654c'"},
 		{"bots", "pinned", "INTEGER NOT NULL DEFAULT 0"},
 		{"bots", "hidden", "INTEGER NOT NULL DEFAULT 0"},
+		{"bots", "grants", "TEXT NOT NULL DEFAULT '[]'"},
+		{"bots", "net_allow", "TEXT NOT NULL DEFAULT '[]'"},
+		{"bots", "ssh_allow", "TEXT NOT NULL DEFAULT '[]'"},
 		{"timers", "name", "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, a := range adds {
@@ -476,6 +569,9 @@ type BotDraft struct {
 	Description string
 	Mark        Mark
 	Model       *string
+	Grants      []string
+	NetAllow    []string
+	SSHAllow    []string
 }
 
 // CreateBot inserts a bot with a default mark and no label.
@@ -491,14 +587,27 @@ func (s *Store) InsertBot(d BotDraft, by string) (Bot, error) {
 	if err != nil {
 		return Bot{}, err
 	}
+	grants, err := NormalizeGrants(d.Grants)
+	if err != nil {
+		return Bot{}, err
+	}
+	netAllow, err := NormalizeAllow(d.NetAllow)
+	if err != nil {
+		return Bot{}, err
+	}
+	sshAllow, err := NormalizeAllow(d.SSHAllow)
+	if err != nil {
+		return Bot{}, err
+	}
 	now := FormatTime(Now())
 	b := Bot{
 		ID: id.New(), Name: d.Name, Label: d.Label, Description: d.Description,
-		Mark: mark, Status: "idle", Model: d.Model, CreatedAt: now, UpdatedAt: now,
+		Mark: mark, Grants: grants, NetAllow: netAllow, SSHAllow: sshAllow,
+		Status: "idle", Model: d.Model, CreatedAt: now, UpdatedAt: now,
 	}
-	_, err = s.db.Exec(`INSERT INTO bots(id, name, name_lower, label, description, mark_shape, mark_color, pinned, hidden, status, model, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		b.ID, b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, 0, 0, b.Status, nullStr(d.Model), b.CreatedAt, b.UpdatedAt)
+	_, err = s.db.Exec(`INSERT INTO bots(id, name, name_lower, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, status, model, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		b.ID, b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, 0, 0, encodeList(grants), encodeList(netAllow), encodeList(sshAllow), b.Status, nullStr(d.Model), b.CreatedAt, b.UpdatedAt)
 	if err != nil {
 		if isUnique(err) {
 			return Bot{}, ErrConflict
@@ -582,14 +691,14 @@ func (s *Store) attachRun(b *Bot) {
 	}
 }
 
-const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, status, model, created_at, updated_at FROM bots`
+const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, status, model, created_at, updated_at FROM bots`
 
 func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	var b Bot
 	var model sql.NullString
-	var shape, color string
+	var shape, color, grants, netAllow, sshAllow string
 	var pinned, hidden int
-	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &b.Status, &model, &b.CreatedAt, &b.UpdatedAt)
+	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &b.Status, &model, &b.CreatedAt, &b.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Bot{}, ErrNotFound
 	}
@@ -602,6 +711,18 @@ func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	}
 	b.Pinned = pinned != 0
 	b.Hidden = hidden != 0
+	b.Grants, err = decodeList(grants)
+	if err != nil {
+		return Bot{}, err
+	}
+	b.NetAllow, err = decodeList(netAllow)
+	if err != nil {
+		return Bot{}, err
+	}
+	b.SSHAllow, err = decodeList(sshAllow)
+	if err != nil {
+		return Bot{}, err
+	}
 	if model.Valid && model.String != "" {
 		s := model.String
 		b.Model = &s
@@ -654,6 +775,12 @@ type BotPatch struct {
 	Status      *string
 	Pinned      *bool
 	Hidden      *bool
+	GrantsSet   bool
+	Grants      []string
+	NetSet      bool
+	NetAllow    []string
+	SSHSet      bool
+	SSHAllow    []string
 	By          string
 }
 
@@ -703,6 +830,36 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 		b.Hidden = *p.Hidden
 		fields = append(fields, "hidden")
 	}
+	if p.GrantsSet {
+		g, err := NormalizeGrants(p.Grants)
+		if err != nil {
+			return Bot{}, err
+		}
+		if !slices.Equal(g, b.Grants) {
+			b.Grants = g
+			fields = append(fields, "grants")
+		}
+	}
+	if p.NetSet {
+		hosts, err := NormalizeAllow(p.NetAllow)
+		if err != nil {
+			return Bot{}, err
+		}
+		if !slices.Equal(hosts, b.NetAllow) {
+			b.NetAllow = hosts
+			fields = append(fields, "net_allow")
+		}
+	}
+	if p.SSHSet {
+		hosts, err := NormalizeAllow(p.SSHAllow)
+		if err != nil {
+			return Bot{}, err
+		}
+		if !slices.Equal(hosts, b.SSHAllow) {
+			b.SSHAllow = hosts
+			fields = append(fields, "ssh_allow")
+		}
+	}
 	if len(fields) == 0 {
 		s.attachRun(&b)
 		return b, nil
@@ -715,8 +872,8 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 	if b.Hidden {
 		hide = 1
 	}
-	_, err = s.db.Exec(`UPDATE bots SET name=?, name_lower=?, label=?, description=?, mark_shape=?, mark_color=?, pinned=?, hidden=?, model=?, status=?, updated_at=? WHERE id=?`,
-		b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, pin, hide, nullStr(b.Model), b.Status, b.UpdatedAt, b.ID)
+	_, err = s.db.Exec(`UPDATE bots SET name=?, name_lower=?, label=?, description=?, mark_shape=?, mark_color=?, pinned=?, hidden=?, grants=?, net_allow=?, ssh_allow=?, model=?, status=?, updated_at=? WHERE id=?`,
+		b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, pin, hide, encodeList(b.Grants), encodeList(b.NetAllow), encodeList(b.SSHAllow), nullStr(b.Model), b.Status, b.UpdatedAt, b.ID)
 	if err != nil {
 		if isUnique(err) {
 			return Bot{}, ErrConflict
@@ -995,8 +1152,11 @@ func (s *Store) NeedsRun(botID string) (bool, error) {
 		return false, err
 	}
 	var pending sql.NullString
+	// Notice lines are visible on the thread. They do not queue another turn.
 	err = s.db.QueryRow(`SELECT MAX(created_at) FROM messages WHERE bot_id=? AND (
-		(thread='user' AND role IN ('user','system')) OR (thread LIKE 'dm:%' AND role='user')
+		(thread='user' AND role='user')
+		OR (thread='user' AND role='system' AND content NOT LIKE 'Notice: %')
+		OR (thread LIKE 'dm:%' AND role='user')
 	)`, botID).Scan(&pending)
 	if err != nil {
 		return false, err

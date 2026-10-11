@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -11,6 +12,13 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
+
+// resumeHold is one capped run's model transcript, including tool results.
+// The thread does not store those, so a later user message cannot rebuild it.
+type resumeHold struct {
+	runID string
+	msgs  []model.Message
+}
 
 type loopState struct {
 	running bool
@@ -21,16 +29,20 @@ type loopState struct {
 
 // App is the daemon: HTTP API, turn queue, timers, and the model loop.
 type App struct {
-	cfg    config.Config
-	st     *store.Store
-	model  model.Client
-	ws     string
-	bus    *Bus
-	ctx    context.Context
-	cancel context.CancelFunc
+	cfg   config.Config
+	st    *store.Store
+	model model.Client
+	ws    string
+	bus   *Bus
+	// shellDial, when set, is the sandbox proxy's outbound dial. Tests use it.
+	shellDial func(context.Context, string, string) (net.Conn, error)
+	ctx       context.Context
+	cancel    context.CancelFunc
 
 	rtMu    sync.Mutex
 	loops   map[string]*loopState
+	resume  map[string]resumeHold
+	pending map[string][]model.Message
 	closing bool
 	wg      sync.WaitGroup
 }
@@ -49,14 +61,16 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{
-		cfg:    cfg,
-		st:     st,
-		model:  m,
-		ws:     cfg.Workspace(),
-		bus:    NewBus(),
-		ctx:    ctx,
-		cancel: cancel,
-		loops:  map[string]*loopState{},
+		cfg:     cfg,
+		st:      st,
+		model:   m,
+		ws:      cfg.Workspace(),
+		bus:     NewBus(),
+		ctx:     ctx,
+		cancel:  cancel,
+		loops:   map[string]*loopState{},
+		resume:  map[string]resumeHold{},
+		pending: map[string][]model.Message{},
 	}
 	if err := mkdirWorkspace(a.ws); err != nil {
 		st.Close()
@@ -209,6 +223,106 @@ func (a *App) kickLocked(botID string) string {
 		a.loop(botID, run.ID)
 	}()
 	return run.ID
+}
+
+// continueRun starts a new run on a capped transcript. It does not go through
+// NeedsRun: there is no new user message, and the capped run stays finished.
+// Running is checked before the offer is taken, so a second continue cannot
+// discard the transcript the first one is already using.
+func (a *App) continueRun(botID, fromRun string) (string, int, error) {
+	a.rtMu.Lock()
+	defer a.rtMu.Unlock()
+	if a.closing {
+		return "", http.StatusConflict, errors.New("shutting down")
+	}
+	bot, err := a.st.GetBot(botID)
+	if err != nil {
+		return "", http.StatusNotFound, errors.New("not found")
+	}
+	if bot.Status == "paused" {
+		return "", http.StatusConflict, errors.New("bot is paused")
+	}
+	st := a.loops[botID]
+	if st != nil && st.running {
+		return "", http.StatusConflict, errors.New("bot is running")
+	}
+	offer, ok := a.resume[botID]
+	if !ok || offer.runID != fromRun || fromRun == "" {
+		return "", http.StatusNotFound, errors.New("not found")
+	}
+	delete(a.resume, botID)
+	run, err := a.st.CreateRun(botID)
+	if err != nil {
+		a.resume[botID] = offer
+		return "", http.StatusInternalServerError, err
+	}
+	if err := a.st.SetStatus(botID, "running"); err != nil {
+		_, _ = a.st.FinishRun(run.ID, "error", err.Error())
+		a.resume[botID] = offer
+		return "", http.StatusInternalServerError, err
+	}
+	a.pending[run.ID] = offer.msgs
+	if st == nil {
+		st = &loopState{}
+		a.loops[botID] = st
+	}
+	st.running = true
+	st.runID = run.ID
+	st.again = false
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		a.loop(botID, run.ID)
+	}()
+	return run.ID, http.StatusOK, nil
+}
+
+func (a *App) holdResume(botID, runID string, msgs []model.Message) {
+	a.rtMu.Lock()
+	defer a.rtMu.Unlock()
+	a.resume[botID] = resumeHold{runID: runID, msgs: cloneMsgs(msgs)}
+}
+
+func (a *App) dropResume(botID string) {
+	a.rtMu.Lock()
+	delete(a.resume, botID)
+	a.rtMu.Unlock()
+}
+
+func (a *App) takePending(runID string) ([]model.Message, bool) {
+	a.rtMu.Lock()
+	defer a.rtMu.Unlock()
+	msgs, ok := a.pending[runID]
+	if ok {
+		delete(a.pending, runID)
+	}
+	return msgs, ok
+}
+
+func cloneMsgs(in []model.Message) []model.Message {
+	out := make([]model.Message, len(in))
+	copy(out, in)
+	return out
+}
+
+func (a *App) decorateBot(b store.Bot) store.Bot {
+	a.rtMu.Lock()
+	defer a.rtMu.Unlock()
+	if h, ok := a.resume[b.ID]; ok {
+		b.ContinueRunID = h.runID
+	}
+	return b
+}
+
+func (a *App) decorateBots(bots []store.Bot) []store.Bot {
+	a.rtMu.Lock()
+	defer a.rtMu.Unlock()
+	for i := range bots {
+		if h, ok := a.resume[bots[i].ID]; ok {
+			bots[i].ContinueRunID = h.runID
+		}
+	}
+	return bots
 }
 
 func (a *App) loop(botID, runID string) {

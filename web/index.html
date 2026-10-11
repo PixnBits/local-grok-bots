@@ -72,6 +72,10 @@
   .view { display: none; flex: 1; min-height: 0; }
   .view.on { display: flex; flex-direction: column; gap: 12px; }
   .create, .profile { padding: 14px; display: grid; gap: 8px; }
+  .grants { border: 1px solid var(--line); border-radius: 10px; margin: 0; padding: 8px 12px; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+  .grants legend { padding: 0 6px; color: var(--muted); }
+  .grants label { display: flex; gap: 6px; align-items: center; width: auto; }
+  .grants input { width: auto; padding: 0; border: 0; background: transparent; }
   h2 { font-family: var(--serif); font-size: 18px; margin: 0; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; }
   .bots { display: flex; flex-direction: column; gap: 8px; }
@@ -149,6 +153,11 @@
     overflow-wrap: anywhere;
   }
   .note { margin: 0 14px 8px; color: var(--err); background: var(--err-bg); border-radius: 10px; padding: 8px 10px; font-size: 13px; }
+  .note.continue {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    color: var(--accent); background: var(--accent-2);
+  }
+  .note.continue button { flex: none; }
   .note[hidden] { display: none !important; }
   .composer { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); align-items: flex-end; }
   .composer textarea { min-height: 44px; max-height: 140px; }
@@ -258,6 +267,16 @@
         <label>Label<input id="profile-label" placeholder="Short role line" autocomplete="off"></label>
         <label>Description<textarea id="profile-description" placeholder="Standing prompt. This is what the model is given."></textarea></label>
         <label>Model override<input id="profile-model" placeholder="blank uses the daemon default" autocomplete="off"></label>
+        <fieldset class="grants">
+          <legend>Grants</legend>
+          <label><input type="checkbox" name="grant" value="net"> net</label>
+          <label><input type="checkbox" name="grant" value="git"> git</label>
+          <label><input type="checkbox" name="grant" value="ssh"> ssh</label>
+          <label><input type="checkbox" name="grant" value="build"> build</label>
+        </fieldset>
+        <label>Network allowlist<input id="profile-net" placeholder="example.com, api.github.com" autocomplete="off"></label>
+        <label>SSH allowlist<input id="profile-ssh" placeholder="host.example" autocomplete="off"></label>
+        <p class="empty" style="padding:0">Only you can set grants. Bots cannot grant them to themselves.</p>
         <div class="row">
           <button class="primary" type="submit">Save</button>
         </div>
@@ -299,7 +318,7 @@
   </form>
 </div>
 <script>
-const KINDS = ["user_message","bot_message","dm_sent","dm_received","tool_start","tool_end","bot_created","bot_updated","bot_deleted","timer_fired","timer_missed","model_call","run_started","run_finished","daemon_start","daemon_stop"];
+const KINDS = ["user_message","bot_message","dm_sent","dm_received","tool_start","tool_end","bot_created","bot_updated","bot_deleted","timer_fired","timer_missed","model_call","run_started","run_finished","daemon_start","daemon_stop","grant_use","grant_denied","net_request","sandbox_block"];
 const SHAPES = ["circle","square","diamond","triangle","hex"];
 const COLORS = ["#1b654c","#8a4e08","#8d2d2d","#1d4e89","#5c4d7a","#3f6b4a","#a15c38","#2f2f2f"];
 const state = {
@@ -412,12 +431,32 @@ function paintHeader(b) {
   $("#menu-pin").textContent = b.pinned ? "Unpin" : "Pin";
   $("#menu-hide").textContent = b.hidden ? "Unhide" : "Hide";
   const note = $("#run-note");
+  const offer = !state.streaming && b.status !== "running" && b.last_run_error === "tool round limit" && b.continue_run_id;
+  if (offer) {
+    note.hidden = false;
+    note.className = "note continue";
+    note.replaceChildren(document.createTextNode("Stopped after 8 tool rounds. "));
+    const btn = el("button", "primary", "Continue");
+    btn.type = "button";
+    const runId = b.continue_run_id;
+    btn.addEventListener("click", () => continueRun(runId));
+    note.append(btn);
+    return;
+  }
+  note.className = "note";
   if (!state.streaming && b.status !== "running" && b.last_run_status === "error" && b.last_run_error) {
     note.hidden = false;
     note.textContent = "Run failed: " + b.last_run_error;
   } else if (!state.streaming) {
     note.hidden = true;
+    note.replaceChildren();
   }
+}
+function showRunError(text) {
+  const note = $("#run-note");
+  note.className = "note";
+  note.hidden = false;
+  note.textContent = text;
 }
 function closeMenu() {
   $("#bot-menu").hidden = true;
@@ -448,7 +487,7 @@ function whoText(m) {
     const b = currentBot();
     return b ? b.name : "Bot";
   }
-  if ((m.content || "").startsWith("Message from ")) return "";
+  if ((m.content || "").startsWith("Message from ") || (m.content || "").startsWith("Notice: ")) return "";
   return "Scheduled";
 }
 function renderMessages() {
@@ -515,8 +554,20 @@ async function send() {
     if (data.run_id) follow(data.run_id);
     else pollActive();
   } catch (err) {
-    $("#run-note").hidden = false;
-    $("#run-note").textContent = err.message;
+    showRunError(err.message);
+  }
+}
+async function continueRun(runId) {
+  if (!state.botId || !runId || state.continuing) return;
+  state.continuing = true;
+  $("#run-note").hidden = true;
+  try {
+    const data = await api("/api/bots/" + state.botId + "/runs/" + encodeURIComponent(runId) + "/continue", {method: "POST"});
+    if (data.run_id) await follow(data.run_id);
+  } catch (err) {
+    showRunError(err.message);
+  } finally {
+    state.continuing = false;
   }
 }
 function stopStream() {
@@ -579,14 +630,15 @@ async function follow(runId) {
           live.append(el("div", "tool", (payload.name || "tool") + " " + ok + ": " + (payload.result_or_error || "")));
         } else if (event === "done" || event === "error") {
           setWorking(false);
-          if (event === "error") {
-            const note = $("#run-note");
-            note.hidden = false;
-            note.textContent = "Run failed: " + (payload.error || "unknown error");
+          if (event === "error" && payload.error !== "tool round limit") {
+            showRunError("Run failed: " + (payload.error || "unknown error"));
           }
           stopStream();
           await loadThread();
           await refreshBot();
+          if (event === "error" && payload.error === "tool round limit" && currentBot() && currentBot().status === "running") {
+            await refreshBot();
+          }
           if (event === "done") pollActive();
           return;
         }
@@ -635,8 +687,7 @@ $("#bot-menu").addEventListener("click", async (e) => {
     } else if (act === "duplicate") { await duplicateBot(state.botId); }
     else if (act === "delete") { await deleteBot(); }
   } catch (err) {
-    $("#run-note").hidden = false;
-    $("#run-note").textContent = err.message;
+    showRunError(err.message);
   }
 });
 async function deleteBot() {
@@ -714,6 +765,12 @@ async function openProfile(id) {
   $("#profile-label").value = b.label || "";
   $("#profile-description").value = b.description || "";
   $("#profile-model").value = b.model || "";
+  const grants = new Set(b.grants || []);
+  for (const box of document.querySelectorAll('#profile-form input[name="grant"]')) {
+    box.checked = grants.has(box.value);
+  }
+  $("#profile-net").value = (b.net_allow || []).join(", ");
+  $("#profile-ssh").value = (b.ssh_allow || []).join(", ");
   $("#profile-err").textContent = "";
   paintMarkPicker();
   await loadRoutines();
@@ -748,6 +805,9 @@ async function loadRoutines() {
     box.append(row);
   }
 }
+function splitList(s) {
+  return String(s || "").split(/[\s,]+/).map(x => x.trim()).filter(Boolean);
+}
 $("#profile-back").addEventListener("click", () => openBot(state.botId));
 $("#profile-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -755,12 +815,19 @@ $("#profile-form").addEventListener("submit", async (e) => {
   $("#profile-err").textContent = "";
   const model = $("#profile-model").value.trim();
   try {
+    const grants = [];
+    for (const box of document.querySelectorAll('#profile-form input[name="grant"]')) {
+      if (box.checked) grants.push(box.value);
+    }
     await api("/api/bots/" + state.botId, {method:"PATCH", body: JSON.stringify({
       name: $("#profile-name").value,
       label: $("#profile-label").value,
       description: $("#profile-description").value,
       mark: state.mark,
-      model: model || null
+      model: model || null,
+      grants,
+      net_allow: splitList($("#profile-net").value),
+      ssh_allow: splitList($("#profile-ssh").value)
     })});
     await loadBots();
     const note = $("#profile-err");

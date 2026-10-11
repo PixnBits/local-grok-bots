@@ -29,15 +29,23 @@ func (a *App) execute(botID, runID string) {
 
 	bot, err := a.st.GetBot(botID)
 	if err != nil {
+		a.takePending(runID)
+		a.dropResume(botID)
 		_, _ = a.st.FinishRun(runID, "error", err.Error())
 		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
 		return
 	}
-	msgs, err := a.buildMessages(bot)
-	if err != nil {
-		_, _ = a.st.FinishRun(runID, "error", err.Error())
-		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
-		return
+	// A continuation already holds the transcript, including tool results.
+	// Any other run drops the offer so a timer or DM does not keep it.
+	msgs, ok := a.takePending(runID)
+	if !ok {
+		a.dropResume(botID)
+		msgs, err = a.buildMessages(bot)
+		if err != nil {
+			_, _ = a.st.FinishRun(runID, "error", err.Error())
+			a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+			return
+		}
 	}
 	modelName := a.cfg.Model
 	if bot.Model != nil && *bot.Model != "" {
@@ -107,6 +115,7 @@ func (a *App) execute(botID, runID string) {
 		}
 	}
 	msg := "tool round limit"
+	a.holdResume(bot.ID, runID, msgs)
 	_, _ = a.st.FinishRun(runID, "error", msg)
 	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": msg})
 }
@@ -174,7 +183,7 @@ func (a *App) buildMessages(bot store.Bot) ([]model.Message, error) {
 		b.WriteString(m.Value)
 		b.WriteString("\n")
 	}
-	b.WriteString("\nYou can call tools. create_bot creates a bot: pass name and description. description is the standing prompt the new bot is given. instructions is an old name for that same field and still works. Do not use the shell to create a bot. update_bot changes a bot. list_bots and read_bot inspect bots. send_dm sends a direct message. write_memory and delete_memory keep notes. set_timer and clear_timer schedule prompts. read_file, write_file, and run_shell stay inside the workspace; paths outside it are rejected. After tools, send a short reply to the user. Direct messages from other bots appear as user messages prefixed with [DM from Name]. Scheduled prompts are prefixed with [scheduled].\n")
+	b.WriteString("\nYou can call tools. create_bot creates a bot: pass name and description. description is the standing prompt the new bot is given. instructions is an old name for that same field and still works. Do not use the shell to create a bot. update_bot changes a bot. list_bots and read_bot inspect bots. send_dm sends a direct message. write_memory and delete_memory keep notes. set_timer and clear_timer schedule prompts. read_file, write_file, and run_shell stay inside the workspace; paths outside it are rejected. go, gofmt, and other tools installed under /usr are on PATH. Network, git push, and SSH stay off unless the user turned them on in the profile. After tools, send a short reply to the user. Direct messages from other bots appear as user messages prefixed with [DM from Name]. Scheduled prompts are prefixed with [scheduled].\n")
 	out := []model.Message{{Role: "system", Content: b.String()}}
 	for _, m := range hist {
 		out = append(out, mapHist(m, names))
@@ -198,7 +207,7 @@ func mapHist(m store.Message, names map[string]string) model.Message {
 	case "bot":
 		return model.Message{Role: "assistant", Content: m.Content}
 	case "system":
-		if strings.HasPrefix(m.Content, "Message from ") {
+		if strings.HasPrefix(m.Content, "Message from ") || strings.HasPrefix(m.Content, "Notice: ") {
 			return model.Message{Role: "user", Content: m.Content}
 		}
 		return model.Message{Role: "user", Content: "[scheduled] " + m.Content}

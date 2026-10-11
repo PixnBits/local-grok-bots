@@ -26,6 +26,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /api/bots/{id}/thread/messages", a.handlePostMessage)
 	mux.HandleFunc("GET /api/bots/{id}/thread/stream", a.handleStream)
 	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/cancel", a.handleCancel)
+	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/continue", a.handleContinue)
 	mux.HandleFunc("GET /api/bots/{id}/memory", a.handleListMemory)
 	mux.HandleFunc("POST /api/bots/{id}/memory", a.handlePutMemory)
 	mux.HandleFunc("DELETE /api/bots/{id}/memory/{key}", a.handleDeleteMemory)
@@ -87,7 +88,7 @@ func (a *App) handleListBots(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, bots)
+	writeJSON(w, http.StatusOK, a.decorateBots(bots))
 }
 
 func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
@@ -98,6 +99,9 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 		Instructions *string     `json:"instructions"`
 		Mark         *store.Mark `json:"mark"`
 		Model        *string     `json:"model"`
+		Grants       []string    `json:"grants"`
+		NetAllow     []string    `json:"net_allow"`
+		SSHAllow     []string    `json:"ssh_allow"`
 	}
 	if err := readJSON(w, r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -124,6 +128,7 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 	}
 	b, err := a.st.InsertBot(store.BotDraft{
 		Name: name, Label: body.Label, Description: description, Mark: mark, Model: modelPtr,
+		Grants: body.Grants, NetAllow: body.NetAllow, SSHAllow: body.SSHAllow,
 	}, "user")
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
@@ -152,7 +157,7 @@ func (a *App) handleGetBot(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, b)
+	writeJSON(w, http.StatusOK, a.decorateBot(b))
 }
 
 func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
@@ -223,6 +228,33 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 		}
 		patch.Hidden = &hidden
 	}
+	if v, ok := raw["grants"]; ok {
+		list, err := decodeStringList(v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid grants"})
+			return
+		}
+		patch.GrantsSet = true
+		patch.Grants = list
+	}
+	if v, ok := raw["net_allow"]; ok {
+		list, err := decodeStringList(v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid net_allow"})
+			return
+		}
+		patch.NetSet = true
+		patch.NetAllow = list
+	}
+	if v, ok := raw["ssh_allow"]; ok {
+		list, err := decodeStringList(v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid ssh_allow"})
+			return
+		}
+		patch.SSHSet = true
+		patch.SSHAllow = list
+	}
 	if v, ok := raw["model"]; ok {
 		patch.ModelSet = true
 		if string(v) != "null" {
@@ -271,7 +303,7 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 		a.kick(id)
 	}
 	b, _ = a.st.GetBot(id)
-	writeJSON(w, http.StatusOK, b)
+	writeJSON(w, http.StatusOK, a.decorateBot(b))
 }
 
 func (a *App) handleDeleteBot(w http.ResponseWriter, r *http.Request) {
@@ -281,6 +313,7 @@ func (a *App) handleDeleteBot(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	a.dropResume(id)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -326,6 +359,7 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.log(id, "user_message", map[string]any{"message_id": msg.ID})
+	a.dropResume(id)
 	runID := a.kick(id)
 	resp := map[string]any{"message": msg, "run_id": nil}
 	if runID != "" {
@@ -422,6 +456,15 @@ func (a *App) handleCancel(w http.ResponseWriter, r *http.Request) {
 	}
 	a.cancelBot(botID)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+}
+
+func (a *App) handleContinue(w http.ResponseWriter, r *http.Request) {
+	runID, code, err := a.continueRun(r.PathValue("id"), r.PathValue("run_id"))
+	if err != nil {
+		writeJSON(w, code, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"run_id": runID})
 }
 
 func (a *App) handleListMemory(w http.ResponseWriter, r *http.Request) {
@@ -653,6 +696,20 @@ func readMap(w http.ResponseWriter, r *http.Request) (map[string]json.RawMessage
 		return nil, errors.New("invalid JSON")
 	}
 	return raw, nil
+}
+
+func decodeStringList(v json.RawMessage) ([]string, error) {
+	if string(v) == "null" {
+		return []string{}, nil
+	}
+	var xs []string
+	if err := json.Unmarshal(v, &xs); err != nil {
+		return nil, err
+	}
+	if xs == nil {
+		xs = []string{}
+	}
+	return xs, nil
 }
 
 func decodeText(v json.RawMessage, field string) (string, error) {

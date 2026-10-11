@@ -58,6 +58,9 @@ VALUES('t1', 'b1', '1h', 'do it', 1, '2999-01-01T00:00:00.000000000Z');
 	if bot.Description != "keep" || bot.Label != "" || bot.Mark.Shape != "circle" {
 		t.Fatalf("migrated bot %#v", bot)
 	}
+	if len(bot.Grants) != 0 || len(bot.NetAllow) != 0 || len(bot.SSHAllow) != 0 {
+		t.Fatalf("migrated grants %#v", bot)
+	}
 	timers, err := st.ListTimers("b1")
 	if err != nil {
 		t.Fatal(err)

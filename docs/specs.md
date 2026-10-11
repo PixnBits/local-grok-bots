@@ -81,7 +81,7 @@ An inbound DM is also represented in the receiving bot’s user thread as a syst
 | finished_at | timestamp, nullable | |
 | error | text, nullable | Includes `tool round limit`, `daemon_restart`, `timed out`, `shutdown`. |
 
-A run is capped at 8 model rounds. Hitting the cap finishes the run as `error` / `tool round limit` and writes `run_finished`.
+A run is capped at 8 model rounds. Hitting the cap finishes the run as `error` / `tool round limit` and writes `run_finished`. The daemon keeps that run's model transcript in memory, including tool results, and `GET /api/bots` and `GET /api/bots/{id}` include `continue_run_id` while the offer is held. `POST /api/bots/{id}/runs/{run_id}/continue` starts a new run on that transcript for another 8 rounds and returns `{run_id}`. The capped run stays `error`. The client does not send a transcript. A second continue while the bot is running is 409 and does not take the transcript. A missing offer is 404. A new user message, a timer or DM turn, or a daemon restart drops the offer. Hitting the cap again offers the new run.
 
 ### Log event
 
@@ -111,6 +111,7 @@ JSON over HTTP. One SSE stream for a live turn. All routes under `/api`.
 | POST | /api/bots/{id}/thread/messages | `{content}` | `{message, run_id}` immediately |
 | GET | /api/bots/{id}/thread/stream | `?run_id=` | SSE |
 | POST | /api/bots/{id}/runs/{run_id}/cancel | | `{status}` |
+| POST | /api/bots/{id}/runs/{run_id}/continue | | `{run_id}` for another 8 rounds on that capped transcript. 409 if the bot is running. 404 if there is no offer. |
 | GET | /api/bots/{id}/memory | | `[{key, value, updated_at}]` |
 | POST | /api/bots/{id}/memory | `{key, value}` | memory row |
 | DELETE | /api/bots/{id}/memory/{key} | | 204 |
@@ -145,7 +146,7 @@ Optional gate: if `AUTH_TOKEN` is set in the daemon environment, require `Author
 - Cancel sets the run to `cancelled` and stops further tool calls. Partial output already persisted stays.
 - Bot-to-bot DMs use the same queue on the receiving bot. The sender does not block waiting for a reply.
 - Order is preserved. Nothing is dropped.
-- A run that exceeds 8 model rounds ends `error` / `tool round limit`.
+- A run that exceeds 8 model rounds ends `error` / `tool round limit`. The page can continue that transcript as a new run for another 8 rounds. A new message, another turn, or a restart drops the offer.
 - While a run is `running`, the stream emits `status` events so the page can show the working animation. The animation clears on `done` or `error`.
 
 ## 4. Bot tool surface
@@ -179,17 +180,19 @@ Arguments containing anything that looks like a secret are redacted in the log.
 
 `read_file` and `write_file` resolve against that directory and reject anything that leaves it.
 
-`run_shell` re-execs under `unshare` into a user and mount namespace, chroots, drops capabilities, and runs with the workspace bind-mounted at `/work`. Inside the jail the working directory is `/work`, not the host path. The host filesystem outside the workspace is not visible. If `unshare` or user namespaces are unavailable, the tool fails closed.
+`run_shell` uses bubblewrap when `bwrap` is on `PATH`. Otherwise it re-execs under `unshare` into a user, mount, and network namespace, chroots, and bind-mounts the workspace at `/work`. Inside the jail the working directory is `/work`, not the host path. The host filesystem outside the workspace is not visible, and there is no network unless the bot has a grant. PATH also includes toolchain directories already on the read-only system mount, including `/usr/local/go/bin` and `/usr/local/bin` when they exist. Home directories and `/snap` are not added. If neither jail can be built, the tool fails closed.
+
+Writes to `.git/hooks`, shell rc names, and executable git settings are blocked.
 
 A bot that reports its workspace as `/work` is reporting the jail. Giving a bot material means mounting or copying it into `workspace/`. It does not mean relaxing the jail.
 
-The target model for adding capability (named grants for network, git, SSH, builds, and later a headless browser) is in `docs/sandbox.md`. The current jail remains the default until those grants are implemented.
+Named grants (`net`, `git`, `ssh`, `build`) live on the bot. The profile and the bot API set and clear them, along with `net_allow` and `ssh_allow`. The meta tools do not. A missing grant fails closed and is logged. `git push` returns the diff and does not push. The browser grant in `docs/sandbox.md` is not implemented.
 
 ## 5. Log schema
 
 Append-only. `kind` is a closed set:
 
-`user_message`, `bot_message`, `dm_sent`, `dm_received`, `tool_start`, `tool_end`, `bot_created`, `bot_updated`, `bot_deleted`, `timer_fired`, `timer_missed`, `model_call`, `run_started`, `run_finished`, `daemon_start`, `daemon_stop`.
+`user_message`, `bot_message`, `dm_sent`, `dm_received`, `tool_start`, `tool_end`, `bot_created`, `bot_updated`, `bot_deleted`, `timer_fired`, `timer_missed`, `model_call`, `run_started`, `run_finished`, `daemon_start`, `daemon_stop`, `grant_use`, `grant_denied`, `net_request`, `sandbox_block`.
 
 `detail` holds the useful bits and stays small:
 
@@ -231,7 +234,7 @@ The page is a client. Refreshing reloads from the daemon. Four surfaces. The con
 
 **Bot menu.** Opened from the conversation header, not as a side panel. Items: View profile, Pin, Hide, Duplicate, Delete.
 
-**Profile.** A separate view. Mark, name, label, description, model override, and the routines list (add, pause, delete, next run). This is the only place the description is edited.
+**Profile.** A separate view. Mark, name, label, description, model override, grants, network and SSH allowlists, and the routines list (add, pause, delete, next run). This is the only place the description and the grants are edited.
 
 **Log.** Filterable by bot and by kind. The verification surface.
 
@@ -241,7 +244,7 @@ The page is a client. Refreshing reloads from the daemon. Four surfaces. The con
 - Binds on the LAN (or localhost behind a reverse proxy already trusted). No public exposure required. Plain HTTP is fine.
 - Default model is the local Ollama endpoint, overridable by `OLLAMA_MODEL` and per bot. If Ollama is down, runs fail with a clear log line and do not hang.
 - Clean shutdown writes `daemon_stop`. Crash does not; the next start writes `daemon_start` and reconciles runs as above.
-- `unshare` must exist for `run_shell`. Missing, the tool fails; the daemon still serves.
+- `bwrap` or `unshare` must be usable for `run_shell`. Missing, the tool fails; the daemon still serves.
 
 ## Out of these specs
 
