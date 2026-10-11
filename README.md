@@ -30,9 +30,9 @@ data/workspace/    the only tree bots may read, write, or shell in
 
 File tools resolve against `workspace/` and reject `..`, absolute host paths, and symlink escapes.
 
-`run_shell` needs `unshare` and user namespaces. It re-execs into a mount namespace, chroots, and bind-mounts the workspace at `/work`. Inside the jail the bot cannot see your home, `~/projects`, or host `/tmp`. If it reports its workspace as `/work`, that is the jail path, not the host path. If `unshare` is missing, shell calls fail closed and the daemon still serves.
+`run_shell` needs `unshare` and user namespaces. It re-execs into a mount namespace, chroots, and bind-mounts the workspace at `/work`. Inside the jail the bot cannot see the host filesystem outside that directory. If it reports its workspace as `/work`, that is the jail path, not the host path. If `unshare` is missing, shell calls fail closed and the daemon still serves.
 
-To give a bot a real checkout, copy or mount it into `workspace/`. Do not expect the Grok Build CLI, `go`, or anything else on the host `PATH` to be callable unless it is visible inside that jail.
+To give a bot material, copy or mount it into `workspace/`. Host binaries are not callable unless they are visible inside the jail.
 
 ## systemd
 
@@ -52,10 +52,10 @@ For a user unit, change `WantedBy` to `default.target`, put the unit in `~/.conf
 
 The page is plain HTTP on the LAN. The browser warning is expected. Do not port-forward it.
 
-## What the page does
+## What the page does today
 
-Three views: the bot list, a conversation whose composer stays enabled during a run, and a log filtered by bot and kind. Streaming tokens and tool lines come from `GET /api/bots/{id}/thread/stream?run_id=`. A failed run shows a banner; the reason is also in the log.
+The running page has a bot list, a conversation whose composer stays enabled during a run, an editor beside the thread, and a log. That editor-beside-the-thread is a deviation from the target. The target is in `docs/PRD.md`: conversation is the surface, profile is a separate view opened from the bot menu, and a working animation sits at the bottom of the message screen.
 
-If Ollama is down, the run fails and the log records `model_call` with the error. A restart marks an in-flight run `error` / `daemon_restart` and does not resume the model call. A timer whose `next_fire_at` is already past at boot is logged as `timer_missed` and rescheduled, not run. A run stops after 8 model rounds with `tool round limit`.
+Streaming tokens and tool lines come from `GET /api/bots/{id}/thread/stream?run_id=`. If Ollama is down, the run fails and the log records `model_call` with the error. A restart marks an in-flight run `error` / `daemon_restart` and does not resume the model call. A timer whose `next_fire_at` is already past at boot is logged as `timer_missed` and rescheduled, not run. A run stops after 8 model rounds with `tool round limit`.
 
-Product shape is in `docs/PRD.md`. Contracts are in `docs/specs.md`.
+Target shape is in `docs/PRD.md`. Contracts are in `docs/specs.md`.
