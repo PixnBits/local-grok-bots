@@ -16,22 +16,30 @@ import (
 
 func toolDefs() []model.Tool {
 	obj := func(props map[string]any, req []string) map[string]any {
+		if req == nil {
+			req = []string{}
+		}
 		return map[string]any{"type": "object", "properties": props, "required": req}
 	}
 	str := map[string]any{"type": "string"}
+	// File and shell tools come first. qwen3.8's default thinking only
+	// reliably notices tools near the end of this list. The bot tools
+	// stay last so create_bot is among the ones it uses. When they sit
+	// earlier, the model treats them as missing and keeps thinking past
+	// the three-minute model limit (about 8 tokens/s on this machine).
 	return []model.Tool{
-		{Name: "list_bots", Description: "List bots: id, name, and status.", Parameters: obj(map[string]any{}, nil)},
-		{Name: "read_bot", Description: "Read a bot's instructions and memory by name or id.", Parameters: obj(map[string]any{"name": str}, []string{"name"})},
-		{Name: "send_dm", Description: "Send a direct message to another bot by name or id. Returns immediately; the recipient gets its own turn.", Parameters: obj(map[string]any{"to": str, "content": str}, []string{"to", "content"})},
-		{Name: "create_bot", Description: "Create a bot with a unique name and instructions.", Parameters: obj(map[string]any{"name": str, "instructions": str, "model": str}, []string{"name", "instructions"})},
-		{Name: "update_bot", Description: "Update another bot's name, instructions, or model. Identify it by id or name.", Parameters: obj(map[string]any{"id": str, "name": str, "instructions": str, "model": str}, nil)},
 		{Name: "write_memory", Description: "Upsert a memory note on yourself.", Parameters: obj(map[string]any{"key": str, "value": str}, []string{"key", "value"})},
 		{Name: "delete_memory", Description: "Delete one of your memory notes.", Parameters: obj(map[string]any{"key": str}, []string{"key"})},
-		{Name: "set_timer", Description: "Schedule a prompt on yourself. Schedule is an interval like 30s, 5m, 2h, or 1d.", Parameters: obj(map[string]any{"schedule": str, "prompt": str}, []string{"schedule", "prompt"})},
+		{Name: "set_timer", Description: "Schedule a prompt on yourself. Schedule is an interval like 30s, 5m, 2h, or 1d.", Parameters: obj(map[string]any{"name": str, "schedule": str, "prompt": str}, []string{"schedule", "prompt"})},
 		{Name: "clear_timer", Description: "Delete one of your timers by id.", Parameters: obj(map[string]any{"id": str}, []string{"id"})},
 		{Name: "read_file", Description: "Read a UTF-8 file inside the workspace.", Parameters: obj(map[string]any{"path": str}, []string{"path"})},
 		{Name: "write_file", Description: "Write a UTF-8 file inside the workspace. Creates parent directories.", Parameters: obj(map[string]any{"path": str, "content": str}, []string{"path", "content"})},
 		{Name: "run_shell", Description: "Run a shell command with the workspace as the working directory. Cannot read or write outside the workspace.", Parameters: obj(map[string]any{"command": str}, []string{"command"})},
+		{Name: "list_bots", Description: "List bots: id, name, label, and status.", Parameters: obj(map[string]any{}, nil)},
+		{Name: "read_bot", Description: "Read a bot's description and memory by name or id.", Parameters: obj(map[string]any{"name": str}, []string{"name"})},
+		{Name: "send_dm", Description: "Send a direct message to another bot by name or id. Returns immediately; the recipient gets its own turn.", Parameters: obj(map[string]any{"to": str, "content": str}, []string{"to", "content"})},
+		{Name: "create_bot", Description: "Create a bot. name and description are required. description is the standing prompt the new bot is given. instructions is an accepted alias for description.", Parameters: obj(map[string]any{"name": str, "label": str, "description": str, "instructions": str, "model": str}, []string{"name", "description"})},
+		{Name: "update_bot", Description: "Update another bot's name, label, description, or model. Identify it by id or name. A rename requires id. instructions is an accepted alias for description.", Parameters: obj(map[string]any{"id": str, "name": str, "label": str, "description": str, "instructions": str, "model": str}, nil)},
 	}
 }
 
@@ -59,11 +67,12 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		type row struct {
 			ID     string `json:"id"`
 			Name   string `json:"name"`
+			Label  string `json:"label"`
 			Status string `json:"status"`
 		}
 		out := make([]row, 0, len(bots))
 		for _, b := range bots {
-			out = append(out, row{ID: b.ID, Name: b.Name, Status: b.Status})
+			out = append(out, row{ID: b.ID, Name: b.Name, Label: b.Label, Status: b.Status})
 		}
 		return mustJSON(out), nil
 	case "read_bot":
@@ -83,8 +92,8 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			return "", err
 		}
 		return mustJSON(map[string]any{
-			"id": other.ID, "name": other.Name, "status": other.Status,
-			"instructions": other.Instructions, "model": other.Model, "memory": mem,
+			"id": other.ID, "name": other.Name, "label": other.Label, "status": other.Status,
+			"description": other.Description, "model": other.Model, "memory": mem,
 		}), nil
 	case "send_dm":
 		to := strArg(args, "to")
@@ -109,12 +118,17 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		if err != nil {
 			return "", err
 		}
-		instructions := strArg(args, "instructions")
+		description := strArg(args, "description")
+		if _, ok := args["description"]; !ok {
+			description = strArg(args, "instructions")
+		}
 		var modelPtr *string
 		if m := strings.TrimSpace(strArg(args, "model")); m != "" {
 			modelPtr = &m
 		}
-		created, err := a.st.CreateBot(name, instructions, modelPtr, bot.ID)
+		created, err := a.st.InsertBot(store.BotDraft{
+			Name: name, Label: strArg(args, "label"), Description: description, Model: modelPtr,
+		}, bot.ID)
 		if err != nil {
 			return "", err
 		}
@@ -132,11 +146,6 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			return "", err
 		}
 		patch := store.BotPatch{By: bot.ID}
-		if v, ok := args["name"]; ok && fmt.Sprint(v) != "" && (strArg(args, "id") != "" || hasKey(args, "instructions") || hasKey(args, "model")) {
-			// name field is the new name only when the bot was identified separately,
-			// or when both id and name are present. If only name is set and it matched
-			// the lookup, a rename requires the new name under "name" plus id.
-		}
 		if id := strArg(args, "id"); id != "" {
 			if n := strArg(args, "name"); n != "" && !strings.EqualFold(n, target.Name) {
 				cn, err := cleanName(n)
@@ -146,9 +155,16 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 				patch.Name = &cn
 			}
 		}
-		if _, ok := args["instructions"]; ok {
-			ins := strArg(args, "instructions")
-			patch.Instructions = &ins
+		if _, ok := args["label"]; ok {
+			label := strArg(args, "label")
+			patch.Label = &label
+		}
+		if _, ok := args["description"]; ok {
+			desc := strArg(args, "description")
+			patch.Description = &desc
+		} else if _, ok := args["instructions"]; ok {
+			desc := strArg(args, "instructions")
+			patch.Description = &desc
 		}
 		if _, ok := args["model"]; ok {
 			m := strings.TrimSpace(strArg(args, "model"))
@@ -157,11 +173,6 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 				patch.Model = &m
 			}
 		}
-		// Allow rename when called as update_bot {name: current, new_name}? Spec says
-		// {id or name, name?, instructions?, model?}. If both id and name are sent,
-		// name is the new name. If only name is sent, it identifies the bot and does
-		// not rename. A rename without an id uses the lookup name and cannot also
-		// pass a new name in the same field. Callers pass id to rename.
 		updated, err := a.st.UpdateBot(target.ID, patch)
 		if err != nil {
 			return "", err
@@ -192,7 +203,7 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		if strings.TrimSpace(prompt) == "" {
 			return "", errors.New("prompt required")
 		}
-		t, err := a.st.CreateTimer(bot.ID, schedule, prompt, true)
+		t, err := a.st.CreateTimer(bot.ID, strArg(args, "name"), schedule, prompt, true)
 		if err != nil {
 			return "", err
 		}
@@ -294,11 +305,6 @@ func strArg(args map[string]any, key string) string {
 		}
 		return string(b)
 	}
-}
-
-func hasKey(args map[string]any, key string) bool {
-	_, ok := args[key]
-	return ok
 }
 
 func mustJSON(v any) string {

@@ -92,9 +92,12 @@ func (a *App) handleListBots(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name         string  `json:"name"`
-		Instructions string  `json:"instructions"`
-		Model        *string `json:"model"`
+		Name         string      `json:"name"`
+		Label        string      `json:"label"`
+		Description  *string     `json:"description"`
+		Instructions *string     `json:"instructions"`
+		Mark         *store.Mark `json:"mark"`
+		Model        *string     `json:"model"`
 	}
 	if err := readJSON(w, r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -105,8 +108,9 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	if len(body.Instructions) > 100_000 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "instructions too long"})
+	description := firstText(body.Description, body.Instructions)
+	if len(description) > 100_000 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "description too long"})
 		return
 	}
 	var modelPtr *string
@@ -114,12 +118,32 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 		m := strings.TrimSpace(*body.Model)
 		modelPtr = &m
 	}
-	b, err := a.st.CreateBot(name, body.Instructions, modelPtr, "user")
+	mark := store.Mark{}
+	if body.Mark != nil {
+		mark = *body.Mark
+	}
+	b, err := a.st.InsertBot(store.BotDraft{
+		Name: name, Label: body.Label, Description: description, Mark: mark, Model: modelPtr,
+	}, "user")
 	if err != nil {
-		writeErr(w, err)
+		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusCreated, b)
+}
+
+func firstText(primary, alias *string) string {
+	if primary != nil {
+		return *primary
+	}
+	if alias != nil {
+		return *alias
+	}
+	return ""
 }
 
 func (a *App) handleGetBot(w http.ResponseWriter, r *http.Request) {
@@ -152,17 +176,52 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 		}
 		patch.Name = &name
 	}
-	if v, ok := raw["instructions"]; ok {
-		var ins string
-		if err := json.Unmarshal(v, &ins); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid instructions"})
+	if v, ok := raw["label"]; ok {
+		var label string
+		if err := json.Unmarshal(v, &label); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid label"})
 			return
 		}
-		if len(ins) > 100_000 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "instructions too long"})
+		patch.Label = &label
+	}
+	if v, ok := raw["description"]; ok {
+		desc, err := decodeText(v, "description")
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		patch.Instructions = &ins
+		patch.Description = &desc
+	} else if v, ok := raw["instructions"]; ok {
+		desc, err := decodeText(v, "description")
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		patch.Description = &desc
+	}
+	if v, ok := raw["mark"]; ok {
+		var mark store.Mark
+		if err := json.Unmarshal(v, &mark); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid mark"})
+			return
+		}
+		patch.Mark = &mark
+	}
+	if v, ok := raw["pinned"]; ok {
+		var pinned bool
+		if err := json.Unmarshal(v, &pinned); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid pinned"})
+			return
+		}
+		patch.Pinned = &pinned
+	}
+	if v, ok := raw["hidden"]; ok {
+		var hidden bool
+		if err := json.Unmarshal(v, &hidden); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid hidden"})
+			return
+		}
+		patch.Hidden = &hidden
 	}
 	if v, ok := raw["model"]; ok {
 		patch.ModelSet = true
@@ -198,7 +257,11 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 	}
 	b, err := a.st.UpdateBot(id, patch)
 	if err != nil {
-		writeErr(w, err)
+		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConflict) {
+			writeErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	if patch.Status != nil && *patch.Status == "paused" {
@@ -428,6 +491,7 @@ func (a *App) handleCreateTimer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
+		Name     string `json:"name"`
 		Schedule string `json:"schedule"`
 		Prompt   string `json:"prompt"`
 		Enabled  *bool  `json:"enabled"`
@@ -444,7 +508,7 @@ func (a *App) handleCreateTimer(w http.ResponseWriter, r *http.Request) {
 	if body.Enabled != nil {
 		enabled = *body.Enabled
 	}
-	t, err := a.st.CreateTimer(id, body.Schedule, body.Prompt, enabled)
+	t, err := a.st.CreateTimer(id, body.Name, body.Schedule, body.Prompt, enabled)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -459,6 +523,14 @@ func (a *App) handlePatchTimer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var p store.TimerPatch
+	if v, ok := raw["name"]; ok {
+		var s string
+		if json.Unmarshal(v, &s) != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid name"})
+			return
+		}
+		p.Name = &s
+	}
 	if v, ok := raw["schedule"]; ok {
 		var s string
 		if json.Unmarshal(v, &s) != nil {
@@ -581,6 +653,17 @@ func readMap(w http.ResponseWriter, r *http.Request) (map[string]json.RawMessage
 		return nil, errors.New("invalid JSON")
 	}
 	return raw, nil
+}
+
+func decodeText(v json.RawMessage, field string) (string, error) {
+	var s string
+	if err := json.Unmarshal(v, &s); err != nil {
+		return "", errors.New("invalid " + field)
+	}
+	if len(s) > 100_000 {
+		return "", errors.New(field + " too long")
+	}
+	return s, nil
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

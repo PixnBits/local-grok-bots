@@ -14,7 +14,6 @@
     --accent: #1b654c;
     --accent-2: #e7f3ec;
     --run: #8a4e08;
-    --run-bg: #f8ecd8;
     --err: #8d2d2d;
     --err-bg: #f8e6e2;
     --paused: #4d5966;
@@ -37,6 +36,7 @@
   button { border: 1px solid var(--line); background: var(--paper); border-radius: 10px; padding: 8px 12px; }
   button.primary { background: var(--accent); color: #f4fbf7; border-color: transparent; }
   button.ghost { background: transparent; }
+  button.danger { color: var(--err); }
   button:disabled { opacity: .45; cursor: default; }
   input, textarea, select {
     width: 100%;
@@ -71,22 +71,42 @@
   }
   .view { display: none; flex: 1; min-height: 0; }
   .view.on { display: flex; flex-direction: column; gap: 12px; }
-  .create { padding: 14px; display: grid; gap: 8px; }
-  .create h2, .edit h2, .log head { font-family: var(--serif); font-size: 18px; margin: 0; }
-  .row { display: flex; gap: 8px; }
+  .create, .profile { padding: 14px; display: grid; gap: 8px; }
+  h2 { font-family: var(--serif); font-size: 18px; margin: 0; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
   .bots { display: flex; flex-direction: column; gap: 8px; }
   .bot {
-    text-align: left; padding: 12px 14px; display: flex; justify-content: space-between; align-items: center; gap: 10px;
+    text-align: left; padding: 12px 14px; display: flex; align-items: center; gap: 10px;
   }
-  .bot strong { display: block; }
-  .bot small { color: var(--muted); }
-  .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); text-transform: lowercase; }
+  .bot-copy { min-width: 0; flex: 1; }
+  .bot-copy strong, .bot-copy small, .thread-id h2, .who {
+    display: block;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    overflow-wrap: normal;
+    word-break: normal;
+  }
+  .bot-copy small { color: var(--muted); }
+  .bot.dim { opacity: .55; }
+  .mark {
+    width: 28px; height: 28px; flex: none;
+    background: var(--c, var(--accent));
+  }
+  .mark[data-shape="circle"] { border-radius: 99px; }
+  .mark[data-shape="square"] { border-radius: 4px; }
+  .mark[data-shape="diamond"] { width: 20px; height: 20px; margin: 4px; border-radius: 3px; transform: rotate(45deg); }
+  .mark[data-shape="triangle"] { clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+  .mark[data-shape="hex"] { clip-path: polygon(25% 6%, 75% 6%, 100% 50%, 75% 94%, 25% 94%, 0 50%); }
+  .swatches, .shapes { display: flex; gap: 8px; flex-wrap: wrap; }
+  .swatch, .shape-btn { width: 32px; height: 32px; padding: 0; border-radius: 8px; }
+  .swatch[aria-pressed="true"], .shape-btn[aria-pressed="true"] { outline: 2px solid var(--ink); outline-offset: 2px; }
+  .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); text-transform: lowercase; flex: none; }
   .dot { width: 8px; height: 8px; border-radius: 99px; background: #b7b1a6; display: inline-block; }
   .status.running { color: var(--run); }
   .status.running .dot { background: var(--run); box-shadow: 0 0 0 4px rgba(138,78,8,.15); }
   .status.paused .dot { background: var(--paused); }
   .status.idle .dot { background: var(--accent); }
-  .chat-layout { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 12px; }
   .thread {
     flex: 1; min-height: 240px; display: flex; flex-direction: column; overflow: hidden;
   }
@@ -94,25 +114,46 @@
     display: flex; justify-content: space-between; align-items: center; gap: 8px;
     padding: 12px 14px; border-bottom: 1px solid var(--line);
   }
-  .thread-bar h2 { margin: 0; font-family: var(--serif); font-size: 20px; }
+  .thread-id { min-width: 0; flex: 1; }
+  .thread-id h2 { margin: 0; font-family: var(--serif); font-size: 20px; }
+  .thread-id .role { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .menu { position: relative; flex: none; }
+  .menu-pop {
+    position: absolute; right: 0; top: calc(100% + 6px); z-index: 6;
+    background: var(--paper); border: 1px solid var(--line); border-radius: 12px;
+    box-shadow: var(--shadow); min-width: 180px; padding: 4px;
+    display: flex; flex-direction: column;
+  }
+  .menu-pop[hidden] { display: none !important; }
+  .menu-pop button { text-align: left; background: transparent; border: 0; border-radius: 8px; }
+  .menu-pop button:hover { background: #f3eee6; }
   .msgs { flex: 1; overflow: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
-  .bubble { max-width: 78ch; padding: 10px 12px; border-radius: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .bubble { max-width: min(78ch, 100%); padding: 10px 12px; border-radius: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .bubble.user { background: var(--accent-2); align-self: flex-end; border-bottom-right-radius: 4px; }
   .bubble.bot { background: #fff; border: 1px solid var(--line); align-self: flex-start; border-bottom-left-radius: 4px; }
   .bubble.system { background: transparent; color: var(--muted); font-size: 13px; align-self: center; text-align: center; }
-  .who { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
-  .live { padding: 0 14px 10px; display: flex; flex-direction: column; gap: 6px; }
+  .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; max-width: 100%; }
+  .working {
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 14px 8px; color: var(--run); font-size: 13px;
+  }
+  .working[hidden] { display: none !important; }
+  .pulse {
+    width: 8px; height: 8px; border-radius: 99px; background: var(--run); flex: none;
+    animation: pulse 1s ease-in-out infinite;
+  }
+  @keyframes pulse { 50% { opacity: .3; transform: scale(.75); } }
+  .live { padding: 0 14px 8px; display: flex; flex-direction: column; gap: 6px; }
   .tool {
     font-family: var(--mono); font-size: 12px; background: #f3eee6; border-radius: 8px; padding: 6px 8px;
     overflow-wrap: anywhere;
   }
-  .banner { margin: 0 14px 10px; background: var(--err-bg); color: var(--err); border-radius: 10px; padding: 8px 10px; font-size: 13px; }
+  .note { margin: 0 14px 8px; color: var(--err); background: var(--err-bg); border-radius: 10px; padding: 8px 10px; font-size: 13px; }
+  .note[hidden] { display: none !important; }
   .composer { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); align-items: flex-end; }
   .composer textarea { min-height: 44px; max-height: 140px; }
-  .edit { padding: 14px; display: grid; gap: 8px; }
-  .dms { display: flex; flex-direction: column; gap: 6px; }
-  .dm-btn { text-align: left; }
-  .dm-thread { font-size: 13px; background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 8px; max-height: 180px; overflow: auto; white-space: pre-wrap; }
+  .routine { display: grid; gap: 4px; padding: 8px 0; border-top: 1px solid var(--line); }
+  .routine .meta { color: var(--muted); font-size: 12px; }
   .filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .log { flex: 1; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
   .event { padding: 8px 10px; border-bottom: 1px solid var(--line); }
@@ -131,12 +172,10 @@
   @media (min-width: 980px) {
     nav.tabs { display: none; }
     main { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 12px; align-items: stretch; }
-    .view { display: flex !important; }
-    #view-log { display: none !important; }
-    #view-log.on { display: flex !important; grid-column: 1 / -1; }
-    .chat-layout { display: grid; grid-template-columns: minmax(0, 1fr) 300px; min-height: 0; }
-    #edit[hidden] { display: none !important; }
-    .chat-layout:not(:has(#edit:not([hidden]))) { grid-template-columns: minmax(0, 1fr); }
+    #view-bots, #view-chat { display: flex !important; }
+    #view-profile, #view-log { display: none !important; }
+    body.solo #view-bots, body.solo #view-chat { display: none !important; }
+    body.solo #view-profile.on, body.solo #view-log.on { display: flex !important; grid-column: 1 / -1; }
     .desktop-log { display: inline-flex; }
     .thread { min-height: 70vh; }
   }
@@ -162,52 +201,81 @@
       <form class="panel create" id="create-form">
         <h2>New bot</h2>
         <input name="name" placeholder="Name" autocomplete="off" required>
-        <textarea name="instructions" placeholder="Instructions — role, boundaries, what this bot is for"></textarea>
+        <input name="label" placeholder="Label — short role line" autocomplete="off">
+        <textarea name="description" placeholder="Description — the standing prompt"></textarea>
         <div class="row">
           <button class="primary" type="submit">Create bot</button>
+          <button type="button" id="show-hidden" class="ghost">Show hidden</button>
         </div>
         <div class="err" id="create-err"></div>
       </form>
       <div class="bots" id="bot-list"></div>
     </section>
     <section class="view" id="view-chat">
-      <div class="chat-layout">
-        <div class="panel thread" id="thread">
-          <div class="thread-bar">
-            <div>
-              <h2 id="thread-name">No bot selected</h2>
-              <div class="status" id="thread-status"></div>
+      <div class="panel thread" id="thread">
+        <div class="thread-bar">
+          <div class="thread-id">
+            <h2 id="thread-name">No bot selected</h2>
+            <div class="role" id="thread-label"></div>
+          </div>
+          <div class="menu">
+            <button type="button" id="menu-btn" aria-haspopup="menu" aria-expanded="false" aria-label="Bot menu">⋯</button>
+            <div class="menu-pop" id="bot-menu" hidden role="menu">
+              <button type="button" data-act="profile" role="menuitem">View profile</button>
+              <button type="button" data-act="pin" role="menuitem" id="menu-pin">Pin</button>
+              <button type="button" data-act="hide" role="menuitem" id="menu-hide">Hide</button>
+              <button type="button" data-act="duplicate" role="menuitem">Duplicate</button>
+              <button type="button" data-act="delete" class="danger" role="menuitem">Delete</button>
             </div>
-            <button type="button" id="edit-toggle">Edit</button>
           </div>
-          <div class="banner" id="run-banner" hidden></div>
-          <div class="msgs" id="msgs"><p class="empty">Choose a bot to read its thread.</p></div>
-          <div class="live" id="live"></div>
-          <form class="composer" id="composer">
-            <textarea id="composer-input" placeholder="Message… Enter to send, Shift+Enter for a new line"></textarea>
-            <button class="primary" type="submit" id="send-btn">Send</button>
-          </form>
         </div>
-        <form class="panel edit" id="edit" hidden>
-          <h2>Bot</h2>
-          <label>Name<input id="edit-name" autocomplete="off"></label>
-          <label>Instructions<textarea id="edit-instructions"></textarea></label>
-          <label>Model override<input id="edit-model" placeholder="blank uses the daemon default" autocomplete="off"></label>
-          <div class="row">
-            <button class="primary" type="submit">Save</button>
-            <button type="button" id="pause-btn">Pause</button>
-            <button type="button" id="delete-btn">Delete</button>
-          </div>
-          <div class="err" id="edit-err"></div>
-          <h2>Direct messages</h2>
-          <div class="dms" id="dms"><p class="empty">No DMs yet.</p></div>
+        <div class="msgs" id="msgs"><p class="empty">Choose a bot to read its thread.</p></div>
+        <div class="working" id="working" hidden>
+          <span class="pulse" aria-hidden="true"></span>
+          <span id="working-text">working</span>
+        </div>
+        <div class="live" id="live"></div>
+        <div class="note" id="run-note" hidden></div>
+        <form class="composer" id="composer">
+          <textarea id="composer-input" placeholder="Message… Enter to send, Shift+Enter for a new line"></textarea>
+          <button class="primary" type="submit" id="send-btn">Send</button>
         </form>
       </div>
+    </section>
+    <section class="view" id="view-profile">
+      <form class="panel profile" id="profile-form">
+        <div class="row" style="justify-content:space-between;align-items:center">
+          <h2>Profile</h2>
+          <button type="button" id="profile-back" class="ghost">Back</button>
+        </div>
+        <div class="row" style="align-items:center">
+          <span class="mark" id="profile-mark" data-shape="circle" style="--c:#1b654c"></span>
+          <span class="empty" style="padding:0">Mark</span>
+        </div>
+        <div class="shapes" id="shape-picker"></div>
+        <div class="swatches" id="color-picker"></div>
+        <label>Name<input id="profile-name" autocomplete="off"></label>
+        <label>Label<input id="profile-label" placeholder="Short role line" autocomplete="off"></label>
+        <label>Description<textarea id="profile-description" placeholder="Standing prompt. This is what the model is given."></textarea></label>
+        <label>Model override<input id="profile-model" placeholder="blank uses the daemon default" autocomplete="off"></label>
+        <div class="row">
+          <button class="primary" type="submit">Save</button>
+        </div>
+        <div class="err" id="profile-err"></div>
+        <h2>Routines</h2>
+        <div id="routines"></div>
+        <div class="routine">
+          <input id="routine-name" placeholder="Name" autocomplete="off">
+          <input id="routine-schedule" placeholder="Schedule — 30s, 5m, 2h, 1d" autocomplete="off">
+          <textarea id="routine-prompt" placeholder="Instruction when it fires"></textarea>
+          <button type="button" id="routine-add">Add routine</button>
+        </div>
+      </form>
     </section>
     <section class="view" id="view-log">
       <div class="panel" style="display:flex;flex-direction:column;min-height:0;flex:1">
         <div class="edit-bar">
-          <h2 style="font-family:var(--serif);margin:0">Log</h2>
+          <h2>Log</h2>
           <button type="button" id="log-refresh">Refresh</button>
         </div>
         <div style="padding:12px" class="filters">
@@ -232,6 +300,8 @@
 </div>
 <script>
 const KINDS = ["user_message","bot_message","dm_sent","dm_received","tool_start","tool_end","bot_created","bot_updated","bot_deleted","timer_fired","timer_missed","model_call","run_started","run_finished","daemon_start","daemon_stop"];
+const SHAPES = ["circle","square","diamond","triangle","hex"];
+const COLORS = ["#1b654c","#8a4e08","#8d2d2d","#1d4e89","#5c4d7a","#3f6b4a","#a15c38","#2f2f2f"];
 const state = {
   view: "bots",
   botId: null,
@@ -240,7 +310,8 @@ const state = {
   token: sessionStorage.getItem("lgb_token") || "",
   streamCtl: null,
   streaming: "",
-  editOpen: window.matchMedia("(min-width: 980px)").matches,
+  showHidden: false,
+  mark: {shape: "circle", color: "#1b654c"},
   desktopLog: false
 };
 const $ = (s, r=document) => r.querySelector(s);
@@ -268,45 +339,58 @@ function el(tag, cls, text) {
   if (text != null) n.textContent = text;
   return n;
 }
+function markEl(mark) {
+  const m = mark || {shape: "circle", color: "#1b654c"};
+  const n = el("span", "mark");
+  n.dataset.shape = m.shape || "circle";
+  n.style.setProperty("--c", m.color || "#1b654c");
+  return n;
+}
 function setView(name) {
   state.view = name;
+  const wide = window.innerWidth >= 980;
+  const solo = name === "profile" || name === "log";
+  document.body.classList.toggle("solo", solo);
   for (const b of document.querySelectorAll("nav.tabs button")) {
     b.setAttribute("aria-selected", b.dataset.view === name ? "true" : "false");
   }
-  for (const v of ["bots","chat","log"]) {
-    $("#view-" + v).classList.toggle("on", v === name || (window.innerWidth >= 980 && v !== "log"));
-  }
-  if (window.innerWidth >= 980) {
-    document.body.classList.toggle("logging", state.desktopLog || name === "log");
-    $("#view-log").classList.toggle("on", state.desktopLog || name === "log");
+  for (const v of ["bots","chat","profile","log"]) {
+    let on = v === name;
+    if (wide && !solo && (v === "bots" || v === "chat")) on = true;
+    $("#view-" + v).classList.toggle("on", on);
   }
   if (name === "log") loadLog();
 }
-document.querySelectorAll("nav.tabs button").forEach(b => b.addEventListener("click", () => setView(b.dataset.view)));
+document.querySelectorAll("nav.tabs button").forEach(b => b.addEventListener("click", () => {
+  state.desktopLog = false;
+  setView(b.dataset.view);
+}));
 $("#log-toggle").addEventListener("click", () => {
   state.desktopLog = !state.desktopLog;
   setView(state.desktopLog ? "log" : (state.botId ? "chat" : "bots"));
-  if (state.desktopLog) loadLog();
 });
 function statusNode(status) {
   const s = el("span", "status " + (status || "idle"));
   s.append(el("i", "dot"), document.createTextNode(status || "idle"));
   return s;
 }
+function currentBot() { return state.bots.find(b => b.id === state.botId) || null; }
 function renderBots() {
   const list = $("#bot-list");
   list.replaceChildren();
-  if (!state.bots.length) {
-    list.append(el("p", "empty", "No bots yet. Create one to start a thread."));
-    return;
+  const visible = state.bots.filter(b => state.showHidden || !b.hidden);
+  const hiddenCount = state.bots.filter(b => b.hidden).length;
+  $("#show-hidden").textContent = state.showHidden ? "Hide hidden" : (hiddenCount ? "Show hidden (" + hiddenCount + ")" : "Show hidden");
+  if (!visible.length) {
+    list.append(el("p", "empty", state.bots.length ? "Every bot is hidden." : "No bots yet. Create one to start a thread."));
   }
-  for (const b of state.bots) {
-    const btn = el("button", "bot");
+  for (const b of visible) {
+    const btn = el("button", "bot" + (b.hidden ? " dim" : ""));
     btn.type = "button";
-    const left = el("span");
-    left.append(el("strong", null, b.name));
-    if (b.model) left.append(el("small", null, b.model));
-    btn.append(left, statusNode(b.status));
+    const copy = el("span", "bot-copy");
+    copy.append(el("strong", null, b.name));
+    copy.append(el("small", null, b.label || ""));
+    btn.append(markEl(b.mark), copy, statusNode(b.status));
     btn.addEventListener("click", () => openBot(b.id));
     list.append(btn);
   }
@@ -314,64 +398,71 @@ function renderBots() {
   const cur = sel.value;
   sel.replaceChildren(new Option("All bots", ""));
   for (const b of state.bots) sel.append(new Option(b.name, b.id));
-  sel.value = cur;
+  if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
 }
 async function loadBots() {
   state.bots = await api("/api/bots");
   renderBots();
-  if (state.botId) {
-    const b = state.bots.find(x => x.id === state.botId);
-    if (b) paintBot(b);
+  const b = currentBot();
+  if (b) paintHeader(b);
+}
+function paintHeader(b) {
+  $("#thread-name").textContent = b.name;
+  $("#thread-label").textContent = b.label || "";
+  $("#menu-pin").textContent = b.pinned ? "Unpin" : "Pin";
+  $("#menu-hide").textContent = b.hidden ? "Unhide" : "Hide";
+  const note = $("#run-note");
+  if (!state.streaming && b.status !== "running" && b.last_run_status === "error" && b.last_run_error) {
+    note.hidden = false;
+    note.textContent = "Run failed: " + b.last_run_error;
+  } else if (!state.streaming) {
+    note.hidden = true;
   }
 }
-function paintBot(b) {
-  $("#thread-name").textContent = b.name;
-  const st = $("#thread-status");
-  st.className = "status " + b.status;
-  st.replaceChildren(el("i", "dot"), document.createTextNode(b.status));
-  $("#pause-btn").textContent = b.status === "paused" ? "Resume" : "Pause";
-  const banner = $("#run-banner");
-  if (b.status !== "running" && b.last_run_status === "error" && b.last_run_error) {
-    banner.hidden = false;
-    banner.textContent = "Run failed: " + b.last_run_error;
-  } else if (!state.streaming) {
-    banner.hidden = true;
-  }
+function closeMenu() {
+  $("#bot-menu").hidden = true;
+  $("#menu-btn").setAttribute("aria-expanded", "false");
 }
 async function openBot(id) {
   state.botId = id;
+  closeMenu();
   setView("chat");
-  $("#edit").hidden = !state.editOpen;
   await refreshBot();
   await loadThread();
-  const b = state.bots.find(x => x.id === id);
+  const b = currentBot();
   if (b && b.active_run_id) follow(b.active_run_id);
 }
 async function refreshBot() {
-  if (!state.botId) return;
+  if (!state.botId) return null;
   const b = await api("/api/bots/" + state.botId);
   const i = state.bots.findIndex(x => x.id === b.id);
-  if (i >= 0) state.bots[i] = Object.assign(state.bots[i] || {}, b);
+  if (i >= 0) state.bots[i] = b;
   else state.bots.push(b);
-  paintBot(b);
-  $("#edit-name").value = b.name || "";
-  $("#edit-instructions").value = b.instructions || "";
-  $("#edit-model").value = b.model || "";
+  paintHeader(b);
   renderBots();
-  loadDMs();
   return b;
+}
+function whoText(m) {
+  if (m.role === "user") return "You";
+  if (m.role === "bot") {
+    const b = currentBot();
+    return b ? b.name : "Bot";
+  }
+  if ((m.content || "").startsWith("Message from ")) return "";
+  return "Scheduled";
 }
 function renderMessages() {
   const box = $("#msgs");
   box.replaceChildren();
-  if (!state.messages.length) {
+  if (!state.messages.length && $("#working").hidden) {
     box.append(el("p", "empty", "No messages yet. The composer stays available while a run is in progress."));
     return;
   }
   for (const m of state.messages) {
     const bubble = el("div", "bubble " + (m.role || "system"));
-    const who = m.role === "user" ? "You" : m.role === "bot" ? "Bot" : "Scheduled";
-    bubble.append(el("span", "who", who), document.createTextNode(m.content || ""));
+    const who = whoText(m);
+    if (who) bubble.append(el("span", "who", who));
+    bubble.append(document.createTextNode(m.content || ""));
     box.append(bubble);
   }
   box.scrollTop = box.scrollHeight;
@@ -382,18 +473,29 @@ async function loadThread() {
   state.messages = data.messages || [];
   renderMessages();
 }
+function setWorking(on, text) {
+  const w = $("#working");
+  w.hidden = !on;
+  if (on) $("#working-text").textContent = text || "working";
+}
 $("#create-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   $("#create-err").textContent = "";
   const fd = new FormData(e.target);
   try {
     const bot = await api("/api/bots", {method:"POST", body: JSON.stringify({
-      name: fd.get("name"), instructions: fd.get("instructions") || ""
+      name: fd.get("name"),
+      label: fd.get("label") || "",
+      description: fd.get("description") || ""
     })});
     e.target.reset();
     await loadBots();
     openBot(bot.id);
   } catch (err) { $("#create-err").textContent = err.message; }
+});
+$("#show-hidden").addEventListener("click", () => {
+  state.showHidden = !state.showHidden;
+  renderBots();
 });
 $("#composer").addEventListener("submit", (e) => { e.preventDefault(); send(); });
 $("#composer-input").addEventListener("keydown", (e) => {
@@ -404,6 +506,7 @@ async function send() {
   const content = input.value.trim();
   if (!content || !state.botId) return;
   input.value = "";
+  $("#run-note").hidden = true;
   try {
     const data = await api("/api/bots/" + state.botId + "/thread/messages", {
       method: "POST", body: JSON.stringify({content})
@@ -412,25 +515,28 @@ async function send() {
     if (data.run_id) follow(data.run_id);
     else pollActive();
   } catch (err) {
-    $("#run-banner").hidden = false;
-    $("#run-banner").textContent = err.message;
+    $("#run-note").hidden = false;
+    $("#run-note").textContent = err.message;
   }
 }
 function stopStream() {
   if (state.streamCtl) { state.streamCtl.abort(); state.streamCtl = null; }
   state.streaming = "";
   $("#live").replaceChildren();
+  setWorking(false);
 }
 async function follow(runId) {
   if (!runId || state.streaming === runId) return;
   stopStream();
   state.streaming = runId;
+  setWorking(true, "working");
   const ctl = new AbortController();
   state.streamCtl = ctl;
   const live = $("#live");
   let acc = "";
   const bubble = el("div", "bubble bot");
-  bubble.append(el("span", "who", "Bot"));
+  const who = el("span", "who", (currentBot() && currentBot().name) || "Bot");
+  bubble.append(who);
   const text = el("span");
   bubble.append(text);
   try {
@@ -458,7 +564,9 @@ async function follow(runId) {
         if (!data) continue;
         let payload = {};
         try { payload = JSON.parse(data); } catch { continue; }
-        if (event === "token") {
+        if (event === "status") {
+          setWorking(true, payload.text || payload.state || "working");
+        } else if (event === "token") {
           acc += payload.text || "";
           text.textContent = acc;
           if (!bubble.parentNode) live.append(bubble);
@@ -469,28 +577,30 @@ async function follow(runId) {
         } else if (event === "tool_result") {
           const ok = payload.ok ? "ok" : "error";
           live.append(el("div", "tool", (payload.name || "tool") + " " + ok + ": " + (payload.result_or_error || "")));
-        } else if (event === "done") {
+        } else if (event === "done" || event === "error") {
+          setWorking(false);
+          if (event === "error") {
+            const note = $("#run-note");
+            note.hidden = false;
+            note.textContent = "Run failed: " + (payload.error || "unknown error");
+          }
           stopStream();
           await loadThread();
           await refreshBot();
-          pollActive();
-          return;
-        } else if (event === "error") {
-          const banner = $("#run-banner");
-          banner.hidden = false;
-          banner.textContent = "Run failed: " + (payload.error || "unknown error");
-          stopStream();
-          await loadThread();
-          await refreshBot();
+          if (event === "done") pollActive();
           return;
         }
       }
     }
   } catch (err) {
     if (err.name === "AbortError") return;
+    setWorking(false);
     await loadThread();
   } finally {
-    if (state.streaming === runId) state.streaming = "";
+    if (state.streaming === runId) {
+      state.streaming = "";
+      setWorking(false);
+    }
   }
 }
 async function pollActive() {
@@ -498,66 +608,186 @@ async function pollActive() {
   const b = await refreshBot();
   if (b && b.active_run_id && b.active_run_id !== state.streaming) follow(b.active_run_id);
 }
-$("#edit-toggle").addEventListener("click", () => {
-  state.editOpen = !state.editOpen;
-  $("#edit").hidden = !state.editOpen;
+$("#menu-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const menu = $("#bot-menu");
+  menu.hidden = !menu.hidden;
+  $("#menu-btn").setAttribute("aria-expanded", menu.hidden ? "false" : "true");
 });
-$("#edit").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  if (!state.botId) return;
-  $("#edit-err").textContent = "";
-  const model = $("#edit-model").value.trim();
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".menu")) closeMenu();
+});
+$("#bot-menu").addEventListener("click", async (e) => {
+  const btn = e.target.closest("button");
+  if (!btn || !state.botId) return;
+  closeMenu();
+  const act = btn.dataset.act;
+  const b = currentBot();
   try {
-    await api("/api/bots/" + state.botId, {method:"PATCH", body: JSON.stringify({
-      name: $("#edit-name").value,
-      instructions: $("#edit-instructions").value,
-      model: model || null
-    })});
-    await refreshBot();
-    await loadBots();
-  } catch (err) { $("#edit-err").textContent = err.message; }
+    if (act === "profile") { await openProfile(state.botId); }
+    else if (act === "pin") {
+      await api("/api/bots/" + state.botId, {method:"PATCH", body: JSON.stringify({pinned: !(b && b.pinned)})});
+      await loadBots();
+    } else if (act === "hide") {
+      await api("/api/bots/" + state.botId, {method:"PATCH", body: JSON.stringify({hidden: !(b && b.hidden)})});
+      await loadBots();
+      if (!(b && b.hidden)) setView("bots");
+    } else if (act === "duplicate") { await duplicateBot(state.botId); }
+    else if (act === "delete") { await deleteBot(); }
+  } catch (err) {
+    $("#run-note").hidden = false;
+    $("#run-note").textContent = err.message;
+  }
 });
-$("#pause-btn").addEventListener("click", async () => {
-  if (!state.botId) return;
-  const b = state.bots.find(x => x.id === state.botId);
-  const next = b && b.status === "paused" ? "idle" : "paused";
-  try {
-    await api("/api/bots/" + state.botId, {method:"PATCH", body: JSON.stringify({status: next})});
-    await refreshBot();
-    await loadBots();
-  } catch (err) { $("#edit-err").textContent = err.message; }
-});
-$("#delete-btn").addEventListener("click", async () => {
-  if (!state.botId) return;
+async function deleteBot() {
   if (!confirm("Delete this bot and its thread?")) return;
-  try {
-    await api("/api/bots/" + state.botId, {method:"DELETE"});
-    state.botId = null;
-    stopStream();
-    $("#thread-name").textContent = "No bot selected";
-    $("#msgs").replaceChildren(el("p", "empty", "Choose a bot to read its thread."));
-    await loadBots();
-    setView("bots");
-  } catch (err) { $("#edit-err").textContent = err.message; }
-});
-async function loadDMs() {
-  const box = $("#dms");
-  if (!state.botId) return;
-  const dms = await api("/api/bots/" + state.botId + "/dms");
+  await api("/api/bots/" + state.botId, {method:"DELETE"});
+  state.botId = null;
+  stopStream();
+  $("#thread-name").textContent = "No bot selected";
+  $("#thread-label").textContent = "";
+  $("#msgs").replaceChildren(el("p", "empty", "Choose a bot to read its thread."));
+  await loadBots();
+  setView("bots");
+}
+async function duplicateBot(id) {
+  const full = await api("/api/bots/" + id);
+  const timers = await api("/api/bots/" + id + "/timers");
+  const baseName = full.name + " copy";
+  let name = baseName;
+  let created = null;
+  for (let n = 2; n < 30; n++) {
+    try {
+      created = await api("/api/bots", {method:"POST", body: JSON.stringify({
+        name, label: full.label || "", description: full.description || "",
+        mark: full.mark, model: full.model
+      })});
+      break;
+    } catch (err) {
+      if (!/exists/i.test(err.message)) throw err;
+      name = baseName + " " + n;
+    }
+  }
+  if (!created) throw new Error("could not duplicate");
+  for (const t of timers) {
+    await api("/api/bots/" + created.id + "/timers", {method:"POST", body: JSON.stringify({
+      name: t.name, schedule: t.schedule, prompt: t.prompt, enabled: t.enabled
+    })});
+  }
+  await loadBots();
+  await openProfile(created.id);
+}
+function paintMarkPicker() {
+  const shapes = $("#shape-picker");
+  shapes.replaceChildren();
+  for (const shape of SHAPES) {
+    const b = el("button", "shape-btn");
+    b.type = "button";
+    b.setAttribute("aria-pressed", shape === state.mark.shape ? "true" : "false");
+    b.append(markEl({shape, color: state.mark.color}));
+    b.addEventListener("click", () => { state.mark.shape = shape; paintMarkPicker(); });
+    shapes.append(b);
+  }
+  const colors = $("#color-picker");
+  colors.replaceChildren();
+  for (const color of COLORS) {
+    const b = el("button", "swatch");
+    b.type = "button";
+    b.style.background = color;
+    b.setAttribute("aria-label", color);
+    b.setAttribute("aria-pressed", color === state.mark.color ? "true" : "false");
+    b.addEventListener("click", () => { state.mark.color = color; paintMarkPicker(); });
+    colors.append(b);
+  }
+  const preview = $("#profile-mark");
+  preview.dataset.shape = state.mark.shape;
+  preview.style.setProperty("--c", state.mark.color);
+}
+async function openProfile(id) {
+  state.botId = id;
+  closeMenu();
+  const b = await api("/api/bots/" + id);
+  const i = state.bots.findIndex(x => x.id === b.id);
+  if (i >= 0) state.bots[i] = b; else state.bots.push(b);
+  state.mark = {shape: (b.mark && b.mark.shape) || "circle", color: (b.mark && b.mark.color) || "#1b654c"};
+  $("#profile-name").value = b.name || "";
+  $("#profile-label").value = b.label || "";
+  $("#profile-description").value = b.description || "";
+  $("#profile-model").value = b.model || "";
+  $("#profile-err").textContent = "";
+  paintMarkPicker();
+  await loadRoutines();
+  setView("profile");
+}
+async function loadRoutines() {
+  const box = $("#routines");
   box.replaceChildren();
-  if (!dms.length) { box.append(el("p", "empty", "No DMs yet.")); return; }
-  for (const d of dms) {
-    const btn = el("button", "dm-btn", d.name);
-    btn.type = "button";
-    btn.addEventListener("click", async () => {
-      const data = await api("/api/dms/" + state.botId + "/" + d.bot_id + "?limit=40");
-      const pre = el("div", "dm-thread");
-      pre.textContent = (data.messages || []).map(m => (m.role === "bot" ? "out" : "in") + ": " + m.content).join("\n") || "(empty)";
-      btn.after(pre);
+  if (!state.botId) return;
+  const timers = await api("/api/bots/" + state.botId + "/timers");
+  if (!timers.length) box.append(el("p", "empty", "No routines."));
+  for (const t of timers) {
+    const row = el("div", "routine");
+    row.append(el("strong", null, t.name || "Untitled"));
+    const when = t.next_fire_at ? new Date(t.next_fire_at).toLocaleString() : "";
+    row.append(el("div", "meta", t.schedule + (when ? " · next " + when : "") + (t.enabled ? "" : " · paused")));
+    const actions = el("div", "row");
+    const toggle = el("button", "ghost", t.enabled ? "Pause" : "Resume");
+    toggle.type = "button";
+    toggle.addEventListener("click", async () => {
+      await api("/api/timers/" + t.id, {method:"PATCH", body: JSON.stringify({enabled: !t.enabled})});
+      await loadRoutines();
     });
-    box.append(btn);
+    const del = el("button", "ghost danger", "Delete");
+    del.type = "button";
+    del.addEventListener("click", async () => {
+      await api("/api/timers/" + t.id, {method:"DELETE"});
+      await loadRoutines();
+    });
+    actions.append(toggle, del);
+    row.append(actions);
+    box.append(row);
   }
 }
+$("#profile-back").addEventListener("click", () => openBot(state.botId));
+$("#profile-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!state.botId) return;
+  $("#profile-err").textContent = "";
+  const model = $("#profile-model").value.trim();
+  try {
+    await api("/api/bots/" + state.botId, {method:"PATCH", body: JSON.stringify({
+      name: $("#profile-name").value,
+      label: $("#profile-label").value,
+      description: $("#profile-description").value,
+      mark: state.mark,
+      model: model || null
+    })});
+    await loadBots();
+    const note = $("#profile-err");
+    note.style.color = "var(--accent)";
+    note.textContent = "Saved.";
+  } catch (err) {
+    const note = $("#profile-err");
+    note.style.color = "";
+    note.textContent = err.message;
+  }
+});
+$("#routine-add").addEventListener("click", async () => {
+  if (!state.botId) return;
+  $("#profile-err").textContent = "";
+  try {
+    await api("/api/bots/" + state.botId + "/timers", {method:"POST", body: JSON.stringify({
+      name: $("#routine-name").value.trim(),
+      schedule: $("#routine-schedule").value.trim(),
+      prompt: $("#routine-prompt").value,
+      enabled: true
+    })});
+    $("#routine-name").value = "";
+    $("#routine-schedule").value = "";
+    $("#routine-prompt").value = "";
+    await loadRoutines();
+  } catch (err) { $("#profile-err").textContent = err.message; }
+});
 function fillKinds() {
   const sel = $("#log-kind");
   for (const k of KINDS) sel.append(new Option(k, k));
@@ -605,7 +835,10 @@ fillKinds();
   } catch (err) {
     if (err.message !== "unauthorized") $("#health").textContent = err.message;
   }
-  setInterval(() => { loadBots().catch(() => {}); if (state.view === "log" || state.desktopLog) loadLog().catch(() => {}); }, 3000);
+  setInterval(() => {
+    loadBots().catch(() => {});
+    if (state.view === "log" || state.desktopLog) loadLog().catch(() => {});
+  }, 3000);
 })();
 </script>
 </body>

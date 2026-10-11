@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -18,6 +20,7 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 	"github.com/PixnBits/local-grok-bots/internal/store"
+	"github.com/PixnBits/local-grok-bots/web"
 )
 
 func TestMain(m *testing.M) {
@@ -515,7 +518,7 @@ func TestTimerMissedOnBoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tm, err := st.CreateTimer(bot.ID, "1h", "do the thing", true)
+	tm, err := st.CreateTimer(bot.ID, "hourly", "1h", "do the thing", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -544,4 +547,264 @@ func TestTimerMissedOnBoot(t *testing.T) {
 		t.Fatalf("not rescheduled %#v", timers)
 	}
 	_ = app
+}
+
+func TestProfileSaveDoesNotRequireThread(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		t.Fatal("profile save started a run")
+		return model.ChatResponse{}, nil
+	}})
+	srv := serve(t, app)
+	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{
+		"name": "Ada", "instructions": "legacy prompt",
+	}, "")
+	if res.StatusCode != 201 {
+		t.Fatalf("create %d %s", res.StatusCode, b)
+	}
+	var bot store.Bot
+	decodeJSON(t, b, &bot)
+	if bot.Description != "legacy prompt" {
+		t.Fatalf("instructions alias was not stored as description: %#v", bot)
+	}
+	res, b = do(t, "PATCH", srv.URL+"/api/bots/"+bot.ID, map[string]any{
+		"label":       "researcher",
+		"description": "standing prompt",
+		"mark":        map[string]string{"shape": "diamond", "color": "#8a4e08"},
+		"model":       "local-override",
+	}, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("patch %d %s", res.StatusCode, b)
+	}
+	decodeJSON(t, b, &bot)
+	if bot.Label != "researcher" || bot.Description != "standing prompt" || bot.Mark.Shape != "diamond" || bot.Model == nil || *bot.Model != "local-override" {
+		t.Fatalf("profile %#v", bot)
+	}
+	res, b = do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/timers", map[string]any{
+		"name": "digest", "schedule": "1d", "prompt": "summarize",
+	}, "")
+	if res.StatusCode != 201 {
+		t.Fatalf("timer %d %s", res.StatusCode, b)
+	}
+	var thread struct {
+		Messages []store.Message `json:"messages"`
+	}
+	_, b = do(t, "GET", srv.URL+"/api/bots/"+bot.ID+"/thread", nil, "")
+	decodeJSON(t, b, &thread)
+	if len(thread.Messages) != 0 {
+		t.Fatalf("thread should stay empty %#v", thread.Messages)
+	}
+	_, b = do(t, "GET", srv.URL+"/api/bots/"+bot.ID+"/timers", nil, "")
+	var timers []store.Timer
+	decodeJSON(t, b, &timers)
+	if len(timers) != 1 || timers[0].Name != "digest" || !timers[0].Enabled {
+		t.Fatalf("timers %#v", timers)
+	}
+	page := string(web.IndexHTML)
+	if strings.Contains(page, `id="edit-instructions"`) || strings.Contains(page, `id="edit"`) {
+		t.Fatal("thread page still has the description editor")
+	}
+	if !strings.Contains(page, "View profile") || !strings.Contains(page, `id="working"`) {
+		t.Fatal("page is missing the profile menu or the working status")
+	}
+}
+
+func TestRunEmitsStatus(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		once.Do(func() { close(entered) })
+		<-release
+		return model.ChatResponse{Content: "pong"}, nil
+	}})
+	srv := serve(t, app)
+	_, b := do(t, "POST", srv.URL+"/api/bots", map[string]string{"name": "Ada", "description": "brief"}, "")
+	var bot store.Bot
+	decodeJSON(t, b, &bot)
+	_, b = do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]string{"content": "ping"}, "")
+	var posted struct {
+		RunID string `json:"run_id"`
+	}
+	decodeJSON(t, b, &posted)
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("run did not start")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/bots/"+bot.ID+"/thread/stream?run_id="+posted.RunID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	saw := make(chan string, 1)
+	go func() {
+		sc := bufio.NewScanner(res.Body)
+		event := ""
+		for sc.Scan() {
+			line := sc.Text()
+			if strings.HasPrefix(line, "event:") {
+				event = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			}
+			if event == "status" && strings.HasPrefix(line, "data:") {
+				saw <- strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+				return
+			}
+		}
+	}()
+	select {
+	case data := <-saw:
+		var payload struct {
+			State string `json:"state"`
+		}
+		if err := json.Unmarshal([]byte(data), &payload); err != nil || payload.State == "" {
+			t.Fatalf("status payload %s", data)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("no status event")
+	}
+	close(release)
+	waitIdle(t, srv.URL, bot.ID, "")
+}
+
+func TestInboundDMOnReceivingThread(t *testing.T) {
+	var once atomic.Bool
+	app := newApp(t, "", fakeModel{fn: func(req model.ChatRequest) (model.ChatResponse, error) {
+		sys := req.Messages[0].Content
+		if strings.Contains(sys, "You are Alice") && once.CompareAndSwap(false, true) {
+			return model.ChatResponse{ToolCalls: []model.ToolCall{{
+				Name: "send_dm", Arguments: map[string]any{"to": "Bob", "content": "ping"},
+			}}}, nil
+		}
+		return model.ChatResponse{Content: "ok"}, nil
+	}})
+	srv := serve(t, app)
+	_, b := do(t, "POST", srv.URL+"/api/bots", map[string]string{"name": "Alice", "description": "send"}, "")
+	var alice store.Bot
+	decodeJSON(t, b, &alice)
+	_, b = do(t, "POST", srv.URL+"/api/bots", map[string]string{"name": "Bob", "description": "receive"}, "")
+	var bob store.Bot
+	decodeJSON(t, b, &bob)
+	do(t, "POST", srv.URL+"/api/bots/"+alice.ID+"/thread/messages", map[string]string{"content": "tell bob"}, "")
+	waitIdle(t, srv.URL, alice.ID, "")
+	waitIdle(t, srv.URL, bob.ID, "")
+
+	_, b = do(t, "GET", srv.URL+"/api/bots/"+bob.ID+"/thread", nil, "")
+	var thread struct {
+		Messages []store.Message `json:"messages"`
+	}
+	decodeJSON(t, b, &thread)
+	var saw bool
+	for _, m := range thread.Messages {
+		if m.Role == "system" && m.Content == "Message from Alice" {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("receiving thread %#v", thread.Messages)
+	}
+	_, b = do(t, "GET", srv.URL+"/api/dms/"+alice.ID+"/"+bob.ID, nil, "")
+	decodeJSON(t, b, &thread)
+	var dm bool
+	for _, m := range thread.Messages {
+		if m.Content == "ping" && strings.HasPrefix(m.Thread, "dm:") {
+			dm = true
+		}
+	}
+	if !dm {
+		t.Fatalf("dm storage %#v", thread.Messages)
+	}
+}
+
+func TestHideDoesNotPause(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "no"}, nil
+	}})
+	srv := serve(t, app)
+	_, b := do(t, "POST", srv.URL+"/api/bots", map[string]string{"name": "Ada", "description": "stay running"}, "")
+	var bot store.Bot
+	decodeJSON(t, b, &bot)
+	res, b := do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/timers", map[string]any{
+		"name": "tick", "schedule": "1h", "prompt": "check", "enabled": true,
+	}, "")
+	if res.StatusCode != 201 {
+		t.Fatalf("timer %d %s", res.StatusCode, b)
+	}
+	res, b = do(t, "PATCH", srv.URL+"/api/bots/"+bot.ID, map[string]any{"hidden": true, "pinned": true}, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("hide %d %s", res.StatusCode, b)
+	}
+	decodeJSON(t, b, &bot)
+	if bot.Status != "idle" || !bot.Hidden || !bot.Pinned {
+		t.Fatalf("hide changed bot state %#v", bot)
+	}
+	_, b = do(t, "GET", srv.URL+"/api/bots/"+bot.ID+"/timers", nil, "")
+	var timers []store.Timer
+	decodeJSON(t, b, &timers)
+	if len(timers) != 1 || !timers[0].Enabled {
+		t.Fatalf("hide paused routines %#v", timers)
+	}
+}
+
+func TestPromptShowsCreateBot(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "no"}, nil
+	}})
+	bot, err := app.st.CreateBot("BotMaker", "use the create_bot tool", nil, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs, err := app.buildMessages(bot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sys := msgs[0].Content
+	if !strings.Contains(sys, "create_bot") || !strings.Contains(sys, "description is the standing prompt") {
+		t.Fatalf("prompt hides create_bot: %s", sys)
+	}
+	var create map[string]any
+	for _, tool := range toolDefs() {
+		raw, err := json.Marshal(tool.Parameters)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), `"required":null`) {
+			t.Fatalf("%s schema has required null: %s", tool.Name, raw)
+		}
+		if tool.Name == "create_bot" {
+			if err := json.Unmarshal(raw, &create); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	props, _ := create["properties"].(map[string]any)
+	if _, ok := props["description"]; !ok {
+		t.Fatalf("create_bot schema: %#v", create)
+	}
+	if _, ok := props["instructions"]; !ok {
+		t.Fatalf("create_bot omits instructions alias: %#v", create)
+	}
+	names := make([]string, 0, len(toolDefs()))
+	for _, tool := range toolDefs() {
+		names = append(names, tool.Name)
+	}
+	shell := indexOf(names, "run_shell")
+	createAt := indexOf(names, "create_bot")
+	if shell < 0 || createAt < shell {
+		t.Fatalf("create_bot must follow run_shell, got %v", names)
+	}
+}
+
+func indexOf(names []string, want string) int {
+	for i, n := range names {
+		if n == want {
+			return i
+		}
+	}
+	return -1
 }

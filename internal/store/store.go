@@ -42,10 +42,51 @@ func Now() time.Time {
 
 func FormatTime(t time.Time) string { return t.UTC().Format(timeLayout) }
 
+// Mark is the roster glyph. It does not change behavior.
+type Mark struct {
+	Shape string `json:"shape"`
+	Color string `json:"color"`
+}
+
+// DefaultMark is used when a bot is created without one.
+func DefaultMark() Mark { return Mark{Shape: "circle", Color: "#1b654c"} }
+
+// NormalizeMark accepts a shape and a #rrggbb color. Empty fields use the default.
+func NormalizeMark(m Mark) (Mark, error) {
+	shape := strings.ToLower(strings.TrimSpace(m.Shape))
+	color := strings.ToLower(strings.TrimSpace(m.Color))
+	if shape == "" {
+		shape = "circle"
+	}
+	if color == "" {
+		color = "#1b654c"
+	}
+	switch shape {
+	case "circle", "square", "diamond", "triangle", "hex":
+	default:
+		return Mark{}, errors.New("unknown mark shape")
+	}
+	if len(color) != 7 || color[0] != '#' {
+		return Mark{}, errors.New("mark color must be #rrggbb")
+	}
+	for _, c := range color[1:] {
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f':
+		default:
+			return Mark{}, errors.New("mark color must be #rrggbb")
+		}
+	}
+	return Mark{Shape: shape, Color: color}, nil
+}
+
 type Bot struct {
 	ID            string  `json:"id"`
 	Name          string  `json:"name"`
-	Instructions  string  `json:"instructions,omitempty"`
+	Label         string  `json:"label"`
+	Description   string  `json:"description,omitempty"`
+	Mark          Mark    `json:"mark"`
+	Pinned        bool    `json:"pinned"`
+	Hidden        bool    `json:"hidden"`
 	Status        string  `json:"status"`
 	Model         *string `json:"model"`
 	CreatedAt     string  `json:"created_at,omitempty"`
@@ -74,6 +115,7 @@ type Message struct {
 type Timer struct {
 	ID         string  `json:"id"`
 	BotID      string  `json:"bot_id"`
+	Name       string  `json:"name"`
 	Schedule   string  `json:"schedule"`
 	Prompt     string  `json:"prompt"`
 	Enabled    bool    `json:"enabled"`
@@ -142,7 +184,12 @@ CREATE TABLE IF NOT EXISTS bots (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   name_lower TEXT NOT NULL UNIQUE,
-  instructions TEXT NOT NULL DEFAULT '',
+  label TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  mark_shape TEXT NOT NULL DEFAULT 'circle',
+  mark_color TEXT NOT NULL DEFAULT '#1b654c',
+  pinned INTEGER NOT NULL DEFAULT 0,
+  hidden INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'idle',
   model TEXT,
   created_at TEXT NOT NULL,
@@ -168,6 +215,7 @@ CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(bot_id, thread, creat
 CREATE TABLE IF NOT EXISTS timers (
   id TEXT PRIMARY KEY,
   bot_id TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
   schedule TEXT NOT NULL,
   prompt TEXT NOT NULL,
   enabled INTEGER NOT NULL,
@@ -194,7 +242,70 @@ CREATE TABLE IF NOT EXISTS log_events (
 CREATE INDEX IF NOT EXISTS idx_log_bot ON log_events(bot_id, id);
 CREATE INDEX IF NOT EXISTS idx_log_kind ON log_events(kind, id);
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.evolve()
+}
+
+func (s *Store) evolve() error {
+	hasInstr, err := s.hasColumn("bots", "instructions")
+	if err != nil {
+		return err
+	}
+	hasDesc, err := s.hasColumn("bots", "description")
+	if err != nil {
+		return err
+	}
+	if hasInstr && !hasDesc {
+		if _, err := s.db.Exec(`ALTER TABLE bots RENAME COLUMN instructions TO description`); err != nil {
+			return err
+		}
+	}
+	adds := []struct{ table, col, decl string }{
+		{"bots", "description", "TEXT NOT NULL DEFAULT ''"},
+		{"bots", "label", "TEXT NOT NULL DEFAULT ''"},
+		{"bots", "mark_shape", "TEXT NOT NULL DEFAULT 'circle'"},
+		{"bots", "mark_color", "TEXT NOT NULL DEFAULT '#1b654c'"},
+		{"bots", "pinned", "INTEGER NOT NULL DEFAULT 0"},
+		{"bots", "hidden", "INTEGER NOT NULL DEFAULT 0"},
+		{"timers", "name", "TEXT NOT NULL DEFAULT ''"},
+	}
+	for _, a := range adds {
+		ok, err := s.hasColumn(a.table, a.col)
+		if err != nil {
+			return err
+		}
+		if ok {
+			continue
+		}
+		if _, err := s.db.Exec(`ALTER TABLE ` + a.table + ` ADD COLUMN ` + a.col + ` ` + a.decl); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) hasColumn(table, col string) (bool, error) {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull int
+		var dflt sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			return false, err
+		}
+		if name == col {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // ReconcileOnBoot marks leftover running runs failed, idles those bots,
@@ -358,24 +469,47 @@ func (s *Store) AddLog(botID, kind string, detail any) error {
 	return tx.Commit()
 }
 
-func (s *Store) CreateBot(name, instructions string, model *string, by string) (Bot, error) {
+// BotDraft is the input for creating a bot. Empty mark fields use DefaultMark.
+type BotDraft struct {
+	Name        string
+	Label       string
+	Description string
+	Mark        Mark
+	Model       *string
+}
+
+// CreateBot inserts a bot with a default mark and no label.
+func (s *Store) CreateBot(name, description string, model *string, by string) (Bot, error) {
+	return s.InsertBot(BotDraft{Name: name, Description: description, Model: model}, by)
+}
+
+// InsertBot inserts a bot. Description is the standing prompt.
+func (s *Store) InsertBot(d BotDraft, by string) (Bot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	mark, err := NormalizeMark(d.Mark)
+	if err != nil {
+		return Bot{}, err
+	}
 	now := FormatTime(Now())
 	b := Bot{
-		ID: id.New(), Name: name, Instructions: instructions, Status: "idle",
-		Model: model, CreatedAt: now, UpdatedAt: now,
+		ID: id.New(), Name: d.Name, Label: d.Label, Description: d.Description,
+		Mark: mark, Status: "idle", Model: d.Model, CreatedAt: now, UpdatedAt: now,
 	}
-	_, err := s.db.Exec(`INSERT INTO bots(id, name, name_lower, instructions, status, model, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?,?)`, b.ID, b.Name, strings.ToLower(b.Name), b.Instructions, b.Status, nullStr(model), b.CreatedAt, b.UpdatedAt)
+	_, err = s.db.Exec(`INSERT INTO bots(id, name, name_lower, label, description, mark_shape, mark_color, pinned, hidden, status, model, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		b.ID, b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, 0, 0, b.Status, nullStr(d.Model), b.CreatedAt, b.UpdatedAt)
 	if err != nil {
 		if isUnique(err) {
 			return Bot{}, ErrConflict
 		}
 		return Bot{}, err
 	}
-	fields := []string{"name", "instructions"}
-	if model != nil {
+	fields := []string{"name", "description"}
+	if d.Label != "" {
+		fields = append(fields, "label")
+	}
+	if d.Model != nil {
 		fields = append(fields, "model")
 	}
 	if err := s.logUnlocked(b.ID, "bot_created", map[string]any{
@@ -418,7 +552,7 @@ func (s *Store) GetBot(id string) (Bot, error) {
 }
 
 func (s *Store) getBot(id string, withRun bool) (Bot, error) {
-	row := s.db.QueryRow(`SELECT id, name, instructions, status, model, created_at, updated_at FROM bots WHERE id=?`, id)
+	row := s.db.QueryRow(botSelect+` WHERE id=?`, id)
 	b, err := scanBot(row, true)
 	if err != nil {
 		return Bot{}, err
@@ -448,22 +582,32 @@ func (s *Store) attachRun(b *Bot) {
 	}
 }
 
+const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, status, model, created_at, updated_at FROM bots`
+
 func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	var b Bot
 	var model sql.NullString
-	err := row.Scan(&b.ID, &b.Name, &b.Instructions, &b.Status, &model, &b.CreatedAt, &b.UpdatedAt)
+	var shape, color string
+	var pinned, hidden int
+	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &b.Status, &model, &b.CreatedAt, &b.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Bot{}, ErrNotFound
 	}
 	if err != nil {
 		return Bot{}, err
 	}
+	b.Mark = Mark{Shape: shape, Color: color}
+	if b.Mark.Shape == "" || b.Mark.Color == "" {
+		b.Mark = DefaultMark()
+	}
+	b.Pinned = pinned != 0
+	b.Hidden = hidden != 0
 	if model.Valid && model.String != "" {
 		s := model.String
 		b.Model = &s
 	}
 	if !full {
-		b.Instructions = ""
+		b.Description = ""
 	}
 	return b, nil
 }
@@ -471,7 +615,7 @@ func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 func (s *Store) ListBots() ([]Bot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`SELECT id, name, instructions, status, model, created_at, updated_at FROM bots ORDER BY name_lower`)
+	rows, err := s.db.Query(botSelect + ` ORDER BY pinned DESC, name_lower`)
 	if err != nil {
 		return nil, err
 	}
@@ -490,7 +634,7 @@ func (s *Store) ListBots() ([]Bot, error) {
 	rows.Close()
 	for i := range out {
 		s.attachRun(&out[i])
-		out[i].Instructions = ""
+		out[i].Description = ""
 		out[i].CreatedAt = ""
 		out[i].UpdatedAt = ""
 	}
@@ -501,12 +645,16 @@ func (s *Store) ListBots() ([]Bot, error) {
 }
 
 type BotPatch struct {
-	Name         *string
-	Instructions *string
-	Model        *string
-	ModelSet     bool
-	Status       *string
-	By           string
+	Name        *string
+	Label       *string
+	Description *string
+	Mark        *Mark
+	Model       *string
+	ModelSet    bool
+	Status      *string
+	Pinned      *bool
+	Hidden      *bool
+	By          string
 }
 
 func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
@@ -521,9 +669,23 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 		b.Name = *p.Name
 		fields = append(fields, "name")
 	}
-	if p.Instructions != nil && *p.Instructions != b.Instructions {
-		b.Instructions = *p.Instructions
-		fields = append(fields, "instructions")
+	if p.Label != nil && *p.Label != b.Label {
+		b.Label = *p.Label
+		fields = append(fields, "label")
+	}
+	if p.Description != nil && *p.Description != b.Description {
+		b.Description = *p.Description
+		fields = append(fields, "description")
+	}
+	if p.Mark != nil {
+		mark, err := NormalizeMark(*p.Mark)
+		if err != nil {
+			return Bot{}, err
+		}
+		if mark != b.Mark {
+			b.Mark = mark
+			fields = append(fields, "mark")
+		}
 	}
 	if p.ModelSet {
 		b.Model = p.Model
@@ -533,13 +695,28 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 		b.Status = *p.Status
 		fields = append(fields, "status")
 	}
+	if p.Pinned != nil && *p.Pinned != b.Pinned {
+		b.Pinned = *p.Pinned
+		fields = append(fields, "pinned")
+	}
+	if p.Hidden != nil && *p.Hidden != b.Hidden {
+		b.Hidden = *p.Hidden
+		fields = append(fields, "hidden")
+	}
 	if len(fields) == 0 {
 		s.attachRun(&b)
 		return b, nil
 	}
 	b.UpdatedAt = FormatTime(Now())
-	_, err = s.db.Exec(`UPDATE bots SET name=?, name_lower=?, instructions=?, model=?, status=?, updated_at=? WHERE id=?`,
-		b.Name, strings.ToLower(b.Name), b.Instructions, nullStr(b.Model), b.Status, b.UpdatedAt, b.ID)
+	pin, hide := 0, 0
+	if b.Pinned {
+		pin = 1
+	}
+	if b.Hidden {
+		hide = 1
+	}
+	_, err = s.db.Exec(`UPDATE bots SET name=?, name_lower=?, label=?, description=?, mark_shape=?, mark_color=?, pinned=?, hidden=?, model=?, status=?, updated_at=? WHERE id=?`,
+		b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, pin, hide, nullStr(b.Model), b.Status, b.UpdatedAt, b.ID)
 	if err != nil {
 		if isUnique(err) {
 			return Bot{}, ErrConflict
@@ -603,7 +780,7 @@ func (s *Store) DeleteBot(id, by string) error {
 func (s *Store) FindBot(nameOrID string) (Bot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	row := s.db.QueryRow(`SELECT id, name, instructions, status, model, created_at, updated_at FROM bots WHERE id=?`, nameOrID)
+	row := s.db.QueryRow(botSelect+` WHERE id=?`, nameOrID)
 	b, err := scanBot(row, true)
 	if err == nil {
 		return b, nil
@@ -611,7 +788,7 @@ func (s *Store) FindBot(nameOrID string) (Bot, error) {
 	if !errors.Is(err, ErrNotFound) {
 		return Bot{}, err
 	}
-	row = s.db.QueryRow(`SELECT id, name, instructions, status, model, created_at, updated_at FROM bots WHERE name_lower=?`, strings.ToLower(strings.TrimSpace(nameOrID)))
+	row = s.db.QueryRow(botSelect+` WHERE name_lower=?`, strings.ToLower(strings.TrimSpace(nameOrID)))
 	return scanBot(row, true)
 }
 
@@ -700,12 +877,21 @@ func (s *Store) AddDMPair(fromID, toID, content, runID string) (sent Message, re
 		sent.RunID = &runID
 	}
 	received = Message{ID: id.New(), BotID: toID, Thread: "dm:" + fromID, Role: "user", Content: content, CreatedAt: FormatTime(Now())}
+	var fromName string
+	if err := tx.QueryRow(`SELECT name FROM bots WHERE id=?`, fromID).Scan(&fromName); err != nil {
+		return Message{}, Message{}, err
+	}
+	notice := Message{ID: id.New(), BotID: toID, Thread: "user", Role: "system", Content: "Message from " + fromName, CreatedAt: FormatTime(Now())}
 	if _, err := tx.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at) VALUES(?,?,?,?,?,?,?)`,
 		sent.ID, sent.BotID, sent.Thread, sent.Role, sent.Content, run, sent.CreatedAt); err != nil {
 		return Message{}, Message{}, err
 	}
 	if _, err := tx.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at) VALUES(?,?,?,?,?,?,?)`,
 		received.ID, received.BotID, received.Thread, received.Role, received.Content, nil, received.CreatedAt); err != nil {
+		return Message{}, Message{}, err
+	}
+	if _, err := tx.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at) VALUES(?,?,?,?,?,?,?)`,
+		notice.ID, notice.BotID, notice.Thread, notice.Role, notice.Content, nil, notice.CreatedAt); err != nil {
 		return Message{}, Message{}, err
 	}
 	if err := s.addLogTx(tx, fromID, "dm_sent", map[string]any{"message_id": sent.ID, "other_bot_id": toID}); err != nil {
@@ -890,7 +1076,7 @@ func (s *Store) GetRun(id string) (Run, error) {
 	return r, nil
 }
 
-func (s *Store) CreateTimer(botID, schedule, prompt string, enabled bool) (Timer, error) {
+func (s *Store) CreateTimer(botID, name, schedule, prompt string, enabled bool) (Timer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	d, err := ParseInterval(schedule)
@@ -902,18 +1088,18 @@ func (s *Store) CreateTimer(botID, schedule, prompt string, enabled bool) (Timer
 		en = 1
 	}
 	t := Timer{
-		ID: id.New(), BotID: botID, Schedule: strings.TrimSpace(schedule), Prompt: prompt,
+		ID: id.New(), BotID: botID, Name: strings.TrimSpace(name), Schedule: strings.TrimSpace(schedule), Prompt: prompt,
 		Enabled: enabled, NextFireAt: FormatTime(Now().Add(d)),
 	}
-	_, err = s.db.Exec(`INSERT INTO timers(id, bot_id, schedule, prompt, enabled, next_fire_at) VALUES(?,?,?,?,?,?)`,
-		t.ID, t.BotID, t.Schedule, t.Prompt, en, t.NextFireAt)
+	_, err = s.db.Exec(`INSERT INTO timers(id, bot_id, name, schedule, prompt, enabled, next_fire_at) VALUES(?,?,?,?,?,?,?)`,
+		t.ID, t.BotID, t.Name, t.Schedule, t.Prompt, en, t.NextFireAt)
 	return t, err
 }
 
 func (s *Store) ListTimers(botID string) ([]Timer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`SELECT id, bot_id, schedule, prompt, enabled, next_fire_at, last_fire_at FROM timers WHERE bot_id=? ORDER BY next_fire_at`, botID)
+	rows, err := s.db.Query(timerSelect+` WHERE bot_id=? ORDER BY next_fire_at`, botID)
 	if err != nil {
 		return nil, err
 	}
@@ -924,7 +1110,7 @@ func (s *Store) ListTimers(botID string) ([]Timer, error) {
 func (s *Store) GetTimer(id string) (Timer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	row := s.db.QueryRow(`SELECT id, bot_id, schedule, prompt, enabled, next_fire_at, last_fire_at FROM timers WHERE id=?`, id)
+	row := s.db.QueryRow(timerSelect+` WHERE id=?`, id)
 	t, err := scanTimer(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Timer{}, ErrNotFound
@@ -933,6 +1119,7 @@ func (s *Store) GetTimer(id string) (Timer, error) {
 }
 
 type TimerPatch struct {
+	Name     *string
 	Schedule *string
 	Prompt   *string
 	Enabled  *bool
@@ -941,13 +1128,16 @@ type TimerPatch struct {
 func (s *Store) UpdateTimer(id string, p TimerPatch) (Timer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	row := s.db.QueryRow(`SELECT id, bot_id, schedule, prompt, enabled, next_fire_at, last_fire_at FROM timers WHERE id=?`, id)
+	row := s.db.QueryRow(timerSelect+` WHERE id=?`, id)
 	t, err := scanTimer(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Timer{}, ErrNotFound
 	}
 	if err != nil {
 		return Timer{}, err
+	}
+	if p.Name != nil {
+		t.Name = strings.TrimSpace(*p.Name)
 	}
 	if p.Schedule != nil {
 		if _, err := ParseInterval(*p.Schedule); err != nil {
@@ -974,8 +1164,8 @@ func (s *Store) UpdateTimer(id string, p TimerPatch) (Timer, error) {
 	if t.Enabled {
 		en = 1
 	}
-	_, err = s.db.Exec(`UPDATE timers SET schedule=?, prompt=?, enabled=?, next_fire_at=? WHERE id=?`,
-		t.Schedule, t.Prompt, en, t.NextFireAt, t.ID)
+	_, err = s.db.Exec(`UPDATE timers SET name=?, schedule=?, prompt=?, enabled=?, next_fire_at=? WHERE id=?`,
+		t.Name, t.Schedule, t.Prompt, en, t.NextFireAt, t.ID)
 	return t, err
 }
 
@@ -999,7 +1189,7 @@ func (s *Store) ClaimDueTimers(now time.Time) ([]Timer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	stamp := FormatTime(now)
-	rows, err := s.db.Query(`SELECT id, bot_id, schedule, prompt, enabled, next_fire_at, last_fire_at FROM timers WHERE enabled=1 AND next_fire_at <= ?`, stamp)
+	rows, err := s.db.Query(timerSelect+` WHERE enabled=1 AND next_fire_at <= ?`, stamp)
 	if err != nil {
 		return nil, err
 	}
@@ -1041,11 +1231,13 @@ func scanTimers(rows *sql.Rows) ([]Timer, error) {
 	return out, rows.Err()
 }
 
+const timerSelect = `SELECT id, bot_id, name, schedule, prompt, enabled, next_fire_at, last_fire_at FROM timers`
+
 func scanTimer(sc interface{ Scan(...any) error }) (Timer, error) {
 	var t Timer
 	var en int
 	var last sql.NullString
-	err := sc.Scan(&t.ID, &t.BotID, &t.Schedule, &t.Prompt, &en, &t.NextFireAt, &last)
+	err := sc.Scan(&t.ID, &t.BotID, &t.Name, &t.Schedule, &t.Prompt, &en, &t.NextFireAt, &last)
 	if err != nil {
 		return Timer{}, err
 	}

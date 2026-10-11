@@ -54,7 +54,7 @@ The page is plain HTTP on the LAN. The browser warning is expected. Do not port-
 
 ## What the page does today
 
-The running page has a bot list, a conversation whose composer stays enabled during a run, an editor beside the thread, and a log. That editor-beside-the-thread is a deviation from the target. The target is in `docs/PRD.md`: conversation is the surface, profile is a separate view opened from the bot menu, and a working animation sits at the bottom of the message screen.
+The page is a roster (mark, name, label, status), a conversation with a composer that stays enabled during a run, a profile opened from the bot menu, and a separate log. The conversation does not edit the bot. A working animation sits at the bottom of the message list while a run is alive. Pin and hide are roster flags; hide does not pause the bot or its routines.
 
 Streaming tokens and tool lines come from `GET /api/bots/{id}/thread/stream?run_id=`. If Ollama is down, the run fails and the log records `model_call` with the error. A restart marks an in-flight run `error` / `daemon_restart` and does not resume the model call. A timer whose `next_fire_at` is already past at boot is logged as `timer_missed` and rescheduled, not run. A run stops after 8 model rounds with `tool round limit`.
 
