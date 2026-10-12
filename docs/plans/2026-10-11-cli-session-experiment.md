@@ -145,7 +145,7 @@ claude [--model MODEL] (--session-id UUID | --resume UUID) \
 
 The process working directory is the shared workspace. Claude has no `--sandbox workspace` flag in this adapter. `--permission-mode bypassPermissions` is the stand-in for `--always-approve`. Older builds accept `--dangerously-skip-permissions` as the same switch; this adapter passes the permission-mode form. Auth stays in `claude` (`claude` login or `ANTHROPIC_API_KEY`). The daemon does not read keys.
 
-Session transcripts are JSONL files under `~/.claude/projects/` (keyed by project directory). `--session-id` must be a UUID. Bot ids from this daemon already are. `stream-json` text deltas (`stream_event` / `text_delta`) are SSE tokens. The stored reply prefers the final `result` string. Assistant tool-use blocks show up as tool lines. A `permission_denied` system event is a tool line, not a failure of the whole turn.
+Session transcripts are JSONL files under `~/.claude/projects/` (keyed by project directory). `--session-id` must be a UUID. The daemon generates one with the same UUID helper it uses for bot ids; it is not the bot id. `stream-json` text deltas (`stream_event` / `text_delta`) are SSE tokens. The stored reply prefers the final `result` string. Assistant tool-use blocks show up as tool lines. A `permission_denied` system event is a tool line, not a failure of the whole turn.
 
 ### Measured behaviour and deviations
 
