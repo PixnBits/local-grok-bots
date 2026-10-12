@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -511,6 +512,202 @@ func TestPackageInstallNotice(t *testing.T) {
 	if !ok || ev.Notice != "Package install" {
 		t.Fatalf("missing package notice: %+v", res.Events)
 	}
+}
+
+func runJail(t *testing.T, req Request) (Result, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer cancel()
+	res, err := Run(ctx, req)
+	t.Logf("err=%v\nstdout:\n%s\nstderr:\n%s", err, res.Stdout, res.Stderr)
+	return res, err
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+func entropyCommand(secret string, strictDev bool) string {
+	extra := ""
+	if strictDev {
+		extra = `
+if test -e /dev/tty || test -e /dev/shm; then echo EXTRA_DEV; exit 1; fi
+echo NO_EXTRA_DEV
+`
+	}
+	return fmt.Sprintf(`set -eu
+test -c /dev/null
+test -c /dev/zero
+test -c /dev/full
+test -c /dev/random
+test -c /dev/urandom
+echo BEGIN_BYTES
+od -An -N16 -tx1 /dev/urandom
+echo END_BYTES
+if cat /etc/passwd >/dev/null 2>&1; then echo PASSWD_READABLE; exit 1; fi
+echo PASSWD_HIDDEN
+if cat %s >/dev/null 2>&1; then echo HOST_READABLE; exit 1; fi
+echo HOST_HIDDEN
+%sssh-keygen -t ed25519 -f id_ed25519 -N "" -q
+test -s id_ed25519
+echo KEY_OK
+`, shellQuote(secret), extra)
+}
+
+func hexByteCount(s string) int {
+	n := 0
+	for _, f := range strings.Fields(s) {
+		if len(f) != 2 {
+			continue
+		}
+		if _, err := strconv.ParseUint(f, 16, 8); err == nil {
+			n++
+		}
+	}
+	return n
+}
+
+func assertEntropyJail(t *testing.T, forceUnshare bool) {
+	t.Helper()
+	ws := t.TempDir()
+	secret := filepath.Join(t.TempDir(), "secret.txt")
+	if err := os.WriteFile(secret, []byte("TOPSECRET\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := runJail(t, Request{
+		Workspace:    ws,
+		Command:      entropyCommand(secret, forceUnshare),
+		forceUnshare: forceUnshare,
+	})
+	if err != nil {
+		t.Fatalf("jail: %v\nstdout:\n%s\nstderr:\n%s", err, res.Stdout, res.Stderr)
+	}
+	if !strings.Contains(res.Stdout, "PASSWD_HIDDEN") || strings.Contains(res.Stdout, "PASSWD_READABLE") {
+		t.Fatalf("/etc/passwd was readable:\n%s", res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, "HOST_HIDDEN") || strings.Contains(res.Stdout, "HOST_READABLE") || strings.Contains(res.Stdout, "TOPSECRET") {
+		t.Fatalf("host file was readable:\n%s", res.Stdout)
+	}
+	if forceUnshare && !strings.Contains(res.Stdout, "NO_EXTRA_DEV") {
+		t.Fatalf("unshare jail exposed tty or shm:\n%s", res.Stdout)
+	}
+	start := strings.Index(res.Stdout, "BEGIN_BYTES")
+	end := strings.Index(res.Stdout, "END_BYTES")
+	if start < 0 || end < start {
+		t.Fatalf("od output missing:\n%s", res.Stdout)
+	}
+	if n := hexByteCount(res.Stdout[start:end]); n != 16 {
+		t.Fatalf("od printed %d bytes, want 16:\n%s", n, res.Stdout[start:end])
+	}
+	if !strings.Contains(res.Stdout, "KEY_OK") {
+		t.Fatalf("ssh-keygen did not succeed:\n%s\n%s", res.Stdout, res.Stderr)
+	}
+	st, err := os.Stat(filepath.Join(ws, "id_ed25519"))
+	if err != nil || st.Size() == 0 {
+		t.Fatalf("jail key missing: %v", err)
+	}
+}
+
+func TestEntropyDevices(t *testing.T) {
+	requireBin(t, "unshare")
+	requireBin(t, "od")
+	requireBin(t, "ssh-keygen")
+	t.Run("unshare", func(t *testing.T) {
+		// AppArmor's unprivileged_userns profile denies sys_admin, so
+		// /usr/bin/unshare cannot write uid_map from this host. A privileged
+		// container is unconfined root and can run the same launcher.
+		if os.Getenv("LGB_SANDBOX_INNER") != "1" && !canUnshare() {
+			reexecUnshare(t)
+			return
+		}
+		assertEntropyJail(t, true)
+	})
+	if _, err := exec.LookPath("bwrap"); err == nil {
+		t.Run("bwrap", func(t *testing.T) {
+			assertEntropyJail(t, false)
+		})
+	}
+}
+
+func canUnshare() bool {
+	cmd := exec.Command("unshare", "--user", "--map-root-user", "--mount", "--propagation", "private", "true")
+	return cmd.Run() == nil
+}
+
+const unshareImageDockerfile = `FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-client gcc libc6-dev && rm -rf /var/lib/apt/lists/*
+`
+
+func reexecUnshare(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Fatalf("unshare cannot map root, and docker is unavailable: %v", err)
+	}
+	ensureUnshareImage(t)
+	root := moduleRoot(t)
+	goroot := strings.TrimSpace(mustOut(t, "go", "env", "GOROOT"))
+	modcache := strings.TrimSpace(mustOut(t, "go", "env", "GOMODCACHE"))
+	cmd := exec.Command("docker", "run", "--rm", "--privileged",
+		"-e", "LGB_SANDBOX_INNER=1",
+		"-e", "GOFLAGS=-mod=readonly",
+		"-e", "GOPROXY=off",
+		"-e", "GOTELEMETRY=off",
+		"-e", "GOMODCACHE=/gomod",
+		"-e", "GOCACHE=/tmp/gocache",
+		"-e", "PATH=/usr/local/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+		"-v", goroot+":/usr/local/go:ro",
+		"-v", modcache+":/gomod:ro",
+		"-v", root+":/src:ro",
+		"-w", "/src",
+		"lgb-sandbox-unshare:local",
+		"go", "test", "./internal/sandbox/", "-count=1", "-run", "TestEntropyDevices/^unshare$", "-timeout", "120s",
+	)
+	out, err := cmd.CombinedOutput()
+	t.Logf("inner unshare:\n%s", out)
+	if err != nil {
+		t.Fatalf("unshare jail via privileged container: %v\n%s", err, out)
+	}
+}
+
+func ensureUnshareImage(t *testing.T) {
+	t.Helper()
+	if exec.Command("docker", "image", "inspect", "lgb-sandbox-unshare:local").Run() == nil {
+		return
+	}
+	cmd := exec.Command("docker", "build", "-t", "lgb-sandbox-unshare:local", "-")
+	cmd.Stdin = strings.NewReader(unshareImageDockerfile)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("build unshare test image: %v\n%s", err, out)
+	}
+}
+
+func moduleRoot(t *testing.T) string {
+	t.Helper()
+	dir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatal("go.mod not found")
+		}
+		dir = parent
+	}
+}
+
+func mustOut(t *testing.T, name string, args ...string) string {
+	t.Helper()
+	out, err := exec.Command(name, args...).Output()
+	if err != nil {
+		t.Fatalf("%s %s: %v", name, strings.Join(args, " "), err)
+	}
+	return string(out)
 }
 
 func TestRefusedBindHelper(t *testing.T) {

@@ -26,6 +26,9 @@ type Request struct {
 	SSHKey     string
 	// Dial, when set, is the proxy's outbound TCP dial. Tests use it.
 	Dial func(context.Context, string, string) (net.Conn, error)
+	// forceUnshare selects the unshare jail even when bwrap is installed.
+	// Tests in this package set it. Callers outside the package cannot.
+	forceUnshare bool
 }
 
 // Result is the captured output and the grant events for this command.
@@ -49,15 +52,16 @@ type stage2File struct {
 }
 
 type prepared struct {
-	workspace string
-	command   string
-	dir       string
-	env       []string
-	mounts    []mount
-	events    string
-	proxy     *proxy
-	before    *treeSnap
-	extra     []Event
+	workspace    string
+	command      string
+	dir          string
+	env          []string
+	mounts       []mount
+	events       string
+	proxy        *proxy
+	before       *treeSnap
+	extra        []Event
+	forceUnshare bool
 }
 
 func (p *prepared) close() {
@@ -115,8 +119,10 @@ func Run(ctx context.Context, req Request) (Result, error) {
 }
 
 func launch(ctx context.Context, p *prepared) (string, string, error) {
-	if path, err := exec.LookPath("bwrap"); err == nil {
-		return runBwrap(ctx, p, path)
+	if !p.forceUnshare {
+		if path, err := exec.LookPath("bwrap"); err == nil {
+			return runBwrap(ctx, p, path)
+		}
 	}
 	return runUnshare(ctx, p)
 }
@@ -126,7 +132,7 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &prepared{workspace: ws, command: req.Command, dir: dir, before: takeSnap(ws)}
+	p := &prepared{workspace: ws, command: req.Command, dir: dir, before: takeSnap(ws), forceUnshare: req.forceUnshare}
 	ok := false
 	defer func() {
 		if !ok {

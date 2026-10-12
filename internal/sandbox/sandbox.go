@@ -78,12 +78,13 @@ func enterJail(jail string, cfg stage2File) error {
 	if b, err := os.ReadFile("/etc/ld.so.cache"); err == nil {
 		_ = os.WriteFile(filepath.Join(jail, "etc", "ld.so.cache"), b, 0o644)
 	}
-	nullPath := filepath.Join(jail, "dev", "null")
-	if err := os.WriteFile(nullPath, nil, 0o644); err != nil {
-		return err
-	}
-	if err := unix.Mount("/dev/null", nullPath, "", unix.MS_BIND, ""); err != nil {
-		return fmt.Errorf("dev/null: %w", err)
+	// Bind the host entropy nodes. Tools such as ssh-keygen open the device
+	// file; getrandom is not a substitute. Do not mknod, and do not mount the
+	// rest of /dev (disks, kvm, tun, nvidia). /dev/tty and /dev/shm stay out.
+	for _, name := range []string{"null", "zero", "full", "random", "urandom"} {
+		if err := mountDevNode(jail, name); err != nil {
+			return err
+		}
 	}
 	if err := unix.Mount("tmpfs", filepath.Join(jail, "tmp"), "tmpfs", 0, "size=32m,mode=1777"); err != nil {
 		return fmt.Errorf("tmpfs: %w", err)
@@ -121,6 +122,28 @@ func enterJail(jail string, cfg stage2File) error {
 		}
 	}
 	return unix.Exec("/bin/sh", []string{"sh", "-c", command}, env)
+}
+
+func mountDevNode(jail, name string) error {
+	src := "/dev/" + name
+	st, err := os.Stat(src)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("dev/%s: %w", name, err)
+	}
+	if st.Mode()&os.ModeCharDevice == 0 {
+		return fmt.Errorf("dev/%s: not a character device", name)
+	}
+	dst := filepath.Join(jail, "dev", name)
+	if err := os.WriteFile(dst, nil, 0o644); err != nil {
+		return err
+	}
+	if err := unix.Mount(src, dst, "", unix.MS_BIND, ""); err != nil {
+		return fmt.Errorf("dev/%s: %w", name, err)
+	}
+	return nil
 }
 
 func bindIntoJail(jail string, m mount) error {
