@@ -143,7 +143,7 @@ claude [--model MODEL] (--session-id UUID | --resume UUID) \
   --permission-mode bypassPermissions
 ```
 
-The process working directory is the shared workspace. Claude has no `--sandbox workspace` flag in this adapter. `--permission-mode bypassPermissions` is the stand-in for `--always-approve`. Older builds accept `--dangerously-skip-permissions` as the same switch; this adapter passes the permission-mode form. Auth stays in `claude` login files under `~/.claude`. The daemon does not read keys, and it does not pass `ANTHROPIC_API_KEY` into the CLI process.
+The process working directory is `workspace/bots/<bot id>`, mode `0700`. Claude has no `--sandbox workspace` flag in this adapter. `--permission-mode bypassPermissions` is the stand-in for `--always-approve`. Older builds accept `--dangerously-skip-permissions` as the same switch; this adapter passes the permission-mode form. Auth stays in `claude` login files under `~/.claude`. The daemon does not read keys, and it does not pass `ANTHROPIC_API_KEY` into the CLI process.
 
 Session transcripts are JSONL files under `~/.claude/projects/` (keyed by project directory). `--session-id` must be a UUID. The daemon generates one with the same UUID helper it uses for bot ids; it is not the bot id. `stream-json` text deltas (`stream_event` / `text_delta`) are SSE tokens. The stored reply prefers the final `result` string. Assistant tool-use blocks show up as tool lines. A `permission_denied` system event is a tool line, not a failure of the whole turn.
 
@@ -158,7 +158,7 @@ Session transcripts are JSONL files under `~/.claude/projects/` (keyed by projec
 - Meta tools are fenced JSON in the reply, not MCP and not shell wrappers. The stored thread message has the fence removed. The live SSE stream can still show the fence for a moment, because tokens are forwarded as they arrive.
 - A follow-up resume with the action results happens only when the action failed, the visible reply was empty, or the action was `list_bots` or `read_bot`. Otherwise one CLI process handles the turn.
 - File, shell, and search stay on the CLI's own tools. Ollama file and shell tools still use the workspace jail. A CLI turn runs under bubblewrap: the workspace at its host path, `~/.grok` and `~/.claude` at `/lgb-home`, a cleared environment, and network left open. A nested `bwrap` from `grok --sandbox workspace` can fail when the kernel blocks nested user namespaces.
-- All CLI bots share `DATA_DIR/workspace`. A `CLAUDE.md` or Grok rules file in that directory is visible to every bot. There is no per-bot worktree.
+- Each CLI bot runs in `DATA_DIR/workspace/bots/<bot id>`, mode `0700`. A rules file there is not the next bot's instruction. Ollama file and shell tools still use the shared workspace. There is no per-bot worktree.
 - Desktop notification is best-effort after the turn is stored. Linux: `notify-send`. macOS: `osascript`. Other platforms and a missing binary do nothing.
 - No API keys are written by the daemon. Do not commit `~/.grok` or `~/.claude`.
 

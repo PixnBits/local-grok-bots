@@ -88,7 +88,7 @@ func grokFlags(spec Spec) []string {
 // claudeFlags is the Claude Code headless equivalent. Sessions are JSONL
 // transcripts under ~/.claude/projects/, resumed by id. --session-id must be
 // a UUID; the daemon's ids are. There is no --sandbox workspace flag, so the
-// process cwd is the shared workspace and permission prompts are bypassed.
+// process cwd is this bot's directory and permission prompts are bypassed.
 func claudeFlags(spec Spec) []string {
 	var args []string
 	if spec.Model != "" {

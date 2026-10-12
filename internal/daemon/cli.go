@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -49,9 +51,10 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID, backend stri
 		a.failCLI(bot.ID, runID, backend, err)
 		return
 	}
-	ws := a.ws
-	if abs, absErr := filepath.Abs(ws); absErr == nil {
-		ws = abs
+	ws, err := cliWorkspace(a.ws, bot.ID)
+	if err != nil {
+		a.failCLI(bot.ID, runID, backend, err)
+		return
 	}
 	a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "working"})
 	runner := a.runner
@@ -195,6 +198,21 @@ func (a *App) runCLIActions(ctx context.Context, bot store.Bot, runID string, ac
 	return formatActionResults(lines), anyErr, anyQuery
 }
 
+// cliWorkspace is the CLI process cwd. Ollama file and shell tools stay on a.ws.
+func cliWorkspace(root, botID string) (string, error) {
+	if strings.TrimSpace(botID) == "" || strings.Contains(botID, "/") || strings.Contains(botID, `\`) || strings.Contains(botID, "..") {
+		return "", fmt.Errorf("invalid bot id")
+	}
+	dir := filepath.Join(root, "bots", botID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", err
+	}
+	return filepath.Abs(dir)
+}
+
 func (a *App) notifyTurn(name, text string, needsInput bool) {
 	title := name
 	body := strings.TrimSpace(text)
@@ -291,7 +309,7 @@ func (a *App) writeCLIPreamble(b *strings.Builder, bot store.Bot) error {
 	if !anyOther {
 		b.WriteString("(none)\n")
 	}
-	b.WriteString("\nUse your own file, shell, and search tools. The workspace is shared by every bot. Do not create a private worktree.\n")
+	b.WriteString("\nUse your own file, shell, and search tools. Your working directory is private to this bot. Do not create a worktree outside it.\n")
 	b.WriteString("Scheduled prompts are prefixed with [scheduled]. Direct messages from other bots are prefixed with [DM from Name].\n")
 	b.WriteString("\nDaemon actions are not shell commands. When you need one, put a fenced JSON block in the reply. The fence is removed before the user sees it.\n\n")
 	b.WriteString("```action\n{\"tool\":\"write_memory\",\"key\":\"note\",\"value\":\"hello\"}\n```\n\n")

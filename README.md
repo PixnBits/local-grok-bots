@@ -30,9 +30,9 @@ data/workspace/    the only tree bots may read, write, or shell in
 
 ## CLI sessions
 
-A bot with `cli_backend` `grok` or `claude` does not call Ollama. The daemon spawns that CLI in `workspace/`, one headless process per turn, and stores the CLI session id on the bot. The next message, DM, or timer resumes the same session. Auth is the CLI's (`grok login` or `claude` login) under the daemon user's `~/.grok` or `~/.claude`. This daemon does not store API keys, and it does not pass `XAI_API_KEY` or `ANTHROPIC_API_KEY` through the environment.
+A bot with `cli_backend` `grok` or `claude` does not call Ollama. The daemon spawns that CLI in `workspace/bots/<bot id>/`, mode `0700`, one headless process per turn, and stores the CLI session id on the bot. The next message, DM, or timer resumes the same session. Auth is the CLI's (`grok login` or `claude` login) under the daemon user's `~/.grok` or `~/.claude`. This daemon does not store API keys, and it does not pass `XAI_API_KEY` or `ANTHROPIC_API_KEY` through the environment.
 
-The CLI process is wrapped in bubblewrap. The workspace is bind-mounted at its host path. The only home paths mounted are `~/.grok`, `~/.claude`, and `~/.claude.json` when that file exists, and they appear under `/lgb-home`. The child environment is cleared, so an SSH agent socket is not inherited. `bwrap` is required; the turn fails closed when it is missing. Network stays open so the CLI can reach its model API. On kernels that block nested user namespaces, `grok --sandbox workspace` may be unable to start a second sandbox inside this jail. `--always-approve` and Claude's permission bypass stay on because a headless turn cannot prompt. The daemon refuses to start as root.
+The CLI process is wrapped in bubblewrap. That bot directory is bind-mounted at its host path. Ollama file and shell tools still use the shared `workspace/`. The only home paths mounted are `~/.grok`, `~/.claude`, and `~/.claude.json` when that file exists, and they appear under `/lgb-home`. The child environment is cleared, so an SSH agent socket is not inherited. `bwrap` is required; the turn fails closed when it is missing. Network stays open so the CLI can reach its model API. On kernels that block nested user namespaces, `grok --sandbox workspace` may be unable to start a second sandbox inside this jail. `--always-approve` and Claude's permission bypass stay on because a headless turn cannot prompt. The daemon refuses to start as root.
 
 ```bash
 # new bots use Grok unless they set cli_backend
@@ -44,7 +44,7 @@ Per bot, `POST /api/bots` and `PATCH /api/bots/{id}` accept `cli_backend`: `grok
 Grok:
 
 ```bash
-grok --session-id ID -p PROMPT --sandbox workspace --cwd workspace \
+grok --session-id ID -p PROMPT --sandbox workspace --cwd workspace/bots/<bot id> \
   --output-format streaming-json --always-approve --no-auto-update
 ```
 
@@ -57,7 +57,7 @@ claude --session-id UUID -p PROMPT --output-format stream-json --verbose \
   --include-partial-messages --permission-mode bypassPermissions
 ```
 
-The process working directory is the shared workspace. Claude sessions are JSONL files under `~/.claude/projects/`. There is no per-bot directory and no worktree. A rules file in the workspace is visible to every bot.
+The process working directory is that bot's directory. Claude sessions are JSONL files under `~/.claude/projects/`. A rules file there is not visible to another CLI bot. There is no worktree.
 
 The CLI process is killed after 30 minutes without a user message or a new turn, unless a timer is due within 2 minutes. The session file remains. Timers are still scheduled here; the prompt is prefixed `[scheduled]`.
 

@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"context"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -103,6 +105,65 @@ func TestCLIStreamsTokens(t *testing.T) {
 	}
 	if len(replies) != 1 || replies[0] != "Hello!" {
 		t.Fatalf("replies %#v", replies)
+	}
+}
+
+func TestCLIWorkspaceIsPrivate(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{}, nil
+	}})
+	var mu sync.Mutex
+	got := map[string]string{}
+	var preamble string
+	app.runner = runnerFunc(func(_ context.Context, spec clisession.Spec, _ func(clisession.Event)) (clisession.Result, error) {
+		mu.Lock()
+		got[spec.SessionID] = spec.Workspace
+		if preamble == "" {
+			preamble = spec.Prompt
+		}
+		mu.Unlock()
+		return clisession.Result{SessionID: spec.SessionID, Text: "ok"}, nil
+	})
+	srv := serve(t, app)
+	var ids []string
+	for _, name := range []string{"Ada", "Bea"} {
+		_, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{
+			"name": name, "cli_backend": "grok",
+		}, "")
+		var bot store.Bot
+		decodeJSON(t, b, &bot)
+		ids = append(ids, bot.ID)
+		do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]string{"content": "hi"}, "")
+		waitIdle(t, srv.URL, bot.ID, "")
+	}
+	if len(got) != 2 {
+		t.Fatalf("workspaces %#v", got)
+	}
+	seen := map[string]bool{}
+	for _, id := range ids {
+		bot, err := app.st.GetBot(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dir := got[bot.SessionID]
+		want := filepath.Join(app.ws, "bots", id)
+		if dir != want {
+			t.Fatalf("workspace %s want %s", dir, want)
+		}
+		if seen[dir] {
+			t.Fatalf("shared directory %s", dir)
+		}
+		seen[dir] = true
+		st, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode().Perm() != 0o700 {
+			t.Fatalf("mode %o", st.Mode().Perm())
+		}
+	}
+	if !strings.Contains(preamble, "private to this bot") || strings.Contains(preamble, "shared by every bot") {
+		t.Fatalf("preamble %s", preamble)
 	}
 }
 
