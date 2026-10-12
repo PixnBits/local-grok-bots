@@ -39,8 +39,8 @@ func toolDefs() []model.Tool {
 		{Name: "list_bots", Description: "List bots: id, name, label, and status.", Parameters: obj(map[string]any{}, nil)},
 		{Name: "read_bot", Description: "Read a bot's description and memory by name or id.", Parameters: obj(map[string]any{"name": str}, []string{"name"})},
 		{Name: "send_dm", Description: "Send a direct message to another bot by name or id. Returns immediately; the recipient gets its own turn.", Parameters: obj(map[string]any{"to": str, "content": str}, []string{"to", "content"})},
-		{Name: "create_bot", Description: "Create a bot. name and description are required. description is the standing prompt the new bot is given. instructions is an accepted alias for description.", Parameters: obj(map[string]any{"name": str, "label": str, "description": str, "instructions": str, "model": str}, []string{"name", "description"})},
-		{Name: "update_bot", Description: "Update another bot's name, label, description, or model. Identify it by id or name. A rename requires id. instructions is an accepted alias for description.", Parameters: obj(map[string]any{"id": str, "name": str, "label": str, "description": str, "instructions": str, "model": str}, nil)},
+		{Name: "create_bot", Description: "Create a bot. name and description are required. description is the standing prompt the new bot is given. instructions is an accepted alias for description. cli_backend is grok, claude, or ollama.", Parameters: obj(map[string]any{"name": str, "label": str, "description": str, "instructions": str, "model": str, "cli_backend": str}, []string{"name", "description"})},
+		{Name: "update_bot", Description: "Update another bot's name, label, description, model, or cli_backend. Identify it by id or name. A rename requires id. instructions is an accepted alias for description. cli_backend is grok, claude, or ollama.", Parameters: obj(map[string]any{"id": str, "name": str, "label": str, "description": str, "instructions": str, "model": str, "cli_backend": str}, nil)},
 	}
 }
 
@@ -127,8 +127,16 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		if m := strings.TrimSpace(strArg(args, "model")); m != "" {
 			modelPtr = &m
 		}
+		backend := strings.TrimSpace(strArg(args, "cli_backend"))
+		if backend == "" {
+			backend = bot.CLIBackend
+		}
+		if backend == "" {
+			backend = a.cfg.CLIBackend
+		}
 		created, err := a.st.InsertBot(store.BotDraft{
 			Name: name, Label: strArg(args, "label"), Description: description, Model: modelPtr,
+			CLIBackend: backend,
 		}, bot.ID)
 		if err != nil {
 			return "", err
@@ -173,6 +181,14 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			if m != "" {
 				patch.Model = &m
 			}
+		}
+		if _, ok := args["cli_backend"]; ok {
+			norm, err := store.NormalizeCLIBackend(strArg(args, "cli_backend"))
+			if err != nil {
+				return "", err
+			}
+			patch.CLISet = true
+			patch.CLIBackend = norm
 		}
 		updated, err := a.st.UpdateBot(target.ID, patch)
 		if err != nil {

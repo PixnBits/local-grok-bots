@@ -35,6 +35,10 @@ func (a *App) execute(botID, runID string) {
 		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
 		return
 	}
+	if backend := a.resolvedBackend(bot); backend != "" {
+		a.executeCLI(ctx, bot, runID, backend)
+		return
+	}
 	// A continuation already holds the transcript, including tool results.
 	// Any other run drops the offer so a timer or DM does not keep it.
 	msgs, ok := a.takePending(runID)

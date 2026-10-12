@@ -18,6 +18,8 @@ type Config struct {
 	AuthToken  string
 	Version    string
 	BuildBinds []string
+	// CLIBackend is the default model backend for new bots: grok, claude, or empty (Ollama).
+	CLIBackend string
 }
 
 func FromEnv() Config {
@@ -29,6 +31,7 @@ func FromEnv() Config {
 		AuthToken:  os.Getenv("AUTH_TOKEN"),
 		Version:    Version,
 		BuildBinds: splitList(os.Getenv("SANDBOX_BUILD_BINDS")),
+		CLIBackend: strings.ToLower(strings.TrimSpace(os.Getenv("CLI_BACKEND"))),
 	}
 }
 

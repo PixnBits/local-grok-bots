@@ -99,6 +99,7 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 		Instructions *string     `json:"instructions"`
 		Mark         *store.Mark `json:"mark"`
 		Model        *string     `json:"model"`
+		CLIBackend   *string     `json:"cli_backend"`
 		Grants       []string    `json:"grants"`
 		NetAllow     []string    `json:"net_allow"`
 		SSHAllow     []string    `json:"ssh_allow"`
@@ -122,13 +123,23 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 		m := strings.TrimSpace(*body.Model)
 		modelPtr = &m
 	}
+	rawBackend := a.cfg.CLIBackend
+	if body.CLIBackend != nil {
+		rawBackend = *body.CLIBackend
+	}
+	backend, err := store.NormalizeCLIBackend(rawBackend)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	mark := store.Mark{}
 	if body.Mark != nil {
 		mark = *body.Mark
 	}
 	b, err := a.st.InsertBot(store.BotDraft{
 		Name: name, Label: body.Label, Description: description, Mark: mark, Model: modelPtr,
-		Grants: body.Grants, NetAllow: body.NetAllow, SSHAllow: body.SSHAllow,
+		CLIBackend: backend,
+		Grants:     body.Grants, NetAllow: body.NetAllow, SSHAllow: body.SSHAllow,
 	}, "user")
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
@@ -268,6 +279,22 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 				patch.Model = &m
 			}
 		}
+	}
+	if v, ok := raw["cli_backend"]; ok {
+		var backend string
+		if string(v) != "null" {
+			if err := json.Unmarshal(v, &backend); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid cli_backend"})
+				return
+			}
+		}
+		norm, err := store.NormalizeCLIBackend(backend)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		patch.CLISet = true
+		patch.CLIBackend = norm
 	}
 	var setIdle bool
 	if v, ok := raw["status"]; ok {

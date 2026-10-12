@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/config"
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/store"
@@ -32,8 +33,10 @@ type App struct {
 	cfg   config.Config
 	st    *store.Store
 	model model.Client
-	ws    string
-	bus   *Bus
+	// runner executes grok/claude turns. Nil uses clisession.ExecRunner.
+	runner clisession.Runner
+	ws     string
+	bus    *Bus
 	// shellDial, when set, is the sandbox proxy's outbound dial. Tests use it.
 	shellDial func(context.Context, string, string) (net.Conn, error)
 	ctx       context.Context

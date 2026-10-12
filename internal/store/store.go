@@ -174,6 +174,8 @@ type Bot struct {
 	SSHAllow      []string `json:"ssh_allow"`
 	Status        string   `json:"status"`
 	Model         *string  `json:"model"`
+	CLIBackend    string   `json:"cli_backend,omitempty"`
+	SessionID     string   `json:"session_id,omitempty"`
 	CreatedAt     string   `json:"created_at,omitempty"`
 	UpdatedAt     string   `json:"updated_at,omitempty"`
 	ActiveRunID   *string  `json:"active_run_id,omitempty"`
@@ -282,6 +284,8 @@ CREATE TABLE IF NOT EXISTS bots (
   ssh_allow TEXT NOT NULL DEFAULT '[]',
   status TEXT NOT NULL DEFAULT 'idle',
   model TEXT,
+  cli_backend TEXT NOT NULL DEFAULT '',
+  session_id TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -362,6 +366,8 @@ func (s *Store) evolve() error {
 		{"bots", "grants", "TEXT NOT NULL DEFAULT '[]'"},
 		{"bots", "net_allow", "TEXT NOT NULL DEFAULT '[]'"},
 		{"bots", "ssh_allow", "TEXT NOT NULL DEFAULT '[]'"},
+		{"bots", "cli_backend", "TEXT NOT NULL DEFAULT ''"},
+		{"bots", "session_id", "TEXT NOT NULL DEFAULT ''"},
 		{"timers", "name", "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, a := range adds {
@@ -569,6 +575,7 @@ type BotDraft struct {
 	Description string
 	Mark        Mark
 	Model       *string
+	CLIBackend  string
 	Grants      []string
 	NetAllow    []string
 	SSHAllow    []string
@@ -600,14 +607,18 @@ func (s *Store) InsertBot(d BotDraft, by string) (Bot, error) {
 		return Bot{}, err
 	}
 	now := FormatTime(Now())
+	backend, err := NormalizeCLIBackend(d.CLIBackend)
+	if err != nil {
+		return Bot{}, err
+	}
 	b := Bot{
 		ID: id.New(), Name: d.Name, Label: d.Label, Description: d.Description,
 		Mark: mark, Grants: grants, NetAllow: netAllow, SSHAllow: sshAllow,
-		Status: "idle", Model: d.Model, CreatedAt: now, UpdatedAt: now,
+		Status: "idle", Model: d.Model, CLIBackend: backend, CreatedAt: now, UpdatedAt: now,
 	}
-	_, err = s.db.Exec(`INSERT INTO bots(id, name, name_lower, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, status, model, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		b.ID, b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, 0, 0, encodeList(grants), encodeList(netAllow), encodeList(sshAllow), b.Status, nullStr(d.Model), b.CreatedAt, b.UpdatedAt)
+	_, err = s.db.Exec(`INSERT INTO bots(id, name, name_lower, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, status, model, cli_backend, session_id, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		b.ID, b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, 0, 0, encodeList(grants), encodeList(netAllow), encodeList(sshAllow), b.Status, nullStr(d.Model), b.CLIBackend, "", b.CreatedAt, b.UpdatedAt)
 	if err != nil {
 		if isUnique(err) {
 			return Bot{}, ErrConflict
@@ -620,6 +631,9 @@ func (s *Store) InsertBot(d BotDraft, by string) (Bot, error) {
 	}
 	if d.Model != nil {
 		fields = append(fields, "model")
+	}
+	if d.CLIBackend != "" {
+		fields = append(fields, "cli_backend")
 	}
 	if err := s.logUnlocked(b.ID, "bot_created", map[string]any{
 		"fields": fields, "by": by, "bot_id": b.ID, "name": b.Name,
@@ -691,14 +705,14 @@ func (s *Store) attachRun(b *Bot) {
 	}
 }
 
-const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, status, model, created_at, updated_at FROM bots`
+const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, status, model, cli_backend, session_id, created_at, updated_at FROM bots`
 
 func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	var b Bot
 	var model sql.NullString
 	var shape, color, grants, netAllow, sshAllow string
 	var pinned, hidden int
-	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &b.Status, &model, &b.CreatedAt, &b.UpdatedAt)
+	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &b.Status, &model, &b.CLIBackend, &b.SessionID, &b.CreatedAt, &b.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Bot{}, ErrNotFound
 	}
@@ -781,6 +795,8 @@ type BotPatch struct {
 	NetAllow    []string
 	SSHSet      bool
 	SSHAllow    []string
+	CLISet      bool
+	CLIBackend  string
 	By          string
 }
 
@@ -860,6 +876,20 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 			fields = append(fields, "ssh_allow")
 		}
 	}
+	if p.CLISet {
+		backend, err := NormalizeCLIBackend(p.CLIBackend)
+		if err != nil {
+			return Bot{}, err
+		}
+		if backend != b.CLIBackend {
+			b.CLIBackend = backend
+			fields = append(fields, "cli_backend")
+			if b.SessionID != "" {
+				b.SessionID = ""
+				fields = append(fields, "session_id")
+			}
+		}
+	}
 	if len(fields) == 0 {
 		s.attachRun(&b)
 		return b, nil
@@ -872,8 +902,8 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 	if b.Hidden {
 		hide = 1
 	}
-	_, err = s.db.Exec(`UPDATE bots SET name=?, name_lower=?, label=?, description=?, mark_shape=?, mark_color=?, pinned=?, hidden=?, grants=?, net_allow=?, ssh_allow=?, model=?, status=?, updated_at=? WHERE id=?`,
-		b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, pin, hide, encodeList(b.Grants), encodeList(b.NetAllow), encodeList(b.SSHAllow), nullStr(b.Model), b.Status, b.UpdatedAt, b.ID)
+	_, err = s.db.Exec(`UPDATE bots SET name=?, name_lower=?, label=?, description=?, mark_shape=?, mark_color=?, pinned=?, hidden=?, grants=?, net_allow=?, ssh_allow=?, model=?, cli_backend=?, session_id=?, status=?, updated_at=? WHERE id=?`,
+		b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, pin, hide, encodeList(b.Grants), encodeList(b.NetAllow), encodeList(b.SSHAllow), nullStr(b.Model), b.CLIBackend, b.SessionID, b.Status, b.UpdatedAt, b.ID)
 	if err != nil {
 		if isUnique(err) {
 			return Bot{}, ErrConflict
@@ -885,6 +915,32 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 	}
 	s.attachRun(&b)
 	return b, nil
+}
+
+// SetBotSession records the CLI session id for a bot. It does not write a log row.
+func (s *Store) SetBotSession(id, sessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`UPDATE bots SET session_id=? WHERE id=?`, sessionID, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// NormalizeCLIBackend accepts grok, claude, ollama, or empty.
+func NormalizeCLIBackend(s string) (string, error) {
+	s = strings.ToLower(strings.TrimSpace(s))
+	switch s {
+	case "", "ollama", "grok", "claude":
+		return s, nil
+	default:
+		return "", fmt.Errorf("cli_backend must be grok, claude, or ollama")
+	}
 }
 
 func (s *Store) SetStatus(id, status string) error {
@@ -1168,6 +1224,50 @@ func (s *Store) NeedsRun(botID string) (bool, error) {
 		return true, nil
 	}
 	return pending.String > started.String, nil
+}
+
+// TurnInputs returns messages that should be sent on this run: user text,
+// scheduled prompts, and inbound DMs created after the previous run started
+// and before this run started. Notices are excluded. Messages that arrive
+// while this run is going stay queued for the next one.
+func (s *Store) TurnInputs(botID, currentRunID string) ([]Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var current string
+	err := s.db.QueryRow(`SELECT started_at FROM runs WHERE id=?`, currentRunID).Scan(&current)
+	if err != nil {
+		return nil, err
+	}
+	var prev sql.NullString
+	err = s.db.QueryRow(`SELECT started_at FROM runs WHERE bot_id=? AND id!=? ORDER BY started_at DESC LIMIT 1`, botID, currentRunID).Scan(&prev)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	q := `SELECT id, bot_id, thread, role, content, run_id, created_at FROM messages WHERE bot_id=? AND created_at<? AND (
+		(thread='user' AND role='user')
+		OR (thread='user' AND role='system' AND content NOT LIKE 'Notice: %')
+		OR (thread LIKE 'dm:%' AND role='user')
+	)`
+	args := []any{botID, current}
+	if prev.Valid && prev.String != "" {
+		q += ` AND created_at>?`
+		args = append(args, prev.String)
+	}
+	q += ` ORDER BY created_at ASC, id ASC`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Message{}
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) CreateRun(botID string) (Run, error) {

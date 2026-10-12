@@ -88,3 +88,25 @@ Treat each bot as a durable session in the Grok CLI or Claude Code CLI (configur
 - Document deviations from the Ollama + custom sandbox design here.
 
 Implementation can land incrementally. The 846d81 daemon provides a solid base to swap the model client and sandbox for CLI sessions while keeping the rest of the shape.
+
+## Runner notes (M0)
+
+A Grok turn is one headless process. A new session is created with `--session-id` because `--resume` only continues a session that already exists. Later turns pass `--resume` and only the new user, DM, or scheduled text. The CLI keeps the transcript.
+
+```
+grok [-m MODEL] (--session-id ID | --resume ID) \
+  -p PROMPT \
+  --sandbox workspace \
+  --cwd SHARED_WORKSPACE \
+  --output-format streaming-json \
+  --always-approve \
+  --no-auto-update
+```
+
+- Session files live under `~/.grok/sessions/`, keyed by working directory. The daemon stores the id on `bots.session_id` and does not manage that directory.
+- Auth stays in the CLI (`grok login`, or `XAI_API_KEY` in the environment the CLI already uses). The daemon does not read or store keys.
+- `CLI_BACKEND` (`grok`, `claude`, or empty) is the default for a new bot. The bot column `cli_backend` is `grok`, `claude`, `ollama`, or empty. Empty and `ollama` keep the Ollama loop. Changing backend clears `session_id`.
+- Shared cwd is `DATA_DIR/workspace`. No per-bot directory and no `--worktree`.
+- The Claude adapter is not wired yet.
+- If a fresh start fails before the CLI reports a session id, the stored id is cleared so the next turn can create another session.
+
