@@ -24,23 +24,19 @@ func toolDefs() []model.Tool {
 	}
 	str := map[string]any{"type": "string"}
 	// File and shell tools come first. qwen3.8's default thinking only
-	// reliably notices tools near the end of this list. The bot tools
-	// stay last so create_bot is among the ones it uses. When they sit
+	// reliably notices tools near the end of this list. Memory and roster
+	// reads stay after the shell so they are not dropped. When they sit
 	// earlier, the model treats them as missing and keeps thinking past
 	// the three-minute model limit (about 8 tokens/s on this machine).
 	return []model.Tool{
 		{Name: "write_memory", Description: "Upsert a memory note on yourself.", Parameters: obj(map[string]any{"key": str, "value": str}, []string{"key", "value"})},
 		{Name: "delete_memory", Description: "Delete one of your memory notes.", Parameters: obj(map[string]any{"key": str}, []string{"key"})},
-		{Name: "set_timer", Description: "Schedule a prompt on yourself. Schedule is an interval like 30s, 5m, 2h, or 1d.", Parameters: obj(map[string]any{"name": str, "schedule": str, "prompt": str}, []string{"schedule", "prompt"})},
 		{Name: "clear_timer", Description: "Delete one of your timers by id.", Parameters: obj(map[string]any{"id": str}, []string{"id"})},
 		{Name: "read_file", Description: "Read a UTF-8 file inside the workspace.", Parameters: obj(map[string]any{"path": str}, []string{"path"})},
 		{Name: "write_file", Description: "Write a UTF-8 file inside the workspace. Creates parent directories.", Parameters: obj(map[string]any{"path": str, "content": str}, []string{"path", "content"})},
 		{Name: "run_shell", Description: "Run a shell command inside the workspace jail. Paths outside the workspace are rejected. Network, git push, and SSH fail unless the user granted them.", Parameters: obj(map[string]any{"command": str}, []string{"command"})},
 		{Name: "list_bots", Description: "List bots: id, name, label, and status.", Parameters: obj(map[string]any{}, nil)},
 		{Name: "read_bot", Description: "Read a bot's description and memory by name or id.", Parameters: obj(map[string]any{"name": str}, []string{"name"})},
-		{Name: "send_dm", Description: "Send a direct message to another bot by name or id. Returns immediately; the recipient gets its own turn.", Parameters: obj(map[string]any{"to": str, "content": str}, []string{"to", "content"})},
-		{Name: "create_bot", Description: "Create a bot. name and description are required. description is the standing prompt the new bot is given. instructions is an accepted alias for description. cli_backend is grok, claude, or ollama.", Parameters: obj(map[string]any{"name": str, "label": str, "description": str, "instructions": str, "model": str, "cli_backend": str}, []string{"name", "description"})},
-		{Name: "update_bot", Description: "Update another bot's name, label, description, model, or cli_backend. Identify it by id or name. A rename requires id. instructions is an accepted alias for description. cli_backend is grok, claude, or ollama.", Parameters: obj(map[string]any{"id": str, "name": str, "label": str, "description": str, "instructions": str, "model": str, "cli_backend": str}, nil)},
 	}
 }
 
@@ -60,6 +56,10 @@ func (a *App) execTool(ctx context.Context, bot store.Bot, name string, args map
 
 func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args map[string]any) (string, error) {
 	switch name {
+	case "send_dm", "create_bot", "update_bot", "set_timer":
+		// The page is the user path. A bot must not create or rewrite bots,
+		// message another bot, or schedule itself.
+		return "", fmt.Errorf("%s requires the user; a bot cannot do that", name)
 	case "list_bots":
 		bots, err := a.st.ListBots()
 		if err != nil {
@@ -96,105 +96,6 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			"id": other.ID, "name": other.Name, "label": other.Label, "status": other.Status,
 			"description": other.Description, "model": other.Model, "memory": mem,
 		}), nil
-	case "send_dm":
-		to := strArg(args, "to")
-		content := strArg(args, "content")
-		if to == "" || strings.TrimSpace(content) == "" {
-			return "", errors.New("to and content required")
-		}
-		other, err := a.st.FindBot(to)
-		if err != nil {
-			return "", err
-		}
-		if other.ID == bot.ID {
-			return "", errors.New("cannot DM yourself")
-		}
-		if _, _, err := a.st.AddDMPair(bot.ID, other.ID, content, ""); err != nil {
-			return "", err
-		}
-		a.kick(other.ID)
-		return mustJSON(map[string]any{"to": other.ID, "name": other.Name, "ok": true}), nil
-	case "create_bot":
-		name, err := cleanName(strArg(args, "name"))
-		if err != nil {
-			return "", err
-		}
-		description := strArg(args, "description")
-		if _, ok := args["description"]; !ok {
-			description = strArg(args, "instructions")
-		}
-		var modelPtr *string
-		if m := strings.TrimSpace(strArg(args, "model")); m != "" {
-			modelPtr = &m
-		}
-		backend := strings.TrimSpace(strArg(args, "cli_backend"))
-		if backend == "" {
-			backend = bot.CLIBackend
-		}
-		if backend == "" {
-			backend = a.cfg.CLIBackend
-		}
-		created, err := a.st.InsertBot(store.BotDraft{
-			Name: name, Label: strArg(args, "label"), Description: description, Model: modelPtr,
-			CLIBackend: backend,
-		}, bot.ID)
-		if err != nil {
-			return "", err
-		}
-		return mustJSON(map[string]any{"id": created.ID, "name": created.Name}), nil
-	case "update_bot":
-		who := strArg(args, "id")
-		if who == "" {
-			who = strArg(args, "name")
-		}
-		if who == "" {
-			return "", errors.New("id or name required")
-		}
-		target, err := a.st.FindBot(who)
-		if err != nil {
-			return "", err
-		}
-		patch := store.BotPatch{By: bot.ID}
-		if id := strArg(args, "id"); id != "" {
-			if n := strArg(args, "name"); n != "" && !strings.EqualFold(n, target.Name) {
-				cn, err := cleanName(n)
-				if err != nil {
-					return "", err
-				}
-				patch.Name = &cn
-			}
-		}
-		if _, ok := args["label"]; ok {
-			label := strArg(args, "label")
-			patch.Label = &label
-		}
-		if _, ok := args["description"]; ok {
-			desc := strArg(args, "description")
-			patch.Description = &desc
-		} else if _, ok := args["instructions"]; ok {
-			desc := strArg(args, "instructions")
-			patch.Description = &desc
-		}
-		if _, ok := args["model"]; ok {
-			m := strings.TrimSpace(strArg(args, "model"))
-			patch.ModelSet = true
-			if m != "" {
-				patch.Model = &m
-			}
-		}
-		if _, ok := args["cli_backend"]; ok {
-			norm, err := store.NormalizeCLIBackend(strArg(args, "cli_backend"))
-			if err != nil {
-				return "", err
-			}
-			patch.CLISet = true
-			patch.CLIBackend = norm
-		}
-		updated, err := a.st.UpdateBot(target.ID, patch)
-		if err != nil {
-			return "", err
-		}
-		return mustJSON(map[string]any{"id": updated.ID, "name": updated.Name}), nil
 	case "write_memory":
 		key := strArg(args, "key")
 		if strings.TrimSpace(key) == "" || strings.Contains(key, "/") {
@@ -214,17 +115,6 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			return "", err
 		}
 		return `{"ok":true}`, nil
-	case "set_timer":
-		schedule := strArg(args, "schedule")
-		prompt := strArg(args, "prompt")
-		if strings.TrimSpace(prompt) == "" {
-			return "", errors.New("prompt required")
-		}
-		t, err := a.st.CreateTimer(bot.ID, strArg(args, "name"), schedule, prompt, true)
-		if err != nil {
-			return "", err
-		}
-		return mustJSON(t), nil
 	case "clear_timer":
 		id := strArg(args, "id")
 		if id == "" {

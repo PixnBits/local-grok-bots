@@ -11,7 +11,7 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
-func TestCLIDMAndCreateBot(t *testing.T) {
+func TestCLICannotDMOrCreate(t *testing.T) {
 	var notes []string
 	var noteMu sync.Mutex
 	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
@@ -27,18 +27,17 @@ func TestCLIDMAndCreateBot(t *testing.T) {
 	app.runner = runnerFunc(func(_ context.Context, spec clisession.Spec, onEvent func(clisession.Event)) (clisession.Result, error) {
 		mu.Lock()
 		specs = append(specs, spec)
-		n := len(specs)
 		mu.Unlock()
 		if onEvent != nil {
 			onEvent(clisession.Event{Kind: "token", Text: "ok"})
 		}
-		if n == 1 {
-			return clisession.Result{SessionID: spec.SessionID, Text: "Sent.\n\n```action\n{\"tool\":\"send_dm\",\"to\":\"Bob\",\"content\":\"ping\"}\n```"}, nil
+		if strings.Contains(spec.Prompt, "Daemon action results") {
+			return clisession.Result{SessionID: spec.SessionID, Text: "Stopped."}, nil
 		}
-		if strings.Contains(spec.Prompt, "list_bots") || strings.Contains(spec.Prompt, "Daemon action results") {
-			return clisession.Result{SessionID: spec.SessionID, Text: "two bots"}, nil
+		if strings.Contains(spec.Prompt, "make bea") {
+			return clisession.Result{SessionID: spec.SessionID, Text: "Created Bea.\n\n```action\n{\"tool\":\"create_bot\",\"name\":\"Bea\",\"description\":\"helps\"}\n```"}, nil
 		}
-		return clisession.Result{SessionID: spec.SessionID, Text: "Created Bea.\n\n```action\n{\"tool\":\"create_bot\",\"name\":\"Bea\",\"description\":\"helps\"}\n```"}, nil
+		return clisession.Result{SessionID: spec.SessionID, Text: "Sent.\n\n```action\n{\"tool\":\"send_dm\",\"to\":\"Bob\",\"content\":\"ping\"}\n```"}, nil
 	})
 	srv := serve(t, app)
 	_, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{
@@ -62,25 +61,25 @@ func TestCLIDMAndCreateBot(t *testing.T) {
 			replies = append(replies, m.Content)
 		}
 	}
-	if len(replies) != 1 || replies[0] != "Sent." || strings.Contains(replies[0], "action") {
+	if len(replies) != 1 || replies[0] != "Stopped." || strings.Contains(replies[0], "action") {
 		t.Fatalf("ada replies %#v", replies)
 	}
 	dms, err := app.st.ListMessages(bob.ID, "dm:"+ada.ID, "", 20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(dms) != 1 || dms[0].Content != "ping" || dms[0].Role != "user" {
+	if len(dms) != 0 {
 		t.Fatalf("bob dm %#v", dms)
 	}
-	if !hasMessage(botThread(t, srv.URL, bob.ID), "system", "Message from Ada") {
-		t.Fatal("notice missing")
+	if hasMessage(botThread(t, srv.URL, bob.ID), "system", "Message from Ada") {
+		t.Fatal("notice was posted")
 	}
-	if len(logKind(t, srv.URL, "dm_sent")) == 0 || len(logKind(t, srv.URL, "dm_received")) == 0 {
-		t.Fatal("dm was not logged")
+	if len(logKind(t, srv.URL, "dm_sent")) != 0 || len(logKind(t, srv.URL, "dm_received")) != 0 {
+		t.Fatal("dm was logged")
 	}
 	mu.Lock()
-	if len(specs) != 1 || !strings.Contains(specs[0].Prompt, "send_dm") {
-		t.Fatalf("expected one turn with the action preamble, specs=%d", len(specs))
+	if len(specs) < 1 || !strings.Contains(specs[0].Prompt, "A bot cannot") || strings.Contains(specs[0].Prompt, "send_dm (to, content)") {
+		t.Fatalf("preamble still offers send_dm, specs=%d", len(specs))
 	}
 	mu.Unlock()
 
@@ -92,23 +91,13 @@ func TestCLIDMAndCreateBot(t *testing.T) {
 	}
 	var bots []store.Bot
 	decodeJSON(t, b, &bots)
-	var beaID string
 	for i := range bots {
 		if bots[i].Name == "Bea" {
-			beaID = bots[i].ID
+			t.Fatal("Bea was created")
 		}
 	}
-	if beaID == "" {
-		t.Fatal("Bea was not created")
-	}
-	res, b = do(t, "GET", srv.URL+"/api/bots/"+beaID, nil, "")
-	var bea store.Bot
-	decodeJSON(t, b, &bea)
-	if bea.Description != "helps" || bea.CLIBackend != "grok" {
-		t.Fatalf("bea %#v", bea)
-	}
-	if len(logKind(t, srv.URL, "bot_created")) < 3 {
-		t.Fatal("create_bot was not logged")
+	if len(logKind(t, srv.URL, "bot_created")) != 2 {
+		t.Fatal("create_bot was logged")
 	}
 	replies = nil
 	for _, m := range botThread(t, srv.URL, ada.ID) {
@@ -116,7 +105,7 @@ func TestCLIDMAndCreateBot(t *testing.T) {
 			replies = append(replies, m.Content)
 		}
 	}
-	if len(replies) != 2 || replies[1] != "Created Bea." {
+	if len(replies) != 2 || replies[1] != "Stopped." {
 		t.Fatalf("replies %#v", replies)
 	}
 	noteMu.Lock()

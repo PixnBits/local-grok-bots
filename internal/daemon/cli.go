@@ -287,7 +287,7 @@ func (a *App) writeCLIPreamble(b *strings.Builder, bot store.Bot) error {
 	b.WriteString("\nUse your own file, shell, and search tools. The workspace is shared by every bot. Do not create a private worktree.\n")
 	b.WriteString("Scheduled prompts are prefixed with [scheduled]. Direct messages from other bots are prefixed with [DM from Name].\n")
 	b.WriteString("\nDaemon actions are not shell commands. When you need one, put a fenced JSON block in the reply. The fence is removed before the user sees it.\n\n")
-	b.WriteString("```action\n{\"tool\":\"send_dm\",\"to\":\"Bot Name\",\"content\":\"hello\"}\n```\n\n")
-	b.WriteString("Allowed tools: send_dm (to, content), create_bot (name, description), update_bot (id or name, plus fields to change), write_memory (key, value), delete_memory (key), set_timer (schedule, prompt), clear_timer (id), list_bots, read_bot (name). Do not use the shell to create a bot or send a DM.\n\n")
+	b.WriteString("```action\n{\"tool\":\"write_memory\",\"key\":\"note\",\"value\":\"hello\"}\n```\n\n")
+	b.WriteString("Allowed tools: write_memory (key, value), delete_memory (key), clear_timer (id), list_bots, read_bot (name). Creating a bot, updating a bot, sending a DM, and setting a timer are done by the user from the page. A bot cannot do those. Do not use the shell to do them either.\n\n")
 	return nil
 }

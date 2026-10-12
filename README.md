@@ -64,8 +64,10 @@ The CLI process is killed after 30 minutes without a user message or a new turn,
 DMs, create/update bot, memory, and timers are not MCP tools. The model puts a fenced block in its reply and the daemon runs it, then strips the fence:
 
 ```action
-{"tool":"send_dm","to":"Ada","content":"hello"}
+{"tool":"write_memory","key":"note","value":"hello"}
 ```
+
+Creating a bot, updating a bot, sending a DM, and setting a timer are done from the page. A bot cannot do those.
 
 File and shell work stays on the CLI. When a turn finishes, or the CLI asks for input, the daemon tries `notify-send` on Linux and `osascript` on macOS. If that tool is missing, the turn still completes.
 

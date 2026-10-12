@@ -123,10 +123,10 @@ grok [-m MODEL] (--session-id ID | --resume ID) \
 Custom tools stay off MCP. The fresh-session prompt tells the model to emit a fenced block:
 
 ```action
-{"tool":"send_dm","to":"Bot Name","content":"hello"}
+{"tool":"write_memory","key":"note","value":"hello"}
 ```
 
-The daemon parses `action` and `bot-action` fences, runs the existing daemon tools (DM, create/update bot, memory, timers, list/read), strips the fence from the stored reply, and writes the usual log rows. File and shell actions are rejected so the CLI's own tools stay in charge of the workspace. A follow-up resume happens only when an action failed, a reply was empty, or the action was `list_bots` / `read_bot`.
+The daemon parses `action` and `bot-action` fences, runs memory, clear-timer, and list/read actions, strips the fence from the stored reply, and writes the usual log rows. `create_bot`, `update_bot`, `send_dm`, and `set_timer` are refused: the user does those from the page. File and shell actions are rejected so the CLI's own tools stay in charge of the workspace. A follow-up resume happens only when an action failed, a reply was empty, or the action was `list_bots` / `read_bot`.
 
 A finished turn, a failed turn, or a result that asks for input sends a desktop notification. Linux uses `notify-send`. macOS uses `osascript` `display notification`. A missing notifier is ignored.
 

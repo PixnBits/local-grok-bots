@@ -83,7 +83,7 @@ func TestGrantsAPISetAndClear(t *testing.T) {
 	}
 }
 
-func TestMetaToolsDoNotGrant(t *testing.T) {
+func TestBotCannotMutateRoster(t *testing.T) {
 	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
 		return model.ChatResponse{Content: "no"}, nil
 	}})
@@ -99,33 +99,39 @@ func TestMetaToolsDoNotGrant(t *testing.T) {
 	decodeJSON(t, b, &target)
 
 	ctx := context.Background()
-	if _, err := app.dispatchTool(ctx, caller, "update_bot", map[string]any{
-		"id": target.ID, "label": "renamed", "grants": []any{"net"}, "net_allow": []any{"evil.test"},
-	}); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{"update_bot", "create_bot", "send_dm", "set_timer"} {
+		_, err := app.dispatchTool(ctx, caller, name, map[string]any{
+			"id": target.ID, "name": "Spawn", "to": "Target", "content": "ping",
+			"label": "renamed", "description": "stay", "schedule": "1h", "prompt": "stay up",
+			"grants": []any{"net"},
+		})
+		if err == nil || !strings.Contains(err.Error(), "requires the user") {
+			t.Fatalf("%s err %v", name, err)
+		}
 	}
 	got, err := app.st.GetBot(target.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Label != "renamed" || strings.Join(got.Grants, ",") != "git" || len(got.NetAllow) != 0 {
-		t.Fatalf("update_bot changed grants %#v", got)
+	if got.Label != "" || got.Description != "stay" || strings.Join(got.Grants, ",") != "git" {
+		t.Fatalf("target changed %#v", got)
 	}
-	out, err := app.dispatchTool(ctx, caller, "create_bot", map[string]any{
-		"name": "Spawn", "description": "stay", "grants": []any{"ssh"}, "ssh_allow": []any{"evil.test"},
-	})
+	if _, err := app.st.FindBot("Spawn"); err == nil {
+		t.Fatal("create_bot created a bot")
+	}
+	timers, err := app.st.ListTimers(caller.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "Spawn") {
-		t.Fatalf("create_bot result %s", out)
+	if len(timers) != 0 {
+		t.Fatalf("set_timer created %#v", timers)
 	}
-	spawn, err := app.st.FindBot("Spawn")
+	dms, err := app.st.ListMessages(target.ID, "dm:"+caller.ID, "", 20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(spawn.Grants) != 0 || len(spawn.SSHAllow) != 0 {
-		t.Fatalf("create_bot copied grants %#v", spawn)
+	if len(dms) != 0 {
+		t.Fatalf("send_dm stored %#v", dms)
 	}
 }
 

@@ -158,18 +158,14 @@ Tools the model can call. Each is logged on start and on finish.
 |---|---|---|
 | list_bots | | `[{id, name, label, status}]` |
 | read_bot | `{name or id}` | description and memory keys/values |
-| send_dm | `{to, content}` | persists a DM, queues a turn on the recipient |
-| create_bot | `{name, label?, description, model?}` | same as `POST /api/bots` |
-| update_bot | `{id or name, name?, label?, description?, model?}` | same as `PATCH`; rename requires `id` |
 | write_memory | `{key, value}` | upsert on the calling bot |
 | delete_memory | `{key}` | |
-| set_timer | `{name?, schedule, prompt}` | creates an enabled timer on the calling bot |
-| clear_timer | `{id}` | |
+| clear_timer | `{id}` | deletes one of the calling bot's timers |
 | read_file | `{path}` | inside the workspace directory only |
 | write_file | `{path, content}` | inside the workspace directory only |
 | run_shell | `{command}` | jailed to the workspace; stdout/stderr captured and truncated |
 
-Paths that escape the workspace are rejected, including `..`, absolute host paths, and symlink escapes. The meta tools (`create_bot`, `update_bot`) are ordinary tools; the profile performs the same mutations through the API. A change made by a bot is logged with the acting bot id.
+`create_bot`, `update_bot`, `send_dm`, and `set_timer` are not model tools. The page creates and edits bots and timers through the HTTP API. A bot that calls one of those names gets an error and no mutation. Paths that escape the workspace are rejected, including `..`, absolute host paths, and symlink escapes.
 
 Arguments containing anything that looks like a secret are redacted in the log.
 

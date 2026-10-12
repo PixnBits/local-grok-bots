@@ -197,25 +197,17 @@ func TestCreateAndQueue(t *testing.T) {
 	}
 }
 
-func TestDMAndCreateBot(t *testing.T) {
-	var aliceOnce, bobOnce atomic.Bool
+func TestModelCannotDMOrCreate(t *testing.T) {
+	var aliceOnce atomic.Bool
 	app := newApp(t, "", fakeModel{fn: func(req model.ChatRequest) (model.ChatResponse, error) {
 		sys := req.Messages[0].Content
 		if bytes.Contains([]byte(sys), []byte("You are Alice")) {
 			if !aliceOnce.CompareAndSwap(false, true) {
 				return model.ChatResponse{Content: "noted"}, nil
 			}
-			return model.ChatResponse{ToolCalls: []model.ToolCall{{
-				Name: "send_dm", Arguments: map[string]any{"to": "Bob", "content": "ping"},
-			}}}, nil
-		}
-		if bytes.Contains([]byte(sys), []byte("You are Bob")) {
-			if !bobOnce.CompareAndSwap(false, true) {
-				return model.ChatResponse{Content: "pong"}, nil
-			}
 			return model.ChatResponse{ToolCalls: []model.ToolCall{
+				{Name: "send_dm", Arguments: map[string]any{"to": "Bob", "content": "ping"}},
 				{Name: "create_bot", Arguments: map[string]any{"name": "Cara", "instructions": "notes"}},
-				{Name: "send_dm", Arguments: map[string]any{"to": "Alice", "content": "pong"}},
 			}}, nil
 		}
 		return model.ChatResponse{Content: "ok"}, nil
@@ -231,51 +223,28 @@ func TestDMAndCreateBot(t *testing.T) {
 	waitIdle(t, srv.URL, alice.ID, "")
 	waitIdle(t, srv.URL, bob.ID, "")
 
-	res, b := do(t, "GET", srv.URL+"/api/log?limit=200", nil, "")
+	if len(logKind(t, srv.URL, "dm_sent")) != 0 || len(logKind(t, srv.URL, "dm_received")) != 0 {
+		t.Fatal("dm was logged")
+	}
+	res, b := do(t, "GET", srv.URL+"/api/bots", nil, "")
 	if res.StatusCode != 200 {
 		t.Fatal(res.StatusCode, string(b))
 	}
-	var events []store.LogEvent
-	decodeJSON(t, b, &events)
-	var sent, recv, created bool
-	for _, e := range events {
-		switch e.Kind {
-		case "dm_sent", "dm_received":
-			var d struct {
-				Other string `json:"other_bot_id"`
-			}
-			_ = json.Unmarshal(e.Detail, &d)
-			if e.Kind == "dm_sent" {
-				sent = true
-			}
-			if e.Kind == "dm_received" {
-				recv = true
-			}
-		case "bot_created":
-			var d struct {
-				By   string `json:"by"`
-				Name string `json:"name"`
-			}
-			_ = json.Unmarshal(e.Detail, &d)
-			if d.Name == "Cara" && d.By == bob.ID {
-				created = true
-			}
-		}
-	}
-	if !sent || !recv || !created {
-		t.Fatalf("log flags sent=%v recv=%v created=%v", sent, recv, created)
-	}
-	res, b = do(t, "GET", srv.URL+"/api/bots", nil, "")
 	var bots []store.Bot
 	decodeJSON(t, b, &bots)
-	found := false
-	for _, b := range bots {
-		if b.Name == "Cara" {
-			found = true
+	for _, bot := range bots {
+		if bot.Name == "Cara" {
+			t.Fatalf("cara created %#v", bots)
 		}
 	}
-	if !found {
-		t.Fatalf("cara missing %#v", bots)
+	var replies []string
+	for _, m := range botThread(t, srv.URL, alice.ID) {
+		if m.Role == "bot" {
+			replies = append(replies, m.Content)
+		}
+	}
+	if len(replies) != 1 || replies[0] != "noted" {
+		t.Fatalf("replies %#v", replies)
 	}
 }
 
@@ -673,7 +642,7 @@ func TestRunEmitsStatus(t *testing.T) {
 	waitIdle(t, srv.URL, bot.ID, "")
 }
 
-func TestInboundDMOnReceivingThread(t *testing.T) {
+func TestInboundDMIsNotQueuedByABot(t *testing.T) {
 	var once atomic.Bool
 	app := newApp(t, "", fakeModel{fn: func(req model.ChatRequest) (model.ChatResponse, error) {
 		sys := req.Messages[0].Content
@@ -700,25 +669,17 @@ func TestInboundDMOnReceivingThread(t *testing.T) {
 		Messages []store.Message `json:"messages"`
 	}
 	decodeJSON(t, b, &thread)
-	var saw bool
 	for _, m := range thread.Messages {
 		if m.Role == "system" && m.Content == "Message from Alice" {
-			saw = true
+			t.Fatalf("receiving thread %#v", thread.Messages)
 		}
-	}
-	if !saw {
-		t.Fatalf("receiving thread %#v", thread.Messages)
 	}
 	_, b = do(t, "GET", srv.URL+"/api/dms/"+alice.ID+"/"+bob.ID, nil, "")
 	decodeJSON(t, b, &thread)
-	var dm bool
 	for _, m := range thread.Messages {
-		if m.Content == "ping" && strings.HasPrefix(m.Thread, "dm:") {
-			dm = true
+		if m.Content == "ping" {
+			t.Fatalf("dm storage %#v", thread.Messages)
 		}
-	}
-	if !dm {
-		t.Fatalf("dm storage %#v", thread.Messages)
 	}
 }
 
@@ -752,11 +713,11 @@ func TestHideDoesNotPause(t *testing.T) {
 	}
 }
 
-func TestPromptShowsCreateBot(t *testing.T) {
+func TestPromptDeniesBotMutations(t *testing.T) {
 	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
 		return model.ChatResponse{Content: "no"}, nil
 	}})
-	bot, err := app.st.CreateBot("BotMaker", "use the create_bot tool", nil, "user")
+	bot, err := app.st.CreateBot("BotMaker", "inspect only", nil, "user")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -765,10 +726,14 @@ func TestPromptShowsCreateBot(t *testing.T) {
 		t.Fatal(err)
 	}
 	sys := msgs[0].Content
-	if !strings.Contains(sys, "create_bot") || !strings.Contains(sys, "description is the standing prompt") {
-		t.Fatalf("prompt hides create_bot: %s", sys)
+	if !strings.Contains(sys, "A bot cannot do those") {
+		t.Fatalf("prompt still offers mutations: %s", sys)
 	}
-	var create map[string]any
+	for _, name := range []string{"create_bot", "update_bot", "send_dm", "set_timer"} {
+		if strings.Contains(sys, name) {
+			t.Fatalf("prompt names %s: %s", name, sys)
+		}
+	}
 	for _, tool := range toolDefs() {
 		raw, err := json.Marshal(tool.Parameters)
 		if err != nil {
@@ -777,27 +742,19 @@ func TestPromptShowsCreateBot(t *testing.T) {
 		if strings.Contains(string(raw), `"required":null`) {
 			t.Fatalf("%s schema has required null: %s", tool.Name, raw)
 		}
-		if tool.Name == "create_bot" {
-			if err := json.Unmarshal(raw, &create); err != nil {
-				t.Fatal(err)
-			}
+		switch tool.Name {
+		case "create_bot", "update_bot", "send_dm", "set_timer":
+			t.Fatalf("tool %s is still offered", tool.Name)
 		}
-	}
-	props, _ := create["properties"].(map[string]any)
-	if _, ok := props["description"]; !ok {
-		t.Fatalf("create_bot schema: %#v", create)
-	}
-	if _, ok := props["instructions"]; !ok {
-		t.Fatalf("create_bot omits instructions alias: %#v", create)
 	}
 	names := make([]string, 0, len(toolDefs()))
 	for _, tool := range toolDefs() {
 		names = append(names, tool.Name)
 	}
 	shell := indexOf(names, "run_shell")
-	createAt := indexOf(names, "create_bot")
-	if shell < 0 || createAt < shell {
-		t.Fatalf("create_bot must follow run_shell, got %v", names)
+	list := indexOf(names, "list_bots")
+	if shell < 0 || list < shell {
+		t.Fatalf("list_bots must follow run_shell, got %v", names)
 	}
 }
 
