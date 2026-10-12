@@ -12,8 +12,8 @@ Treat each bot as a durable session in the Grok CLI or Claude Code CLI (configur
 ## Decisions (from user)
 
 - **CLIs:** Grok and Claude only. Configurable which backend per bot (or globally). Handle the nuances of each (flag differences, session store paths, sandbox profiles, output formats, permission models).
-- **Idle timeout:** 30 minutes of no user message and no imminent timer → kill process. Resume on next event.
-- **Filesystem:** Shared user filesystem for all bots. No per-bot private directories or worktrees. CLI sandbox still applies (prefer `--sandbox workspace` or equivalent; document how shared access is constrained).
+- **Idle timeout:** 30 minutes of no user message and no imminent user-created timer → kill process. A bot-created timer does not count. Resume on next event.
+- **Filesystem:** Each CLI bot uses `workspace/bots/<bot id>`. Ollama file and shell tools still share `workspace/`. No per-bot worktree. CLI sandbox still applies (prefer `--sandbox workspace` or equivalent; document how shared access is constrained).
 - **Custom tools:** No MCP. Handle bot-to-bot DM, create/update bot, memory, and timer coordination without an MCP server. Options: daemon-side injection of context into the prompt, post-processing of CLI tool results, or thin shell wrappers the CLI can call that talk back to the daemon over a local socket/HTTP. Prefer the simplest that preserves the existing tool surface from the 846d81 slice.
 - **Auth:** Handled entirely by the CLIs (`grok login` / `claude` auth). Daemon does not manage keys or sessions.
 - **Concurrency:** No artificial limits. Daemon can spawn multiple CLI processes as needed.
@@ -114,7 +114,7 @@ grok [-m MODEL] (--session-id ID | --resume ID) \
 
 - `streaming-json` text events are published as SSE `token` frames. Tool calls are published as `tool_call` with redacted arguments, and the same arguments are written to the log. When the stream has no text deltas, the final reply is one token so the page still moves.
 - The stored reply prefers the final structured `text` when the CLI sends one. Deltas are the live view only.
-- A live CLI is killed after 30 minutes from the last user message or turn start, unless a timer fires within 2 minutes. The process group is killed. `session_id` stays. The next message or timer uses `--resume`.
+- A live CLI is killed after 30 minutes from the last user message or turn start, unless a user-created timer fires within 2 minutes. A bot-created timer does not keep the process. The process group is killed. `session_id` stays. The next message or timer uses `--resume`.
 - CLI turns are not under the 10-minute Ollama cap. Shutdown and cancel still stop them.
 - A timer fire posts the routine prompt, prefixed `[scheduled]` as before, and resumes that bot's session.
 
@@ -152,7 +152,7 @@ Session transcripts are JSONL files under `~/.claude/projects/` (keyed by projec
 - Default backend is still Ollama. Set `CLI_BACKEND=grok` or `claude`, or set `cli_backend` on the bot. Empty and `ollama` keep the HTTP client and the workspace jail.
 - Changing `cli_backend` clears `session_id`. The next turn starts a new CLI session and sends the preamble again.
 - Fresh Grok sessions use `--session-id`, not `--resume`. `--resume` is only for an id the CLI has already created.
-- CLI turns are not under the 10-minute Ollama cap. They stop on shutdown, cancel, or 30 minutes after the last user message or turn start. A timer due within 2 minutes keeps a live process.
+- CLI turns are not under the 10-minute Ollama cap. They stop on shutdown, cancel, or 30 minutes after the last user message or turn start. A user-created timer due within 2 minutes keeps a live process. A bot-created timer does not.
 - The idle kill is a process-group kill. The session files stay. The next user message, DM, or timer resumes.
 - Timers are still daemon-owned. The fired prompt is prefixed `[scheduled]`.
 - Meta tools are fenced JSON in the reply, not MCP and not shell wrappers. The stored thread message has the fence removed. The live SSE stream can still show the fence for a moment, because tokens are forwarded as they arrive.

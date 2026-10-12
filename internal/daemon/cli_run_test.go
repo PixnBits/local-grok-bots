@@ -305,6 +305,54 @@ func TestCLIIdleKillThenResume(t *testing.T) {
 	}
 }
 
+func TestBotTimerDoesNotSuppressIdle(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{}, nil
+	}})
+	app.imminent = 2 * time.Hour
+	started := make(chan struct{})
+	var once sync.Once
+	app.runner = runnerFunc(func(ctx context.Context, spec clisession.Spec, _ func(clisession.Event)) (clisession.Result, error) {
+		if spec.OnStart != nil {
+			spec.OnStart(4242)
+		}
+		once.Do(func() { close(started) })
+		<-ctx.Done()
+		return clisession.Result{SessionID: spec.SessionID}, ctx.Err()
+	})
+	srv := serve(t, app)
+	_, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{
+		"name": "Ada", "cli_backend": "grok",
+	}, "")
+	var bot store.Bot
+	decodeJSON(t, b, &bot)
+	do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]string{"content": "work"}, "")
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("cli did not start")
+	}
+	if _, err := app.st.CreateTimer(bot.ID, "stay", "1h", "stay up", true, "bot"); err != nil {
+		t.Fatal(err)
+	}
+	app.rtMu.Lock()
+	app.activity[bot.ID] = time.Now().Add(-2 * time.Hour)
+	app.rtMu.Unlock()
+	app.killIdle()
+	waitIdle(t, srv.URL, bot.ID, "")
+	res, b := do(t, "GET", srv.URL+"/api/bots/"+bot.ID, nil, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("get %d %s", res.StatusCode, b)
+	}
+	decodeJSON(t, b, &bot)
+	if bot.Status != "idle" {
+		t.Fatalf("bot timer kept the process, status %s", bot.Status)
+	}
+	if bot.SessionID == "" {
+		t.Fatal("idle kill dropped the session")
+	}
+}
+
 func TestCLICancelResume(t *testing.T) {
 	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
 		return model.ChatResponse{}, nil

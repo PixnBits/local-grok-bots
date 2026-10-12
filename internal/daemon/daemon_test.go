@@ -488,7 +488,7 @@ func TestTimerMissedOnBoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tm, err := st.CreateTimer(bot.ID, "hourly", "1h", "do the thing", true)
+	tm, err := st.CreateTimer(bot.ID, "hourly", "1h", "do the thing", true, "user")
 	if err != nil {
 		t.Fatal(err)
 	}

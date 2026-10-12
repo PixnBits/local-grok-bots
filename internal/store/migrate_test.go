@@ -65,7 +65,7 @@ VALUES('t1', 'b1', '1h', 'do it', 1, '2999-01-01T00:00:00.000000000Z');
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(timers) != 1 || timers[0].Name != "" || timers[0].Prompt != "do it" {
+	if len(timers) != 1 || timers[0].Name != "" || timers[0].Prompt != "do it" || timers[0].Source != "user" {
 		t.Fatalf("migrated timers %#v", timers)
 	}
 }

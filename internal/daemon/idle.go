@@ -52,7 +52,8 @@ func (a *App) clearCLIPID(botID, runID string) {
 }
 
 // killIdle stops a live CLI that has had no user message and no turn start
-// within the idle window, unless a timer will fire inside the imminent window.
+// within the idle window, unless a user-created timer will fire inside the
+// imminent window. A bot-created timer does not keep the process alive.
 func (a *App) killIdle() {
 	if a.ctx.Err() != nil {
 		return
@@ -92,6 +93,9 @@ func (a *App) timerSoon(botID string, now time.Time) bool {
 	low := store.FormatTime(now.Add(-2 * time.Second))
 	high := store.FormatTime(now.Add(a.imminentWindow()))
 	for _, tm := range timers {
+		if tm.Source != "user" {
+			continue
+		}
 		if tm.Enabled && tm.NextFireAt > low && tm.NextFireAt <= high {
 			return true
 		}

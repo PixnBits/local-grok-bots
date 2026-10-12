@@ -59,7 +59,7 @@ claude --session-id UUID -p PROMPT --output-format stream-json --verbose \
 
 The process working directory is that bot's directory. Claude sessions are JSONL files under `~/.claude/projects/`. A rules file there is not visible to another CLI bot. There is no worktree.
 
-The CLI process is killed after 30 minutes without a user message or a new turn, unless a timer is due within 2 minutes. The session file remains. Timers are still scheduled here; the prompt is prefixed `[scheduled]`.
+The CLI process is killed after 30 minutes without a user message or a new turn, unless a timer created from the page is due within 2 minutes. A timer recorded as bot-created does not keep the process alive. The session file remains. Timers are still scheduled here; the prompt is prefixed `[scheduled]`.
 
 DMs, create/update bot, memory, and timers are not MCP tools. The model puts a fenced block in its reply and the daemon runs it, then strips the fence:
 

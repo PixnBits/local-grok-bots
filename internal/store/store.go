@@ -210,6 +210,8 @@ type Timer struct {
 	Enabled    bool    `json:"enabled"`
 	NextFireAt string  `json:"next_fire_at"`
 	LastFireAt *string `json:"last_fire_at"`
+	// Source is "user" for a timer created from the page, or "bot" for one a model created.
+	Source string `json:"source"`
 }
 
 type Run struct {
@@ -314,7 +316,8 @@ CREATE TABLE IF NOT EXISTS timers (
   prompt TEXT NOT NULL,
   enabled INTEGER NOT NULL,
   next_fire_at TEXT NOT NULL,
-  last_fire_at TEXT
+  last_fire_at TEXT,
+  source TEXT NOT NULL DEFAULT 'user'
 );
 CREATE INDEX IF NOT EXISTS idx_timers_due ON timers(enabled, next_fire_at);
 CREATE TABLE IF NOT EXISTS runs (
@@ -369,6 +372,7 @@ func (s *Store) evolve() error {
 		{"bots", "cli_backend", "TEXT NOT NULL DEFAULT ''"},
 		{"bots", "session_id", "TEXT NOT NULL DEFAULT ''"},
 		{"timers", "name", "TEXT NOT NULL DEFAULT ''"},
+		{"timers", "source", "TEXT NOT NULL DEFAULT 'user'"},
 	}
 	for _, a := range adds {
 		ok, err := s.hasColumn(a.table, a.col)
@@ -1336,9 +1340,13 @@ func (s *Store) GetRun(id string) (Run, error) {
 	return r, nil
 }
 
-func (s *Store) CreateTimer(botID, name, schedule, prompt string, enabled bool) (Timer, error) {
+func (s *Store) CreateTimer(botID, name, schedule, prompt string, enabled bool, source string) (Timer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	source, err := timerSource(source)
+	if err != nil {
+		return Timer{}, err
+	}
 	d, err := ParseInterval(schedule)
 	if err != nil {
 		return Timer{}, err
@@ -1349,11 +1357,22 @@ func (s *Store) CreateTimer(botID, name, schedule, prompt string, enabled bool) 
 	}
 	t := Timer{
 		ID: id.New(), BotID: botID, Name: strings.TrimSpace(name), Schedule: strings.TrimSpace(schedule), Prompt: prompt,
-		Enabled: enabled, NextFireAt: FormatTime(Now().Add(d)),
+		Enabled: enabled, NextFireAt: FormatTime(Now().Add(d)), Source: source,
 	}
-	_, err = s.db.Exec(`INSERT INTO timers(id, bot_id, name, schedule, prompt, enabled, next_fire_at) VALUES(?,?,?,?,?,?,?)`,
-		t.ID, t.BotID, t.Name, t.Schedule, t.Prompt, en, t.NextFireAt)
+	_, err = s.db.Exec(`INSERT INTO timers(id, bot_id, name, schedule, prompt, enabled, next_fire_at, source) VALUES(?,?,?,?,?,?,?,?)`,
+		t.ID, t.BotID, t.Name, t.Schedule, t.Prompt, en, t.NextFireAt, t.Source)
 	return t, err
+}
+
+func timerSource(source string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "user":
+		return "user", nil
+	case "bot":
+		return "bot", nil
+	default:
+		return "", fmt.Errorf("timer source must be user or bot")
+	}
 }
 
 func (s *Store) ListTimers(botID string) ([]Timer, error) {
@@ -1491,13 +1510,13 @@ func scanTimers(rows *sql.Rows) ([]Timer, error) {
 	return out, rows.Err()
 }
 
-const timerSelect = `SELECT id, bot_id, name, schedule, prompt, enabled, next_fire_at, last_fire_at FROM timers`
+const timerSelect = `SELECT id, bot_id, name, schedule, prompt, enabled, next_fire_at, last_fire_at, source FROM timers`
 
 func scanTimer(sc interface{ Scan(...any) error }) (Timer, error) {
 	var t Timer
 	var en int
 	var last sql.NullString
-	err := sc.Scan(&t.ID, &t.BotID, &t.Name, &t.Schedule, &t.Prompt, &en, &t.NextFireAt, &last)
+	err := sc.Scan(&t.ID, &t.BotID, &t.Name, &t.Schedule, &t.Prompt, &en, &t.NextFireAt, &last, &t.Source)
 	if err != nil {
 		return Timer{}, err
 	}

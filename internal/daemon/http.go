@@ -579,7 +579,7 @@ func (a *App) handleCreateTimer(w http.ResponseWriter, r *http.Request) {
 	if body.Enabled != nil {
 		enabled = *body.Enabled
 	}
-	t, err := a.st.CreateTimer(id, body.Name, body.Schedule, body.Prompt, enabled)
+	t, err := a.st.CreateTimer(id, body.Name, body.Schedule, body.Prompt, enabled, "user")
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
