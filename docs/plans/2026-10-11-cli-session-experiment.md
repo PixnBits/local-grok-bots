@@ -118,4 +118,14 @@ grok [-m MODEL] (--session-id ID | --resume ID) \
 - CLI turns are not under the 10-minute Ollama cap. Shutdown and cancel still stop them.
 - A timer fire posts the routine prompt, prefixed `[scheduled]` as before, and resumes that bot's session.
 
+## Runner notes (M2)
 
+Custom tools stay off MCP. The fresh-session prompt tells the model to emit a fenced block:
+
+```action
+{"tool":"send_dm","to":"Bot Name","content":"hello"}
+```
+
+The daemon parses `action` and `bot-action` fences, runs the existing daemon tools (DM, create/update bot, memory, timers, list/read), strips the fence from the stored reply, and writes the usual log rows. File and shell actions are rejected so the CLI's own tools stay in charge of the workspace. A follow-up resume happens only when an action failed, a reply was empty, or the action was `list_bots` / `read_bot`.
+
+A finished turn, a failed turn, or a result that asks for input sends a desktop notification. Linux uses `notify-send`. macOS uses `osascript` `display notification`. A missing notifier is ignored.

@@ -61,6 +61,7 @@ func newApp(t *testing.T, dir string, m model.Client) *App {
 	if err != nil {
 		t.Fatal(err)
 	}
+	app.notifyFn = func(string, string) {}
 	t.Cleanup(app.Shutdown)
 	return app
 }

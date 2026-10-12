@@ -53,6 +53,8 @@ type App struct {
 	idleAfter time.Duration
 	// imminent is how soon a timer must fire to spare a live CLI. Zero means 2 minutes.
 	imminent time.Duration
+	// notifyFn overrides desktop notifications. Nil uses the OS notifier.
+	notifyFn func(title, body string)
 	closing  bool
 	wg       sync.WaitGroup
 }
