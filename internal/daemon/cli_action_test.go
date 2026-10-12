@@ -139,6 +139,28 @@ func TestCLINeedsInputNotification(t *testing.T) {
 	}
 }
 
+func TestNotifyRedactsSecrets(t *testing.T) {
+	var body string
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{}, nil
+	}})
+	app.notifyFn = func(_, bo string) { body = bo }
+	app.runner = runnerFunc(func(_ context.Context, spec clisession.Spec, _ func(clisession.Event)) (clisession.Result, error) {
+		return clisession.Result{SessionID: spec.SessionID, Text: "done sk-abcdefghijklmnop API_KEY=hunter2"}, nil
+	})
+	srv := serve(t, app)
+	_, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{
+		"name": "Ada", "cli_backend": "grok",
+	}, "")
+	var bot store.Bot
+	decodeJSON(t, b, &bot)
+	do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]string{"content": "edit"}, "")
+	waitIdle(t, srv.URL, bot.ID, "")
+	if strings.Contains(body, "sk-abcdefghijklmnop") || strings.Contains(body, "hunter2") || !strings.Contains(body, "[redacted]") {
+		t.Fatalf("notify %q", body)
+	}
+}
+
 func TestCLIQueryFollowUp(t *testing.T) {
 	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
 		return model.ChatResponse{}, nil

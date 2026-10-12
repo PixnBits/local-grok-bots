@@ -7,6 +7,13 @@ import (
 
 var secretKeyRe = regexp.MustCompile(`(?i)(token|secret|password|passwd|api[_-]?key|authorization|credential|bearer)`)
 var secretValRe = regexp.MustCompile(`(?i)\b(?:sk-[a-z0-9]{8,}|ghp_[a-zA-Z0-9]{8,}|github_pat_[a-zA-Z0-9_]{8,}|bearer\s+[a-z0-9\-._~+/]+=*)`)
+var secretAssignRe = regexp.MustCompile(`(?i)(token|secret|password|passwd|api[_-]?key|authorization|credential|bearer)\s*[:=]\s*\S+`)
+
+// redactText hides token-shaped values and secret assignments in free text.
+func redactText(s string) string {
+	s = secretAssignRe.ReplaceAllString(s, "$1=[redacted]")
+	return secretValRe.ReplaceAllString(s, "[redacted]")
+}
 
 func redactValue(v any) any {
 	switch t := v.(type) {

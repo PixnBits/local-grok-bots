@@ -22,10 +22,12 @@ type Spec struct {
 
 // Event is one parsed CLI output line.
 type Event struct {
-	Kind       string // token, tool, end, error
-	Text       string
-	SessionID  string
-	ToolName   string
+	Kind      string // token, tool, end, error
+	Text      string
+	SessionID string
+	ToolName  string
+	// ToolArgs is the tool input from the CLI stream, when the event included it.
+	ToolArgs   map[string]any
 	StopReason string
 	NeedsInput bool
 	// Final means Text is the whole reply, not a delta.

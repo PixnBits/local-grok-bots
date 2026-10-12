@@ -78,7 +78,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID, backend stri
 				a.setCLIPID(bot.ID, pid)
 			}
 		}
-		res, streamed, err := a.runCLISpec(ctx, runID, runner, spec)
+		res, streamed, err := a.runCLISpec(ctx, bot.ID, runID, runner, spec)
 		if err != nil {
 			if ctx.Err() != nil {
 				a.finishInterrupted(bot.ID, runID, ctx)
@@ -131,7 +131,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID, backend stri
 	a.notifyTurn(bot.Name, lastText, needsInput)
 }
 
-func (a *App) runCLISpec(ctx context.Context, runID string, runner clisession.Runner, spec clisession.Spec) (clisession.Result, bool, error) {
+func (a *App) runCLISpec(ctx context.Context, botID, runID string, runner clisession.Runner, spec clisession.Spec) (clisession.Result, bool, error) {
 	var streamed bool
 	res, err := runner.Run(ctx, spec, func(ev clisession.Event) {
 		switch ev.Kind {
@@ -146,10 +146,16 @@ func (a *App) runCLISpec(ctx context.Context, runID string, runner clisession.Ru
 			if name == "" {
 				name = "tool"
 			}
+			args := ev.ToolArgs
+			if args == nil {
+				args = map[string]any{}
+			}
+			redacted := redactValue(args)
 			a.bus.Publish(runID, "status", map[string]any{"state": name, "text": name})
 			a.bus.Publish(runID, "tool_call", map[string]any{
-				"name": name, "arguments": map[string]any{},
+				"name": name, "arguments": redacted,
 			})
+			a.log(botID, "tool_start", map[string]any{"name": name, "arguments": redacted})
 		}
 	})
 	return res, streamed, err
@@ -201,11 +207,12 @@ func (a *App) notifyTurn(name, text string, needsInput bool) {
 	if body == "" {
 		body = "Finished"
 	}
+	body = clip(redactText(body), 180)
 	if a.notifyFn != nil {
-		a.notifyFn(title, clip(body, 180))
+		a.notifyFn(title, body)
 		return
 	}
-	notify.Send(title, clip(body, 180))
+	notify.Send(title, body)
 }
 
 func (a *App) failCLI(botID, runID, backend string, err error) {

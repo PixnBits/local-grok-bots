@@ -112,7 +112,7 @@ grok [-m MODEL] (--session-id ID | --resume ID) \
 
 ## Runner notes (M1)
 
-- `streaming-json` text events are published as SSE `token` frames. Tool calls are published as `tool_call`. When the stream has no text deltas, the final reply is one token so the page still moves.
+- `streaming-json` text events are published as SSE `token` frames. Tool calls are published as `tool_call` with redacted arguments, and the same arguments are written to the log. When the stream has no text deltas, the final reply is one token so the page still moves.
 - The stored reply prefers the final structured `text` when the CLI sends one. Deltas are the live view only.
 - A live CLI is killed after 30 minutes from the last user message or turn start, unless a timer fires within 2 minutes. The process group is killed. `session_id` stays. The next message or timer uses `--resume`.
 - CLI turns are not under the 10-minute Ollama cap. Shutdown and cancel still stop them.
@@ -128,7 +128,7 @@ Custom tools stay off MCP. The fresh-session prompt tells the model to emit a fe
 
 The daemon parses `action` and `bot-action` fences, runs memory, clear-timer, and list/read actions, strips the fence from the stored reply, and writes the usual log rows. `create_bot`, `update_bot`, `send_dm`, and `set_timer` are refused: the user does those from the page. File and shell actions are rejected so the CLI's own tools stay in charge of the workspace. A follow-up resume happens only when an action failed, a reply was empty, or the action was `list_bots` / `read_bot`.
 
-A finished turn, a failed turn, or a result that asks for input sends a desktop notification. Linux uses `notify-send`. macOS uses `osascript` `display notification`. A missing notifier is ignored.
+A finished turn, a failed turn, or a result that asks for input sends a desktop notification. The body is redacted before it is sent. Linux uses `notify-send`. macOS uses `osascript` `display notification`. A missing notifier is ignored.
 
 ## Runner notes (M3)
 

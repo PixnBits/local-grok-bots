@@ -84,6 +84,21 @@ func TestParseClaudeStream(t *testing.T) {
 	}
 }
 
+func TestParseToolArguments(t *testing.T) {
+	ev, ok := Parse(`{"type":"tool_call","toolName":"bash","arguments":{"command":"ls","api_key":"hunter2"}}`)
+	if !ok || ev.Kind != "tool" || ev.ToolName != "bash" || ev.ToolArgs["command"] != "ls" || ev.ToolArgs["api_key"] != "hunter2" {
+		t.Fatalf("%+v ok=%v", ev, ok)
+	}
+	ev, ok = Parse(`{"type":"tool_call","name":"bash","args":"{\"command\":\"pwd\"}"}`)
+	if !ok || ev.ToolArgs["command"] != "pwd" {
+		t.Fatalf("string args %+v ok=%v", ev, ok)
+	}
+	ev, ok = Parse(`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}`)
+	if !ok || ev.ToolName != "Bash" || ev.ToolArgs["command"] != "ls" {
+		t.Fatalf("claude %+v ok=%v", ev, ok)
+	}
+}
+
 func TestParseError(t *testing.T) {
 	ev, ok := Parse(`{"type":"error","message":"Couldn't start session: missing"}`)
 	if !ok || ev.Kind != "error" || ev.Text == "" {

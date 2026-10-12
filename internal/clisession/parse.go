@@ -48,7 +48,7 @@ func Parse(line string) (Event, bool) {
 		return Event{Kind: "error", Text: msg, SessionID: session}, true
 	case "tool_call":
 		name := firstString(raw, "toolName", "tool", "name", "title")
-		return Event{Kind: "tool", ToolName: name, SessionID: session}, true
+		return Event{Kind: "tool", ToolName: name, ToolArgs: toolArgs(raw), SessionID: session}, true
 	case "stream_event":
 		text := claudeTextDelta(raw["event"])
 		if text == "" {
@@ -59,8 +59,8 @@ func Parse(line string) (Event, bool) {
 		}
 		return Event{Kind: "token", Text: text, SessionID: session}, true
 	case "assistant":
-		if name := claudeToolName(raw["message"]); name != "" {
-			return Event{Kind: "tool", ToolName: name, SessionID: session}, true
+		if name, args := claudeTool(raw["message"]); name != "" {
+			return Event{Kind: "tool", ToolName: name, ToolArgs: args, SessionID: session}, true
 		}
 		if session == "" {
 			return Event{}, false
@@ -108,14 +108,14 @@ func claudeTextDelta(v any) string {
 	return s
 }
 
-func claudeToolName(v any) string {
+func claudeTool(v any) (string, map[string]any) {
 	m, ok := v.(map[string]any)
 	if !ok {
-		return ""
+		return "", nil
 	}
 	content, ok := m["content"].([]any)
 	if !ok {
-		return ""
+		return "", nil
 	}
 	for _, item := range content {
 		block, ok := item.(map[string]any)
@@ -126,11 +126,38 @@ func claudeToolName(v any) string {
 		if typ != "tool_use" {
 			continue
 		}
-		if name, _ := block["name"].(string); name != "" {
-			return name
+		name, _ := block["name"].(string)
+		if name == "" {
+			continue
+		}
+		return name, toolArgs(block)
+	}
+	return "", nil
+}
+
+func toolArgs(raw map[string]any) map[string]any {
+	for _, key := range []string{"arguments", "args", "input", "parameters"} {
+		if m := asMap(raw[key]); m != nil {
+			return m
+		}
+		s, ok := raw[key].(string)
+		if !ok || strings.TrimSpace(s) == "" {
+			continue
+		}
+		var m map[string]any
+		if json.Unmarshal([]byte(s), &m) == nil {
+			return m
 		}
 	}
-	return ""
+	return nil
+}
+
+func asMap(v any) map[string]any {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return m
 }
 
 func dataString(v any) string {

@@ -22,7 +22,9 @@ func TestCLIStreamsTokens(t *testing.T) {
 		if onEvent != nil {
 			onEvent(clisession.Event{Kind: "token", Text: "He"})
 			onEvent(clisession.Event{Kind: "token", Text: "llo"})
-			onEvent(clisession.Event{Kind: "tool", ToolName: "read_file"})
+			onEvent(clisession.Event{Kind: "tool", ToolName: "read_file", ToolArgs: map[string]any{
+				"command": "echo sk-abcdefghijklmnop", "api_key": "hunter2",
+			}})
 		}
 		return clisession.Result{SessionID: spec.SessionID, Text: "Hello!"}, nil
 	})
@@ -72,8 +74,25 @@ func TestCLIStreamsTokens(t *testing.T) {
 	if !strings.Contains(tokens, "He") || !strings.Contains(tokens, "llo") {
 		t.Fatalf("tokens %q", tokens)
 	}
-	if !strings.Contains(tools, "read_file") {
+	if !strings.Contains(tools, "read_file") || !strings.Contains(tools, "[redacted]") {
 		t.Fatalf("tools %q", tools)
+	}
+	if strings.Contains(tools, "sk-abcdefghijklmnop") || strings.Contains(tools, "hunter2") {
+		t.Fatalf("tools leaked %q", tools)
+	}
+	var logged bool
+	for _, e := range logKind(t, srv.URL, "tool_start") {
+		detail := string(e.Detail)
+		if !strings.Contains(detail, "read_file") {
+			continue
+		}
+		logged = true
+		if strings.Contains(detail, "sk-abcdefghijklmnop") || strings.Contains(detail, "hunter2") || !strings.Contains(detail, "[redacted]") {
+			t.Fatalf("log %s", detail)
+		}
+	}
+	if !logged {
+		t.Fatal("tool_start was not logged")
 	}
 	thread := botThread(t, srv.URL, bot.ID)
 	var replies []string
