@@ -49,12 +49,88 @@ func Parse(line string) (Event, bool) {
 	case "tool_call":
 		name := firstString(raw, "toolName", "tool", "name", "title")
 		return Event{Kind: "tool", ToolName: name, SessionID: session}, true
+	case "stream_event":
+		text := claudeTextDelta(raw["event"])
+		if text == "" {
+			if session == "" {
+				return Event{}, false
+			}
+			return Event{Kind: "meta", SessionID: session}, true
+		}
+		return Event{Kind: "token", Text: text, SessionID: session}, true
+	case "assistant":
+		if name := claudeToolName(raw["message"]); name != "" {
+			return Event{Kind: "tool", ToolName: name, SessionID: session}, true
+		}
+		if session == "" {
+			return Event{}, false
+		}
+		return Event{Kind: "meta", SessionID: session}, true
+	case "system":
+		if firstString(raw, "subtype") == "permission_denied" {
+			tool := firstString(raw, "tool")
+			if tool == "" {
+				tool = "permission_denied"
+			}
+			return Event{Kind: "tool", ToolName: tool, SessionID: session}, true
+		}
+		if session == "" {
+			return Event{}, false
+		}
+		return Event{Kind: "meta", SessionID: session}, true
+	case "user":
+		if session == "" {
+			return Event{}, false
+		}
+		return Event{Kind: "meta", SessionID: session}, true
 	default:
 		if session != "" {
-			return Event{Kind: "end", SessionID: session, StopReason: stop}, true
+			return Event{Kind: "meta", SessionID: session, StopReason: stop}, true
 		}
 		return Event{}, false
 	}
+}
+
+func claudeTextDelta(v any) string {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return ""
+	}
+	delta, ok := m["delta"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	typ, _ := delta["type"].(string)
+	if typ != "" && typ != "text_delta" {
+		return ""
+	}
+	s, _ := delta["text"].(string)
+	return s
+}
+
+func claudeToolName(v any) string {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return ""
+	}
+	content, ok := m["content"].([]any)
+	if !ok {
+		return ""
+	}
+	for _, item := range content {
+		block, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		typ, _ := block["type"].(string)
+		if typ != "tool_use" {
+			continue
+		}
+		if name, _ := block["name"].(string); name != "" {
+			return name
+		}
+	}
+	return ""
 }
 
 func dataString(v any) string {

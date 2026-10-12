@@ -50,7 +50,11 @@ func Args(spec Spec) ([]string, error) {
 		}
 		return append([]string{bin}, grokFlags(spec)...), nil
 	case "claude":
-		return nil, fmt.Errorf("claude backend is not implemented yet")
+		bin := spec.Bin
+		if bin == "" {
+			bin = "claude"
+		}
+		return append([]string{bin}, claudeFlags(spec)...), nil
 	default:
 		return nil, fmt.Errorf("unknown cli backend %q", spec.Backend)
 	}
@@ -75,6 +79,30 @@ func grokFlags(spec Spec) []string {
 		"--output-format", "streaming-json",
 		"--always-approve",
 		"--no-auto-update",
+	)
+	return args
+}
+
+// claudeFlags is the Claude Code headless equivalent. Sessions are JSONL
+// transcripts under ~/.claude/projects/, resumed by id. --session-id must be
+// a UUID; the daemon's ids are. There is no --sandbox workspace flag, so the
+// process cwd is the shared workspace and permission prompts are bypassed.
+func claudeFlags(spec Spec) []string {
+	var args []string
+	if spec.Model != "" {
+		args = append(args, "--model", spec.Model)
+	}
+	if !spec.Fresh && spec.SessionID != "" {
+		args = append(args, "--resume", spec.SessionID)
+	} else if spec.SessionID != "" {
+		args = append(args, "--session-id", spec.SessionID)
+	}
+	args = append(args,
+		"-p", spec.Prompt,
+		"--output-format", "stream-json",
+		"--verbose",
+		"--include-partial-messages",
+		"--permission-mode", "bypassPermissions",
 	)
 	return args
 }

@@ -107,7 +107,7 @@ grok [-m MODEL] (--session-id ID | --resume ID) \
 - Auth stays in the CLI (`grok login`, or `XAI_API_KEY` in the environment the CLI already uses). The daemon does not read or store keys.
 - `CLI_BACKEND` (`grok`, `claude`, or empty) is the default for a new bot. The bot column `cli_backend` is `grok`, `claude`, `ollama`, or empty. Empty and `ollama` keep the Ollama loop. Changing backend clears `session_id`.
 - Shared cwd is `DATA_DIR/workspace`. No per-bot directory and no `--worktree`.
-- The Claude adapter is not wired yet.
+- Claude uses the flags in the M3 notes below.
 - If a fresh start fails before the CLI reports a session id, the stored id is cleared so the next turn can create another session.
 
 ## Runner notes (M1)
@@ -129,3 +129,39 @@ Custom tools stay off MCP. The fresh-session prompt tells the model to emit a fe
 The daemon parses `action` and `bot-action` fences, runs the existing daemon tools (DM, create/update bot, memory, timers, list/read), strips the fence from the stored reply, and writes the usual log rows. File and shell actions are rejected so the CLI's own tools stay in charge of the workspace. A follow-up resume happens only when an action failed, a reply was empty, or the action was `list_bots` / `read_bot`.
 
 A finished turn, a failed turn, or a result that asks for input sends a desktop notification. Linux uses `notify-send`. macOS uses `osascript` `display notification`. A missing notifier is ignored.
+
+## Runner notes (M3)
+
+Claude Code is the other backend. Same daemon path: one headless process per turn, session id stored on the bot, resume on the next event.
+
+```
+claude [--model MODEL] (--session-id UUID | --resume UUID) \
+  -p PROMPT \
+  --output-format stream-json \
+  --verbose \
+  --include-partial-messages \
+  --permission-mode bypassPermissions
+```
+
+The process working directory is the shared workspace. Claude has no `--sandbox workspace` flag in this adapter. `--permission-mode bypassPermissions` is the stand-in for `--always-approve`. Older builds accept `--dangerously-skip-permissions` as the same switch; this adapter passes the permission-mode form. Auth stays in `claude` (`claude` login or `ANTHROPIC_API_KEY`). The daemon does not read keys.
+
+Session transcripts are JSONL files under `~/.claude/projects/` (keyed by project directory). `--session-id` must be a UUID. Bot ids from this daemon already are. `stream-json` text deltas (`stream_event` / `text_delta`) are SSE tokens. The stored reply prefers the final `result` string. Assistant tool-use blocks show up as tool lines. A `permission_denied` system event is a tool line, not a failure of the whole turn.
+
+### Measured behaviour and deviations
+
+- Default backend is still Ollama. Set `CLI_BACKEND=grok` or `claude`, or set `cli_backend` on the bot. Empty and `ollama` keep the HTTP client and the workspace jail.
+- Changing `cli_backend` clears `session_id`. The next turn starts a new CLI session and sends the preamble again.
+- Fresh Grok sessions use `--session-id`, not `--resume`. `--resume` is only for an id the CLI has already created.
+- CLI turns are not under the 10-minute Ollama cap. They stop on shutdown, cancel, or 30 minutes after the last user message or turn start. A timer due within 2 minutes keeps a live process.
+- The idle kill is a process-group kill. The session files stay. The next user message, DM, or timer resumes.
+- Timers are still daemon-owned. The fired prompt is prefixed `[scheduled]`.
+- Meta tools are fenced JSON in the reply, not MCP and not shell wrappers. The stored thread message has the fence removed. The live SSE stream can still show the fence for a moment, because tokens are forwarded as they arrive.
+- A follow-up resume with the action results happens only when the action failed, the visible reply was empty, or the action was `list_bots` or `read_bot`. Otherwise one CLI process handles the turn.
+- File, shell, and search stay on the CLI's own tools. The daemon jail is only the Ollama path.
+- All CLI bots share `DATA_DIR/workspace`. A `CLAUDE.md` or Grok rules file in that directory is visible to every bot. There is no per-bot worktree.
+- Desktop notification is best-effort after the turn is stored. Linux: `notify-send`. macOS: `osascript`. Other platforms and a missing binary do nothing.
+- No API keys are written by the daemon. Do not commit `~/.grok` or `~/.claude`.
+
+
+
+

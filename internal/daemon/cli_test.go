@@ -109,3 +109,34 @@ func TestCLIBackendRejected(t *testing.T) {
 		t.Fatalf("create %d %s", res.StatusCode, b)
 	}
 }
+
+func TestClaudeBackendReachesRunner(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		t.Errorf("ollama was called")
+		return model.ChatResponse{}, nil
+	}})
+	var got clisession.Spec
+	app.runner = runnerFunc(func(_ context.Context, spec clisession.Spec, _ func(clisession.Event)) (clisession.Result, error) {
+		got = spec
+		return clisession.Result{SessionID: spec.SessionID, Text: "from claude"}, nil
+	})
+	srv := serve(t, app)
+	_, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{
+		"name": "Ada", "cli_backend": "claude",
+	}, "")
+	var bot store.Bot
+	decodeJSON(t, b, &bot)
+	do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]string{"content": "hi"}, "")
+	waitIdle(t, srv.URL, bot.ID, "")
+	if got.Backend != "claude" || !got.Fresh || got.SessionID == "" || !strings.Contains(got.Prompt, "hi") {
+		t.Fatalf("spec %+v", got)
+	}
+	res, b := do(t, "GET", srv.URL+"/api/bots/"+bot.ID, nil, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("get %d %s", res.StatusCode, b)
+	}
+	decodeJSON(t, b, &bot)
+	if bot.CLIBackend != "claude" || bot.SessionID != got.SessionID {
+		t.Fatalf("bot %#v", bot)
+	}
+}

@@ -48,9 +48,40 @@ func TestGrokFreshSessionUsesSessionID(t *testing.T) {
 	}
 }
 
-func TestClaudeStub(t *testing.T) {
-	_, err := Args(Spec{Backend: "claude", Prompt: "hi"})
-	if err == nil || !strings.Contains(err.Error(), "not implemented") {
-		t.Fatalf("err %v", err)
+func TestClaudeFlags(t *testing.T) {
+	argv, err := Args(Spec{
+		Backend: "claude", SessionID: "550e8400-e29b-41d4-a716-446655440000", Fresh: false,
+		Prompt: "hello", Workspace: "/work/shared", Model: "sonnet",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"claude",
+		"--model", "sonnet",
+		"--resume", "550e8400-e29b-41d4-a716-446655440000",
+		"-p", "hello",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--include-partial-messages",
+		"--permission-mode", "bypassPermissions",
+	}
+	if strings.Join(argv, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("argv %q", argv)
+	}
+	fresh, err := Args(Spec{
+		Backend: "claude", SessionID: "550e8400-e29b-41d4-a716-446655440000", Fresh: true,
+		Prompt: "hi", Workspace: "/work",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh[1] != "--session-id" || fresh[2] != "550e8400-e29b-41d4-a716-446655440000" {
+		t.Fatalf("fresh %q", fresh)
+	}
+	for _, a := range fresh {
+		if a == "--resume" {
+			t.Fatal("fresh turn must not pass --resume")
+		}
 	}
 }

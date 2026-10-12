@@ -14,6 +14,7 @@ go build -o local-grok-bots ./cmd/local-grok-bots
 | `DATA_DIR` | `./data` | Directory for `state.db` and `workspace/` |
 | `OLLAMA_URL` | `http://127.0.0.1:11434` | Local Ollama HTTP API |
 | `OLLAMA_MODEL` | `llama3.2` | Model used when a bot has no override. Set this to a model you have pulled. |
+| `CLI_BACKEND` | unset | Default for a new bot: `grok`, `claude`, or empty. Empty and `ollama` call Ollama. |
 | `BIND_ADDR` | `0.0.0.0:8080` | Address the daemon listens on |
 | `AUTH_TOKEN` | unset | If set, every route except `GET /api/health` requires `Authorization: Bearer <token>` |
 | `SANDBOX_BUILD_BINDS` | unset | Colon-separated absolute paths. With the `build` grant, each path is a read-only bind in the shell jail. |
@@ -26,6 +27,47 @@ data/workspace/    the only tree bots may read, write, or shell in
 ```
 
 `state.db` is SQLite in WAL mode. Names are unique case-insensitively; threads stay attached to the bot id across renames.
+
+## CLI sessions
+
+A bot with `cli_backend` `grok` or `claude` does not call Ollama. The daemon spawns that CLI in `workspace/`, one headless process per turn, and stores the CLI session id on the bot. The next message, DM, or timer resumes the same session. Auth is the CLI's (`grok login` or `claude` login). This daemon does not store API keys.
+
+```bash
+# new bots use Grok unless they set cli_backend
+CLI_BACKEND=grok ./local-grok-bots
+```
+
+Per bot, `POST /api/bots` and `PATCH /api/bots/{id}` accept `cli_backend`: `grok`, `claude`, `ollama`, or `""`. Changing it clears the session id.
+
+Grok:
+
+```bash
+grok --session-id ID -p PROMPT --sandbox workspace --cwd workspace \
+  --output-format streaming-json --always-approve --no-auto-update
+```
+
+Later turns pass `--resume ID` instead of `--session-id`. Session files stay in `~/.grok/sessions/`.
+
+Claude Code:
+
+```bash
+claude --session-id UUID -p PROMPT --output-format stream-json --verbose \
+  --include-partial-messages --permission-mode bypassPermissions
+```
+
+The process working directory is the shared workspace. Claude sessions are JSONL files under `~/.claude/projects/`. There is no per-bot directory and no worktree. A rules file in the workspace is visible to every bot.
+
+The CLI process is killed after 30 minutes without a user message or a new turn, unless a timer is due within 2 minutes. The session file remains. Timers are still scheduled here; the prompt is prefixed `[scheduled]`.
+
+DMs, create/update bot, memory, and timers are not MCP tools. The model puts a fenced block in its reply and the daemon runs it, then strips the fence:
+
+```action
+{"tool":"send_dm","to":"Ada","content":"hello"}
+```
+
+File and shell work stays on the CLI. When a turn finishes, or the CLI asks for input, the daemon tries `notify-send` on Linux and `osascript` on macOS. If that tool is missing, the turn still completes.
+
+Bots left on Ollama keep the HTTP client and the workspace jail below.
 
 ## Workspace
 
