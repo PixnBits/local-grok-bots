@@ -7,71 +7,84 @@ That commit introduces the Go daemon with SQLite persistence (bots, threads, DMs
 
 ## Goal
 
-Treat each bot as a durable session in the Grok CLI (preferred) or Claude Code CLI. The CLI supplies the model loop, tools, and sandbox. The daemon remains the source of truth for the roster, timers, log, web UI, and message queue. Timers and idle handling use session resumption so the CLI process does not need to stay alive forever.
+Treat each bot as a durable session in the Grok CLI or Claude Code CLI (configurable). The CLI supplies the model loop, tools, and sandbox. The daemon remains the source of truth for the roster, timers, log, web UI, and message queue. Timers and idle handling use session resumption so the CLI process does not need to stay alive forever.
+
+## Decisions (from user)
+
+- **CLIs:** Grok and Claude only. Configurable which backend per bot (or globally). Handle the nuances of each (flag differences, session store paths, sandbox profiles, output formats, permission models).
+- **Idle timeout:** 30 minutes of no user message and no imminent timer → kill process. Resume on next event.
+- **Filesystem:** Shared user filesystem for all bots. No per-bot private directories or worktrees. CLI sandbox still applies (prefer `--sandbox workspace` or equivalent; document how shared access is constrained).
+- **Custom tools:** No MCP. Handle bot-to-bot DM, create/update bot, memory, and timer coordination without an MCP server. Options: daemon-side injection of context into the prompt, post-processing of CLI tool results, or thin shell wrappers the CLI can call that talk back to the daemon over a local socket/HTTP. Prefer the simplest that preserves the existing tool surface from the 846d81 slice.
+- **Auth:** Handled entirely by the CLIs (`grok login` / `claude` auth). Daemon does not manage keys or sessions.
+- **Concurrency:** No artificial limits. Daemon can spawn multiple CLI processes as needed.
+- **Output / UX / reliability:** Support both batch JSON and streaming-json (or equivalent). Streaming for live user experience and SSE token updates; batch or structured events for reliable interrupt handling, recovery, and session continuity. Design the runner to tolerate process kill/restart mid-stream via session resumption.
+- **OS notifications:** When a bot finishes a turn or is requesting user input, emit a native desktop notification on Linux and macOS.
+  - Linux: `notify-send` (libnotify / D-Bus).
+  - macOS: `osascript -e 'display notification "..." with title "..."'`.
+  - Daemon detects platform and calls the appropriate command after capturing the CLI reply (or on a "needs input" signal if the CLI exposes one). Fail open if the notifier is missing.
 
 ## Recommended Architecture
 
 - **Daemon (source of truth)**
   - Owns bots, threads, timers, log, web UI, message queue (as in the 846d81 slice).
-  - Stores per-bot `session_id` and private working directory.
-  - Owns the clock: schedules timer fires and idle kill decisions.
+  - Stores per-bot `session_id` and chosen CLI backend (grok | claude).
+  - Owns the clock: schedules timer fires and the 30-minute idle kill.
+  - Emits OS notifications on turn complete or input requested.
 
 - **Per-bot session**
-  - One Grok CLI session ID (or Claude equivalent).
-  - Private cwd: `data/workspace/<bot-id>/` (or git worktree).
-  - Native CLI sandbox (`--sandbox workspace` or equivalent).
+  - One CLI session ID (Grok or Claude).
+  - Shared user filesystem / workspace. CLI sandbox profile still applied.
+  - Native CLI sandbox (`--sandbox workspace` for Grok; Claude equivalent).
 
 - **Turn flow**
   1. User message or timer fire arrives.
-  2. If no live process, spawn:
+  2. If no live process, spawn headless (example for Grok):
      ```
      grok --resume <session_id> \
           -p "<prompt>" \
           --sandbox workspace \
-          --cwd <bot-dir> \
-          --output-format json \
+          --cwd <shared-workspace> \
+          --output-format streaming-json \
           --always-approve \
           --no-auto-update
      ```
-  3. Capture structured output, persist bot reply to SQLite thread, emit via SSE.
-  4. After N minutes of idle (no user message, no imminent timer), kill the process. Session state remains on disk.
+     Claude equivalent with its flags. Capture both streaming events (for SSE) and final structured result.
+  3. Persist bot reply to SQLite thread, emit via SSE.
+  4. If the turn ends or requests input, send OS notification.
+  5. After 30 minutes of idle, kill the process. Session state remains on disk.
 
 - **Timers**
-  - Daemon scheduler is authoritative (unchanged from 846d81).
+  - Daemon scheduler is authoritative.
   - On fire: resume the session with the routine prompt.
-  - Optional pre-wake a short time before fire so the process is warm.
+  - Optional short pre-wake before fire.
 
-- **Custom tools (DM, create/update bot, set_timer, memory)**
-  - Preferred: small local MCP or HTTP endpoint that the CLI can call.
-  - Alternative: daemon injects context or post-processes tool results.
-  - Lean into CLI-native tools for file/shell/search where possible. The existing workspace tools in the daemon can be retired or kept as fallback.
+- **Custom tools (no MCP)**
+  - Daemon injects relevant context (other bots, memory snippets) into the prompt or system rules.
+  - Or: CLI tools that are thin wrappers (e.g. a `local-grok-bots-dm` binary) which the model can call; they hit a local daemon endpoint.
+  - Lean on CLI-native file/shell/search tools. Existing daemon workspace tools can be retired or kept as fallback.
 
-## Why Grok CLI
+## Why both CLIs
 
-- Sessions persist on disk under `~/.grok/sessions/` and resume cleanly after process exit via `--resume` / `-c`.
-- Headless mode (`-p --output-format json`) returns `sessionId` for chaining.
-- First-class sandbox profiles (workspace, read-only, strict); profile is fixed for the life of the session.
-- Theme alignment with "Grok Bot".
-- `/loop` exists but is session-scoped; the daemon should still own durable scheduling.
+- Configurable backend lets the experiment compare Grok vs Claude session behaviour, sandbox strength, and recovery characteristics on the same daemon.
+- Both support durable sessions, `--resume` / `-c` / `-r`, headless `-p`, and structured output.
+- Nuances (session path, sandbox flags, permission defaults, `/loop` quirks) are handled in the runner, not exposed to the user.
 
-Claude Code is a viable alternative (`claude -p --resume <id>`, similar persistence). Make the backend configurable.
+## Open items (narrowed)
 
-## Open Questions
-
-1. Idle timeout default (e.g. 15 min)?
-2. Strict per-bot filesystem isolation (private dirs/worktrees) or shared workspace?
-3. Auth on the always-on box: `XAI_API_KEY` in the daemon environment, or shared `grok login`?
-4. How much of the custom tool surface (bot-to-bot DM, meta-bot, memory) must be preserved vs. leaning fully on CLI tools + thin coordination MCP?
-5. Concurrent turns and resource limits (CPU/RAM on the Framework Desktop)?
-6. Should long-lived processes be kept for high-activity bots, or always prefer spawn/resume?
+- Exact mechanism for custom coordination tools without MCP (injection vs thin wrappers).
+- How to detect "requesting user input" reliably from both CLIs (structured event, exit code, or prompt pattern).
+- Streaming interruption recovery details (what is replayed on resume).
 
 ## Recommendations
 
-- High confidence for a docs-only experiment on this branch.
-- Prefer Grok CLI headless + `--resume` + `--sandbox workspace`.
-- Keep daemon as orchestrator and clock owner (as designed in 846d81).
-- Isolate bots with private cwds + CLI sandbox.
-- Implement custom coordination tools via a small MCP server exposed to the CLI.
-- Document deviations from the Ollama + custom sandbox design in this plan.
+- High confidence to proceed with the experiment on this branch.
+- Configurable Grok | Claude backend; handle flag and store differences in the runner.
+- 30-minute idle kill + resume.
+- Shared user filesystem + CLI sandbox profile.
+- No MCP; use prompt injection or thin local wrappers for meta tools.
+- Auth left to the CLIs.
+- Support both streaming-json (UX) and final structured capture (reliability).
+- Add platform-native OS notifications on finish or input request.
+- Document deviations from the Ollama + custom sandbox design here.
 
-This is an experiment. Implementation can land incrementally once the open questions are answered. The 846d81 daemon provides a solid base to swap the model client and sandbox for CLI sessions.
+Implementation can land incrementally. The 846d81 daemon provides a solid base to swap the model client and sandbox for CLI sessions while keeping the rest of the shape.
