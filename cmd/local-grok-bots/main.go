@@ -16,6 +16,10 @@ func main() {
 	if sandbox.HandleArgs(os.Args[1:]) {
 		return
 	}
+	if err := refuseRoot(os.Geteuid()); err != nil {
+		fmt.Fprintln(os.Stderr, "local-grok-bots:", err)
+		os.Exit(1)
+	}
 	cfg := config.FromEnv()
 	app, err := daemon.New(cfg, nil)
 	if err != nil {
@@ -29,4 +33,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "local-grok-bots:", err)
 		os.Exit(1)
 	}
+}
+
+// refuseRoot rejects a root daemon. The system unit sets User=local-grok-bots.
+func refuseRoot(euid int) error {
+	if euid == 0 {
+		return fmt.Errorf("refusing to run as root; run as the local-grok-bots user")
+	}
+	return nil
 }

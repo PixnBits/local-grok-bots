@@ -30,7 +30,9 @@ data/workspace/    the only tree bots may read, write, or shell in
 
 ## CLI sessions
 
-A bot with `cli_backend` `grok` or `claude` does not call Ollama. The daemon spawns that CLI in `workspace/`, one headless process per turn, and stores the CLI session id on the bot. The next message, DM, or timer resumes the same session. Auth is the CLI's (`grok login` or `claude` login). This daemon does not store API keys.
+A bot with `cli_backend` `grok` or `claude` does not call Ollama. The daemon spawns that CLI in `workspace/`, one headless process per turn, and stores the CLI session id on the bot. The next message, DM, or timer resumes the same session. Auth is the CLI's (`grok login` or `claude` login) under the daemon user's `~/.grok` or `~/.claude`. This daemon does not store API keys, and it does not pass `XAI_API_KEY` or `ANTHROPIC_API_KEY` through the environment.
+
+The CLI process is wrapped in bubblewrap. The workspace is bind-mounted at its host path. The only home paths mounted are `~/.grok`, `~/.claude`, and `~/.claude.json` when that file exists, and they appear under `/lgb-home`. The child environment is cleared, so an SSH agent socket is not inherited. `bwrap` is required; the turn fails closed when it is missing. Network stays open so the CLI can reach its model API. On kernels that block nested user namespaces, `grok --sandbox workspace` may be unable to start a second sandbox inside this jail. `--always-approve` and Claude's permission bypass stay on because a headless turn cannot prompt. The daemon refuses to start as root.
 
 ```bash
 # new bots use Grok unless they set cli_backend
@@ -84,12 +86,15 @@ To give a bot material, copy or mount it into `workspace/`. The shell PATH inclu
 `deploy/local-grok-bots.service` is a system unit. It is not installed by this repo.
 
 ```bash
+sudo useradd --system --create-home --home-dir /var/lib/local-grok-bots --shell /usr/sbin/nologin local-grok-bots
+sudo chown -R local-grok-bots:local-grok-bots /var/lib/local-grok-bots
 sudo install -m 755 local-grok-bots /usr/local/bin/local-grok-bots
-sudo install -d /var/lib/local-grok-bots
 sudo cp deploy/local-grok-bots.service /etc/systemd/system/local-grok-bots.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now local-grok-bots
 ```
+
+The unit sets `User=local-grok-bots` and `ProtectHome=true`. The service home is `/var/lib/local-grok-bots`, so `ProtectHome` does not hide it. Log the CLIs in once as that user (`sudo -u local-grok-bots -- grok login`, and the same for `claude`) so session files and credentials stay in that home. `bwrap` must be installed on the host.
 
 Set `OLLAMA_MODEL` in the installed unit to a model `ollama list` actually shows. Add `After=ollama.service` and `Wants=ollama.service` if that unit exists, so the first boot does not race Ollama.
 

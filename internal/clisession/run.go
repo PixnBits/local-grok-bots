@@ -36,9 +36,9 @@ func (ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Resu
 		}
 		path = looked
 	}
-	cmd := exec.Command(path, argv[1:]...)
-	if spec.Workspace != "" {
-		cmd.Dir = spec.Workspace
+	cmd, err := confinedCommand(path, argv[1:], spec.Workspace)
+	if err != nil {
+		return Result{}, err
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	stdout, err := cmd.StdoutPipe()
