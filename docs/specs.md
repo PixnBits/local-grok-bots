@@ -2,7 +2,7 @@
 
 Contracts the daemon and the web page share. The PRD is the target; this is what each side implements so the other can be built against it.
 
-Personal use, one machine, no auth required if the daemon binds on the LAN. A shared-secret header is the only optional gate, and it must not change the routes.
+Personal use, one machine. The default bind is loopback and needs no token. A non-loopback bind requires `AUTH_TOKEN`. The shared secret does not change the routes.
 
 ## 1. Data model
 
@@ -134,7 +134,7 @@ SSE events on the stream:
 
 `POST .../messages` never blocks on the model. It persists the user message and returns. If a run starts, `run_id` is set. If the bot is already running, `run_id` may be null or may be the existing run; the message is still persisted and will be seen.
 
-Optional gate: if `AUTH_TOKEN` is set in the daemon environment, require `Authorization: Bearer <token>` on every route except `/api/health`. Same routes either way. The HTML page is still served on an unauthenticated `GET /` so the client can collect the token; API calls then 401 until it is set.
+Optional gate on loopback: if `AUTH_TOKEN` is set in the daemon environment, require `Authorization: Bearer <token>` on every route except `/api/health`. A non-loopback `BIND_ADDR` refuses to start until that token is set. Same routes either way. The HTML page is still served on an unauthenticated `GET /` so the client can collect the token; API calls then 401 until it is set.
 
 ## 3. Turn and queue semantics
 
@@ -238,7 +238,7 @@ The page is a client. Refreshing reloads from the daemon. Four surfaces. The con
 ## 8. Process
 
 - Daemon starts on boot via a systemd user or system unit.
-- Binds on the LAN (or localhost behind a reverse proxy already trusted). No public exposure required. Plain HTTP is fine.
+- Binds on `127.0.0.1` by default. A LAN or other non-loopback address requires `AUTH_TOKEN`. No public exposure. Plain HTTP is fine on loopback.
 - Default model is the local Ollama endpoint, overridable by `OLLAMA_MODEL` and per bot. If Ollama is down, runs fail with a clear log line and do not hang.
 - Clean shutdown writes `daemon_stop`. Crash does not; the next start writes `daemon_start` and reconciles runs as above.
 - `bwrap` or `unshare` must be usable for `run_shell`. Missing, the tool fails; the daemon still serves.

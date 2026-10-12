@@ -60,6 +60,9 @@ type App struct {
 }
 
 func New(cfg config.Config, m model.Client) (*App, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	st, err := store.Open(cfg.DBPath())
 	if err != nil {
 		return nil, err

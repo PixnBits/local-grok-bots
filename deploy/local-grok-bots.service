@@ -11,9 +11,10 @@ ExecStart=/usr/local/bin/local-grok-bots
 WorkingDirectory=/var/lib/local-grok-bots
 Environment=HOME=/var/lib/local-grok-bots
 Environment=DATA_DIR=/var/lib/local-grok-bots
-Environment=BIND_ADDR=0.0.0.0:8080
+Environment=BIND_ADDR=127.0.0.1:8080
 Environment=OLLAMA_URL=http://127.0.0.1:11434
 Environment=OLLAMA_MODEL=llama3.2
+# Required when BIND_ADDR is not loopback.
 # Environment=AUTH_TOKEN=replace-me
 NoNewPrivileges=true
 PrivateTmp=true

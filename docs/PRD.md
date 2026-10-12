@@ -20,7 +20,7 @@ Models run locally (Ollama or equivalent on the same box). No weekly token pool,
 
 - Not Hermes, not Claw, not a general coding agent. Those solve different jobs. This is the bot roster, the conversation, and the coordination between bots.
 - Not a desktop automation layer. No browser-on-a-virtual-display, no pointer, no teach-by-clicking. Bots act through tools the daemon exposes (files, shell inside a declared workspace, local model calls, messages to other bots). Computer-use can be added later; it is not in this interface.
-- Not multi-user. One person. The web page can sit on the LAN; it does not need accounts, teams, or SCIM.
+- Not multi-user. One person. The web page defaults to loopback. It can sit on the LAN only with `AUTH_TOKEN`. It does not need accounts, teams, or SCIM.
 - Not a workflow builder. You name a bot, write its description, and talk to it.
 
 ## 3. System shape
@@ -171,7 +171,7 @@ The log is the place you go to verify behavior. The chat transcript stays readab
 - State (bots, threads, DMs, timers, log, memory) is on disk.
 - Shutdown or crash: in-flight turn is lost or marked failed. On restart the daemon reloads and accepts new messages. It does not invent a resume of a half-finished model call.
 - Local model is the default. If Ollama is down, turns fail with a clear log line; they do not hang forever.
-- The web UI binds on the LAN (or localhost plus a reverse proxy you already trust). No public exposure required.
+- The web UI binds on loopback by default. A non-loopback address requires `AUTH_TOKEN`. No public exposure required.
 
 ## 10. Explicit non-goals
 

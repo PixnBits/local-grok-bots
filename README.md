@@ -15,8 +15,8 @@ go build -o local-grok-bots ./cmd/local-grok-bots
 | `OLLAMA_URL` | `http://127.0.0.1:11434` | Local Ollama HTTP API |
 | `OLLAMA_MODEL` | `llama3.2` | Model used when a bot has no override. Set this to a model you have pulled. |
 | `CLI_BACKEND` | unset | Default for a new bot: `grok`, `claude`, or empty. Empty and `ollama` call Ollama. |
-| `BIND_ADDR` | `0.0.0.0:8080` | Address the daemon listens on |
-| `AUTH_TOKEN` | unset | If set, every route except `GET /api/health` requires `Authorization: Bearer <token>` |
+| `BIND_ADDR` | `127.0.0.1:8080` | Address the daemon listens on. A non-loopback address requires `AUTH_TOKEN` |
+| `AUTH_TOKEN` | unset | If set, every route except `GET /api/health` requires `Authorization: Bearer <token>`. Required when `BIND_ADDR` is not loopback |
 | `SANDBOX_BUILD_BINDS` | unset | Colon-separated absolute paths. With the `build` grant, each path is a read-only bind in the shell jail. |
 
 Paths inside `DATA_DIR`:
@@ -102,7 +102,7 @@ Set `OLLAMA_MODEL` in the installed unit to a model `ollama list` actually shows
 
 For a user unit, change `WantedBy` to `default.target`, put the unit in `~/.config/systemd/user/`, and run `systemctl --user enable --now local-grok-bots`.
 
-The page is plain HTTP on the LAN. The browser warning is expected. Do not port-forward it.
+The page listens on `127.0.0.1` and is plain HTTP. To listen on another address, set `BIND_ADDR` and `AUTH_TOKEN` together. The daemon refuses to start when a non-loopback bind has no token. Do not port-forward it.
 
 ## What the page does today
 

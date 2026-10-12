@@ -1,6 +1,8 @@
 package config
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,7 +27,7 @@ type Config struct {
 func FromEnv() Config {
 	return Config{
 		DataDir:    getenv("DATA_DIR", "./data"),
-		BindAddr:   getenv("BIND_ADDR", "0.0.0.0:8080"),
+		BindAddr:   getenv("BIND_ADDR", "127.0.0.1:8080"),
 		OllamaURL:  getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
 		Model:      getenv("OLLAMA_MODEL", "llama3.2"),
 		AuthToken:  os.Getenv("AUTH_TOKEN"),
@@ -55,6 +57,30 @@ func (c Config) DBPath() string {
 
 func (c Config) Workspace() string {
 	return filepath.Join(c.DataDir, "workspace")
+}
+
+// Validate rejects a non-loopback bind that has no AUTH_TOKEN.
+// An empty host, as in ":8080", listens on all interfaces.
+func (c Config) Validate() error {
+	host, _, err := net.SplitHostPort(c.BindAddr)
+	if err != nil {
+		return fmt.Errorf("BIND_ADDR: %w", err)
+	}
+	if loopbackHost(host) {
+		return nil
+	}
+	if strings.TrimSpace(c.AuthToken) == "" {
+		return fmt.Errorf("AUTH_TOKEN is required when BIND_ADDR is not loopback (%s)", c.BindAddr)
+	}
+	return nil
+}
+
+func loopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func getenv(key, fallback string) string {
