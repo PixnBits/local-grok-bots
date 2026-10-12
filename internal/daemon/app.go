@@ -26,6 +26,7 @@ type loopState struct {
 	again   bool
 	runID   string
 	cancel  context.CancelFunc
+	cliPID  int
 }
 
 // App is the daemon: HTTP API, turn queue, timers, and the model loop.
@@ -46,8 +47,14 @@ type App struct {
 	loops   map[string]*loopState
 	resume  map[string]resumeHold
 	pending map[string][]model.Message
-	closing bool
-	wg      sync.WaitGroup
+	// activity is the last user message or CLI turn start. Idle kill reads it.
+	activity map[string]time.Time
+	// idleAfter caps a live CLI after the last activity. Zero means 30 minutes.
+	idleAfter time.Duration
+	// imminent is how soon a timer must fire to spare a live CLI. Zero means 2 minutes.
+	imminent time.Duration
+	closing  bool
+	wg       sync.WaitGroup
 }
 
 func New(cfg config.Config, m model.Client) (*App, error) {
@@ -150,6 +157,7 @@ func (a *App) timerLoop() {
 			return
 		case <-t.C:
 			a.fireDue()
+			a.killIdle()
 		}
 	}
 }

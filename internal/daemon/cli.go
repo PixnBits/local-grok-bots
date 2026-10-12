@@ -26,6 +26,8 @@ func (a *App) resolvedBackend(bot store.Bot) string {
 func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID, backend string) {
 	a.takePending(runID)
 	a.dropResume(bot.ID)
+	a.touchActivity(bot.ID)
+	defer a.clearCLIPID(bot.ID, runID)
 
 	inputs, err := a.st.TurnInputs(bot.ID, runID)
 	if err != nil {
@@ -62,7 +64,31 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID, backend stri
 	if bot.Model != nil {
 		spec.Model = strings.TrimSpace(*bot.Model)
 	}
-	res, err := runner.Run(ctx, spec, nil)
+	spec.OnStart = func(pid int) {
+		if pid > 0 {
+			a.setCLIPID(bot.ID, pid)
+		}
+	}
+	var streamed bool
+	res, err := runner.Run(ctx, spec, func(ev clisession.Event) {
+		switch ev.Kind {
+		case "token":
+			if ev.Text == "" {
+				return
+			}
+			streamed = true
+			a.bus.Publish(runID, "token", map[string]string{"text": ev.Text})
+		case "tool":
+			name := ev.ToolName
+			if name == "" {
+				name = "tool"
+			}
+			a.bus.Publish(runID, "status", map[string]any{"state": name, "text": name})
+			a.bus.Publish(runID, "tool_call", map[string]any{
+				"name": name, "arguments": map[string]any{},
+			})
+		}
+	})
 	if err != nil {
 		if ctx.Err() != nil {
 			a.finishInterrupted(bot.ID, runID, ctx)
@@ -84,6 +110,9 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID, backend stri
 		"model": backend, "ok": true, "session_id": sessionID,
 	})
 	if strings.TrimSpace(res.Text) != "" {
+		if !streamed {
+			a.bus.Publish(runID, "token", map[string]string{"text": res.Text})
+		}
 		a.persistBotText(bot.ID, runID, res.Text)
 	}
 	_, _ = a.st.FinishRun(runID, "done", "")

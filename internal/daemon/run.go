@@ -18,15 +18,6 @@ const (
 )
 
 func (a *App) execute(botID, runID string) {
-	ctx, cancel := context.WithTimeout(a.ctx, runTimeout)
-	a.rtMu.Lock()
-	if st := a.loops[botID]; st != nil {
-		st.cancel = cancel
-		st.runID = runID
-	}
-	a.rtMu.Unlock()
-	defer cancel()
-
 	bot, err := a.st.GetBot(botID)
 	if err != nil {
 		a.takePending(runID)
@@ -35,6 +26,23 @@ func (a *App) execute(botID, runID string) {
 		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
 		return
 	}
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if a.resolvedBackend(bot) != "" {
+		// A CLI turn is capped by the idle kill and by shutdown, not by the
+		// shorter Ollama round timeout.
+		ctx, cancel = context.WithCancel(a.ctx)
+	} else {
+		ctx, cancel = context.WithTimeout(a.ctx, runTimeout)
+	}
+	a.rtMu.Lock()
+	if st := a.loops[botID]; st != nil {
+		st.cancel = cancel
+		st.runID = runID
+	}
+	a.rtMu.Unlock()
+	defer cancel()
+
 	if backend := a.resolvedBackend(bot); backend != "" {
 		a.executeCLI(ctx, bot, runID, backend)
 		return

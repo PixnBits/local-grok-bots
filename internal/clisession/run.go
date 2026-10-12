@@ -85,6 +85,7 @@ func readEvents(r io.Reader, onEvent func(Event)) (Result, error) {
 	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var b strings.Builder
 	var sawDelta bool
+	var sawFinal bool
 	var out Result
 	var errMsg string
 	for sc.Scan() {
@@ -113,8 +114,10 @@ func readEvents(r io.Reader, onEvent func(Event)) (Result, error) {
 			if ev.NeedsInput {
 				out.NeedsInput = true
 			}
-			if ev.Final && ev.Text != "" && !sawDelta {
+			// The final object is what we persist. Deltas are only the live view.
+			if ev.Final && strings.TrimSpace(ev.Text) != "" {
 				out.Text = ev.Text
+				sawFinal = true
 			}
 			if onEvent != nil {
 				onEvent(ev)
@@ -129,7 +132,7 @@ func readEvents(r io.Reader, onEvent func(Event)) (Result, error) {
 	if err := sc.Err(); err != nil {
 		return out, fmt.Errorf("cli stream: %w", err)
 	}
-	if sawDelta {
+	if !sawFinal && sawDelta {
 		out.Text = b.String()
 	}
 	if errMsg != "" && strings.TrimSpace(out.Text) == "" {

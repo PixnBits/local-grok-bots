@@ -386,6 +386,7 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.log(id, "user_message", map[string]any{"message_id": msg.ID})
+	a.touchActivity(id)
 	a.dropResume(id)
 	runID := a.kick(id)
 	resp := map[string]any{"message": msg, "run_id": nil}

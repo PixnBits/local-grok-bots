@@ -110,3 +110,12 @@ grok [-m MODEL] (--session-id ID | --resume ID) \
 - The Claude adapter is not wired yet.
 - If a fresh start fails before the CLI reports a session id, the stored id is cleared so the next turn can create another session.
 
+## Runner notes (M1)
+
+- `streaming-json` text events are published as SSE `token` frames. Tool calls are published as `tool_call`. When the stream has no text deltas, the final reply is one token so the page still moves.
+- The stored reply prefers the final structured `text` when the CLI sends one. Deltas are the live view only.
+- A live CLI is killed after 30 minutes from the last user message or turn start, unless a timer fires within 2 minutes. The process group is killed. `session_id` stays. The next message or timer uses `--resume`.
+- CLI turns are not under the 10-minute Ollama cap. Shutdown and cancel still stop them.
+- A timer fire posts the routine prompt, prefixed `[scheduled]` as before, and resumes that bot's session.
+
+
