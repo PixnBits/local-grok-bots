@@ -616,7 +616,11 @@ func TestEntropyDevices(t *testing.T) {
 		// AppArmor's unprivileged_userns profile denies sys_admin, so
 		// /usr/bin/unshare cannot write uid_map from this host. A privileged
 		// container is unconfined root and can run the same launcher.
+		// That container is opt-in so a normal go test does not start it.
 		if os.Getenv("LGB_SANDBOX_INNER") != "1" && !canUnshare() {
+			if os.Getenv("LGB_SANDBOX_DOCKER") != "1" {
+				t.Skip("unprivileged user namespaces are blocked; set LGB_SANDBOX_DOCKER=1 to run this subtest in a privileged container")
+			}
 			reexecUnshare(t)
 			return
 		}
