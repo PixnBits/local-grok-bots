@@ -148,6 +148,7 @@ Optional gate: if `AUTH_TOKEN` is set in the daemon environment, require `Author
 - Order is preserved. Nothing is dropped.
 - A run that exceeds 8 model rounds ends `error` / `tool round limit`. The page can continue that transcript as a new run for another 8 rounds. A new message, another turn, or a restart drops the offer.
 - While a run is `running`, the stream emits `status` events so the page can show the working animation. The animation clears on `done` or `error`.
+- Text the model sends in the same response as a tool call is streamed as tokens for that run and kept in that run's in-memory transcript. It is not written to the thread. The stored reply is the response that has no tool call.
 
 ## 4. Bot tool surface
 

@@ -89,9 +89,9 @@ func (a *App) execute(botID, runID string) {
 			a.bus.Publish(runID, "done", map[string]any{"run_id": runID})
 			return
 		}
-		if strings.TrimSpace(resp.Content) != "" {
-			a.persistBotText(bot.ID, runID, resp.Content)
-		}
+		// This text is on the live stream and in this run's transcript.
+		// It is not a thread message: stored announcements teach the next
+		// turn to stop after "Let me check" without calling a tool.
 		msgs = append(msgs, model.Message{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls})
 		for _, tc := range resp.ToolCalls {
 			if ctx.Err() != nil {
@@ -183,7 +183,7 @@ func (a *App) buildMessages(bot store.Bot) ([]model.Message, error) {
 		b.WriteString(m.Value)
 		b.WriteString("\n")
 	}
-	b.WriteString("\nYou can call tools. create_bot creates a bot: pass name and description. description is the standing prompt the new bot is given. instructions is an old name for that same field and still works. Do not use the shell to create a bot. update_bot changes a bot. list_bots and read_bot inspect bots. send_dm sends a direct message. write_memory and delete_memory keep notes. set_timer and clear_timer schedule prompts. read_file, write_file, and run_shell stay inside the workspace; paths outside it are rejected. go, gofmt, and other tools installed under /usr are on PATH. Network, git push, and SSH stay off unless the user turned them on in the profile. After tools, send a short reply to the user. Direct messages from other bots appear as user messages prefixed with [DM from Name]. Scheduled prompts are prefixed with [scheduled].\n")
+	b.WriteString("\nYou can call tools. create_bot creates a bot: pass name and description. description is the standing prompt the new bot is given. instructions is an old name for that same field and still works. Do not use the shell to create a bot. update_bot changes a bot. list_bots and read_bot inspect bots. send_dm sends a direct message. write_memory and delete_memory keep notes. set_timer and clear_timer schedule prompts. read_file, write_file, and run_shell stay inside the workspace; paths outside it are rejected. go, gofmt, and other tools installed under /usr are on PATH. Network, git push, and SSH stay off unless the user turned them on in the profile. After tools, send a short reply to the user. Direct messages from other bots appear as user messages prefixed with [DM from Name]. Scheduled prompts are prefixed with [scheduled]. If you need a tool, call it in this response. Do not reply with only an announcement such as \"Let me check.\"\n")
 	out := []model.Message{{Role: "system", Content: b.String()}}
 	for _, m := range hist {
 		out = append(out, mapHist(m, names))
