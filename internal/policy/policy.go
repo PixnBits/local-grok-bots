@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -50,6 +51,11 @@ type Policy struct {
 	// CLIROBinds are extra read-only paths in the CLI jail.
 	// Empty means the jail mounts only its built-in paths.
 	CLIROBinds []string `json:"cli_ro_binds"`
+	// RlimitNofile, RlimitNproc, and RlimitCPU are process limits.
+	// Zero leaves the current limit in place.
+	RlimitNofile int `json:"rlimit_nofile"`
+	RlimitNproc  int `json:"rlimit_nproc"`
+	RlimitCPU    int `json:"rlimit_cpu_seconds"`
 	// HTTPProxy, HTTPSProxy, and NoProxy are the corporate proxy settings.
 	// They are used only when CLINetwork is proxy or explicit-proxy.
 	// Logs and the API show the URL with the password redacted.
@@ -172,6 +178,9 @@ func (p Policy) Validate(modelURL string, proxyAvailable bool) error {
 		return err
 	}
 	if err := p.checkDLP(); err != nil {
+		return err
+	}
+	if err := p.checkRlimits(runtime.GOOS); err != nil {
 		return err
 	}
 	if p.ForceLocalOnly {
@@ -378,6 +387,27 @@ func applyEnv(p *Policy) error {
 	}
 	if v, ok := os.LookupEnv("POLICY_CLI_RO_BINDS"); ok {
 		p.CLIROBinds = splitList(v, string(os.PathListSeparator))
+	}
+	if v, ok := os.LookupEnv("POLICY_RLIMIT_NOFILE"); ok {
+		n, err := parseRlimit(v)
+		if err != nil {
+			return fmt.Errorf("POLICY_RLIMIT_NOFILE: %w", err)
+		}
+		p.RlimitNofile = n
+	}
+	if v, ok := os.LookupEnv("POLICY_RLIMIT_NPROC"); ok {
+		n, err := parseRlimit(v)
+		if err != nil {
+			return fmt.Errorf("POLICY_RLIMIT_NPROC: %w", err)
+		}
+		p.RlimitNproc = n
+	}
+	if v, ok := os.LookupEnv("POLICY_RLIMIT_CPU_SECONDS"); ok {
+		n, err := parseRlimit(v)
+		if err != nil {
+			return fmt.Errorf("POLICY_RLIMIT_CPU_SECONDS: %w", err)
+		}
+		p.RlimitCPU = n
 	}
 	if v, ok := lookupProxy("POLICY_HTTP_PROXY", "HTTP_PROXY", "http_proxy"); ok {
 		p.HTTPProxy = v
@@ -782,6 +812,51 @@ func redactProxyURL(raw string) string {
 		return "redacted"
 	}
 	return u.Redacted()
+}
+
+const (
+	maxRlimitNofile = 1 << 20
+	maxRlimitNproc  = 1 << 20
+	maxRlimitCPU    = 86400 * 100
+)
+
+// checkRlimits rejects a negative value, a value above the ceiling, and any
+// non-zero limit on macOS. Seatbelt cannot apply the same process limits.
+func (p Policy) checkRlimits(goos string) error {
+	if err := boundRlimit("rlimit_nofile", p.RlimitNofile, maxRlimitNofile); err != nil {
+		return err
+	}
+	if err := boundRlimit("rlimit_nproc", p.RlimitNproc, maxRlimitNproc); err != nil {
+		return err
+	}
+	if err := boundRlimit("rlimit_cpu_seconds", p.RlimitCPU, maxRlimitCPU); err != nil {
+		return err
+	}
+	return sandbox.UnsupportedRlimits(goos, sandbox.Rlimits{
+		Nofile: p.RlimitNofile, Nproc: p.RlimitNproc, CPUSeconds: p.RlimitCPU,
+	})
+}
+
+func boundRlimit(name string, n, max int) error {
+	if n < 0 {
+		return fmt.Errorf("%s must be zero or positive", name)
+	}
+	if n > max {
+		return fmt.Errorf("%s %d is above %d", name, n, max)
+	}
+	return nil
+}
+
+func parseRlimit(s string) (int, error) {
+	s = strings.TrimSpace(unquote(s))
+	if s == "" {
+		return 0, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("expected a non-negative integer")
+	}
+	return n, nil
 }
 
 func parseBool(s string) (bool, error) {

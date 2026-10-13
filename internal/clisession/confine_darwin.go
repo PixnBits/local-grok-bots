@@ -7,9 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/PixnBits/local-grok-bots/internal/policy"
+	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 )
 
 // applyLaunch runs bin under sandbox-exec. The workspace is writable.
@@ -18,6 +20,9 @@ import (
 // SSH agent are not inherited. cleanup removes the profile and temp dir
 // after the process has exited.
 func applyLaunch(bin string, args []string, workspace string, plan confinePlan) (*exec.Cmd, func(), error) {
+	if err := sandbox.UnsupportedRlimits(runtime.GOOS, plan.Rlimits); err != nil {
+		return nil, nil, err
+	}
 	ws, home, err := absWorkspace(workspace)
 	if err != nil {
 		return nil, nil, err

@@ -181,8 +181,11 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			NetAllow:   a.policy.NetAllow(current.Grants, current.NetAllow),
 			SSHAllow:   current.SSHAllow,
 			BuildBinds: a.policy.BuildBinds,
-			SSHKey:     a.sshKeyPath(),
-			Dial:       a.shellDial,
+			Rlimits: sandbox.Rlimits{
+				Nofile: a.policy.RlimitNofile, Nproc: a.policy.RlimitNproc, CPUSeconds: a.policy.RlimitCPU,
+			},
+			SSHKey: a.sshKeyPath(),
+			Dial:   a.shellDial,
 		})
 		for _, ev := range res.Events {
 			a.recordSandbox(current.ID, ev)

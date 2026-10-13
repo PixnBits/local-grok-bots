@@ -38,6 +38,7 @@ type confinePlan struct {
 	ProxySock  string
 	ExtraEnv   []string
 	ROBinds    []string
+	Rlimits    sandbox.Rlimits
 }
 
 func (l launch) command(ctx context.Context, bin string, args []string, workspace string) (*exec.Cmd, func(), error) {
@@ -79,7 +80,13 @@ func prepareCLINet(ctx context.Context, pol policy.Policy, dial func(context.Con
 	if mode == "" {
 		mode = policy.NetOpen
 	}
-	plan := confinePlan{ExtraEnv: extra, ROBinds: append([]string{}, pol.CLIROBinds...)}
+	plan := confinePlan{
+		ExtraEnv: extra,
+		ROBinds:  append([]string{}, pol.CLIROBinds...),
+		Rlimits: sandbox.Rlimits{
+			Nofile: pol.RlimitNofile, Nproc: pol.RlimitNproc, CPUSeconds: pol.RlimitCPU,
+		},
+	}
 	noop := func() {}
 	switch mode {
 	case policy.NetOpen:
@@ -216,7 +223,7 @@ func confineArgsPlan(bin string, args []string, workspace string, plan confinePl
 	}
 	b = append(b, "--", argv0)
 	b = append(b, args...)
-	return b, nil
+	return sandbox.AppendBwrapRlimits(b, plan.Rlimits), nil
 }
 
 // absWorkspace checks the CLI working directory. home is empty when it

@@ -5,6 +5,8 @@ package clisession
 import (
 	"fmt"
 	"os/exec"
+
+	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 )
 
 // applyLaunch runs bin under bubblewrap. The workspace is bind-mounted
@@ -19,7 +21,10 @@ func applyLaunch(bin string, args []string, workspace string, plan confinePlan) 
 	if err != nil {
 		return nil, nil, err
 	}
-	cmd := exec.Command(bwrap, wrapArgs...)
+	cmd, err := sandbox.BwrapCommand(bwrap, wrapArgs)
+	if err != nil {
+		return nil, nil, err
+	}
 	// Absolute bwrap path. A minimal env so the wrapper itself does not
 	// carry API keys or an SSH agent socket in its own environ.
 	cmd.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}

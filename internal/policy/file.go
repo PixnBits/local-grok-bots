@@ -87,6 +87,24 @@ func applyKey(p *Policy, key, val string) error {
 			return err
 		}
 		p.CLIROBinds = list
+	case "rlimit_nofile":
+		n, err := parseRlimit(val)
+		if err != nil {
+			return err
+		}
+		p.RlimitNofile = n
+	case "rlimit_nproc":
+		n, err := parseRlimit(val)
+		if err != nil {
+			return err
+		}
+		p.RlimitNproc = n
+	case "rlimit_cpu_seconds":
+		n, err := parseRlimit(val)
+		if err != nil {
+			return err
+		}
+		p.RlimitCPU = n
 	case "http_proxy":
 		p.HTTPProxy = unquote(val)
 	case "https_proxy":

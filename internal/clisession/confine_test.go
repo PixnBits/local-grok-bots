@@ -237,6 +237,33 @@ func TestLaunchProxyProducesUnsharedNet(t *testing.T) {
 	}
 }
 
+func TestCLIRlimitArgv(t *testing.T) {
+	ws := t.TempDir()
+	plain, err := confineArgsPlan("/bin/true", nil, ws, confinePlan{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(plain, "\x00"), "--rlimit") {
+		t.Fatal("zero rlimits changed the argv")
+	}
+	args, err := confineArgsPlan("/bin/true", nil, ws, confinePlan{Rlimits: sandbox.Rlimits{Nofile: 1024, Nproc: 64, CPUSeconds: 15}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, "\x00")
+	for _, want := range []string{
+		"--rlimit\x00NOFILE\x001024\x001024",
+		"--rlimit\x00NPROC\x0064\x0064",
+		"--rlimit\x00CPU\x0015\x0015",
+	} {
+		at := strings.Index(joined, want)
+		sep := strings.Index(joined, "\x00--\x00")
+		if at < 0 || sep < 0 || at > sep {
+			t.Fatalf("missing %q before command:\n%s", want, strings.Join(args, " "))
+		}
+	}
+}
+
 func TestCLIROBindArgv(t *testing.T) {
 	ws := t.TempDir()
 	shared := filepath.Join(t.TempDir(), "shared")

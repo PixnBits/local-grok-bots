@@ -143,7 +143,7 @@ func TestPolicyEndpoint(t *testing.T) {
 		t.Fatalf("policy %d", res.StatusCode)
 	}
 	res, b := do(t, "GET", srv.URL+"/api/policy", nil, "sekrit")
-	if res.StatusCode != 200 || !strings.Contains(string(b), `"cli_network":"open"`) || !strings.Contains(string(b), `"grok"`) || !strings.Contains(string(b), `"cli_ro_binds":[]`) {
+	if res.StatusCode != 200 || !strings.Contains(string(b), `"cli_network":"open"`) || !strings.Contains(string(b), `"grok"`) || !strings.Contains(string(b), `"cli_ro_binds":[]`) || !strings.Contains(string(b), `"rlimit_nofile":0`) || !strings.Contains(string(b), `"rlimit_nproc":0`) || !strings.Contains(string(b), `"rlimit_cpu_seconds":0`) {
 		t.Fatalf("policy %d %s", res.StatusCode, b)
 	}
 }

@@ -13,6 +13,9 @@ import (
 )
 
 func launchOS(ctx context.Context, p *prepared) (string, string, error) {
+	if err := UnsupportedRlimits("darwin", p.rlimits); err != nil {
+		return "", "", err
+	}
 	sb, err := exec.LookPath("sandbox-exec")
 	if err != nil {
 		return "", "", fmt.Errorf("shell sandbox unavailable: sandbox-exec not on PATH")

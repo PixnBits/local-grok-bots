@@ -23,6 +23,8 @@ type Request struct {
 	SSHAllow   []string
 	BuildBinds []string
 	SSHKey     string
+	// Rlimits caps the jailed process. Zero fields leave the current limits.
+	Rlimits Rlimits
 	// Dial, when set, is the proxy's outbound TCP dial. Tests use it.
 	Dial func(context.Context, string, string) (net.Conn, error)
 	// forceUnshare selects the unshare jail even when bwrap is installed.
@@ -61,6 +63,7 @@ type prepared struct {
 	before       *treeSnap
 	extra        []Event
 	forceUnshare bool
+	rlimits      Rlimits
 }
 
 func (p *prepared) close() {
@@ -126,7 +129,7 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &prepared{workspace: ws, command: req.Command, dir: dir, before: takeSnap(ws), forceUnshare: req.forceUnshare}
+	p := &prepared{workspace: ws, command: req.Command, dir: dir, before: takeSnap(ws), forceUnshare: req.forceUnshare, rlimits: req.Rlimits}
 	ok := false
 	defer func() {
 		if !ok {

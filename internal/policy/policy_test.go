@@ -395,3 +395,49 @@ func TestCLIROBindsValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestRlimitValidation(t *testing.T) {
+	p := Default()
+	if p.RlimitNofile != 0 || p.RlimitNproc != 0 || p.RlimitCPU != 0 {
+		t.Fatalf("%+v", p)
+	}
+	if err := p.checkRlimits("linux"); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	body := "rlimit_nofile: 1024\nrlimit_nproc: 64\nrlimit_cpu_seconds: 30\n"
+	if err := os.WriteFile(filepath.Join(dir, "policy.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POLICY_RLIMIT_NOFILE", "8")
+	got, err := Load(dir, "http://127.0.0.1:11434", nil, true)
+	if err != nil || got.RlimitNofile != 1024 || got.RlimitNproc != 64 || got.RlimitCPU != 30 {
+		t.Fatalf("%v %+v", err, got)
+	}
+	raw, err := got.MarshalJSON()
+	if err != nil || !strings.Contains(string(raw), `"rlimit_nofile":1024`) || !strings.Contains(string(raw), `"rlimit_cpu_seconds":30`) {
+		t.Fatalf("%v %s", err, raw)
+	}
+
+	t.Setenv("POLICY_RLIMIT_NOFILE", "0")
+	zero, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true)
+	if err != nil || zero.RlimitNofile != 0 {
+		t.Fatalf("%v %+v", err, zero)
+	}
+	t.Setenv("POLICY_RLIMIT_NOFILE", "-1")
+	if _, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "non-negative") {
+		t.Fatal(err)
+	}
+	t.Setenv("POLICY_RLIMIT_NOFILE", "99999999")
+	if _, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "above") {
+		t.Fatal(err)
+	}
+	high := Default()
+	high.RlimitNproc = 32
+	if err := high.checkRlimits("darwin"); err == nil || !strings.Contains(err.Error(), "Seatbelt") {
+		t.Fatal(err)
+	}
+	if err := high.checkRlimits("linux"); err != nil {
+		t.Fatal(err)
+	}
+}

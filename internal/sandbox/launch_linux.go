@@ -18,10 +18,13 @@ func launchOS(ctx context.Context, p *prepared) (string, string, error) {
 			return runBwrap(ctx, p, path)
 		}
 	}
+	if !p.rlimits.Zero() {
+		return "", "", fmt.Errorf("shell rlimits require bubblewrap")
+	}
 	return runUnshare(ctx, p)
 }
 
-func runBwrap(ctx context.Context, p *prepared, bwrap string) (string, string, error) {
+func shellBwrapArgs(p *prepared) []string {
 	args := []string{
 		"--unshare-user", "--unshare-net", "--unshare-pid", "--unshare-uts",
 		"--die-with-parent", "--disable-userns", "--clearenv",
@@ -64,7 +67,14 @@ func runBwrap(ctx context.Context, p *prepared, bwrap string) (string, string, e
 		args = append(args, "--setenv", k, v)
 	}
 	args = append(args, "--", "/bin/sh", "-c", p.command)
-	cmd := exec.Command(bwrap, args...)
+	return AppendBwrapRlimits(args, p.rlimits)
+}
+
+func runBwrap(ctx context.Context, p *prepared, bwrap string) (string, string, error) {
+	cmd, err := BwrapCommand(bwrap, shellBwrapArgs(p))
+	if err != nil {
+		return "", "", err
+	}
 	return capture(ctx, cmd)
 }
 

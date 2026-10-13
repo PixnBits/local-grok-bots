@@ -12,6 +12,13 @@ import (
 )
 
 func platformHandleArgs(args []string) bool {
+	if len(args) > 0 && args[0] == "--sandbox-rlimit" {
+		if err := rlimitAndExec(args[1:]); err != nil {
+			fmt.Fprintln(os.Stderr, "sandbox:", err)
+			os.Exit(1)
+		}
+		return true
+	}
 	if len(args) < 1 || args[0] != "--sandbox-stage2" {
 		return false
 	}
