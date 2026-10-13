@@ -29,6 +29,24 @@ type ExecRunner struct {
 	Dial func(context.Context, string, string) (net.Conn, error)
 	// NetLog receives allow and deny decisions from the CLI proxy.
 	NetLog func(sandbox.Event)
+	// PinLog receives a pin result when that backend is pinned.
+	// result is "ok" or the failure reason. Unpinned backends are not logged.
+	PinLog func(backend, path, result string)
+}
+
+func (e ExecRunner) notePin(ctx context.Context, backend, path string) error {
+	if _, ok := e.Policy.CLIPinFor(backend); !ok {
+		return nil
+	}
+	err := verifyPin(ctx, e.Policy, backend, path)
+	result := "ok"
+	if err != nil {
+		result = err.Error()
+	}
+	if e.PinLog != nil {
+		e.PinLog(backend, path, result)
+	}
+	return err
 }
 
 func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Result, error) {
@@ -46,6 +64,9 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 			return Result{}, fmt.Errorf("%s not on PATH", path)
 		}
 		path = looked
+	}
+	if err := e.notePin(ctx, spec.Backend, path); err != nil {
+		return Result{}, err
 	}
 	cmd, cleanup, err := (launch{Policy: e.Policy, Dial: e.Dial, NetLog: e.NetLog}).command(ctx, path, argv[1:], spec.Workspace)
 	if cleanup != nil {

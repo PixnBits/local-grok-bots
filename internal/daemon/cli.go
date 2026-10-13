@@ -70,6 +70,11 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID, backend stri
 			Policy: a.policy,
 			Dial:   a.shellDial,
 			NetLog: func(ev sandbox.Event) { a.recordSandbox(bot.ID, ev) },
+			PinLog: func(backend, path, result string) {
+				a.log(bot.ID, "cli_pin", map[string]any{
+					"backend": backend, "path": path, "result": result,
+				})
+			},
 		}
 	}
 	var lastText string

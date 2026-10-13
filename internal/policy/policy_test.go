@@ -207,6 +207,50 @@ func TestCorporateProxyLoadAndRedaction(t *testing.T) {
 	}
 }
 
+func TestCLIPinsParseAndRejectMistakes(t *testing.T) {
+	hash := strings.Repeat("ab", 32)
+	t.Setenv("POLICY_CLI_PINS", "grok sha256="+hash+";claude version=2.1.0")
+	p, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g, ok := p.CLIPinFor("grok")
+	if !ok || g.SHA256 != hash {
+		t.Fatalf("%+v", p.CLIPins)
+	}
+	if _, ok := p.CLIPinFor("missing"); ok {
+		t.Fatal("missing backend was pinned")
+	}
+	dir := t.TempDir()
+	body := "cli_pins: [\"claude path=/usr/bin/claude sha256=" + hash + "\"]\n"
+	if err := os.WriteFile(filepath.Join(dir, "policy.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	filePol, err := Load(dir, "http://127.0.0.1:11434", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filePol.CLIPins) != 1 || filePol.CLIPins[0].Backend != "claude" || filePol.CLIPins[0].Path != "/usr/bin/claude" {
+		t.Fatalf("%+v", filePol.CLIPins)
+	}
+	for _, raw := range []string{
+		"grok sha256=abc",
+		"grok path=relative",
+		"openai sha256=" + hash,
+		"grok sha256=" + hash + ";grok version=1",
+	} {
+		t.Setenv("POLICY_CLI_PINS", raw)
+		if _, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true); err == nil {
+			t.Fatalf("accepted %s", raw)
+		}
+	}
+	t.Setenv("POLICY_CLI_PINS", "")
+	empty, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true)
+	if err != nil || len(empty.CLIPins) != 0 {
+		t.Fatal(err)
+	}
+}
+
 func TestNetAllowUsesDefaultWhenBotHasNone(t *testing.T) {
 	p := Default()
 	p.DefaultNetAllow = []string{"example.com"}

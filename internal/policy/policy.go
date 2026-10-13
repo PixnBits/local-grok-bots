@@ -25,6 +25,15 @@ const (
 	NetExplicit = "explicit-proxy"
 )
 
+// CLIPin is an optional check of one CLI binary.
+// An empty pin list checks nothing. A configured pin must match before exec.
+type CLIPin struct {
+	Backend string `json:"backend"`
+	Path    string `json:"path,omitempty"`
+	SHA256  string `json:"sha256,omitempty"`
+	Version string `json:"version,omitempty"`
+}
+
 // Policy is the effective confinement policy.
 // Slices are empty rather than nil so logs and the API stay stable.
 type Policy struct {
@@ -41,6 +50,8 @@ type Policy struct {
 	HTTPProxy  string `json:"http_proxy"`
 	HTTPSProxy string `json:"https_proxy"`
 	NoProxy    string `json:"no_proxy"`
+	// CLIPins is empty unless an operator pins a backend binary.
+	CLIPins []CLIPin `json:"cli_pins"`
 }
 
 // Default is the policy used when no file or environment sets a field.
@@ -53,6 +64,7 @@ func Default() Policy {
 		EnvAllowlist:     []string{},
 		DefaultNetAllow:  []string{},
 		BuildBinds:       []string{},
+		CLIPins:          []CLIPin{},
 	}
 }
 
@@ -125,6 +137,16 @@ func (p Policy) Validate(modelURL string, proxyAvailable bool) error {
 		if !filepath.IsAbs(path) || strings.ContainsAny(path, "\n\r\x00") {
 			return fmt.Errorf("build bind %q must be an absolute path", path)
 		}
+	}
+	seenPin := map[string]bool{}
+	for _, pin := range p.CLIPins {
+		if err := checkPin(pin); err != nil {
+			return err
+		}
+		if seenPin[pin.Backend] {
+			return fmt.Errorf("cli pin %s is duplicated", pin.Backend)
+		}
+		seenPin[pin.Backend] = true
 	}
 	if p.ForceLocalOnly {
 		if err := requireLoopback(modelURL); err != nil {
@@ -337,7 +359,123 @@ func applyEnv(p *Policy) error {
 	if v, ok := lookupProxy("POLICY_NO_PROXY", "NO_PROXY", "no_proxy"); ok {
 		p.NoProxy = v
 	}
+	if v, ok := os.LookupEnv("POLICY_CLI_PINS"); ok {
+		pins, err := parsePinList(v, ";")
+		if err != nil {
+			return err
+		}
+		p.CLIPins = pins
+	}
 	return nil
+}
+
+// CLIPinFor returns the pin for a backend. The second result is false when
+// that backend is not pinned.
+func (p Policy) CLIPinFor(backend string) (CLIPin, bool) {
+	backend = strings.ToLower(strings.TrimSpace(backend))
+	for _, pin := range p.CLIPins {
+		if pin.Backend == backend {
+			return pin, true
+		}
+	}
+	return CLIPin{}, false
+}
+
+func parsePinList(raw, sep string) ([]CLIPin, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return []CLIPin{}, nil
+	}
+	var out []CLIPin
+	for _, part := range strings.Split(raw, sep) {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, fmt.Errorf("cli pin is empty")
+		}
+		pin, err := parsePin(part)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, pin)
+	}
+	if out == nil {
+		return []CLIPin{}, nil
+	}
+	return out, nil
+}
+
+func parsePin(raw string) (CLIPin, error) {
+	fields := strings.Fields(raw)
+	if len(fields) < 2 {
+		return CLIPin{}, fmt.Errorf("cli pin %q is incomplete", raw)
+	}
+	pin := CLIPin{Backend: strings.ToLower(fields[0])}
+	for _, field := range fields[1:] {
+		key, val, ok := strings.Cut(field, "=")
+		if !ok || key == "" || val == "" {
+			return CLIPin{}, fmt.Errorf("cli pin %q is invalid", raw)
+		}
+		switch key {
+		case "path":
+			pin.Path = val
+		case "sha256":
+			pin.SHA256 = strings.ToLower(val)
+		case "version":
+			pin.Version = val
+		default:
+			return CLIPin{}, fmt.Errorf("cli pin field %q is unknown", key)
+		}
+	}
+	return pin, nil
+}
+
+func checkPin(pin CLIPin) error {
+	switch pin.Backend {
+	case "grok", "claude":
+	default:
+		return fmt.Errorf("cli pin backend %q is unknown", pin.Backend)
+	}
+	if pin.Path == "" && pin.SHA256 == "" && pin.Version == "" {
+		return fmt.Errorf("cli pin %s needs a path, sha256, or version", pin.Backend)
+	}
+	if pin.Path != "" && (!filepath.IsAbs(pin.Path) || strings.ContainsAny(pin.Path, "\r\n\x00")) {
+		return fmt.Errorf("cli pin %s path must be absolute", pin.Backend)
+	}
+	if pin.SHA256 != "" && !sha256Hex(pin.SHA256) {
+		return fmt.Errorf("cli pin %s sha256 must be 64 hex characters", pin.Backend)
+	}
+	if pin.Version != "" && !versionToken(pin.Version) {
+		return fmt.Errorf("cli pin %s version is invalid", pin.Backend)
+	}
+	return nil
+}
+
+func sha256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func versionToken(s string) bool {
+	if len(s) == 0 || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r == '.', r == '_', r == '+', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func lookupProxy(policyKey, upper, lower string) (string, bool) {

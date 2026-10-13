@@ -41,6 +41,10 @@ CLI turns are outside the shell grant list. Their network mode is `cli_network` 
 
 The airgap file is in the README. `GET /api/policy` returns the loaded value.
 
+## CLI binary pins
+
+`cli_pins` is optional. With no pin, the daemon execs whatever `grok` or `claude` is on `PATH`, as it does today. A pin names an absolute path, a SHA-256 of the file, a version token, or any combination. The path and hash are checked before the binary runs. The hash is of the file after symlinks are resolved. A version pin runs `<binary> --version` with a cleared environment and accepts the token only as a whole word. That command is the one case where a version-only pin executes the binary outside the jail, so prefer a hash. A mismatch fails the turn. The log event is `cli_pin` with `ok` or the reason. The expected hash and path are in the policy. The version command's output is not.
+
 ## Out
 
 - Per-bot microVMs.

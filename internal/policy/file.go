@@ -87,6 +87,20 @@ func applyKey(p *Policy, key, val string) error {
 		p.HTTPSProxy = unquote(val)
 	case "no_proxy":
 		p.NoProxy = unquote(val)
+	case "cli_pins":
+		list, err := parseList(val)
+		if err != nil {
+			return err
+		}
+		pins := make([]CLIPin, 0, len(list))
+		for _, item := range list {
+			pin, err := parsePin(item)
+			if err != nil {
+				return err
+			}
+			pins = append(pins, pin)
+		}
+		p.CLIPins = pins
 	default:
 		return fmt.Errorf("unknown key")
 	}

@@ -35,6 +35,7 @@ Two guides are written so a CLI can install this daemon on your machine. Each on
 | `POLICY_ENV_ALLOWLIST` | empty | Extra environment variables copied into a CLI child when they are set. API keys, `SSH_AUTH_SOCK`, and the jail's own variables are rejected. |
 | `POLICY_DEFAULT_NET_ALLOW` | empty | Hosts used when a bot has the `net` grant and no `net_allow` of its own. |
 | `POLICY_FORCE_LOCAL_ONLY` | false | Refuse a non-loopback Ollama URL and refuse CLI backends. |
+| `POLICY_CLI_PINS` | empty | Optional checks, separated by `;`. Each item is `grok` or `claude` plus `path=/absolute`, `sha256=<64 hex>`, or `version=<token>`. Unset checks nothing. A miss fails that turn. |
 
 Paths inside `DATA_DIR`:
 
