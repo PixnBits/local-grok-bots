@@ -57,6 +57,67 @@ The airgap file is in the README. `GET /api/policy` returns the loaded value.
 
 `dlp_scan_tools: true` runs the same check on the tool-result text after the local tool has run and before the next CLI round. The default is false. A blank prompt is not sent to the check. The fields appear on `GET /api/policy`. They are rules and paths, not a copy of the prompt.
 
+## Airgap
+
+The README file is the local-only setting: `force_local_only: true`, `cli_network: none`, and empty backend, allow, and env lists. `force_local_only` disables CLI backends and refuses a non-loopback `OLLAMA_URL`. `cli_network: none` is the setting when a CLI stays enabled and must not dial out. `cli_network: proxy` with `cli_net_allow: []` starts the proxy and denies every destination. The daemon's own model call is the loopback Ollama URL. It does not pull a model.
+
+## Destinations when a CLI stays enabled
+
+`open` does not filter hosts. `proxy` and `explicit-proxy` allow a host only when `cli_net_allow` contains that exact name. A wildcard is stored as that literal and matches no other host. Port 22 still needs the `ssh` grant. Any other port to an allowed host is permitted. A denied host is an audit `net_decision` when `audit_log` is set, which is how an operator learns the next host to add.
+
+The CLI child does not receive `HTTP_PROXY`, `HTTPS_PROXY`, or `NO_PROXY`. Those names cannot be added to `env_allowlist`. Corporate egress is `explicit-proxy` (or `proxy` with a URL): the allowlist still names the real destination, and the daemon dials that destination with HTTP CONNECT through the corporate proxy. `no_proxy` skips that hop. A TLS-inspecting proxy must present a CA the CLI already trusts. The Linux jail bind-mounts `/etc/ssl` read-only when that directory exists. The daemon does not install a CA. A shell `net` grant dials directly and does not use this upstream.
+
+Grok, from the xAI API reference and the accounts FAQ:
+
+| Host | When |
+| --- | --- |
+| `api.x.ai` | Inference. A regional pin is `<region>.api.x.ai`. |
+| `accounts.x.ai`, `console.x.ai` | Account sign-in. |
+
+xAI does not publish one firewall table for every host the Grok CLI may contact. Search, plugins, and updates add hosts. Confirm a denied host in the audit log before locking the list.
+
+Claude Code, from [the enterprise network page](https://code.claude.com/docs/en/network-config) as of 2026-10-13. Re-read that page before freezing an allowlist. A stored login still refreshes tokens, so a headless turn needs the three core hosts. Browser sign-in also uses `claude.com`, which happens when an operator runs `claude auth login` on the host.
+
+| Host | When |
+| --- | --- |
+| `api.anthropic.com` | API requests, the WebFetch domain check, feature flags, telemetry |
+| `claude.ai` | claude.ai account authentication |
+| `platform.claude.com` | Console auth, and OAuth refresh for both account types |
+| `claude.com` | Browser sign-in and some documentation fetches |
+| `mcp-proxy.anthropic.com` | claude.ai MCP connectors, on by default |
+| `downloads.claude.ai` | Native installer and update checks |
+| `storage.googleapis.com` | Plugin metadata, and older native updates |
+| `registry.npmjs.org` | npm or bun installs, plugin packages, `npx` MCP servers |
+| `github.com`, `raw.githubusercontent.com` | Plugin marketplaces and the changelog feed |
+| `code.claude.com` | Built-in documentation lookups |
+| `http-intake.logs.us5.datadoghq.com`, `browser-intake-us5-datadoghq.com` | Optional telemetry. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` disables both |
+| `bridge.claudeusercontent.com` | Claude in Chrome |
+| `formulae.brew.sh` | Homebrew update checks |
+
+`*.frame.claudeusercontent.com` is the artifact host pattern on that page. This allowlist cannot express the wildcard, so each concrete host has to be listed, or the artifact tool has to stay off. Amazon Bedrock, Google Cloud, and Microsoft Foundry move model traffic to those providers. The WebFetch domain check still calls `api.anthropic.com` unless Claude's own `skipWebFetchPreflight` is set. That setting lives in Claude's config, not in this Policy.
+
+Ollama pulls of a bare name use `registry.ollama.ai`. Copy the model onto the host, or pull it from an internal registry, before the daemon starts. Runtime inference stays on the loopback Ollama URL.
+
+## User namespaces and EDR
+
+Linux CLI turns fail closed without the distro `bubblewrap` package. The jail always passes `--unshare-user`, `--unshare-pid`, and `--die-with-parent`. `--unshare-net` is added for `proxy`, `explicit-proxy`, and `none`. The daemon does not pass `--disable-userns`. Install `bubblewrap` from the distribution. A home-built `bwrap` can be blocked by AppArmor, and a kernel with `apparmor_restrict_unprivileged_userns=1` can deny a raw `unshare` of `/proc/self/uid_map` while the packaged `bwrap` still works. The Ollama shell uses `bwrap` when it is installed and otherwise `unshare`. If both fail, that shell fails closed and the daemon still serves.
+
+An EDR that blocks unprivileged user namespaces, `bwrap`, or `LD_PRELOAD` makes a Linux CLI turn fail closed. An EDR that blocks `sandbox-exec` or `DYLD_INSERT_LIBRARIES` makes a macOS turn fail closed. Allow those mechanisms for this service. Do not remove the jail, do not add `--disable-userns`, and do not resign the `grok` or `claude` binary. The preload is how a proxied connect reaches the allowlist. A connect it does not see is denied by the network namespace or by Seatbelt.
+
+`grok --sandbox workspace` can start a second sandbox inside this jail. A kernel that blocks nested user namespaces makes that inner sandbox fail. This jail remains the boundary the daemon enforces.
+
+## Supply chain
+
+`go.sum` is part of the repo. Build with the checksum database left on (`GOSUMDB` unset, or `sum.golang.org`). When the build host cannot reach the public proxy, set `GOPROXY` to the internal module proxy and run `go mod verify` after the download. Turning the checksum database off skips that check.
+
+Install `bubblewrap` from the distro packages. Install `grok` and `claude` from the vendor or an internal mirror, then set `cli_pins` to the absolute path and the SHA-256 of the resolved file. A version-only pin runs `--version` outside the jail, so prefer the hash. The default is no pin, which keeps a current install working.
+
+`OLLAMA_MODEL` selects a model already on the local Ollama. This daemon does not hash that blob. An airgapped host should have no route to `registry.ollama.ai`, and the model files should be in place before startup.
+
+Leave `XAI_API_KEY`, `ANTHROPIC_API_KEY`, and `SSH_AUTH_SOCK` out of the unit. Login stays in the daemon user's `~/.grok` or `~/.claude`.
+
+What is policy-controlled, and what remains, is `docs/plans/2026-10-13-enterprise-residual.md`.
+
 ## Out
 
 - Per-bot microVMs.

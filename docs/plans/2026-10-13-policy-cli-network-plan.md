@@ -28,7 +28,7 @@ default_net_allow: []
 env_allowlist: []
 ```
 
-`force_local_only` already disables CLI backends. `cli_network: none` is the setting when CLI backends stay enabled and must not reach the network.
+`force_local_only` already disables CLI backends. `cli_network: none` is the setting when CLI backends stay enabled and must not reach the network. Destinations, user namespaces, supply chain, and the residual list are in `docs/sandbox.md` and `docs/plans/2026-10-13-enterprise-residual.md`.
 
 ## Out
 

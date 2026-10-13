@@ -32,6 +32,16 @@ Environment=OLLAMA_MODEL=llama3.2
 # Environment=POLICY_DLP_PATTERNS=(?i)\bsecret\b
 # Environment=POLICY_DLP_COMMAND=/usr/local/bin/lgb-dlp-scan
 # Environment=POLICY_DLP_SCAN_TOOLS=false
+# Airgap. These replace the open default. OLLAMA_URL stays on loopback, and
+# the model must already be present. force_local_only disables CLI backends.
+# cli_network=none keeps a CLI enabled and gives it no network. An empty
+# POLICY_CLI_BACKENDS allows no CLI backends. proxy with an empty allowlist
+# denies every destination. Linux CLI turns need distro bubblewrap and
+# unprivileged user namespaces. Do not pass --disable-userns. An EDR that
+# blocks bwrap, user namespaces, or LD_PRELOAD makes that turn fail closed.
+# Environment=POLICY_FORCE_LOCAL_ONLY=true
+# Environment=POLICY_CLI_NETWORK=none
+# Environment=POLICY_CLI_BACKENDS=
 # Required when BIND_ADDR is not loopback.
 # Environment=AUTH_TOKEN=replace-me
 NoNewPrivileges=true

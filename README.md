@@ -72,7 +72,13 @@ default_net_allow: []
 env_allowlist: []
 ```
 
-`force_local_only` refuses a non-loopback `OLLAMA_URL` at startup and disables CLI backends. `cli_network: none` is the setting when those backends stay enabled and must not reach the network. The file is `DATA_DIR/policy.yaml`, or the path in `POLICY_FILE`. The file wins over the environment. See `docs/plans/2026-10-13-policy-cli-network-plan.md`.
+`force_local_only` refuses a non-loopback `OLLAMA_URL` at startup and disables CLI backends. `cli_network: none` is the setting when those backends stay enabled and must not reach the network. `cli_network: proxy` with an empty `cli_net_allow` also denies every CLI destination. The file is `DATA_DIR/policy.yaml`, or the path in `POLICY_FILE`. The file wins over the environment.
+
+The daemon calls Ollama on loopback and does not pull models. A bare `ollama pull` uses `registry.ollama.ai` unless that model is already local or the name points at an internal registry. With CLI backends left on, `open` does not filter hosts. `proxy` and `explicit-proxy` allow only the exact hosts in `cli_net_allow`. A Grok turn needs `api.x.ai`. Sign-in can also use `accounts.x.ai` and `console.x.ai`. A Claude turn needs `api.anthropic.com`, `claude.ai`, and `platform.claude.com`. Feature and telemetry hosts, user namespaces, and the supply chain are in `docs/sandbox.md`.
+
+Linux CLI turns need the distro `bubblewrap` package and unprivileged user namespaces. The jail uses `--unshare-user` and does not pass `--disable-userns`. An EDR that blocks user namespaces, `bwrap`, or `LD_PRELOAD` makes the turn fail closed. macOS needs `sandbox-exec`. An EDR that blocks it or `DYLD_INSERT_LIBRARIES` makes the turn fail closed. Leave the jail in place.
+
+Build with the committed `go.sum` (`go mod verify`). Point `GOPROXY` at an internal module proxy when the build host cannot use the public one, and leave the checksum database on. Pin each CLI binary with `cli_pins` and a SHA-256. Keep the Ollama blob on the local daemon and set `OLLAMA_MODEL` to that name. What the policy covers, and what it leaves open, is `docs/plans/2026-10-13-enterprise-residual.md`.
 
 ```bash
 # new bots use Grok unless they set cli_backend
@@ -138,7 +144,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now local-grok-bots
 ```
 
-The unit sets `User=local-grok-bots` and `ProtectHome=true`. The service home is `/var/lib/local-grok-bots`, so `ProtectHome` does not hide it. Log the CLIs in once as that user (`sudo -u local-grok-bots -- grok login`, and the same for `claude`) so session files and credentials stay in that home. `bwrap` must be installed on the host.
+The unit sets `User=local-grok-bots` and `ProtectHome=true`. The service home is `/var/lib/local-grok-bots`, so `ProtectHome` does not hide it. Log the CLIs in once as that user (`sudo -u local-grok-bots -- grok login`, and the same for `claude`) so session files and credentials stay in that home. `bwrap` must be the distro package, and the host must allow unprivileged user namespaces. The unit comments include an airgap block. Those lines are commented, so a default install stays on the open CLI network.
 
 Set `OLLAMA_MODEL` in the installed unit to a model `ollama list` actually shows. Add `After=ollama.service` and `Wants=ollama.service` if that unit exists, so the first boot does not race Ollama.
 
@@ -154,7 +160,7 @@ sed "s|__HOME__|$HOME|g" deploy/com.local-grok-bots.plist > "$HOME/Library/Launc
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.local-grok-bots.plist"
 ```
 
-The agent runs as that user, so the daemon's refusal to run as root still holds. Do not install this plist as a LaunchDaemon. `sandbox-exec` must be present, which it is on current macOS. Log the CLIs in once in that user's session so credentials stay in `~/.grok` or `~/.claude`.
+The agent runs as that user, so the daemon's refusal to run as root still holds. Do not install this plist as a LaunchDaemon. `sandbox-exec` must be present, which it is on current macOS. An EDR that blocks `sandbox-exec` or `DYLD_INSERT_LIBRARIES` makes a CLI turn fail closed. The plist's comment lists the airgap keys. They are not set, so a default install stays on the open CLI network. Log the CLIs in once in that user's session so credentials stay in `~/.grok` or `~/.claude`.
 
 The page listens on `127.0.0.1` and is plain HTTP. To listen on another address, set `BIND_ADDR` and `AUTH_TOKEN` together. The daemon refuses to start when a non-loopback bind has no token. Do not port-forward it.
 

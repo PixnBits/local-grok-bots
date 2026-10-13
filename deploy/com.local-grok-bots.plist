@@ -10,6 +10,18 @@
 	</array>
 	<key>WorkingDirectory</key>
 	<string>__HOME__/Library/Application Support/local-grok-bots</string>
+	<!--
+		Airgap: add POLICY_FORCE_LOCAL_ONLY=true to disable CLI backends, and
+		keep OLLAMA_URL on loopback with the model already pulled.
+		POLICY_CLI_NETWORK=none is the setting when a CLI stays enabled and
+		must not dial out. An empty POLICY_CLI_BACKENDS allows no CLI backends.
+		proxy with an empty POLICY_CLI_NET_ALLOW denies every destination.
+		Grok needs api.x.ai. Claude needs api.anthropic.com, claude.ai, and
+		platform.claude.com. See docs/sandbox.md.
+		sandbox-exec must stay allowed. An EDR that blocks sandbox-exec or
+		DYLD_INSERT_LIBRARIES makes a CLI turn fail closed. Do not install
+		this plist as a LaunchDaemon. The daemon refuses to run as root.
+	-->
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>HOME</key>
