@@ -13,4 +13,4 @@
 
 ## Out
 
-Writable extra binds, shell-jail changes, and remapping a path to a different destination.
+Writable extra binds and shell-jail changes. A different CLI destination is decided in `docs/plans/2026-10-13-cli-ro-bind-remap-plan.md`.

@@ -15,3 +15,7 @@ An operator can mount a host path at a different path inside the CLI jail. A pla
 ## Out
 
 Writable binds, shell `build_binds` destinations, and a Seatbelt profile that pretends a path was remapped.
+
+## Lesson
+
+`~/.grok/lessons/local-grok-bots/cli-ro-binds.md` — a colon in `POLICY_CLI_RO_BINDS` still separates two same-path entries. The environment remap is `->`.

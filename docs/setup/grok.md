@@ -243,7 +243,7 @@ Other optional controls (all off unless set):
 - Binary pins (`cli_pins` / `POLICY_CLI_PINS`) — fail closed if the resolved `grok` binary does not match the path, SHA-256, or version.
 - Structured audit log (`audit_log` / `POLICY_AUDIT_LOG`) — JSON lines for CLI start/stop, network decisions, and grant events.
 - Prompt check (`dlp_patterns`, `dlp_file`, `dlp_command`) — reject a CLI turn before the process starts.
-- Read-only CLI paths (`cli_ro_binds` / `POLICY_CLI_RO_BINDS`) — extra paths the CLI can read. Leave this unset for a normal install. A relative path, a missing path, or a path under `.ssh`, `~/.grok`, or `~/.claude` fails startup.
+- Read-only CLI paths (`cli_ro_binds` / `POLICY_CLI_RO_BINDS`) — extra paths the CLI can read. A plain path mounts onto itself. In the policy file, `"/opt/shared:/reference"` mounts that host path at `/reference`. In the environment the same remap is `/opt/shared->/reference`, because a colon still separates entries. Leave this unset for a normal install. A relative path, a missing path, a path under `.ssh`, `~/.grok`, or `~/.claude`, or a different destination on macOS fails startup.
 - Resource limits, a turn cap, and a read-only workspace (`rlimit_nofile`, `rlimit_nproc`, `rlimit_cpu_seconds`, `turn_timeout`, `workspace_readonly`) — leave these unset for a normal install. A coding bot should leave the workspace writable. A non-zero resource limit fails startup on macOS. Memory cgroups are not set here.
 
 `GET /api/policy` returns the loaded value. Details, required destinations, EDR notes, and residual risk are in `docs/sandbox.md` and `docs/plans/2026-10-13-enterprise-residual.md`. Ask before writing a policy file if the person has not asked for one.
