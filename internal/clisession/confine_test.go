@@ -293,7 +293,7 @@ func TestCLIROBindArgv(t *testing.T) {
 	if strings.Contains(strings.Join(plain, "\x00"), shared) {
 		t.Fatal("empty plan added a bind")
 	}
-	args, err := confineArgsPlan("/bin/true", nil, ws, confinePlan{ROBinds: []string{shared}})
+	args, err := confineArgsPlan("/bin/true", nil, ws, confinePlan{ROBinds: []policy.CLIROBind{{Src: shared, Dst: shared}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +307,7 @@ func TestCLIROBindArgv(t *testing.T) {
 	if strings.Contains(joined, "--bind\x00"+shared+"\x00") {
 		t.Fatal("cli ro bind is writable")
 	}
-	if _, err := confineArgsPlan("/bin/true", nil, ws, confinePlan{ROBinds: []string{"/usr"}}); err == nil || !strings.Contains(err.Error(), "conflicts") {
+	if _, err := confineArgsPlan("/bin/true", nil, ws, confinePlan{ROBinds: []policy.CLIROBind{{Src: "/usr", Dst: "/usr"}}}); err == nil || !strings.Contains(err.Error(), "conflicts") {
 		t.Fatal(err)
 	}
 }
@@ -336,7 +336,7 @@ func TestCLIROBindIsReadOnly(t *testing.T) {
 	if err := os.WriteFile(marker, []byte("shared-ok\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	args, err := confineArgsPlan(cat, []string{marker}, ws, confinePlan{ROBinds: []string{shared}})
+	args, err := confineArgsPlan(cat, []string{marker}, ws, confinePlan{ROBinds: []policy.CLIROBind{{Src: shared, Dst: shared}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -347,7 +347,7 @@ func TestCLIROBindIsReadOnly(t *testing.T) {
 		t.Fatalf("read %v %s", err, out)
 	}
 	created := filepath.Join(shared, "newfile")
-	args, err = confineArgsPlan(touch, []string{created}, ws, confinePlan{ROBinds: []string{shared}})
+	args, err = confineArgsPlan(touch, []string{created}, ws, confinePlan{ROBinds: []policy.CLIROBind{{Src: shared, Dst: shared}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +376,7 @@ func TestCLIROBindIsLogged(t *testing.T) {
 	}
 	var got []sandbox.Event
 	l := launch{
-		Policy:  policy.Policy{CLINetwork: policy.NetOpen, CLIROBinds: []string{shared}},
+		Policy:  policy.Policy{CLINetwork: policy.NetOpen, CLIROBinds: []policy.CLIROBind{{Src: shared, Dst: shared}}},
 		BindLog: func(ev sandbox.Event) { got = append(got, ev) },
 	}
 	cmd, cleanup, err := l.command(context.Background(), "/bin/true", nil, ws)

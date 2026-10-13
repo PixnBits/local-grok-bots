@@ -86,7 +86,11 @@ func applyKey(p *Policy, key, val string) error {
 		if err != nil {
 			return err
 		}
-		p.CLIROBinds = list
+		binds, err := parseCLIROList(list, true)
+		if err != nil {
+			return err
+		}
+		p.CLIROBinds = binds
 	case "rlimit_nofile":
 		n, err := parseRlimit(val)
 		if err != nil {

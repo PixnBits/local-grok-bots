@@ -30,6 +30,14 @@ const (
 	NetExplicit = "explicit-proxy"
 )
 
+// CLIROBind is one extra read-only path in the CLI jail.
+// Src is the host path. Dst is the path inside the jail.
+// Equal paths mount the host path onto itself.
+type CLIROBind struct {
+	Src string `json:"src"`
+	Dst string `json:"dst"`
+}
+
 // CLIPin is an optional check of one CLI binary.
 // An empty pin list checks nothing. A configured pin must match before exec.
 type CLIPin struct {
@@ -48,10 +56,12 @@ type Policy struct {
 	EnvAllowlist     []string `json:"env_allowlist"`
 	DefaultNetAllow  []string `json:"default_net_allow"`
 	ForceLocalOnly   bool     `json:"force_local_only"`
-	BuildBinds       []string `json:"build_binds"`
+	// BuildBinds are extra read-only shell paths. Each one is mounted at itself.
+	BuildBinds []string `json:"build_binds"`
 	// CLIROBinds are extra read-only paths in the CLI jail.
 	// Empty means the jail mounts only its built-in paths.
-	CLIROBinds []string `json:"cli_ro_binds"`
+	// A pair with Src == Dst mounts the host path onto itself.
+	CLIROBinds []CLIROBind `json:"cli_ro_binds"`
 	// RlimitNofile, RlimitNproc, and RlimitCPU are process limits.
 	// Zero leaves the current limit in place.
 	RlimitNofile int `json:"rlimit_nofile"`
@@ -92,7 +102,7 @@ func Default() Policy {
 		EnvAllowlist:     []string{},
 		DefaultNetAllow:  []string{},
 		BuildBinds:       []string{},
-		CLIROBinds:       []string{},
+		CLIROBinds:       []CLIROBind{},
 		CLIPins:          []CLIPin{},
 		DLPPatterns:      []string{},
 	}
@@ -396,7 +406,11 @@ func applyEnv(p *Policy) error {
 		p.BuildBinds = splitList(v, string(os.PathListSeparator))
 	}
 	if v, ok := os.LookupEnv("POLICY_CLI_RO_BINDS"); ok {
-		p.CLIROBinds = splitList(v, string(os.PathListSeparator))
+		binds, err := parseCLIROList(splitList(v, string(os.PathListSeparator)), false)
+		if err != nil {
+			return fmt.Errorf("POLICY_CLI_RO_BINDS: %w", err)
+		}
+		p.CLIROBinds = binds
 	}
 	if v, ok := os.LookupEnv("POLICY_RLIMIT_NOFILE"); ok {
 		n, err := parseRlimit(v)
@@ -568,8 +582,12 @@ func sha256Hex(s string) bool {
 
 // checkCLIROBinds fails closed unless every extra CLI path is an absolute
 // path that exists and is safe to mount read-only. An empty list is the
-// current jail. The stored list is the cleaned paths.
+// current jail. The stored list is the cleaned src and dst.
 func (p *Policy) checkCLIROBinds(dataDir string) error {
+	return p.checkCLIROBindsOS(dataDir, runtime.GOOS)
+}
+
+func (p *Policy) checkCLIROBindsOS(dataDir, goos string) error {
 	if len(p.CLIROBinds) == 0 {
 		return nil
 	}
@@ -593,46 +611,142 @@ func (p *Policy) checkCLIROBinds(dataDir string) error {
 		filepath.Join(home, ".claude"),
 		filepath.Join(home, ".claude.json"),
 	}
-	cleaned := make([]string, 0, len(p.CLIROBinds))
-	seen := map[string]bool{}
-	for _, raw := range p.CLIROBinds {
-		if strings.TrimSpace(raw) == "" || strings.ContainsAny(raw, "\r\n\x00") {
-			return fmt.Errorf("cli_ro_binds entry is empty")
-		}
-		if !filepath.IsAbs(raw) {
-			return fmt.Errorf("cli_ro_binds %q must be an absolute path", raw)
-		}
-		if strings.ContainsAny(raw, "\"\\()") {
-			return fmt.Errorf("cli_ro_binds %q contains a reserved character", raw)
-		}
-		clean := filepath.Clean(raw)
-		switch clean {
-		case "/usr", "/bin", "/lib", "/lib64", "/etc", "/tmp", "/proc", "/dev", "/lgb-home", "/lgb-proxy":
-			return fmt.Errorf("cli_ro_binds %q conflicts with a jail mount", clean)
-		}
-		if seen[clean] {
-			return fmt.Errorf("cli_ro_binds %q is duplicated", clean)
-		}
-		if err := refuseCLIRO(clean, workspace, login); err != nil {
+	cleaned := make([]CLIROBind, 0, len(p.CLIROBinds))
+	seenSrc := map[string]bool{}
+	seenDst := map[string]bool{}
+	for _, bind := range p.CLIROBinds {
+		src, err := cleanCLIROPath(bind.Src)
+		if err != nil {
 			return err
 		}
-		resolved, err := filepath.EvalSymlinks(clean)
+		dstRaw := bind.Dst
+		if strings.TrimSpace(dstRaw) == "" {
+			dstRaw = bind.Src
+		}
+		dst, err := cleanCLIROPath(dstRaw)
 		if err != nil {
-			return fmt.Errorf("cli_ro_binds %q: %w", clean, err)
+			return err
+		}
+		if src == dst {
+			if cliROReserved(src) {
+				return fmt.Errorf("cli_ro_binds %q conflicts with a jail mount", src)
+			}
+		} else if err := checkRemapDst(dst, workspace); err != nil {
+			return err
+		} else if goos == "darwin" {
+			return fmt.Errorf("cli_ro_binds cannot remap %q to %q: Seatbelt has no bind mount", src, dst)
+		}
+		if seenSrc[src] || seenDst[dst] {
+			quoted := src
+			if seenDst[dst] && !seenSrc[src] {
+				quoted = dst
+			}
+			return fmt.Errorf("cli_ro_binds %q is duplicated", quoted)
+		}
+		if err := refuseCLIRO(src, workspace, login); err != nil {
+			return err
+		}
+		resolved, err := filepath.EvalSymlinks(src)
+		if err != nil {
+			return fmt.Errorf("cli_ro_binds %q: %w", src, err)
 		}
 		resolved = filepath.Clean(resolved)
-		if resolved != clean {
+		if resolved != src {
 			if err := refuseCLIRO(resolved, workspace, login); err != nil {
 				return err
 			}
 		}
 		if _, err := os.Stat(resolved); err != nil {
-			return fmt.Errorf("cli_ro_binds %q: %w", clean, err)
+			return fmt.Errorf("cli_ro_binds %q: %w", src, err)
 		}
-		seen[clean] = true
-		cleaned = append(cleaned, clean)
+		seenSrc[src] = true
+		seenDst[dst] = true
+		cleaned = append(cleaned, CLIROBind{Src: src, Dst: dst})
 	}
 	p.CLIROBinds = cleaned
+	return nil
+}
+
+// parseCLIROList reads compact bind entries.
+// colonSplits is true for a policy-file item, where one colon is src:dst.
+// The environment list is already split on the path separator, so a colon
+// there is not a destination. -> is src then dst in both forms.
+func parseCLIROList(items []string, colonSplits bool) ([]CLIROBind, error) {
+	if len(items) == 0 {
+		return []CLIROBind{}, nil
+	}
+	out := make([]CLIROBind, 0, len(items))
+	for _, item := range items {
+		bind, err := parseCLIROEntry(item, colonSplits)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, bind)
+	}
+	return out, nil
+}
+
+func parseCLIROEntry(raw string, colonSplits bool) (CLIROBind, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || strings.ContainsAny(raw, "\r\n\x00") {
+		return CLIROBind{}, fmt.Errorf("cli_ro_binds entry is empty")
+	}
+	if strings.Count(raw, "->") > 1 {
+		return CLIROBind{}, fmt.Errorf("cli_ro_binds %q is invalid", raw)
+	}
+	src, dst := raw, raw
+	if i := strings.Index(raw, "->"); i >= 0 {
+		src = strings.TrimSpace(raw[:i])
+		dst = strings.TrimSpace(raw[i+2:])
+		if strings.Contains(src, ":") || strings.Contains(dst, ":") {
+			return CLIROBind{}, fmt.Errorf("cli_ro_binds %q is invalid", raw)
+		}
+	} else if strings.Contains(raw, ":") {
+		if !colonSplits || strings.Count(raw, ":") != 1 {
+			return CLIROBind{}, fmt.Errorf("cli_ro_binds %q is invalid", raw)
+		}
+		left, right, _ := strings.Cut(raw, ":")
+		src = strings.TrimSpace(left)
+		dst = strings.TrimSpace(right)
+	}
+	if src == "" || dst == "" {
+		return CLIROBind{}, fmt.Errorf("cli_ro_binds entry is empty")
+	}
+	return CLIROBind{Src: src, Dst: dst}, nil
+}
+
+func cleanCLIROPath(raw string) (string, error) {
+	if strings.TrimSpace(raw) == "" || strings.ContainsAny(raw, "\r\n\x00") {
+		return "", fmt.Errorf("cli_ro_binds entry is empty")
+	}
+	if !filepath.IsAbs(raw) {
+		return "", fmt.Errorf("cli_ro_binds %q must be an absolute path", raw)
+	}
+	if strings.ContainsAny(raw, "\"\\()") {
+		return "", fmt.Errorf("cli_ro_binds %q contains a reserved character", raw)
+	}
+	return filepath.Clean(raw), nil
+}
+
+func cliROReserved(path string) bool {
+	switch path {
+	case "/usr", "/bin", "/lib", "/lib64", "/etc", "/tmp", "/proc", "/dev", "/lgb-home", "/lgb-proxy":
+		return true
+	default:
+		return false
+	}
+}
+
+func checkRemapDst(dst, workspace string) error {
+	reserved := []string{"/usr", "/bin", "/lib", "/lib64", "/etc", "/tmp", "/proc", "/dev", "/lgb-home", "/lgb-proxy"}
+	for _, root := range reserved {
+		if pathOverlaps(dst, root) {
+			return fmt.Errorf("cli_ro_binds %q conflicts with a jail mount", dst)
+		}
+	}
+	if pathOverlaps(dst, workspace) {
+		return fmt.Errorf("cli_ro_binds %q overlaps the workspace", dst)
+	}
 	return nil
 }
 

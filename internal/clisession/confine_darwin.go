@@ -43,7 +43,12 @@ func applyLaunch(bin string, args []string, workspace string, plan confinePlan) 
 	if home != "" {
 		ensureCLIState(home)
 	}
-	net := cliNet{Open: !plan.UnshareNet, ProxySock: plan.ProxySock, ROBinds: plan.ROBinds, ReadOnly: plan.WorkspaceReadonly}
+	reads, err := cliROHostPaths(plan.ROBinds)
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	net := cliNet{Open: !plan.UnshareNet, ProxySock: plan.ProxySock, ROBinds: reads, ReadOnly: plan.WorkspaceReadonly}
 	if plan.PreloadSrc != "" {
 		net.ExtraRead = filepath.Dir(plan.PreloadSrc)
 	}
@@ -72,6 +77,23 @@ func applyLaunch(bin string, args []string, workspace string, plan confinePlan) 
 	}
 	cmd.Env = env
 	return cmd, cleanup, nil
+}
+
+// cliROHostPaths is the Seatbelt read list for same-path binds.
+// A different destination fails here. Seatbelt cannot remap a path.
+func cliROHostPaths(binds []policy.CLIROBind) ([]string, error) {
+	out := make([]string, 0, len(binds))
+	for _, bind := range binds {
+		src := filepath.Clean(strings.TrimSpace(bind.Src))
+		dst := filepath.Clean(strings.TrimSpace(bind.Dst))
+		if dst != "" && dst != "." && dst != src {
+			return nil, fmt.Errorf("cli ro bind cannot remap %q to %q: Seatbelt has no bind mount", src, dst)
+		}
+		if src != "" && src != "." {
+			out = append(out, src)
+		}
+	}
+	return out, nil
 }
 
 func confinedCommand(bin string, args []string, workspace string) (*exec.Cmd, func(), error) {

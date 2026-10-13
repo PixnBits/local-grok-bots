@@ -37,7 +37,7 @@ type confinePlan struct {
 	ProxyDir          string
 	ProxySock         string
 	ExtraEnv          []string
-	ROBinds           []string
+	ROBinds           []policy.CLIROBind
 	Rlimits           sandbox.Rlimits
 	WorkspaceReadonly bool
 }
@@ -56,11 +56,12 @@ func (l launch) command(ctx context.Context, bin string, args []string, workspac
 		return nil, nil, err
 	}
 	if l.BindLog != nil {
-		for _, path := range plan.ROBinds {
+		for _, bind := range plan.ROBinds {
+			path := filepath.Clean(bind.Src)
 			l.BindLog(sandbox.Event{
 				Kind:   "grant_use",
 				Grant:  "cli_ro_bind",
-				Detail: filepath.Clean(path) + " read-only",
+				Detail: path + " read-only",
 			})
 		}
 	}
@@ -83,7 +84,7 @@ func prepareCLINet(ctx context.Context, pol policy.Policy, dial func(context.Con
 	}
 	plan := confinePlan{
 		ExtraEnv: extra,
-		ROBinds:  append([]string{}, pol.CLIROBinds...),
+		ROBinds:  append([]policy.CLIROBind{}, pol.CLIROBinds...),
 		Rlimits: sandbox.Rlimits{
 			Nofile: pol.RlimitNofile, Nproc: pol.RlimitNproc, CPUSeconds: pol.RlimitCPU,
 		},
@@ -370,11 +371,20 @@ func hostFile(path string) (string, bool) {
 	return real, true
 }
 
-func appendCLIROBinds(args []string, seen map[string]bool, binds []string) ([]string, error) {
-	for _, raw := range binds {
-		raw = filepath.Clean(strings.TrimSpace(raw))
-		if raw == "" || raw == "." || !filepath.IsAbs(raw) {
-			return nil, fmt.Errorf("cli ro bind %q must be an absolute path", raw)
+func appendCLIROBinds(args []string, seen map[string]bool, binds []policy.CLIROBind) ([]string, error) {
+	for _, bind := range binds {
+		raw := filepath.Clean(strings.TrimSpace(bind.Src))
+		dst := filepath.Clean(strings.TrimSpace(bind.Dst))
+		if dst == "" || dst == "." {
+			dst = raw
+		}
+		if raw == "" || raw == "." || !filepath.IsAbs(raw) || !filepath.IsAbs(dst) {
+			return nil, fmt.Errorf("cli ro bind %q must be an absolute path", bind.Src)
+		}
+		// A different destination is rejected until the jail mounts it.
+		// Mounting at the host path would hide the operator's dst.
+		if dst != raw {
+			return nil, fmt.Errorf("cli ro bind %q -> %q is not mounted", raw, dst)
 		}
 		if seen[raw] {
 			return nil, fmt.Errorf("cli ro bind %q conflicts with a jail mount", raw)

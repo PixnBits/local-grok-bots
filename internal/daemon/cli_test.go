@@ -160,7 +160,7 @@ func TestPolicyListsCLIROBinds(t *testing.T) {
 	app.cfg.AuthToken = "sekrit"
 	srv := serve(t, app)
 	res, b := do(t, "GET", srv.URL+"/api/policy", nil, "sekrit")
-	if res.StatusCode != 200 || !strings.Contains(string(b), shared) || strings.Contains(string(b), `"cli_ro_binds":[]`) {
+	if res.StatusCode != 200 || !strings.Contains(string(b), `"src":"`+shared+`"`) || !strings.Contains(string(b), `"dst":"`+shared+`"`) || strings.Contains(string(b), `"cli_ro_binds":[]`) {
 		t.Fatalf("policy %d %s", res.StatusCode, b)
 	}
 }

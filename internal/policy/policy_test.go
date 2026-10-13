@@ -342,11 +342,11 @@ func TestCLIROBindsValidation(t *testing.T) {
 	}
 	t.Setenv("POLICY_CLI_RO_BINDS", filepath.Join(t.TempDir(), "from-env"))
 	p, err := Load(data, "http://127.0.0.1:11434", nil, true)
-	if err != nil || len(p.CLIROBinds) != 1 || p.CLIROBinds[0] != shared {
+	if err != nil || len(p.CLIROBinds) != 1 || p.CLIROBinds[0].Src != shared || p.CLIROBinds[0].Dst != shared {
 		t.Fatalf("%v %+v", err, p.CLIROBinds)
 	}
 	raw, err := p.MarshalJSON()
-	if err != nil || !strings.Contains(string(raw), shared) || !strings.Contains(string(raw), `"cli_ro_binds"`) {
+	if err != nil || !strings.Contains(string(raw), `"src":"`+shared+`"`) || !strings.Contains(string(raw), `"dst":"`+shared+`"`) {
 		t.Fatalf("%s %v", raw, err)
 	}
 
@@ -392,6 +392,116 @@ func TestCLIROBindsValidation(t *testing.T) {
 	}
 	t.Setenv("POLICY_CLI_RO_BINDS", ws)
 	if _, err := Load(overlap, "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "workspace") {
+		t.Fatal(err)
+	}
+}
+
+func TestCLIROBindRemap(t *testing.T) {
+	src := filepath.Join(t.TempDir(), "shared")
+	other := filepath.Join(t.TempDir(), "other")
+	if err := os.Mkdir(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := t.TempDir()
+	body := "cli_ro_binds: [\"" + other + "\", \"" + src + ":/reference\"]\n"
+	if err := os.WriteFile(filepath.Join(data, "policy.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POLICY_CLI_RO_BINDS", src+"->/from-env")
+	p, err := Load(data, "http://127.0.0.1:11434", nil, true)
+	if err != nil || len(p.CLIROBinds) != 2 {
+		t.Fatalf("%v %+v", err, p.CLIROBinds)
+	}
+	if p.CLIROBinds[0].Src != other || p.CLIROBinds[0].Dst != other {
+		t.Fatalf("same path %+v", p.CLIROBinds[0])
+	}
+	if p.CLIROBinds[1].Src != src || p.CLIROBinds[1].Dst != "/reference" {
+		t.Fatalf("remap %+v", p.CLIROBinds[1])
+	}
+	raw, err := p.MarshalJSON()
+	if err != nil || !strings.Contains(string(raw), `"dst":"/reference"`) {
+		t.Fatalf("%s %v", raw, err)
+	}
+
+	t.Setenv("POLICY_CLI_RO_BINDS", src+"->/reference")
+	env, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true)
+	if err != nil || len(env.CLIROBinds) != 1 || env.CLIROBinds[0].Src != src || env.CLIROBinds[0].Dst != "/reference" {
+		t.Fatalf("%v %+v", err, env.CLIROBinds)
+	}
+
+	t.Setenv("POLICY_CLI_RO_BINDS", other+":"+src)
+	two, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true)
+	if err != nil || len(two.CLIROBinds) != 2 || two.CLIROBinds[0].Dst != other || two.CLIROBinds[1].Dst != src {
+		t.Fatalf("%v %+v", err, two.CLIROBinds)
+	}
+
+	t.Setenv("POLICY_CLI_RO_BINDS", src+":/reference")
+	colon, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true)
+	if err == nil {
+		for _, bind := range colon.CLIROBinds {
+			if bind.Src != bind.Dst {
+				t.Fatalf("environment colon was treated as a destination: %+v", colon.CLIROBinds)
+			}
+		}
+		t.Fatal("environment colon was treated as a destination")
+	}
+
+	dir := t.TempDir()
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, "policy.yaml"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("POLICY_CLI_RO_BINDS", "")
+	write("cli_ro_binds: [\"relative/path:/reference\"]\n")
+	if _, err := Load(dir, "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatal(err)
+	}
+	write("cli_ro_binds: [\"" + src + ":relative\"]\n")
+	if _, err := Load(dir, "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatal(err)
+	}
+	refused := filepath.Join(t.TempDir(), ".ssh")
+	if err := os.Mkdir(refused, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	write("cli_ro_binds: [\"" + refused + ":/reference\"]\n")
+	if _, err := Load(dir, "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "refused") {
+		t.Fatal(err)
+	}
+	write("cli_ro_binds: [\"" + src + ":/lgb-home\"]\n")
+	if _, err := Load(dir, "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatal(err)
+	}
+	write("cli_ro_binds: [\"" + src + ":/usr/local\"]\n")
+	if _, err := Load(dir, "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatal(err)
+	}
+	write("cli_ro_binds: [\"/usr\"]\n")
+	if _, err := Load(dir, "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatal(err)
+	}
+	ws := filepath.Join(dir, "workspace")
+	if err := os.Mkdir(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write("cli_ro_binds: [\"" + src + ":" + ws + "\"]\n")
+	if _, err := Load(dir, "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "workspace") {
+		t.Fatal(err)
+	}
+
+	ok := Default()
+	ok.CLIROBinds = []CLIROBind{{Src: src, Dst: "/reference"}}
+	if err := ok.checkCLIROBindsOS(t.TempDir(), "linux"); err != nil || ok.CLIROBinds[0].Dst != "/reference" {
+		t.Fatalf("%v %+v", err, ok.CLIROBinds)
+	}
+	mac := Default()
+	mac.CLIROBinds = []CLIROBind{{Src: src, Dst: "/reference"}}
+	if err := mac.checkCLIROBindsOS(t.TempDir(), "darwin"); err == nil || !strings.Contains(err.Error(), "Seatbelt") {
 		t.Fatal(err)
 	}
 }
