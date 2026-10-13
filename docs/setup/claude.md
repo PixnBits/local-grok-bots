@@ -231,6 +231,29 @@ Tell the person to open http://127.0.0.1:8080 and create the bot from the page. 
 
 Ollama is optional. CLI bots do not call it. To also run Ollama bots, set `OLLAMA_MODEL` in the installed unit, or in the foreground environment, to a name that `ollama list` shows. Restart the daemon after that.
 
+## 7. Policy and optional controls
+
+The daemon loads a central Policy at startup. Defaults leave the single-user path unchanged: CLI network stays open, both backends are allowed, and pins, audit, and the prompt check are off.
+
+For an airgapped or restricted machine, create `DATA_DIR/policy.yaml` (or set `POLICY_FILE`) before the next restart. The README has the full table of `POLICY_*` variables and a ready-to-copy airgap example:
+
+```yaml
+force_local_only: true
+cli_network: none
+allow_cli_backends: []
+cli_net_allow: []
+default_net_allow: []
+env_allowlist: []
+```
+
+Other optional controls (all off unless set):
+
+- Binary pins (`cli_pins` / `POLICY_CLI_PINS`) — fail closed if the resolved `claude` binary does not match the path, SHA-256, or version.
+- Structured audit log (`audit_log` / `POLICY_AUDIT_LOG`) — JSON lines for CLI start/stop, network decisions, and grant events.
+- Prompt check (`dlp_patterns`, `dlp_file`, `dlp_command`) — reject a CLI turn before the process starts.
+
+`GET /api/policy` returns the loaded value. Details, required destinations, EDR notes, and residual risk are in `docs/sandbox.md` and `docs/plans/2026-10-13-enterprise-residual.md`. Ask before writing a policy file if the person has not asked for one.
+
 ## Done when
 
 - Health returns `"status":"ok"`.
@@ -239,3 +262,4 @@ Ollama is optional. CLI bots do not call it. To also run Ollama bots, set `OLLAM
 - `deploy/` in the repo is unchanged.
 - The person has the page URL.
 - When `bwrap` is missing, the person has been told that CLI turns fail closed until an administrator installs `bubblewrap`.
+- The person knows the Policy exists and where the airgap example and full knobs live, even if no policy file was written.
