@@ -392,3 +392,93 @@ func TestCLIROBindIsLogged(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 }
+
+func TestCLIROBindRemapArgv(t *testing.T) {
+	ws := t.TempDir()
+	shared := filepath.Join(t.TempDir(), "shared")
+	args, err := confineArgsPlan("/bin/true", nil, ws, confinePlan{
+		ROBinds: []policy.CLIROBind{{Src: shared, Dst: "/reference/data"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, "\x00")
+	want := "--ro-bind\x00" + shared + "\x00/reference/data"
+	ro := strings.Index(joined, want)
+	dir := strings.Index(joined, "--dir\x00/reference")
+	wsBind := strings.Index(joined, "--bind\x00"+ws+"\x00"+ws)
+	if ro < 0 || dir < 0 || dir > ro || wsBind < 0 || ro > wsBind {
+		t.Fatalf("bind order:\n%s", strings.Join(args, " "))
+	}
+	if strings.Contains(joined, "--ro-bind\x00"+shared+"\x00"+shared) || strings.Contains(joined, "--bind\x00"+shared+"\x00") {
+		t.Fatal("remapped bind is mounted at the host path or writable")
+	}
+}
+
+func TestCLIROBindRemapIsReadOnly(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("bubblewrap")
+	}
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip(err)
+	}
+	cat, err := exec.LookPath("cat")
+	if err != nil {
+		t.Skip(err)
+	}
+	touch, err := exec.LookPath("touch")
+	if err != nil {
+		t.Skip(err)
+	}
+	ws := t.TempDir()
+	shared := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(shared, "marker"), []byte("shared-ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args, err := confineArgsPlan(cat, []string{"/reference/marker"}, ws, confinePlan{
+		ROBinds: []policy.CLIROBind{{Src: shared, Dst: "/reference"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bwrap", args...)
+	cmd.Env = []string{"PATH=/usr/bin:/bin"}
+	out, err := cmd.CombinedOutput()
+	if err != nil || string(out) != "shared-ok\n" {
+		t.Fatalf("read %v %s", err, out)
+	}
+	created := filepath.Join(shared, "newfile")
+	args, err = confineArgsPlan(touch, []string{"/reference/newfile"}, ws, confinePlan{
+		ROBinds: []policy.CLIROBind{{Src: shared, Dst: "/reference"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("bwrap", args...)
+	cmd.Env = []string{"PATH=/usr/bin:/bin"}
+	out, err = cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("write succeeded: %s", out)
+	}
+	if _, statErr := os.Stat(created); !os.IsNotExist(statErr) {
+		t.Fatalf("read-only bind created %s (%v)", created, statErr)
+	}
+	var got []sandbox.Event
+	l := launch{
+		Policy: policy.Policy{CLINetwork: policy.NetOpen, CLIROBinds: []policy.CLIROBind{{
+			Src: shared, Dst: "/reference",
+		}}},
+		BindLog: func(ev sandbox.Event) { got = append(got, ev) },
+	}
+	cmd, cleanup, err := l.command(context.Background(), "/bin/true", nil, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cleanup)
+	if len(got) != 1 || got[0].Grant != "cli_ro_bind" || got[0].Detail != shared+" -> /reference read-only" {
+		t.Fatalf("%+v", got)
+	}
+}

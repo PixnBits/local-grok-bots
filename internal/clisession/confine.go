@@ -57,11 +57,10 @@ func (l launch) command(ctx context.Context, bin string, args []string, workspac
 	}
 	if l.BindLog != nil {
 		for _, bind := range plan.ROBinds {
-			path := filepath.Clean(bind.Src)
 			l.BindLog(sandbox.Event{
 				Kind:   "grant_use",
 				Grant:  "cli_ro_bind",
-				Detail: path + " read-only",
+				Detail: cliRODetail(bind),
 			})
 		}
 	}
@@ -371,27 +370,31 @@ func hostFile(path string) (string, bool) {
 	return real, true
 }
 
+func cliRODetail(bind policy.CLIROBind) string {
+	src := filepath.Clean(bind.Src)
+	dst := filepath.Clean(bind.Dst)
+	if dst == "" || dst == "." || dst == src {
+		return src + " read-only"
+	}
+	return src + " -> " + dst + " read-only"
+}
+
 func appendCLIROBinds(args []string, seen map[string]bool, binds []policy.CLIROBind) ([]string, error) {
 	for _, bind := range binds {
-		raw := filepath.Clean(strings.TrimSpace(bind.Src))
+		src := filepath.Clean(strings.TrimSpace(bind.Src))
 		dst := filepath.Clean(strings.TrimSpace(bind.Dst))
 		if dst == "" || dst == "." {
-			dst = raw
+			dst = src
 		}
-		if raw == "" || raw == "." || !filepath.IsAbs(raw) || !filepath.IsAbs(dst) {
+		if src == "" || src == "." || !filepath.IsAbs(src) || !filepath.IsAbs(dst) {
 			return nil, fmt.Errorf("cli ro bind %q must be an absolute path", bind.Src)
 		}
-		// A different destination is rejected until the jail mounts it.
-		// Mounting at the host path would hide the operator's dst.
-		if dst != raw {
-			return nil, fmt.Errorf("cli ro bind %q -> %q is not mounted", raw, dst)
+		if seen[dst] {
+			return nil, fmt.Errorf("cli ro bind %q conflicts with a jail mount", dst)
 		}
-		if seen[raw] {
-			return nil, fmt.Errorf("cli ro bind %q conflicts with a jail mount", raw)
-		}
-		args = appendParents(args, seen, raw)
-		args = append(args, "--ro-bind", raw, raw)
-		seen[raw] = true
+		args = appendParents(args, seen, dst)
+		args = append(args, "--ro-bind", src, dst)
+		seen[dst] = true
 	}
 	return args, nil
 }
