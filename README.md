@@ -7,6 +7,13 @@ go build -o local-grok-bots ./cmd/local-grok-bots
 ./local-grok-bots
 ```
 
+## Set up with a CLI
+
+Two guides are written so a CLI can install this daemon on your machine. Each one builds the binary, installs a per-user service, and checks `GET /api/health`. Login stays in your `~/.grok` or `~/.claude`. The daemon still refuses to run as root.
+
+- [Grok CLI](docs/setup/grok.md). Paste: `Follow docs/setup/grok.md and stop whenever it says to ask me.`
+- [Claude Code](docs/setup/claude.md). Paste: `Follow docs/setup/claude.md and stop whenever it says to ask me.`
+
 ## Environment
 
 | Variable | Default | Purpose |
