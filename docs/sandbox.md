@@ -61,6 +61,20 @@ The airgap file is in the README. `GET /api/policy` returns the loaded value.
 
 The README file is the local-only setting: `force_local_only: true`, `cli_network: none`, and empty backend, allow, and env lists. `force_local_only` disables CLI backends and refuses a non-loopback `OLLAMA_URL`. `cli_network: none` is the setting when a CLI stays enabled and must not dial out. `cli_network: proxy` with `cli_net_allow: []` starts the proxy and denies every destination. The daemon's own model call is the loopback Ollama URL. It does not pull a model.
 
+## CLI read-only binds
+
+`cli_ro_binds` is empty by default, which leaves the CLI jail mounts unchanged. Each entry is an extra path the CLI can read. The shell `build_binds` list is a different grant and is not changed.
+
+On Linux the jail applies `--ro-bind` with the same path as source and destination, after the fixed system mounts and immediately before the writable workspace mount. Parent directories inside the jail are created with `--dir`. The mount is not writable. The workspace and the CLI login directories stay read-write.
+
+Seatbelt on macOS cannot bind-mount one path onto another. The same list is a `file-read*` allow at the host path, and it is not added to the write list. A path the profile cannot quote fails startup. The daemon still writes that allow into the profile.
+
+A path must be absolute and must exist when the daemon starts. A missing path, a relative path, an empty entry, a duplicate, or a broken symlink fails startup. The file list is comma-separated, so a path that contains a comma belongs in `POLICY_CLI_RO_BINDS`. The same refusal rules as a shell bind apply: `.ssh`, shell startup files, `.netrc`, `.pgpass`, and git config. A path that overlaps `DATA_DIR/workspace`, `~/.grok`, `~/.claude`, or `~/.claude.json` also fails, including a parent of those paths and the target of a symlink. The home directory itself overlaps `~/.grok`. A path that is exactly `/usr`, `/bin`, `/lib`, `/lib64`, `/etc`, `/tmp`, `/proc`, `/dev`, `/lgb-home`, or `/lgb-proxy` fails because it is already a jail mount. A child of `/usr` is allowed. The stored value is the cleaned path the operator wrote.
+
+Each applied path is a store event `grant_use` with grant `cli_ro_bind` and detail `<path> read-only`, written when that CLI process's jail is built. When `audit_log` is set, the audit event is `grant`. `GET /api/policy` returns the paths. An empty list writes no event.
+
+Existence is checked at startup. On Linux, removing the path later makes the next turn fail when bubblewrap cannot mount it. On macOS the allow remains in the profile. A path that is already visible through a system mount, such as a directory under `/usr`, is still listed and still logged.
+
 ## Destinations when a CLI stays enabled
 
 `open` does not filter hosts. `proxy` and `explicit-proxy` allow a host only when `cli_net_allow` contains that exact name. A wildcard is stored as that literal and matches no other host. Port 22 still needs the `ssh` grant. Any other port to an allowed host is permitted. A denied host is an audit `net_decision` when `audit_log` is set, which is how an operator learns the next host to add.

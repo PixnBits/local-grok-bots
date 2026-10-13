@@ -1,6 +1,6 @@
 # Policy control and residual risk
 
-The startup Policy is the switch for CLI network, environment, grants, pins, audit, and the prompt check. Defaults still match a single-user machine: `cli_network` is `open`, `grok` and `claude` are allowed, and pins, audit, and the prompt check are off. An airgap file is in the README. This note is what that file changes, and what stays operator-owned.
+The startup Policy is the switch for CLI network, environment, grants, pins, audit, the prompt check, and extra read-only CLI paths. Defaults still match a single-user machine: `cli_network` is `open`, `grok` and `claude` are allowed, pins, audit, and the prompt check are off, and `cli_ro_binds` is empty. An airgap file is in the README. This note is what that file changes, and what stays operator-owned.
 
 ## Policy-controlled
 
@@ -12,6 +12,7 @@ The startup Policy is the switch for CLI network, environment, grants, pins, aud
 - `env_allowlist` copies extra variables that are set. `XAI_API_KEY`, `ANTHROPIC_API_KEY`, `SSH_AUTH_SOCK`, `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`, and the loader variables cannot be added.
 - `default_net_allow` fills a shell `net` grant that has no hosts of its own. A bot list wins.
 - `build_binds` are the extra read-only paths for the shell `build` grant. A relative path fails startup.
+- `cli_ro_binds` are extra read-only paths for the CLI jail only. Empty adds none. A relative path, a missing path, a credential path, or a login path fails startup. The shell `build` grant does not use this list.
 - `cli_pins` checks the resolved CLI binary before exec. No pin checks nothing. A path or SHA-256 miss fails the turn without running the binary.
 - `audit_log` copies CLI start and stop, network allow and deny, other grant decisions, and a DLP denial to stderr, syslog, or a file. Empty writes nothing. The schema is `docs/audit.md`.
 - `dlp_patterns`, `dlp_file`, and `dlp_command` check a CLI prompt before the process starts. A rejection fails the turn. `dlp_scan_tools` also checks tool-result text before the next CLI round. All of this is off by default.
@@ -29,6 +30,7 @@ The shell jail is unchanged: missing grant, missing `bwrap` or `sandbox-exec`, a
 - Audit lines do not include the prompt. A denial is a short reason code. The sink is off until `audit_log` is set.
 - The proxy password remains in the daemon process. Logs and `GET /api/policy` show it redacted.
 - CLI login files under `~/.grok` and `~/.claude` are the credential. They are mounted into the CLI jail. Policy does not remove them.
+- A `cli_ro_binds` entry is read-only and is that exact path. On macOS it is a Seatbelt read allow, not a bind mount, and it does not grant writes. The shell `build_binds` list is unchanged. A path under an already-readable root is still listed. Existence is checked at startup. Removing the path later makes the next Linux turn fail when bubblewrap cannot mount it. Two entries where one contains the other can fail that Linux turn, because the inner path's parents are created as empty jail directories first.
 - The store cannot tell an explicit empty shell allowlist from an unset one. A non-empty `default_net_allow` applies to every `net` bot that has no hosts. Removing the grant is how that bot loses egress.
 - Linux CLI turns need unprivileged user namespaces and the distro `bubblewrap`. The jail always passes `--unshare-user` and never `--disable-userns`. An EDR that blocks user namespaces, `bwrap`, or `LD_PRELOAD` makes the turn fail closed. On macOS, an EDR that blocks `sandbox-exec` or `DYLD_INSERT_LIBRARIES` does the same. The response is to allow those mechanisms. The jail stays.
 - `grok --sandbox workspace` can start another sandbox inside this one. A kernel that blocks nested user namespaces makes that inner sandbox fail. This jail is the boundary the daemon enforces.
