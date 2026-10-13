@@ -89,6 +89,22 @@ func applyKey(p *Policy, key, val string) error {
 		p.NoProxy = unquote(val)
 	case "audit_log":
 		p.AuditLog = unquote(val)
+	case "dlp_patterns":
+		list, err := parseList(val)
+		if err != nil {
+			return err
+		}
+		p.DLPPatterns = list
+	case "dlp_file":
+		p.DLPFile = unquote(val)
+	case "dlp_command":
+		p.DLPCommand = unquote(val)
+	case "dlp_scan_tools":
+		on, err := parseBool(unquote(val))
+		if err != nil {
+			return err
+		}
+		p.DLPScanTools = on
 	case "cli_pins":
 		list, err := parseList(val)
 		if err != nil {

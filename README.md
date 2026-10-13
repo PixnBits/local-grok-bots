@@ -37,6 +37,10 @@ Two guides are written so a CLI can install this daemon on your machine. Each on
 | `POLICY_FORCE_LOCAL_ONLY` | false | Refuse a non-loopback Ollama URL and refuse CLI backends. |
 | `POLICY_CLI_PINS` | empty | Optional checks, separated by `;`. Each item is `grok` or `claude` plus `path=/absolute`, `sha256=<64 hex>`, or `version=<token>`. Unset checks nothing. A miss fails that turn. |
 | `POLICY_AUDIT_LOG` | empty | `stderr`, `syslog`, or an absolute file. Empty writes no audit lines. The schema is `docs/audit.md`. |
+| `POLICY_DLP_PATTERNS` | empty | Go regular expressions, separated by `;`. A match fails the CLI turn before the process starts. Empty leaves the check off. |
+| `POLICY_DLP_FILE` | empty | Absolute blocklist. A line is a case-insensitive literal unless it starts with `re:`. |
+| `POLICY_DLP_COMMAND` | empty | Absolute executable. It reads the prompt on stdin and exits non-zero to reject. Its environment is only `PATH`. |
+| `POLICY_DLP_SCAN_TOOLS` | false | Also check tool-result text before the next CLI round. |
 
 Paths inside `DATA_DIR`:
 

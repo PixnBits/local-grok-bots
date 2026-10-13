@@ -47,6 +47,16 @@ The airgap file is in the README. `GET /api/policy` returns the loaded value.
 
 `audit_log` can copy CLI process start and stop, network allow and deny, and other grant decisions to stderr, syslog, or a file. The schema and redaction rules are in `docs/audit.md`. Empty leaves that sink off. The store log is unchanged.
 
+## Content check
+
+`dlp_patterns`, `dlp_file`, and `dlp_command` are off unless one of them is set. Before a CLI turn is sent, the daemon checks the prompt. A match or a non-zero scanner exit fails that turn and does not start the CLI. The store event is `dlp_denied`. When `audit_log` is set, the audit event is `dlp` with action `deny`. The reason is a short code: `dlp: blocked by pattern`, `dlp: blocked by scanner`, `dlp: scanner failed`, `dlp: rules unreadable`, or `dlp: content too large`. The prompt is not written.
+
+`dlp_patterns` entries are Go regular expressions, at most 256 bytes. In the policy file the list is comma-separated, so a pattern that contains a comma belongs in `POLICY_DLP_PATTERNS` (separated by `;`) or as a `re:` line in the blocklist. `dlp_file` is an absolute path, at most 64KiB, re-read on each check. Blank lines and `#` comments are skipped. Other lines are case-insensitive literals. A line that starts with `re:` is a regular expression. A missing file, a bad `re:` line, or text longer than 1MiB fails the turn.
+
+`dlp_command` is an absolute executable with no arguments and no shell. It receives the text on stdin and `PATH` only, so `XAI_API_KEY` and `SSH_AUTH_SOCK` are not copied. Exit 0 allows the turn. Any other exit rejects it. The command has 5 seconds. A timeout or a failure to start fails the turn. Stderr is discarded, so a scanner that prints the prompt does not put that text in the daemon log. Point this at an external scanner with `dlp_command: /absolute/path/to/scanner`. The scanner should record its own reason code and should not echo the prompt.
+
+`dlp_scan_tools: true` runs the same check on the tool-result text after the local tool has run and before the next CLI round. The default is false. A blank prompt is not sent to the check. The fields appear on `GET /api/policy`. They are rules and paths, not a copy of the prompt.
+
 ## Out
 
 - Per-bot microVMs.

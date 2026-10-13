@@ -18,5 +18,6 @@ Each line is one JSON object. `ts` is UTC RFC3339. String fields are redacted: a
 | `cli_stop` | the same fields, plus `result` of `ok`, `error`, or `interrupted` |
 | `net_decision` | `action` `allow` or `deny`, `grant`, `host`, `port` when known, `detail` |
 | `grant` | `action` `allow` or `deny`, `grant`, `detail`. This is a grant that is not a network decision, such as git. |
+| `dlp` | `action` `deny`, `detail` a short reason such as `dlp: blocked by pattern`. The prompt is not included. |
 
 `cli_network` is `open`, `proxy`, `explicit-proxy`, or `none`. A network allow lists the destination host, not a corporate proxy password. `detail` may say `via host:port` or `direct`.

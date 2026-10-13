@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
+	"github.com/PixnBits/local-grok-bots/internal/dlp"
 	"github.com/PixnBits/local-grok-bots/internal/id"
 	"github.com/PixnBits/local-grok-bots/internal/notify"
 	"github.com/PixnBits/local-grok-bots/internal/sandbox"
@@ -56,6 +57,12 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID, backend stri
 	prompt, err := a.cliPrompt(bot, fresh, inputs)
 	if err != nil {
 		a.failCLI(bot.ID, runID, backend, err)
+		return
+	}
+	if err := a.screenDLP(ctx, bot.ID, runID, backend, prompt); err != nil {
+		if fresh {
+			_ = a.st.SetBotSession(bot.ID, "")
+		}
 		return
 	}
 	ws, err := cliWorkspace(a.ws, bot.ID)
@@ -149,6 +156,11 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID, backend stri
 			a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": msg})
 			a.notifyTurn(bot.Name, msg, false)
 			return
+		}
+		if a.policy.DLPScanTools {
+			if err := a.screenDLP(ctx, bot.ID, runID, backend, follow); err != nil {
+				return
+			}
 		}
 		prompt = follow
 	}
@@ -260,6 +272,19 @@ func (a *App) notifyTurn(name, text string, needsInput bool) {
 		return
 	}
 	notify.Send(title, body)
+}
+
+func (a *App) screenDLP(ctx context.Context, botID, runID, backend, content string) error {
+	err := dlp.Scan(ctx, a.policy, content)
+	if err == nil {
+		return nil
+	}
+	a.log(botID, "dlp_denied", map[string]any{"error": err.Error()})
+	if a.audit != nil && a.audit.Enabled() {
+		a.audit.Write(map[string]any{"event": "dlp", "action": "deny", "detail": err.Error()})
+	}
+	a.failCLI(botID, runID, backend, err)
+	return err
 }
 
 func (a *App) auditCLI(event, backend, sessionID string, pid int, result string) {

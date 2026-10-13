@@ -251,6 +251,48 @@ func TestCLIPinsParseAndRejectMistakes(t *testing.T) {
 	}
 }
 
+func TestDLPRejectsBadRules(t *testing.T) {
+	if Default().DLPEnabled() || Default().DLPScanTools {
+		t.Fatal("default dlp is on")
+	}
+	t.Setenv("POLICY_DLP_PATTERNS", "[")
+	if _, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true); err == nil {
+		t.Fatal("bad regex was accepted")
+	}
+	t.Setenv("POLICY_DLP_PATTERNS", "")
+	t.Setenv("POLICY_DLP_FILE", "block.txt")
+	if _, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true); err == nil {
+		t.Fatal("relative dlp file was accepted")
+	}
+	t.Setenv("POLICY_DLP_FILE", "")
+	t.Setenv("POLICY_DLP_COMMAND", filepath.Join(t.TempDir(), "missing-scan"))
+	if _, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true); err == nil {
+		t.Fatal("missing dlp command was accepted")
+	}
+
+	dir := t.TempDir()
+	script := filepath.Join(dir, "scan.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	block := filepath.Join(dir, "block.txt")
+	if err := os.WriteFile(block, []byte("# note\nproject-secret\nre:(?i)\\btoken-[0-9]+\\b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body := "dlp_patterns: [\"(?i)\\bssn\\b\"]\ndlp_file: " + block + "\ndlp_command: " + script + "\ndlp_scan_tools: true\n"
+	if err := os.WriteFile(filepath.Join(dir, "policy.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POLICY_DLP_COMMAND", filepath.Join(dir, "from-env"))
+	p, err := Load(dir, "http://127.0.0.1:11434", nil, true)
+	if err != nil || p.DLPCommand != script || p.DLPFile != block || !p.DLPScanTools || !p.DLPEnabled() {
+		t.Fatalf("%v %+v", err, p)
+	}
+	if len(p.DLPPatterns) != 1 || p.DLPPatterns[0] != `(?i)\bssn\b` {
+		t.Fatalf("%+v", p.DLPPatterns)
+	}
+}
+
 func TestAuditLogPath(t *testing.T) {
 	t.Setenv("POLICY_AUDIT_LOG", "audit.log")
 	if _, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true); err == nil {

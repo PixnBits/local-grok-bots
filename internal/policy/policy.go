@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -55,6 +56,12 @@ type Policy struct {
 	// AuditLog is empty, "stderr", "syslog", or an absolute file path.
 	// Empty writes no audit lines.
 	AuditLog string `json:"audit_log"`
+	// DLPPatterns, DLPFile, and DLPCommand are the optional content check.
+	// All empty leaves the check off.
+	DLPPatterns  []string `json:"dlp_patterns"`
+	DLPFile      string   `json:"dlp_file"`
+	DLPCommand   string   `json:"dlp_command"`
+	DLPScanTools bool     `json:"dlp_scan_tools"`
 }
 
 // Default is the policy used when no file or environment sets a field.
@@ -68,6 +75,7 @@ func Default() Policy {
 		DefaultNetAllow:  []string{},
 		BuildBinds:       []string{},
 		CLIPins:          []CLIPin{},
+		DLPPatterns:      []string{},
 	}
 }
 
@@ -152,6 +160,9 @@ func (p Policy) Validate(modelURL string, proxyAvailable bool) error {
 		seenPin[pin.Backend] = true
 	}
 	if err := checkAudit(p.AuditLog); err != nil {
+		return err
+	}
+	if err := p.checkDLP(); err != nil {
 		return err
 	}
 	if p.ForceLocalOnly {
@@ -368,6 +379,22 @@ func applyEnv(p *Policy) error {
 	if v, ok := os.LookupEnv("POLICY_AUDIT_LOG"); ok {
 		p.AuditLog = strings.TrimSpace(v)
 	}
+	if v, ok := os.LookupEnv("POLICY_DLP_PATTERNS"); ok {
+		p.DLPPatterns = splitList(v, ";")
+	}
+	if v, ok := os.LookupEnv("POLICY_DLP_FILE"); ok {
+		p.DLPFile = strings.TrimSpace(v)
+	}
+	if v, ok := os.LookupEnv("POLICY_DLP_COMMAND"); ok {
+		p.DLPCommand = strings.TrimSpace(v)
+	}
+	if v, ok := os.LookupEnv("POLICY_DLP_SCAN_TOOLS"); ok {
+		on, err := parseBool(v)
+		if err != nil {
+			return fmt.Errorf("POLICY_DLP_SCAN_TOOLS: %w", err)
+		}
+		p.DLPScanTools = on
+	}
 	if v, ok := os.LookupEnv("POLICY_CLI_PINS"); ok {
 		pins, err := parsePinList(v, ";")
 		if err != nil {
@@ -471,6 +498,62 @@ func sha256Hex(s string) bool {
 		}
 	}
 	return true
+}
+
+// DLPEnabled reports whether a prompt check is configured.
+func (p Policy) DLPEnabled() bool {
+	return len(p.DLPPatterns) > 0 || strings.TrimSpace(p.DLPFile) != "" || strings.TrimSpace(p.DLPCommand) != ""
+}
+
+func (p Policy) checkDLP() error {
+	for _, pattern := range p.DLPPatterns {
+		if len(pattern) == 0 || len(pattern) > 256 {
+			return fmt.Errorf("dlp pattern is invalid")
+		}
+		if _, err := regexp.Compile(pattern); err != nil {
+			return fmt.Errorf("dlp pattern %q: %w", pattern, err)
+		}
+	}
+	if p.DLPFile != "" {
+		if !filepath.IsAbs(p.DLPFile) || strings.ContainsAny(p.DLPFile, "\r\n\x00") {
+			return fmt.Errorf("dlp_file must be an absolute path")
+		}
+		body, err := os.ReadFile(p.DLPFile)
+		if err != nil {
+			return fmt.Errorf("dlp_file: %w", err)
+		}
+		if len(body) > 64*1024 {
+			return fmt.Errorf("dlp_file is too large")
+		}
+		for i, line := range strings.Split(string(body), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			pattern := line
+			if strings.HasPrefix(line, "re:") {
+				pattern = strings.TrimSpace(strings.TrimPrefix(line, "re:"))
+			}
+			if len(pattern) == 0 || len(pattern) > 256 {
+				return fmt.Errorf("dlp_file line %d is invalid", i+1)
+			}
+			if strings.HasPrefix(line, "re:") {
+				if _, err := regexp.Compile(pattern); err != nil {
+					return fmt.Errorf("dlp_file line %d: %w", i+1, err)
+				}
+			}
+		}
+	}
+	if p.DLPCommand != "" {
+		if !filepath.IsAbs(p.DLPCommand) || strings.ContainsAny(p.DLPCommand, "\r\n\x00") {
+			return fmt.Errorf("dlp_command must be an absolute path")
+		}
+		st, err := os.Stat(p.DLPCommand)
+		if err != nil || !st.Mode().IsRegular() || st.Mode()&0o111 == 0 {
+			return fmt.Errorf("dlp_command is not an executable file")
+		}
+	}
+	return nil
 }
 
 func checkAudit(dest string) error {

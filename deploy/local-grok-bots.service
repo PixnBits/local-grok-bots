@@ -27,6 +27,11 @@ Environment=OLLAMA_MODEL=llama3.2
 # Environment=POLICY_CLI_NETWORK=explicit-proxy
 # Environment=POLICY_CLI_NET_ALLOW=api.example.com
 # Environment=POLICY_HTTPS_PROXY=http://proxy.example:8080
+# Optional prompt check. Off unless one of these is set. The command reads
+# stdin, gets PATH only, and must not print the prompt.
+# Environment=POLICY_DLP_PATTERNS=(?i)\bsecret\b
+# Environment=POLICY_DLP_COMMAND=/usr/local/bin/lgb-dlp-scan
+# Environment=POLICY_DLP_SCAN_TOOLS=false
 # Required when BIND_ADDR is not loopback.
 # Environment=AUTH_TOKEN=replace-me
 NoNewPrivileges=true
