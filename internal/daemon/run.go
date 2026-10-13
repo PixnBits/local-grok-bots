@@ -30,10 +30,18 @@ func (a *App) execute(botID, runID string) {
 	var cancel context.CancelFunc
 	if a.resolvedBackend(bot) != "" {
 		// A CLI turn is capped by the idle kill and by shutdown, not by the
-		// shorter Ollama round timeout.
-		ctx, cancel = context.WithCancel(a.ctx)
+		// shorter Ollama round timeout. turn_timeout adds a deadline when set.
+		if d := a.policy.TurnLimit(); d > 0 {
+			ctx, cancel = context.WithTimeout(a.ctx, d)
+		} else {
+			ctx, cancel = context.WithCancel(a.ctx)
+		}
 	} else {
-		ctx, cancel = context.WithTimeout(a.ctx, runTimeout)
+		limit := runTimeout
+		if d := a.policy.TurnLimit(); d > 0 {
+			limit = d
+		}
+		ctx, cancel = context.WithTimeout(a.ctx, limit)
 	}
 	a.rtMu.Lock()
 	if st := a.loops[botID]; st != nil {
@@ -141,6 +149,9 @@ func (a *App) finishInterrupted(botID, runID string, ctx context.Context) {
 	} else if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		status = "error"
 		errText = "timed out"
+		if a.policy.TurnLimit() > 0 {
+			a.log(botID, "turn_timeout", map[string]any{"detail": "timed out"})
+		}
 	}
 	_, _ = a.st.FinishRun(runID, status, errText)
 	if status == "cancelled" {

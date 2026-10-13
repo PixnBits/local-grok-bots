@@ -441,3 +441,39 @@ func TestRlimitValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestTurnTimeoutValidation(t *testing.T) {
+	if Default().TurnLimit() != 0 {
+		t.Fatal(Default().TurnTimeout)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "policy.yaml"), []byte("turn_timeout: 30\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POLICY_TURN_TIMEOUT", "5s")
+	got, err := Load(dir, "http://127.0.0.1:11434", nil, true)
+	if err != nil || got.TurnTimeout != "30s" || got.TurnLimit().String() != "30s" {
+		t.Fatalf("%v %+v", err, got)
+	}
+	raw, err := got.MarshalJSON()
+	if err != nil || !strings.Contains(string(raw), `"turn_timeout":"30s"`) {
+		t.Fatalf("%v %s", err, raw)
+	}
+	t.Setenv("POLICY_TURN_TIMEOUT", "0")
+	zero, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true)
+	if err != nil || zero.TurnTimeout != "" || zero.TurnLimit() != 0 {
+		t.Fatalf("%v %+v", err, zero)
+	}
+	t.Setenv("POLICY_TURN_TIMEOUT", "-1")
+	if _, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "turn_timeout") {
+		t.Fatal(err)
+	}
+	t.Setenv("POLICY_TURN_TIMEOUT", "25h")
+	if _, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "24h") {
+		t.Fatal(err)
+	}
+	t.Setenv("POLICY_TURN_TIMEOUT", "soon")
+	if _, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "invalid") {
+		t.Fatal(err)
+	}
+}

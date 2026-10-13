@@ -105,6 +105,12 @@ func applyKey(p *Policy, key, val string) error {
 			return err
 		}
 		p.RlimitCPU = n
+	case "turn_timeout":
+		d, err := parseTurnTimeout(val)
+		if err != nil {
+			return err
+		}
+		p.TurnTimeout = d
 	case "http_proxy":
 		p.HTTPProxy = unquote(val)
 	case "https_proxy":

@@ -172,7 +172,11 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		if fresh, err := a.st.GetBot(bot.ID); err == nil {
 			current = fresh
 		}
-		sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		limit := 30 * time.Second
+		if d := a.policy.TurnLimit(); d > 0 {
+			limit = d
+		}
+		sctx, cancel := context.WithTimeout(ctx, limit)
 		defer cancel()
 		res, err := sandbox.Run(sctx, sandbox.Request{
 			Workspace:  a.ws,
@@ -189,6 +193,9 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		})
 		for _, ev := range res.Events {
 			a.recordSandbox(current.ID, ev)
+		}
+		if err != nil && ctx.Err() == nil && a.policy.TurnLimit() > 0 && strings.Contains(err.Error(), "shell timed out") {
+			a.log(current.ID, "turn_timeout", map[string]any{"detail": "timed out"})
 		}
 		summary := formatShell(res.Stdout, res.Stderr)
 		if err != nil {

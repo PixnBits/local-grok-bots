@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 )
@@ -56,6 +57,9 @@ type Policy struct {
 	RlimitNofile int `json:"rlimit_nofile"`
 	RlimitNproc  int `json:"rlimit_nproc"`
 	RlimitCPU    int `json:"rlimit_cpu_seconds"`
+	// TurnTimeout is empty when the daemon should keep its built-in caps.
+	// A set value is a Go duration such as 30s.
+	TurnTimeout string `json:"turn_timeout"`
 	// HTTPProxy, HTTPSProxy, and NoProxy are the corporate proxy settings.
 	// They are used only when CLINetwork is proxy or explicit-proxy.
 	// Logs and the API show the URL with the password redacted.
@@ -181,6 +185,9 @@ func (p Policy) Validate(modelURL string, proxyAvailable bool) error {
 		return err
 	}
 	if err := p.checkRlimits(runtime.GOOS); err != nil {
+		return err
+	}
+	if err := p.checkTurnTimeout(); err != nil {
 		return err
 	}
 	if p.ForceLocalOnly {
@@ -408,6 +415,13 @@ func applyEnv(p *Policy) error {
 			return fmt.Errorf("POLICY_RLIMIT_CPU_SECONDS: %w", err)
 		}
 		p.RlimitCPU = n
+	}
+	if v, ok := os.LookupEnv("POLICY_TURN_TIMEOUT"); ok {
+		d, err := parseTurnTimeout(v)
+		if err != nil {
+			return fmt.Errorf("POLICY_TURN_TIMEOUT: %w", err)
+		}
+		p.TurnTimeout = d
 	}
 	if v, ok := lookupProxy("POLICY_HTTP_PROXY", "HTTP_PROXY", "http_proxy"); ok {
 		p.HTTPProxy = v
@@ -845,6 +859,53 @@ func boundRlimit(name string, n, max int) error {
 		return fmt.Errorf("%s %d is above %d", name, n, max)
 	}
 	return nil
+}
+
+// TurnLimit is the policy cap. Zero means the caller keeps its built-in cap.
+func (p Policy) TurnLimit() time.Duration {
+	if p.TurnTimeout == "" {
+		return 0
+	}
+	d, err := time.ParseDuration(p.TurnTimeout)
+	if err != nil || d <= 0 {
+		return 0
+	}
+	return d
+}
+
+func (p *Policy) checkTurnTimeout() error {
+	d, err := parseTurnTimeout(p.TurnTimeout)
+	if err != nil {
+		return err
+	}
+	p.TurnTimeout = d
+	return nil
+}
+
+const maxTurnTimeout = 24 * time.Hour
+
+func parseTurnTimeout(s string) (string, error) {
+	s = strings.TrimSpace(unquote(s))
+	if s == "" || s == "0" || s == "0s" {
+		return "", nil
+	}
+	if n, err := strconv.Atoi(s); err == nil {
+		if n < 0 {
+			return "", fmt.Errorf("turn_timeout must be zero or positive")
+		}
+		s = strconv.Itoa(n) + "s"
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return "", fmt.Errorf("turn_timeout %q is invalid", strings.TrimSpace(s))
+	}
+	if d == 0 {
+		return "", nil
+	}
+	if d > maxTurnTimeout {
+		return "", fmt.Errorf("turn_timeout %s is above 24h", d)
+	}
+	return d.String(), nil
 }
 
 func parseRlimit(s string) (int, error) {
