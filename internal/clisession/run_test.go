@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -117,6 +118,17 @@ func TestExecRunnerDropsEnvAndHidesHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := "home=/lgb-home sock= key= aws= secret=missing"
+	if runtime.GOOS == "darwin" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			t.Fatal(err)
+		}
+		home, err = filepath.Abs(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want = "home=" + home + " sock= key= aws= secret=missing"
+	}
 	if res.Text != want {
 		t.Fatalf("text %q", res.Text)
 	}
@@ -174,7 +186,7 @@ func TestExecRunnerRequiresBwrap(t *testing.T) {
 		Backend: "grok", Bin: "/bin/true", Fresh: true, SessionID: "abc123",
 		Prompt: "ping", Workspace: dir,
 	}, nil)
-	if err == nil || !strings.Contains(err.Error(), "bwrap") {
+	if err == nil || !strings.Contains(err.Error(), "confinement unavailable") {
 		t.Fatalf("err %v", err)
 	}
 }

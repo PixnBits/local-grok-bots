@@ -32,7 +32,9 @@ data/workspace/    the only tree bots may read, write, or shell in
 
 A bot with `cli_backend` `grok` or `claude` does not call Ollama. The daemon spawns that CLI in `workspace/bots/<bot id>/`, mode `0700`, one headless process per turn, and stores the CLI session id on the bot. The next message, DM, or timer resumes the same session. Auth is the CLI's (`grok login` or `claude` login) under the daemon user's `~/.grok` or `~/.claude`. This daemon does not store API keys, and it does not pass `XAI_API_KEY` or `ANTHROPIC_API_KEY` through the environment.
 
-The CLI process is wrapped in bubblewrap. That bot directory is bind-mounted at its host path. Ollama file and shell tools still use the shared `workspace/`. The only home paths mounted are `~/.grok`, `~/.claude`, and `~/.claude.json` when that file exists, and they appear under `/lgb-home`. The child environment is cleared, so an SSH agent socket is not inherited. `bwrap` is required; the turn fails closed when it is missing. Network stays open so the CLI can reach its model API. On kernels that block nested user namespaces, `grok --sandbox workspace` may be unable to start a second sandbox inside this jail. `--always-approve` and Claude's permission bypass stay on because a headless turn cannot prompt. The daemon refuses to start as root.
+On Linux the CLI process is wrapped in bubblewrap. That bot directory is bind-mounted at its host path. Ollama file and shell tools still use the shared `workspace/`. The only home paths mounted are `~/.grok`, `~/.claude`, and `~/.claude.json` when that file exists, and they appear under `/lgb-home`. The child environment is cleared, so an SSH agent socket is not inherited. `bwrap` is required; the turn fails closed when it is missing. Network stays open so the CLI can reach its model API. On kernels that block nested user namespaces, `grok --sandbox workspace` may be unable to start a second sandbox inside this jail. `--always-approve` and Claude's permission bypass stay on because a headless turn cannot prompt. The daemon refuses to start as root.
+
+On macOS the same turn runs under `sandbox-exec`. There is no bind mount. `HOME` stays the user home, and the profile allows writes only in `~/.grok`, `~/.claude`, `~/.claude.json`, the bot directory, and a private temp directory. Other home paths, including `~/.ssh`, are not readable. Network stays open. `sandbox-exec` is required; the turn fails closed when it is missing. Apple marks `sandbox-exec` as deprecated. It is still the Seatbelt entry point this daemon uses, and its deprecation warning is not treated as a failed turn. A CLI that starts its own Seatbelt sandbox inside this one can fail the same way a nested `bwrap` can fail on Linux.
 
 ```bash
 # new bots use Grok unless they set cli_backend
@@ -77,11 +79,13 @@ Bots left on Ollama keep the HTTP client and the workspace jail below.
 
 File tools resolve against `workspace/` and reject `..`, absolute host paths, and symlink escapes.
 
-`run_shell` uses bubblewrap when `bwrap` is installed, and otherwise `unshare` with a chroot. The workspace is bind-mounted at `/work`. The host filesystem outside it is not visible, and the shell starts with no network. If it reports its workspace as `/work`, that is the jail path, not the host path. If neither `bwrap` nor `unshare` can build the jail, the shell fails closed and the daemon still serves. The unshare jail exposes the entropy devices and not the rest of `/dev`.
+On Linux, `run_shell` uses bubblewrap when `bwrap` is installed, and otherwise `unshare` with a chroot. The workspace is bind-mounted at `/work`. The host filesystem outside it is not visible, and the shell starts with no network. If it reports its workspace as `/work`, that is the jail path, not the host path. If neither `bwrap` nor `unshare` can build the jail, the shell fails closed and the daemon still serves. The unshare jail exposes the entropy devices and not the rest of `/dev`.
+
+On macOS, `run_shell` uses `sandbox-exec`. The shell's working directory is the workspace directory on the host, not `/work`, because Seatbelt cannot bind-mount a path. The profile still hides the rest of the host: reads of `/etc/passwd` and of files outside the workspace fail, and writes outside the workspace fail. The shell starts with no network. libc connects are sent to the same allowlist proxy as on Linux, and Seatbelt allows only that proxy socket, so a connect the proxy does not see is denied. Mach lookup stays available so ordinary binaries can start. It is not a file or network grant. `sandbox-exec` is required; the shell fails closed when it is missing. The daemon still serves.
 
 Grants on the bot (`net`, `git`, `ssh`, `build`) are set from the profile. A missing grant fails closed. `git push` returns a diff and does not push. The model is `docs/sandbox.md`.
 
-To give a bot material, copy or mount it into `workspace/`. The shell PATH includes `/usr/bin`, `/bin`, and toolchain directories already on the read-only `/usr` mount, such as `/usr/local/go/bin` and `/usr/local/bin` when they exist. Home directories and `/snap` are not added.
+To give a bot material, copy or mount it into `workspace/`. The shell PATH includes `/usr/bin`, `/bin`, and toolchain directories already on the read-only system prefix, such as `/usr/local/go/bin`, `/usr/local/bin`, and `/opt/homebrew/bin` when they exist. Home directories and `/snap` are not added.
 
 ## systemd
 
@@ -101,6 +105,18 @@ The unit sets `User=local-grok-bots` and `ProtectHome=true`. The service home is
 Set `OLLAMA_MODEL` in the installed unit to a model `ollama list` actually shows. Add `After=ollama.service` and `Wants=ollama.service` if that unit exists, so the first boot does not race Ollama.
 
 For a user unit, change `WantedBy` to `default.target`, put the unit in `~/.config/systemd/user/`, and run `systemctl --user enable --now local-grok-bots`.
+
+## launchd
+
+`deploy/com.local-grok-bots.plist` is a per-user LaunchAgent. It is not installed by this repo. Replace `__HOME__` with the absolute home of the user who has run `grok login` or `claude` login. On Apple Silicon, Homebrew's prefix is `/opt/homebrew`; point `ProgramArguments` at the binary you installed if it is not `/usr/local/bin/local-grok-bots`.
+
+```bash
+mkdir -p "$HOME/Library/Application Support/local-grok-bots" "$HOME/Library/Logs" "$HOME/Library/LaunchAgents"
+sed "s|__HOME__|$HOME|g" deploy/com.local-grok-bots.plist > "$HOME/Library/LaunchAgents/com.local-grok-bots.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.local-grok-bots.plist"
+```
+
+The agent runs as that user, so the daemon's refusal to run as root still holds. Do not install this plist as a LaunchDaemon. `sandbox-exec` must be present, which it is on current macOS. Log the CLIs in once in that user's session so credentials stay in `~/.grok` or `~/.claude`.
 
 The page listens on `127.0.0.1` and is plain HTTP. To listen on another address, set `BIND_ADDR` and `AUTH_TOKEN` together. The daemon refuses to start when a non-loopback bind has no token. Do not port-forward it.
 

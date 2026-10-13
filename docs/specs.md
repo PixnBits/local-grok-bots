@@ -177,11 +177,11 @@ Arguments containing anything that looks like a secret are redacted in the log.
 
 `read_file` and `write_file` resolve against that directory and reject anything that leaves it.
 
-`run_shell` uses bubblewrap when `bwrap` is on `PATH`. Otherwise it re-execs under `unshare` into a user, mount, and network namespace, chroots, and bind-mounts the workspace at `/work`. Inside the jail the working directory is `/work`, not the host path. The host filesystem outside the workspace is not visible, and there is no network unless the bot has a grant. PATH also includes toolchain directories already on the read-only system mount, including `/usr/local/go/bin` and `/usr/local/bin` when they exist. Home directories and `/snap` are not added. If neither jail can be built, the tool fails closed.
+On Linux, `run_shell` uses bubblewrap when `bwrap` is on `PATH`. Otherwise it re-execs under `unshare` into a user, mount, and network namespace, chroots, and bind-mounts the workspace at `/work`. Inside that jail the working directory is `/work`, not the host path. On macOS, `run_shell` uses `sandbox-exec`. The working directory is the host workspace path, because Seatbelt cannot bind-mount `/work`. On both platforms the host filesystem outside the workspace is not readable, and there is no network unless the bot has a grant. PATH also includes toolchain directories already on the read-only system prefix, including `/usr/local/go/bin`, `/usr/local/bin`, and `/opt/homebrew/bin` when they exist. Home directories and `/snap` are not added. If the platform jail cannot be built, the tool fails closed.
 
 Writes to `.git/hooks`, shell rc names, and executable git settings are blocked.
 
-A bot that reports its workspace as `/work` is reporting the jail. Giving a bot material means mounting or copying it into `workspace/`. It does not mean relaxing the jail.
+A bot that reports its workspace as `/work` is reporting the Linux jail. On macOS it reports the host workspace path. Giving a bot material means mounting or copying it into `workspace/`. It does not mean relaxing the jail.
 
 Named grants (`net`, `git`, `ssh`, `build`) live on the bot. The profile and the bot API set and clear them, along with `net_allow` and `ssh_allow`. The meta tools do not. A missing grant fails closed and is logged. `git push` returns the diff and does not push. The browser grant in `docs/sandbox.md` is not implemented.
 
@@ -237,11 +237,11 @@ The page is a client. Refreshing reloads from the daemon. Four surfaces. The con
 
 ## 8. Process
 
-- Daemon starts on boot via a systemd user or system unit.
+- Daemon starts on boot via a systemd user or system unit, or a per-user launchd agent.
 - Binds on `127.0.0.1` by default. A LAN or other non-loopback address requires `AUTH_TOKEN`. No public exposure. Plain HTTP is fine on loopback.
 - Default model is the local Ollama endpoint, overridable by `OLLAMA_MODEL` and per bot. If Ollama is down, runs fail with a clear log line and do not hang.
 - Clean shutdown writes `daemon_stop`. Crash does not; the next start writes `daemon_start` and reconciles runs as above.
-- `bwrap` or `unshare` must be usable for `run_shell`. Missing, the tool fails; the daemon still serves.
+- On Linux, `bwrap` or `unshare` must be usable for `run_shell`. On macOS, `sandbox-exec` must be usable for `run_shell` and for a CLI turn. Missing, the tool or the turn fails; the daemon still serves.
 
 ## Out of these specs
 

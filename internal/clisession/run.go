@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
+
+	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 )
 
 // Runner executes one headless CLI turn.
@@ -36,7 +38,10 @@ func (ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Resu
 		}
 		path = looked
 	}
-	cmd, err := confinedCommand(path, argv[1:], spec.Workspace)
+	cmd, cleanup, err := confinedCommand(path, argv[1:], spec.Workspace)
+	if cleanup != nil {
+		defer cleanup()
+	}
 	if err != nil {
 		return Result{}, err
 	}
@@ -71,7 +76,7 @@ func (ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Resu
 		return res, parseErr
 	}
 	if waitErr != nil && strings.TrimSpace(res.Text) == "" {
-		msg := strings.TrimSpace(stderr.String())
+		msg := strings.TrimSpace(sandbox.StripSeatbeltWarning(stderr.String()))
 		if msg == "" {
 			msg = waitErr.Error()
 		}

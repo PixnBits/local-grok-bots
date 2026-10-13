@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,7 +32,11 @@ func requireBin(t *testing.T, name string) {
 
 func runCmd(t *testing.T, req Request) (Result, error) {
 	t.Helper()
-	requireBin(t, "bwrap")
+	if runtime.GOOS == "darwin" {
+		requireBin(t, "sandbox-exec")
+	} else {
+		requireBin(t, "bwrap")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 	res, err := Run(ctx, req)
@@ -178,7 +183,11 @@ func TestBaseJailHidesHost(t *testing.T) {
 	if err == nil {
 		t.Fatal("cat /etc/passwd succeeded inside the jail")
 	}
-	if !strings.Contains(res.Stdout, "/work") || !strings.Contains(res.Stdout, "hello") {
+	wantRoot := "/work"
+	if runtime.GOOS == "darwin" {
+		wantRoot = ws
+	}
+	if !strings.Contains(res.Stdout, wantRoot) || !strings.Contains(res.Stdout, "hello") {
 		t.Fatalf("workspace was not the jail root:\n%s", res.Stdout)
 	}
 	if !strings.Contains(res.Stdout, "SOCK:unset") {
@@ -447,14 +456,14 @@ func TestJailPATHIncludesToolchain(t *testing.T) {
 	if !strings.Contains(":"+path+":", ":/usr/bin:") || !strings.Contains(":"+path+":", ":/bin:") {
 		t.Fatalf("PATH = %s", path)
 	}
-	if strings.Contains(path, "/home/") || strings.Contains(path, "/snap/") || strings.Contains(path, "nvm") {
+	if strings.Contains(path, "/home/") || strings.Contains(path, "/Users/") || strings.Contains(path, "/snap/") || strings.Contains(path, "nvm") {
 		t.Fatalf("PATH includes a private dir: %s", path)
 	}
 	res, err := runCmd(t, Request{Workspace: t.TempDir(), Command: `printf '%s' "$PATH"`})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Stdout != path {
+	if res.Stdout != path && !strings.HasSuffix(res.Stdout, ":"+path) {
 		t.Fatalf("jail PATH %q want %q", res.Stdout, path)
 	}
 	goBin := "/usr/local/go/bin/go"
@@ -609,6 +618,9 @@ func assertEntropyJail(t *testing.T, forceUnshare bool) {
 }
 
 func TestEntropyDevices(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("bubblewrap and unshare are linux jails")
+	}
 	requireBin(t, "unshare")
 	requireBin(t, "od")
 	requireBin(t, "ssh-keygen")

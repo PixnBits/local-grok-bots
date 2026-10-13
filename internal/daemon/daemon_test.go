@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -332,7 +333,11 @@ func TestWorkspaceJail(t *testing.T) {
 	if shells == 0 {
 		t.Fatal("run_shell was not logged")
 	}
-	if !bytes.Contains([]byte(shellDetail), []byte("/work")) {
+	wantRoot := []byte("/work")
+	if runtime.GOOS == "darwin" {
+		wantRoot = []byte(app.ws)
+	}
+	if !bytes.Contains([]byte(shellDetail), wantRoot) {
 		t.Fatalf("shell did not run inside the workspace jail: %s", shellDetail)
 	}
 }

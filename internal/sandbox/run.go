@@ -3,7 +3,6 @@ package sandbox
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -77,9 +76,9 @@ func (p *prepared) close() {
 }
 
 // Run executes command in the workspace jail.
-// Bubblewrap is used when it is installed. Otherwise the unshare jail is used.
-// Both paths keep the host filesystem outside the workspace hidden and start
-// with no network. A missing bwrap and a missing unshare fails closed.
+// Linux uses bubblewrap when it is installed, and otherwise unshare.
+// macOS uses sandbox-exec. The host filesystem outside the workspace stays
+// hidden and the shell starts with no network. A missing jail fails closed.
 func Run(ctx context.Context, req Request) (Result, error) {
 	if strings.TrimSpace(req.Command) == "" {
 		return Result{}, fmt.Errorf("command required")
@@ -119,12 +118,7 @@ func Run(ctx context.Context, req Request) (Result, error) {
 }
 
 func launch(ctx context.Context, p *prepared) (string, string, error) {
-	if !p.forceUnshare {
-		if path, err := exec.LookPath("bwrap"); err == nil {
-			return runBwrap(ctx, p, path)
-		}
-	}
-	return runUnshare(ctx, p)
+	return launchOS(ctx, p)
 }
 
 func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
@@ -181,16 +175,16 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 		p.proxy = px
 	}
 
-	if err := os.MkdirAll(filepath.Join(rw, "bin"), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(rw, "real"), 0o755); err != nil {
 		return nil, err
 	}
 	if path, err := exec.LookPath("git"); err == nil {
 		if err := writeExec(filepath.Join(ro, "gitwrap"), gitWrap(grants["git"])); err != nil {
 			return nil, err
 		}
-		touch(filepath.Join(rw, "bin", "git"))
+		touch(filepath.Join(rw, "real", "git"))
 		p.mounts = append(p.mounts,
-			mount{Src: path, Dst: "/lgb/bin/git", RO: true},
+			mount{Src: path, Dst: "/lgb/real/git", RO: true},
 			mount{Src: filepath.Join(ro, "gitwrap"), Dst: "/usr/bin/git", RO: true},
 		)
 	}
@@ -198,9 +192,9 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 		if err := writeExec(filepath.Join(ro, "sshwrap"), sshWrap(grants["ssh"], normalizeHosts(req.SSHAllow))); err != nil {
 			return nil, err
 		}
-		touch(filepath.Join(rw, "bin", "ssh"))
+		touch(filepath.Join(rw, "real", "ssh"))
 		p.mounts = append(p.mounts,
-			mount{Src: path, Dst: "/lgb/bin/ssh", RO: true},
+			mount{Src: path, Dst: "/lgb/real/ssh", RO: true},
 			mount{Src: filepath.Join(ro, "sshwrap"), Dst: "/usr/bin/ssh", RO: true},
 		)
 	}
@@ -216,17 +210,17 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 			p.mounts = append(p.mounts, mount{Src: got, Dst: "/lgb/id_ed25519", RO: true})
 		}
 	}
-	for _, name := range []string{"apt-get", "apt", "dnf", "pacman", "apk"} {
+	for _, name := range []string{"apt-get", "apt", "dnf", "pacman", "apk", "brew"} {
 		path, err := exec.LookPath(name)
 		if err != nil {
 			continue
 		}
 		wrapName := name + "wrap"
-		realDst := "/lgb/bin/" + name
-		if err := writeExec(filepath.Join(ro, wrapName), pkgWrap(realDst)); err != nil {
+		realDst := "/lgb/real/" + name
+		if err := writeExec(filepath.Join(ro, wrapName), pkgWrap(name)); err != nil {
 			return nil, err
 		}
-		touch(filepath.Join(rw, "bin", name))
+		touch(filepath.Join(rw, "real", name))
 		p.mounts = append(p.mounts,
 			mount{Src: path, Dst: realDst, RO: true},
 			mount{Src: filepath.Join(ro, wrapName), Dst: "/usr/bin/" + name, RO: true},
@@ -284,6 +278,7 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_SYSTEM=/dev/null",
 		"GIT_CONFIG_NOSYSTEM=1",
+		"LGB_ROOT=/lgb",
 	}
 	if p.proxy != nil {
 		p.env = append(p.env,
@@ -299,6 +294,8 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 // Home directories and /snap are not included.
 func jailPATH() string {
 	candidates := []string{
+		"/opt/homebrew/bin",
+		"/opt/homebrew/sbin",
 		"/usr/local/go/bin",
 		"/usr/lib/go/bin",
 		"/usr/local/sbin",
@@ -362,93 +359,6 @@ func normalizeHosts(hosts []string) []string {
 func sameTree(root, path string) bool {
 	rel, err := filepath.Rel(root, path)
 	return err == nil && !escapes(rel)
-}
-
-func runBwrap(ctx context.Context, p *prepared, bwrap string) (string, string, error) {
-	args := []string{
-		"--unshare-user", "--unshare-net", "--unshare-pid", "--unshare-uts",
-		"--die-with-parent", "--disable-userns", "--clearenv",
-		"--ro-bind", "/usr", "/usr",
-		"--ro-bind", "/bin", "/bin",
-		"--ro-bind", "/lib", "/lib",
-	}
-	if st, err := os.Stat("/lib64"); err == nil && st.IsDir() {
-		args = append(args, "--ro-bind", "/lib64", "/lib64")
-	}
-	args = append(args,
-		"--dir", "/etc",
-		"--tmpfs", "/tmp",
-		"--proc", "/proc",
-		"--dev", "/dev",
-		"--bind", p.workspace, "/work",
-		"--chdir", "/work",
-	)
-	if st, err := os.Stat("/etc/ld.so.cache"); err == nil && !st.IsDir() {
-		args = append(args, "--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache")
-	}
-	if st, err := os.Stat("/etc/ssl"); err == nil && st.IsDir() {
-		args = append(args, "--ro-bind", "/etc/ssl", "/etc/ssl")
-	}
-	if st, err := os.Stat("/etc/services"); err == nil && !st.IsDir() {
-		args = append(args, "--ro-bind", "/etc/services", "/etc/services")
-	}
-	for _, m := range p.mounts {
-		flag := "--bind"
-		if m.RO {
-			flag = "--ro-bind"
-		}
-		args = append(args, flag, m.Src, m.Dst)
-	}
-	for _, e := range p.env {
-		k, v, ok := strings.Cut(e, "=")
-		if !ok {
-			continue
-		}
-		args = append(args, "--setenv", k, v)
-	}
-	args = append(args, "--", "/bin/sh", "-c", p.command)
-	cmd := exec.Command(bwrap, args...)
-	return capture(ctx, cmd)
-}
-
-func runUnshare(ctx context.Context, p *prepared) (string, string, error) {
-	if _, err := exec.LookPath("unshare"); err != nil {
-		return "", "", fmt.Errorf("shell sandbox unavailable: %w", err)
-	}
-	exe, err := os.Executable()
-	if err != nil {
-		return "", "", err
-	}
-	jail, err := os.MkdirTemp("", "lgb-jail-")
-	if err != nil {
-		return "", "", err
-	}
-	defer os.RemoveAll(jail)
-	cfg := stage2File{Workspace: p.workspace, Command: p.command, Env: p.env, Mounts: p.mounts}
-	b, err := json.Marshal(cfg)
-	if err != nil {
-		return "", "", err
-	}
-	cfgPath := filepath.Join(p.dir, "stage2.json")
-	if err := os.WriteFile(cfgPath, b, 0o644); err != nil {
-		return "", "", err
-	}
-	cmd := exec.Command("/usr/bin/unshare",
-		"--user", "--mount", "--net", "--map-root-user", "--propagation", "private",
-		exe, "--sandbox-stage2", jail, cfgPath)
-	return capture(ctx, cmd)
-}
-
-func stage2FromFile(jail, configPath string) error {
-	b, err := os.ReadFile(configPath)
-	if err != nil {
-		return err
-	}
-	var cfg stage2File
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		return err
-	}
-	return enterJail(jail, cfg)
 }
 
 func capture(ctx context.Context, cmd *exec.Cmd) (string, string, error) {

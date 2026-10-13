@@ -18,8 +18,10 @@ export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
 unset SSH_AUTH_SOCK
-real=/lgb/bin/git
-log=/lgb/events/log
+root=${LGB_ROOT:-/lgb}
+realdir=${LGB_REAL:-$root/real}
+real="$realdir/git"
+log="$root/events/log"
 grant=%d
 sub=
 prev=
@@ -94,8 +96,11 @@ func sshWrap(grant bool, hosts []string) string {
 	}
 	return fmt.Sprintf(`#!/bin/sh
 unset SSH_AUTH_SOCK
-real=/lgb/bin/ssh
-log=/lgb/events/log
+root=${LGB_ROOT:-/lgb}
+realdir=${LGB_REAL:-$root/real}
+real="$realdir/ssh"
+log="$root/events/log"
+key="${LGB_KEY:-$root/id_ed25519}"
 grant=%d
 host=
 prev=
@@ -140,7 +145,7 @@ if [ "$grant" != "1" ]; then
   printf '%%s\n' "deny ssh ${host:-unknown}" >> "$log"
   exit 1
 fi
-if [ ! -f /lgb/id_ed25519 ]; then
+if [ ! -f "$key" ]; then
   echo "ssh denied: no dedicated key" >&2
   printf '%%s\n' "deny ssh ${host:-unknown}" >> "$log"
   exit 1
@@ -158,16 +163,18 @@ exec "$real" "$@" \
   -F /dev/null \
   -o IdentitiesOnly=yes \
   -o IdentityAgent=none \
-  -o IdentityFile=/lgb/id_ed25519 \
+  -o IdentityFile="$key" \
   -o StrictHostKeyChecking=accept-new \
-  -o UserKnownHostsFile=/tmp/known_hosts \
+  -o UserKnownHostsFile="$TMPDIR/known_hosts" \
   -o BatchMode=yes
 `, g, arms.String())
 }
 
-func pkgWrap(real string) string {
+func pkgWrap(name string) string {
 	return fmt.Sprintf(`#!/bin/sh
-log=/lgb/events/log
+root=${LGB_ROOT:-/lgb}
+realdir=${LGB_REAL:-$root/real}
+log="$root/events/log"
 hit=0
 for arg in "$@"; do
   case "$arg" in
@@ -179,8 +186,8 @@ done
 if [ "$hit" = "1" ]; then
   printf '%%s\n' pkg >> "$log"
 fi
-exec %s "$@"
-`, real)
+exec "$realdir/%s" "$@"
+`, name)
 }
 
 // EnsureKey returns an ed25519 key at path, creating it when missing.

@@ -1,0 +1,328 @@
+#include <arpa/inet.h>
+#include <ctype.h>
+#include <dlfcn.h>
+#include <errno.h>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <pwd.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+/* Same proxy protocol as the Linux preload. DYLD_INTERPOSE is required
+   because a flat LD_PRELOAD-style override is not how dyld works.
+   Platform binaries ignore DYLD_INSERT_LIBRARIES; the daemon runs a
+   re-signed shell so this library stays loaded. */
+
+#define DYLD_INTERPOSE(_replacement, _replacee) \
+    __attribute__((used)) static struct { const void *replacement; const void *replacee; } \
+        _interpose_##_replacee __attribute__((section("__DATA,__interpose"))) = { \
+            (const void *)(unsigned long)&_replacement, (const void *)(unsigned long)&_replacee }
+
+static int (*real_connect)(int, const struct sockaddr *, socklen_t);
+static int (*real_getaddrinfo)(const char *, const char *, const struct addrinfo *, struct addrinfo **);
+static void (*real_freeaddrinfo)(struct addrinfo *);
+static pthread_once_t once = PTHREAD_ONCE_INIT;
+static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+static char hosts[256][254];
+static int hostn;
+
+static void init_syms(void) {
+    real_connect = dlsym(RTLD_NEXT, "connect");
+    real_getaddrinfo = dlsym(RTLD_NEXT, "getaddrinfo");
+    real_freeaddrinfo = dlsym(RTLD_NEXT, "freeaddrinfo");
+}
+
+static void lower_copy(char *dst, size_t n, const char *src) {
+    size_t i = 0;
+    if (n == 0) return;
+    for (; src[i] && i + 1 < n; i++) {
+        char c = src[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        dst[i] = c;
+    }
+    dst[i] = 0;
+}
+
+static int proxy_connect(int fd, const char *host, int port) {
+    const char *path;
+    int u, n, off;
+    struct sockaddr_un un;
+    char line[400];
+    char resp[80];
+    int rn = 0;
+
+    path = getenv("LGB_PROXY_SOCK");
+    if (!path || !path[0] || !real_connect) {
+        errno = EACCES;
+        return -1;
+    }
+    u = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (u < 0) return -1;
+    memset(&un, 0, sizeof un);
+    un.sun_family = AF_UNIX;
+    if (strlen(path) >= sizeof un.sun_path) {
+        close(u);
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memcpy(un.sun_path, path, strlen(path) + 1);
+    if (real_connect(u, (struct sockaddr *)&un, sizeof un) < 0) {
+        int e = errno;
+        close(u);
+        errno = e;
+        return -1;
+    }
+    n = snprintf(line, sizeof line, "CONNECT %s %d\n", host, port);
+    if (n <= 0 || n >= (int)sizeof line) {
+        close(u);
+        errno = EINVAL;
+        return -1;
+    }
+    off = 0;
+    while (off < n) {
+        int w = (int)write(u, line + off, (size_t)(n - off));
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            close(u);
+            return -1;
+        }
+        off += w;
+    }
+    while (rn < (int)sizeof resp - 1) {
+        char c;
+        int r = (int)read(u, &c, 1);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            close(u);
+            return -1;
+        }
+        if (r == 0) break;
+        resp[rn++] = c;
+        if (c == '\n') break;
+    }
+    resp[rn] = 0;
+    if (strncmp(resp, "OK\n", 3) != 0) {
+        close(u);
+        errno = EACCES;
+        return -1;
+    }
+    if (dup2(u, fd) < 0) {
+        int e = errno;
+        close(u);
+        errno = e;
+        return -1;
+    }
+    if (u != fd) close(u);
+    return 0;
+}
+
+static int lgb_connect(int fd, const struct sockaddr *addr, socklen_t len) {
+    pthread_once(&once, init_syms);
+    if (!real_connect) {
+        errno = EACCES;
+        return -1;
+    }
+    if (!addr || !getenv("LGB_PROXY_SOCK")) {
+        return real_connect(fd, addr, len);
+    }
+    if (addr->sa_family == AF_INET) {
+        const struct sockaddr_in *in = (const struct sockaddr_in *)addr;
+        uint32_t ip = ntohl(in->sin_addr.s_addr);
+        char host[256];
+        int port = ntohs(in->sin_port);
+        if ((ip >> 24) == 127) {
+            return real_connect(fd, addr, len);
+        }
+        if ((ip >> 24) == 0xf0) {
+            int idx = (int)(ip & 0xff);
+            pthread_mutex_lock(&mu);
+            if (idx < 1 || idx > hostn || !hosts[idx][0]) {
+                pthread_mutex_unlock(&mu);
+                errno = EACCES;
+                return -1;
+            }
+            snprintf(host, sizeof host, "%s", hosts[idx]);
+            pthread_mutex_unlock(&mu);
+        } else if (!inet_ntop(AF_INET, &in->sin_addr, host, sizeof host)) {
+            errno = EACCES;
+            return -1;
+        }
+        return proxy_connect(fd, host, port);
+    }
+    if (addr->sa_family == AF_INET6) {
+        const struct sockaddr_in6 *in6 = (const struct sockaddr_in6 *)addr;
+        char host[128];
+        int port = ntohs(in6->sin6_port);
+        if (IN6_IS_ADDR_LOOPBACK(&in6->sin6_addr)) {
+            return real_connect(fd, addr, len);
+        }
+        if (!inet_ntop(AF_INET6, &in6->sin6_addr, host, sizeof host)) {
+            errno = EACCES;
+            return -1;
+        }
+        return proxy_connect(fd, host, port);
+    }
+    return real_connect(fd, addr, len);
+}
+
+static int fill_pw(struct passwd *pwd, char *buf, size_t buflen, uid_t uid) {
+    const char *dir = getenv("HOME");
+    const char *fields[5];
+    size_t need = 0;
+    int i;
+    char *p;
+    char *out[5];
+    if (!dir || !dir[0]) dir = "/work";
+    fields[0] = "bot";
+    fields[1] = "x";
+    fields[2] = "bot";
+    fields[3] = dir;
+    fields[4] = "/bin/sh";
+    for (i = 0; i < 5; i++) need += strlen(fields[i]) + 1;
+    if (buflen < need) return ERANGE;
+    p = buf;
+    for (i = 0; i < 5; i++) {
+        size_t n = strlen(fields[i]);
+        out[i] = p;
+        memcpy(p, fields[i], n + 1);
+        p += n + 1;
+    }
+    memset(pwd, 0, sizeof *pwd);
+    pwd->pw_name = out[0];
+    pwd->pw_passwd = out[1];
+    pwd->pw_uid = uid;
+    pwd->pw_gid = getgid();
+    pwd->pw_gecos = out[2];
+    pwd->pw_dir = out[3];
+    pwd->pw_shell = out[4];
+    pwd->pw_class = out[1];
+    return 0;
+}
+
+static struct passwd *lgb_getpwuid(uid_t uid) {
+    static char buf[512];
+    static struct passwd pw;
+    if (fill_pw(&pw, buf, sizeof buf, uid) != 0) return NULL;
+    return &pw;
+}
+
+static int lgb_getpwuid_r(uid_t uid, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) {
+    int rc;
+    if (!pwd || !result) return EINVAL;
+    rc = fill_pw(pwd, buf, buflen, uid);
+    if (rc != 0) {
+        *result = NULL;
+        return rc;
+    }
+    *result = pwd;
+    return 0;
+}
+
+static struct passwd *lgb_getpwnam(const char *name) {
+    if (!name || strcmp(name, "bot") != 0) return NULL;
+    return lgb_getpwuid(getuid());
+}
+
+static int lgb_getpwnam_r(const char *name, struct passwd *pwd, char *buf, size_t buflen, struct passwd **result) {
+    if (!name || strcmp(name, "bot") != 0) {
+        if (result) *result = NULL;
+        return 0;
+    }
+    return lgb_getpwuid_r(getuid(), pwd, buf, buflen, result);
+}
+
+static int lgb_getaddrinfo(const char *node, const char *service,
+                           const struct addrinfo *hints, struct addrinfo **res) {
+    struct addrinfo *tmp = NULL;
+    struct addrinfo hint;
+    const struct addrinfo *hp = hints;
+    int port = 0;
+    int idx;
+    int rc;
+    struct addrinfo *ai;
+    struct sockaddr_in *sa;
+
+    pthread_once(&once, init_syms);
+    if (!real_getaddrinfo) return EAI_FAIL;
+    if (!node || !node[0] || strcmp(node, "localhost") == 0 || !getenv("LGB_PROXY_SOCK")) {
+        return real_getaddrinfo(node, service, hints, res);
+    }
+    {
+        unsigned char buf[16];
+        if (inet_pton(AF_INET, node, buf) == 1 || inet_pton(AF_INET6, node, buf) == 1) {
+            return real_getaddrinfo(node, service, hints, res);
+        }
+    }
+    if (hints && (hints->ai_flags & AI_NUMERICHOST)) {
+        return real_getaddrinfo(node, service, hints, res);
+    }
+    if (hints) {
+        hint = *hints;
+        hint.ai_family = AF_INET;
+        hp = &hint;
+    }
+    rc = real_getaddrinfo("127.0.0.1", service, hp, &tmp);
+    if (rc == 0 && tmp && tmp->ai_addr && tmp->ai_addr->sa_family == AF_INET) {
+        port = ((struct sockaddr_in *)tmp->ai_addr)->sin_port;
+    }
+    if (tmp && real_freeaddrinfo) real_freeaddrinfo(tmp);
+    if (rc != 0) {
+        if (service && isdigit((unsigned char)service[0])) {
+            port = htons((uint16_t)atoi(service));
+        } else if (service && service[0]) {
+            return rc;
+        }
+    }
+    pthread_mutex_lock(&mu);
+    if (hostn >= 255) {
+        pthread_mutex_unlock(&mu);
+        return EAI_MEMORY;
+    }
+    idx = ++hostn;
+    lower_copy(hosts[idx], sizeof hosts[idx], node);
+    pthread_mutex_unlock(&mu);
+
+    ai = calloc(1, sizeof *ai);
+    sa = calloc(1, sizeof *sa);
+    if (!ai || !sa) {
+        free(ai);
+        free(sa);
+        return EAI_MEMORY;
+    }
+    sa->sin_family = AF_INET;
+    sa->sin_port = (in_port_t)port;
+    sa->sin_addr.s_addr = htonl(0xF0000000u | (unsigned)idx);
+    ai->ai_family = AF_INET;
+    ai->ai_socktype = (hints && hints->ai_socktype) ? hints->ai_socktype : SOCK_STREAM;
+    ai->ai_protocol = (hints && hints->ai_protocol) ? hints->ai_protocol : IPPROTO_TCP;
+    ai->ai_addrlen = sizeof *sa;
+    ai->ai_addr = (struct sockaddr *)sa;
+    ai->ai_canonname = strdup("lgb");
+    *res = ai;
+    return 0;
+}
+
+static void lgb_freeaddrinfo(struct addrinfo *ai) {
+    pthread_once(&once, init_syms);
+    if (ai && ai->ai_canonname && strcmp(ai->ai_canonname, "lgb") == 0) {
+        free(ai->ai_canonname);
+        free(ai->ai_addr);
+        free(ai);
+        return;
+    }
+    if (real_freeaddrinfo) real_freeaddrinfo(ai);
+}
+
+DYLD_INTERPOSE(lgb_connect, connect);
+DYLD_INTERPOSE(lgb_getaddrinfo, getaddrinfo);
+DYLD_INTERPOSE(lgb_freeaddrinfo, freeaddrinfo);
+DYLD_INTERPOSE(lgb_getpwuid, getpwuid);
+DYLD_INTERPOSE(lgb_getpwuid_r, getpwuid_r);
+DYLD_INTERPOSE(lgb_getpwnam, getpwnam);
+DYLD_INTERPOSE(lgb_getpwnam_r, getpwnam_r);

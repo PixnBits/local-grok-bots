@@ -3,7 +3,6 @@ package clisession
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
@@ -12,51 +11,15 @@ import (
 // cliHome is the only home directory inside the CLI jail.
 const cliHome = "/lgb-home"
 
-// confinedCommand runs bin under bubblewrap. The workspace is bind-mounted
-// at its host path. The daemon user's CLI login directories are the only
-// home paths mounted. The child environment is cleared.
-func confinedCommand(bin string, args []string, workspace string) (*exec.Cmd, error) {
-	bwrap, err := exec.LookPath("bwrap")
-	if err != nil {
-		return nil, fmt.Errorf("cli confinement unavailable: bwrap not on PATH")
-	}
-	wrapArgs, err := confineArgs(bin, args, workspace)
-	if err != nil {
-		return nil, err
-	}
-	cmd := exec.Command(bwrap, wrapArgs...)
-	// Absolute bwrap path. A minimal env so the wrapper itself does not
-	// carry API keys or an SSH agent socket in its own environ.
-	cmd.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
-	return cmd, nil
-}
-
 // confineArgs builds the bwrap argv after argv0.
 func confineArgs(bin string, args []string, workspace string) ([]string, error) {
-	ws, err := filepath.Abs(workspace)
-	if err != nil || strings.TrimSpace(workspace) == "" {
-		return nil, fmt.Errorf("cli workspace is required")
-	}
-	if ws == "/" {
-		return nil, fmt.Errorf("cli workspace must not be /")
-	}
-	st, err := os.Stat(ws)
+	ws, home, err := absWorkspace(workspace)
 	if err != nil {
-		return nil, fmt.Errorf("cli workspace: %w", err)
-	}
-	if !st.IsDir() {
-		return nil, fmt.Errorf("cli workspace is not a directory")
+		return nil, err
 	}
 	absBin, err := filepath.Abs(bin)
 	if err != nil {
 		return nil, err
-	}
-	home, _ := os.UserHomeDir()
-	if home != "" {
-		home, _ = filepath.Abs(home)
-	}
-	if home != "" && (ws == home || inside(home, ws)) {
-		return nil, fmt.Errorf("cli workspace must not contain the home directory")
 	}
 	argv0, extra, err := placeBinary(absBin, ws, home)
 	if err != nil {
@@ -111,6 +74,33 @@ func confineArgs(bin string, args []string, workspace string) ([]string, error) 
 	b = append(b, "--", argv0)
 	b = append(b, args...)
 	return b, nil
+}
+
+// absWorkspace checks the CLI working directory. home is empty when it
+// cannot be resolved. The workspace must not be / and must not contain home.
+func absWorkspace(workspace string) (string, string, error) {
+	ws, err := filepath.Abs(workspace)
+	if err != nil || strings.TrimSpace(workspace) == "" {
+		return "", "", fmt.Errorf("cli workspace is required")
+	}
+	if ws == "/" {
+		return "", "", fmt.Errorf("cli workspace must not be /")
+	}
+	st, err := os.Stat(ws)
+	if err != nil {
+		return "", "", fmt.Errorf("cli workspace: %w", err)
+	}
+	if !st.IsDir() {
+		return "", "", fmt.Errorf("cli workspace is not a directory")
+	}
+	home, _ := os.UserHomeDir()
+	if home != "" {
+		home, _ = filepath.Abs(home)
+	}
+	if home != "" && (ws == home || inside(home, ws)) {
+		return "", "", fmt.Errorf("cli workspace must not contain the home directory")
+	}
+	return ws, home, nil
 }
 
 type bindMount struct {
@@ -241,20 +231,42 @@ func appendParents(args []string, seen map[string]bool, dst string) []string {
 }
 
 func appendLocale(args []string, key string) []string {
-	v := os.Getenv(key)
-	if v == "" || len(v) > 128 || strings.ContainsAny(v, "\n\r\x00=") {
+	v, ok := localeValue(key)
+	if !ok {
 		return args
-	}
-	for _, r := range v {
-		if r < 0x20 || r > 0x7e {
-			return args
-		}
 	}
 	return append(args, "--setenv", key, v)
 }
 
+func localePairs() []string {
+	var out []string
+	for _, key := range []string{"LANG", "LC_ALL", "TERM", "TZ"} {
+		v, ok := localeValue(key)
+		if !ok {
+			continue
+		}
+		out = append(out, key+"="+v)
+	}
+	return out
+}
+
+func localeValue(key string) (string, bool) {
+	v := os.Getenv(key)
+	if v == "" || len(v) > 128 || strings.ContainsAny(v, "\n\r\x00=") {
+		return "", false
+	}
+	for _, r := range v {
+		if r < 0x20 || r > 0x7e {
+			return "", false
+		}
+	}
+	return v, true
+}
+
 func cliPATH() string {
 	candidates := []string{
+		"/opt/homebrew/bin",
+		"/opt/homebrew/sbin",
 		"/usr/local/go/bin",
 		"/usr/lib/go/bin",
 		"/usr/local/sbin",

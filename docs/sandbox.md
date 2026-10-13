@@ -12,7 +12,7 @@ The 2026 sandbox-escape research (Pillar Security, CSA) is the relevant caution.
 
 One base jail. A short list of named grants on the bot (or on a run). No policy language. No microVM.
 
-The base is the current workspace jail, upgraded to bubblewrap when the sandbox code is touched. Bubblewrap is what Claude Code and Codex use on Linux. It handles `--unshare-net` and selective binds cleanly, and it avoids the AppArmor friction raw unshare hit on this machine. MicroVMs stay out. That was the AegisClaw path; the overhead is not justified for a single-user desktop.
+The base is the current workspace jail. On Linux it is bubblewrap when `bwrap` is installed, and otherwise unshare. Bubblewrap is what Claude Code and Codex use on Linux. It handles `--unshare-net` and selective binds cleanly, and it avoids the AppArmor friction raw unshare hit on this machine. On macOS the same grants run under `sandbox-exec`. Seatbelt cannot bind-mount, so the shell's working directory is the host workspace path rather than `/work`. MicroVMs stay out. That was the AegisClaw path; the overhead is not justified for a single-user desktop.
 
 Grants are explicit. The daemon checks the grant before the tool runs. Missing grant means fail closed, logged.
 

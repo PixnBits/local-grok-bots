@@ -64,14 +64,18 @@ func TestConfinedCommandEnvIsMinimal(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("XAI_API_KEY", "supersecret")
 	t.Setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
-	cmd, err := confinedCommand("/bin/true", []string{"-p", "x"}, dir)
+	cmd, cleanup, err := confinedCommand("/bin/true", []string{"-p", "x"}, dir)
+	if cleanup != nil {
+		t.Cleanup(cleanup)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cmd.Env) != 1 || !strings.HasPrefix(cmd.Env[0], "PATH=") {
-		t.Fatalf("env %v", cmd.Env)
-	}
-	if strings.Contains(cmd.Env[0], "supersecret") {
+	blob := strings.Join(cmd.Env, "\n")
+	if strings.Contains(blob, "supersecret") || strings.Contains(blob, "SSH_AUTH_SOCK") || strings.Contains(blob, "XAI_API_KEY") {
 		t.Fatal(cmd.Env)
+	}
+	if len(cmd.Env) == 0 || !strings.HasPrefix(cmd.Env[0], "PATH=") {
+		t.Fatalf("env %v", cmd.Env)
 	}
 }
