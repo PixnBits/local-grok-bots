@@ -111,6 +111,12 @@ func applyKey(p *Policy, key, val string) error {
 			return err
 		}
 		p.TurnTimeout = d
+	case "workspace_readonly":
+		on, err := parseBool(unquote(val))
+		if err != nil {
+			return err
+		}
+		p.WorkspaceReadonly = on
 	case "http_proxy":
 		p.HTTPProxy = unquote(val)
 	case "https_proxy":

@@ -14,6 +14,7 @@ type cliNet struct {
 	ProxySock string
 	ExtraRead string
 	ROBinds   []string
+	ReadOnly  bool
 }
 
 // cliSeatbelt is the macOS profile for one CLI turn.
@@ -33,7 +34,12 @@ func cliSeatbelt(ws, home, tmp, binDir string, net cliNet) sandbox.Seatbelt {
 		}
 		reads = append(reads, path)
 	}
-	writes := []string{ws}
+	var writes []string
+	if net.ReadOnly {
+		reads = append(reads, ws)
+	} else {
+		writes = append(writes, ws)
+	}
 	if tmp != "" {
 		writes = append(writes, tmp)
 	}

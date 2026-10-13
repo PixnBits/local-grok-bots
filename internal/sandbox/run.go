@@ -25,6 +25,8 @@ type Request struct {
 	SSHKey     string
 	// Rlimits caps the jailed process. Zero fields leave the current limits.
 	Rlimits Rlimits
+	// WorkspaceReadonly mounts the workspace read-only. False keeps it writable.
+	WorkspaceReadonly bool
 	// Dial, when set, is the proxy's outbound TCP dial. Tests use it.
 	Dial func(context.Context, string, string) (net.Conn, error)
 	// forceUnshare selects the unshare jail even when bwrap is installed.
@@ -50,6 +52,7 @@ type stage2File struct {
 	Command   string   `json:"command"`
 	Env       []string `json:"env"`
 	Mounts    []mount  `json:"mounts"`
+	ReadOnly  bool     `json:"readonly,omitempty"`
 }
 
 type prepared struct {
@@ -64,6 +67,7 @@ type prepared struct {
 	extra        []Event
 	forceUnshare bool
 	rlimits      Rlimits
+	readonly     bool
 }
 
 func (p *prepared) close() {
@@ -105,6 +109,9 @@ func Run(ctx context.Context, req Request) (Result, error) {
 	stdout, stderr, runErr := launch(ctx, p)
 	blockErr := p.before.restore()
 	events := append([]Event{}, p.extra...)
+	if p.readonly && (strings.Contains(stdout, "Read-only file system") || strings.Contains(stderr, "Read-only file system")) {
+		events = append(events, Event{Kind: "sandbox_block", Detail: "workspace is read-only"})
+	}
 	if p.proxy != nil {
 		events = append(events, p.proxy.drain()...)
 	}
@@ -129,7 +136,7 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &prepared{workspace: ws, command: req.Command, dir: dir, before: takeSnap(ws), forceUnshare: req.forceUnshare, rlimits: req.Rlimits}
+	p := &prepared{workspace: ws, command: req.Command, dir: dir, before: takeSnap(ws), forceUnshare: req.forceUnshare, rlimits: req.Rlimits, readonly: req.WorkspaceReadonly}
 	ok := false
 	defer func() {
 		if !ok {

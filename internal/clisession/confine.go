@@ -32,13 +32,14 @@ type launch struct {
 
 // confinePlan is the network and extra environment for one CLI jail.
 type confinePlan struct {
-	UnshareNet bool
-	PreloadSrc string
-	ProxyDir   string
-	ProxySock  string
-	ExtraEnv   []string
-	ROBinds    []string
-	Rlimits    sandbox.Rlimits
+	UnshareNet        bool
+	PreloadSrc        string
+	ProxyDir          string
+	ProxySock         string
+	ExtraEnv          []string
+	ROBinds           []string
+	Rlimits           sandbox.Rlimits
+	WorkspaceReadonly bool
 }
 
 func (l launch) command(ctx context.Context, bin string, args []string, workspace string) (*exec.Cmd, func(), error) {
@@ -86,6 +87,7 @@ func prepareCLINet(ctx context.Context, pol policy.Policy, dial func(context.Con
 		Rlimits: sandbox.Rlimits{
 			Nofile: pol.RlimitNofile, Nproc: pol.RlimitNproc, CPUSeconds: pol.RlimitCPU,
 		},
+		WorkspaceReadonly: pol.WorkspaceReadonly,
 	}
 	noop := func() {}
 	switch mode {
@@ -181,7 +183,11 @@ func confineArgsPlan(bin string, args []string, workspace string, plan confinePl
 	}
 
 	b = appendParents(b, seen, ws)
-	b = append(b, "--bind", ws, ws, "--chdir", ws)
+	wsFlag := "--bind"
+	if plan.WorkspaceReadonly {
+		wsFlag = "--ro-bind"
+	}
+	b = append(b, wsFlag, ws, ws, "--chdir", ws)
 
 	for _, m := range extra {
 		b = appendParents(b, seen, m.dst)

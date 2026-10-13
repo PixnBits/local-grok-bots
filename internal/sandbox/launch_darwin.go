@@ -114,9 +114,15 @@ func launchOS(ctx context.Context, p *prepared) (string, string, error) {
 	if p.proxy != nil {
 		socks = append(socks, filepath.Join(root, "sock", "proxy.sock"))
 	}
+	writes := []string{root}
+	if p.readonly {
+		reads = append(reads, p.workspace)
+	} else {
+		writes = append([]string{p.workspace}, writes...)
+	}
 	profile, err := (Seatbelt{
 		Read:         reads,
-		Write:        []string{p.workspace, root},
+		Write:        writes,
 		ProxySockets: socks,
 		DenyExec:     deny,
 	}).Render()

@@ -40,9 +40,13 @@ func shellBwrapArgs(p *prepared) []string {
 		"--tmpfs", "/tmp",
 		"--proc", "/proc",
 		"--dev", "/dev",
-		"--bind", p.workspace, "/work",
-		"--chdir", "/work",
 	)
+	if p.readonly {
+		args = append(args, "--ro-bind", p.workspace, "/work")
+	} else {
+		args = append(args, "--bind", p.workspace, "/work")
+	}
+	args = append(args, "--chdir", "/work")
 	if st, err := os.Stat("/etc/ld.so.cache"); err == nil && !st.IsDir() {
 		args = append(args, "--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache")
 	}
@@ -91,7 +95,7 @@ func runUnshare(ctx context.Context, p *prepared) (string, string, error) {
 		return "", "", err
 	}
 	defer os.RemoveAll(jail)
-	cfg := stage2File{Workspace: p.workspace, Command: p.command, Env: p.env, Mounts: p.mounts}
+	cfg := stage2File{Workspace: p.workspace, Command: p.command, Env: p.env, Mounts: p.mounts, ReadOnly: p.readonly}
 	b, err := json.Marshal(cfg)
 	if err != nil {
 		return "", "", err

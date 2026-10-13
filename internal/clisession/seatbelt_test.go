@@ -82,6 +82,30 @@ func TestCLISeatbeltWritesLoginDirsOnly(t *testing.T) {
 	if _, err := bad.Render(); err == nil {
 		t.Fatal("seatbelt accepted a path it cannot quote")
 	}
+	roWS := cliSeatbelt(ws, home, tmp, "", cliNet{ReadOnly: true})
+	for _, p := range roWS.Write {
+		if p == ws {
+			t.Fatalf("readonly workspace is writable: %v", roWS.Write)
+		}
+	}
+	sawRead := false
+	for _, p := range roWS.Read {
+		if p == ws {
+			sawRead = true
+		}
+	}
+	if !sawRead {
+		t.Fatalf("readonly workspace is not readable: %v", roWS.Read)
+	}
+	sawLogin := false
+	for _, p := range roWS.Write {
+		if strings.HasSuffix(p, ".grok") || strings.HasSuffix(p, ".claude") {
+			sawLogin = true
+		}
+	}
+	if !sawLogin {
+		t.Fatalf("login dirs lost writes: %v", roWS.Write)
+	}
 
 	env := cliChildEnv(home, tmp)
 	blob := strings.Join(env, "\n")

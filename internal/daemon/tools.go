@@ -147,6 +147,10 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		}
 		return s, nil
 	case "write_file":
+		if a.policy.WorkspaceReadonly {
+			a.log(bot.ID, "sandbox_block", map[string]any{"path": strArg(args, "path"), "detail": "workspace is read-only"})
+			return "", errors.New("workspace is read-only")
+		}
 		path, err := sandbox.Resolve(a.ws, strArg(args, "path"))
 		if err != nil {
 			return "", err
@@ -188,8 +192,9 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			Rlimits: sandbox.Rlimits{
 				Nofile: a.policy.RlimitNofile, Nproc: a.policy.RlimitNproc, CPUSeconds: a.policy.RlimitCPU,
 			},
-			SSHKey: a.sshKeyPath(),
-			Dial:   a.shellDial,
+			SSHKey:            a.sshKeyPath(),
+			Dial:              a.shellDial,
+			WorkspaceReadonly: a.policy.WorkspaceReadonly,
 		})
 		for _, ev := range res.Events {
 			a.recordSandbox(current.ID, ev)

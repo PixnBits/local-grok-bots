@@ -62,8 +62,14 @@ func enterJail(jail string, cfg stage2File) error {
 		// if a recursive remount is rejected.
 		_ = unix.Mount("", dst, "", unix.MS_BIND|unix.MS_REMOUNT|unix.MS_RDONLY|unix.MS_REC, "")
 	}
-	if err := unix.Mount(workspace, filepath.Join(jail, "work"), "", unix.MS_BIND, ""); err != nil {
+	work := filepath.Join(jail, "work")
+	if err := unix.Mount(workspace, work, "", unix.MS_BIND, ""); err != nil {
 		return fmt.Errorf("bind workspace: %w", err)
+	}
+	if cfg.ReadOnly {
+		if err := unix.Mount("", work, "", unix.MS_BIND|unix.MS_REMOUNT|unix.MS_RDONLY, ""); err != nil {
+			return fmt.Errorf("readonly workspace: %w", err)
+		}
 	}
 	if b, err := os.ReadFile("/etc/ld.so.cache"); err == nil {
 		_ = os.WriteFile(filepath.Join(jail, "etc", "ld.so.cache"), b, 0o644)

@@ -3,6 +3,8 @@
 package sandbox
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -27,6 +29,26 @@ func TestShellRlimitArgv(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q\n%s", want, strings.Join(args, " "))
 		}
+	}
+}
+
+func TestShellWorkspaceReadonly(t *testing.T) {
+	ws := t.TempDir()
+	args := shellBwrapArgs(&prepared{workspace: ws, command: "true", readonly: true})
+	joined := strings.Join(args, "\x00")
+	if !strings.Contains(joined, "--ro-bind\x00"+ws+"\x00/work") || strings.Contains(joined, "--bind\x00"+ws+"\x00") {
+		t.Fatalf("workspace mount:\n%s", strings.Join(args, " "))
+	}
+	res, err := runCmd(t, Request{Workspace: ws, Command: "touch ro-proof", WorkspaceReadonly: true})
+	if err == nil {
+		t.Fatalf("write succeeded: %s %s", res.Stdout, res.Stderr)
+	}
+	if _, statErr := os.Stat(filepath.Join(ws, "ro-proof")); !os.IsNotExist(statErr) {
+		t.Fatalf("read-only workspace created ro-proof (%v)", statErr)
+	}
+	ev, ok := findEvent(res.Events, "sandbox_block", "", "")
+	if !ok || ev.Detail != "workspace is read-only" {
+		t.Fatalf("%+v stderr=%s", res.Events, res.Stderr)
 	}
 }
 

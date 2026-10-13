@@ -60,6 +60,9 @@ type Policy struct {
 	// TurnTimeout is empty when the daemon should keep its built-in caps.
 	// A set value is a Go duration such as 30s.
 	TurnTimeout string `json:"turn_timeout"`
+	// WorkspaceReadonly mounts the workspace read-only in the CLI and shell jails.
+	// Login directories stay writable. False keeps the workspace writable.
+	WorkspaceReadonly bool `json:"workspace_readonly"`
 	// HTTPProxy, HTTPSProxy, and NoProxy are the corporate proxy settings.
 	// They are used only when CLINetwork is proxy or explicit-proxy.
 	// Logs and the API show the URL with the password redacted.
@@ -422,6 +425,13 @@ func applyEnv(p *Policy) error {
 			return fmt.Errorf("POLICY_TURN_TIMEOUT: %w", err)
 		}
 		p.TurnTimeout = d
+	}
+	if v, ok := os.LookupEnv("POLICY_WORKSPACE_READONLY"); ok {
+		on, err := parseBool(v)
+		if err != nil {
+			return fmt.Errorf("POLICY_WORKSPACE_READONLY: %w", err)
+		}
+		p.WorkspaceReadonly = on
 	}
 	if v, ok := lookupProxy("POLICY_HTTP_PROXY", "HTTP_PROXY", "http_proxy"); ok {
 		p.HTTPProxy = v

@@ -43,7 +43,7 @@ func applyLaunch(bin string, args []string, workspace string, plan confinePlan) 
 	if home != "" {
 		ensureCLIState(home)
 	}
-	net := cliNet{Open: !plan.UnshareNet, ProxySock: plan.ProxySock, ROBinds: plan.ROBinds}
+	net := cliNet{Open: !plan.UnshareNet, ProxySock: plan.ProxySock, ROBinds: plan.ROBinds, ReadOnly: plan.WorkspaceReadonly}
 	if plan.PreloadSrc != "" {
 		net.ExtraRead = filepath.Dir(plan.PreloadSrc)
 	}

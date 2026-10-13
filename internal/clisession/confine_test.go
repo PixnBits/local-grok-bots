@@ -237,6 +237,25 @@ func TestLaunchProxyProducesUnsharedNet(t *testing.T) {
 	}
 }
 
+func TestCLIWorkspaceReadonlyArgv(t *testing.T) {
+	ws := t.TempDir()
+	plain, err := confineArgsPlan("/bin/true", nil, ws, confinePlan{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(plain, "\x00"), "--bind\x00"+ws+"\x00"+ws) {
+		t.Fatal("default workspace is not writable")
+	}
+	args, err := confineArgsPlan("/bin/true", nil, ws, confinePlan{WorkspaceReadonly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, "\x00")
+	if !strings.Contains(joined, "--ro-bind\x00"+ws+"\x00"+ws) || strings.Contains(joined, "--bind\x00"+ws+"\x00") {
+		t.Fatalf("workspace mount:\n%s", strings.Join(args, " "))
+	}
+}
+
 func TestCLIRlimitArgv(t *testing.T) {
 	ws := t.TempDir()
 	plain, err := confineArgsPlan("/bin/true", nil, ws, confinePlan{})

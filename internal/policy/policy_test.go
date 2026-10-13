@@ -477,3 +477,31 @@ func TestTurnTimeoutValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestWorkspaceReadonlyValidation(t *testing.T) {
+	if Default().WorkspaceReadonly {
+		t.Fatal("default workspace is read-only")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "policy.yaml"), []byte("workspace_readonly: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POLICY_WORKSPACE_READONLY", "false")
+	got, err := Load(dir, "http://127.0.0.1:11434", nil, true)
+	if err != nil || !got.WorkspaceReadonly {
+		t.Fatalf("%v %+v", err, got)
+	}
+	raw, err := got.MarshalJSON()
+	if err != nil || !strings.Contains(string(raw), `"workspace_readonly":true`) {
+		t.Fatalf("%v %s", err, raw)
+	}
+	t.Setenv("POLICY_WORKSPACE_READONLY", "0")
+	zero, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true)
+	if err != nil || zero.WorkspaceReadonly {
+		t.Fatalf("%v %+v", err, zero)
+	}
+	t.Setenv("POLICY_WORKSPACE_READONLY", "maybe")
+	if _, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "boolean") {
+		t.Fatal(err)
+	}
+}
