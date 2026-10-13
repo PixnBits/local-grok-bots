@@ -75,6 +75,22 @@ Each applied path is a store event `grant_use` with grant `cli_ro_bind` and deta
 
 Existence is checked at startup. On Linux, removing the path later makes the next turn fail when bubblewrap cannot mount it. On macOS the allow remains in the profile. A path that is already visible through a system mount, such as a directory under `/usr`, is still listed and still logged.
 
+A shell `build` bind is recorded the same way when it is applied: grant `build`, detail `<path> read-only`. A path that is refused or missing is not an applied bind. The event names the host path and does not include the files inside it.
+
+## Resource limits and turn timeout
+
+`rlimit_nofile`, `rlimit_nproc`, and `rlimit_cpu_seconds` are zero by default. Zero does not change the process limit. A negative value fails startup. The ceilings are 1048576 open files, 1048576 processes, and 100 days of CPU time. The generated bubblewrap argv includes `--rlimit NAME soft hard` with soft and hard set to the same number. Bubblewrap 0.11.1 has no `--rlimit` flag, so Linux applies the same numbers with `setrlimit` and then execs bubblewrap without that unknown flag. A limit that is higher than the daemon's own hard limit fails the jail. If `bwrap` is missing, the shell does not fall through to unshare while a limit is set.
+
+Seatbelt cannot express these limits. A non-zero value fails startup on macOS and fails the jail launch. It is not ignored. Memory cgroups are out of scope. There is no memory field.
+
+`turn_timeout` is empty by default. Empty keeps three existing caps: a CLI turn ends on idle or shutdown, a shell command ends at 30s, and an Ollama run ends at 10m. A number of seconds or a Go duration such as `30m` ends the CLI turn at that deadline as well, and it replaces the shell and Ollama caps. The idle kill still applies. The ceiling is 24h. When that deadline fires, the turn ends and the store event is `turn_timeout`. The default caps do not write that event.
+
+## Read-only workspace
+
+`workspace_readonly` is false by default, which keeps the workspace writable. A coding bot should leave it false. True mounts the workspace read-only in the CLI jail and the shell jail. On Linux that is `--ro-bind` (or a read-only remount in the unshare fallback). On macOS the workspace is a Seatbelt read allow and is removed from the write list. `~/.grok`, `~/.claude`, and `~/.claude.json` stay writable.
+
+A daemon `write_file` is refused and logged as `sandbox_block` with detail `workspace is read-only`. A write from inside the jail fails in the kernel with `Read-only file system`, and that text is logged the same way. `GET /api/policy` returns the flag.
+
 ## Destinations when a CLI stays enabled
 
 `open` does not filter hosts. `proxy` and `explicit-proxy` allow a host only when `cli_net_allow` contains that exact name. A wildcard is stored as that literal and matches no other host. Port 22 still needs the `ssh` grant. Any other port to an allowed host is permitted. A denied host is an audit `net_decision` when `audit_log` is set, which is how an operator learns the next host to add.

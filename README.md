@@ -42,6 +42,11 @@ Two guides are written so a CLI can install this daemon on your machine. Each on
 | `POLICY_DLP_COMMAND` | empty | Absolute executable. It reads the prompt on stdin and exits non-zero to reject. Its environment is only `PATH`. |
 | `POLICY_DLP_SCAN_TOOLS` | false | Also check tool-result text before the next CLI round. |
 | `POLICY_CLI_RO_BINDS` | empty | Colon-separated absolute paths. Each path is read-only inside the CLI jail. Empty adds none. A relative path, a missing path, or a credential or login path fails startup. The shell `build` grant does not use this list. |
+| `POLICY_RLIMIT_NOFILE` | 0 | Open-file cap for the CLI and shell jails. Zero keeps the current limit. Above 1048576 fails startup. macOS fails startup when this is not zero. |
+| `POLICY_RLIMIT_NPROC` | 0 | Process cap for those jails. Zero keeps the current limit. The ceiling is 1048576. macOS fails startup when this is not zero. |
+| `POLICY_RLIMIT_CPU_SECONDS` | 0 | CPU-time cap in seconds. Zero keeps the current limit. The ceiling is 100 days. macOS fails startup when this is not zero. Memory cgroups are not available. |
+| `POLICY_TURN_TIMEOUT` | empty | Go duration, such as `30s` or `2m`, or a number of seconds. Empty keeps the idle CLI cap, the 30s shell cap, and the 10m Ollama cap. |
+| `POLICY_WORKSPACE_READONLY` | false | Mount the workspace read-only in the CLI and shell jails. Leave this false for a coding bot. CLI login directories stay writable. |
 
 Paths inside `DATA_DIR`:
 
@@ -73,9 +78,15 @@ default_net_allow: []
 env_allowlist: []
 # Optional. A read-only path in the CLI jail. Leave it unset for the default mounts.
 # cli_ro_binds: ["/opt/shared-data"]
+# Optional caps. Zero, empty, and false keep the current limits and a writable workspace.
+# rlimit_nofile: 1024
+# rlimit_nproc: 256
+# rlimit_cpu_seconds: 600
+# turn_timeout: 30m
+# workspace_readonly: false
 ```
 
-`force_local_only` refuses a non-loopback `OLLAMA_URL` at startup and disables CLI backends. The commented `cli_ro_binds` line is an example of an extra read-only path. It is not part of the airgap, and leaving it out keeps the previous jail mounts. `cli_network: none` is the setting when those backends stay enabled and must not reach the network. `cli_network: proxy` with an empty `cli_net_allow` also denies every CLI destination. The file is `DATA_DIR/policy.yaml`, or the path in `POLICY_FILE`. The file wins over the environment.
+`force_local_only` refuses a non-loopback `OLLAMA_URL` at startup and disables CLI backends. The commented lines are examples. `cli_ro_binds` is an extra read-only path. The limit, timeout, and `workspace_readonly` lines are optional caps. None of them is part of the airgap, and leaving them out keeps the previous jail, timeouts, and writable workspace. A coding bot should leave `workspace_readonly` false. `cli_network: none` is the setting when those backends stay enabled and must not reach the network. `cli_network: proxy` with an empty `cli_net_allow` also denies every CLI destination. The file is `DATA_DIR/policy.yaml`, or the path in `POLICY_FILE`. The file wins over the environment.
 
 The daemon calls Ollama on loopback and does not pull models. A bare `ollama pull` uses `registry.ollama.ai` unless that model is already local or the name points at an internal registry. With CLI backends left on, `open` does not filter hosts. `proxy` and `explicit-proxy` allow only the exact hosts in `cli_net_allow`. A Grok turn needs `api.x.ai`. Sign-in can also use `accounts.x.ai` and `console.x.ai`. A Claude turn needs `api.anthropic.com`, `claude.ai`, and `platform.claude.com`. Feature and telemetry hosts, user namespaces, and the supply chain are in `docs/sandbox.md`.
 

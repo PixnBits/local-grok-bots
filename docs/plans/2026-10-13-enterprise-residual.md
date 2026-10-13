@@ -1,6 +1,6 @@
 # Policy control and residual risk
 
-The startup Policy is the switch for CLI network, environment, grants, pins, audit, the prompt check, and extra read-only CLI paths. Defaults still match a single-user machine: `cli_network` is `open`, `grok` and `claude` are allowed, pins, audit, and the prompt check are off, and `cli_ro_binds` is empty. An airgap file is in the README. This note is what that file changes, and what stays operator-owned.
+The startup Policy is the switch for CLI network, environment, grants, pins, audit, the prompt check, extra read-only CLI paths, process limits, the turn cap, and the workspace mount. Defaults still match a single-user machine: `cli_network` is `open`, `grok` and `claude` are allowed, pins, audit, and the prompt check are off, `cli_ro_binds` is empty, resource limits and `turn_timeout` are unset, and the workspace is writable. An airgap file is in the README. This note is what that file changes, and what stays operator-owned.
 
 ## Policy-controlled
 
@@ -13,6 +13,9 @@ The startup Policy is the switch for CLI network, environment, grants, pins, aud
 - `default_net_allow` fills a shell `net` grant that has no hosts of its own. A bot list wins.
 - `build_binds` are the extra read-only paths for the shell `build` grant. A relative path fails startup.
 - `cli_ro_binds` are extra read-only paths for the CLI jail only. Empty adds none. A relative path, a missing path, a credential path, or a login path fails startup. The shell `build` grant does not use this list.
+- `rlimit_nofile`, `rlimit_nproc`, and `rlimit_cpu_seconds` cap the CLI and shell processes. Zero keeps the current limit. A non-zero value fails startup on macOS. Memory cgroups are out of scope.
+- `turn_timeout` adds a CLI deadline and replaces the 30s shell cap and the 10m Ollama cap. Empty keeps the idle-only CLI lifetime, the 30s shell cap, and the 10m Ollama cap. The idle kill still applies. Expiry logs `turn_timeout`.
+- `workspace_readonly` mounts the workspace read-only in both jails. False keeps it writable. A coding bot should leave it false. CLI login directories stay writable.
 - `cli_pins` checks the resolved CLI binary before exec. No pin checks nothing. A path or SHA-256 miss fails the turn without running the binary.
 - `audit_log` copies CLI start and stop, network allow and deny, other grant decisions, and a DLP denial to stderr, syslog, or a file. Empty writes nothing. The schema is `docs/audit.md`.
 - `dlp_patterns`, `dlp_file`, and `dlp_command` check a CLI prompt before the process starts. A rejection fails the turn. `dlp_scan_tools` also checks tool-result text before the next CLI round. All of this is off by default.
@@ -30,6 +33,8 @@ The shell jail is unchanged: missing grant, missing `bwrap` or `sandbox-exec`, a
 - Audit lines do not include the prompt. A denial is a short reason code. The sink is off until `audit_log` is set.
 - The proxy password remains in the daemon process. Logs and `GET /api/policy` show it redacted.
 - CLI login files under `~/.grok` and `~/.claude` are the credential. They are mounted into the CLI jail. Policy does not remove them.
+- Linux applies `rlimit_*` with `setrlimit` because bubblewrap 0.11.1 has no `--rlimit` flag. The generated argv still names `--rlimit`. A limit above the daemon's hard limit fails the jail. `RLIMIT_CPU` is CPU time, not a memory cap. macOS rejects a non-zero limit instead of ignoring it.
+- `workspace_readonly` does not make `~/.grok` or `~/.claude` read-only. A shell that was already running keeps the mount it started with until the next command.
 - A `cli_ro_binds` entry is read-only and is that exact path. On macOS it is a Seatbelt read allow, not a bind mount, and it does not grant writes. The shell `build_binds` list is unchanged. A path under an already-readable root is still listed. Existence is checked at startup. Removing the path later makes the next Linux turn fail when bubblewrap cannot mount it. Two entries where one contains the other can fail that Linux turn, because the inner path's parents are created as empty jail directories first.
 - The store cannot tell an explicit empty shell allowlist from an unset one. A non-empty `default_net_allow` applies to every `net` bot that has no hosts. Removing the grant is how that bot loses egress.
 - Linux CLI turns need unprivileged user namespaces and the distro `bubblewrap`. The jail always passes `--unshare-user` and never `--disable-userns`. An EDR that blocks user namespaces, `bwrap`, or `LD_PRELOAD` makes the turn fail closed. On macOS, an EDR that blocks `sandbox-exec` or `DYLD_INSERT_LIBRARIES` does the same. The response is to allow those mechanisms. The jail stays.
