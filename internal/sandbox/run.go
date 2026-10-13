@@ -253,7 +253,6 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 	})
 
 	if grants["build"] {
-		var applied []string
 		for _, raw := range req.BuildBinds {
 			raw = strings.TrimSpace(raw)
 			if raw == "" {
@@ -263,19 +262,14 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 				p.extra = append(p.extra, Event{Kind: "sandbox_block", Detail: "refused bind " + raw})
 				continue
 			}
-			st, err := os.Stat(raw)
-			if err != nil {
+			if _, err := os.Stat(raw); err != nil {
 				continue
 			}
 			if sameTree(ws, raw) {
 				continue
 			}
 			p.mounts = append(p.mounts, mount{Src: raw, Dst: raw, RO: true})
-			applied = append(applied, raw)
-			_ = st
-		}
-		if len(applied) > 0 {
-			p.extra = append(p.extra, Event{Kind: "grant_use", Grant: "build", Detail: strings.Join(applied, ",")})
+			p.extra = append(p.extra, Event{Kind: "grant_use", Grant: "build", Detail: raw + " read-only"})
 		}
 	}
 

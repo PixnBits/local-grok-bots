@@ -503,7 +503,7 @@ func TestBuildBinds(t *testing.T) {
 		t.Fatalf("build bind missing: %v\n%s\n%s", err, res.Stdout, res.Stderr)
 	}
 	ev, ok := findEvent(res.Events, "grant_use", "build", "")
-	if !ok || !strings.Contains(ev.Detail, tool) || strings.Contains(ev.Detail, ws) {
+	if !ok || ev.Detail != tool+" read-only" {
 		t.Fatalf("build event: %+v", res.Events)
 	}
 	if _, ok := findEvent(res.Events, "sandbox_block", "", ""); !ok {
