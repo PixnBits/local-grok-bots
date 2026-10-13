@@ -92,12 +92,25 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID, backend stri
 		if bot.Model != nil {
 			spec.Model = strings.TrimSpace(*bot.Model)
 		}
-		spec.OnStart = func(pid int) {
-			if pid > 0 {
-				a.setCLIPID(bot.ID, pid)
+		var pid int
+		spec.OnStart = func(child int) {
+			if child > 0 {
+				pid = child
+				a.setCLIPID(bot.ID, child)
+				a.auditCLI("cli_start", backend, sessionID, child, "")
 			}
 		}
 		res, streamed, err := a.runCLISpec(ctx, bot.ID, runID, runner, spec)
+		if pid > 0 {
+			result := "ok"
+			if err != nil {
+				result = "error"
+				if ctx.Err() != nil {
+					result = "interrupted"
+				}
+			}
+			a.auditCLI("cli_stop", backend, sessionID, pid, result)
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				a.finishInterrupted(bot.ID, runID, ctx)
@@ -247,6 +260,23 @@ func (a *App) notifyTurn(name, text string, needsInput bool) {
 		return
 	}
 	notify.Send(title, body)
+}
+
+func (a *App) auditCLI(event, backend, sessionID string, pid int, result string) {
+	if a.audit == nil || !a.audit.Enabled() {
+		return
+	}
+	fields := map[string]any{
+		"event":       event,
+		"pid":         pid,
+		"backend":     backend,
+		"session_id":  sessionID,
+		"cli_network": a.policy.CLINetwork,
+	}
+	if result != "" {
+		fields["result"] = result
+	}
+	a.audit.Write(fields)
 }
 
 func (a *App) failCLI(botID, runID, backend string, err error) {

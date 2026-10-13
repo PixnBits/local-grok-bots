@@ -52,6 +52,9 @@ type Policy struct {
 	NoProxy    string `json:"no_proxy"`
 	// CLIPins is empty unless an operator pins a backend binary.
 	CLIPins []CLIPin `json:"cli_pins"`
+	// AuditLog is empty, "stderr", "syslog", or an absolute file path.
+	// Empty writes no audit lines.
+	AuditLog string `json:"audit_log"`
 }
 
 // Default is the policy used when no file or environment sets a field.
@@ -147,6 +150,9 @@ func (p Policy) Validate(modelURL string, proxyAvailable bool) error {
 			return fmt.Errorf("cli pin %s is duplicated", pin.Backend)
 		}
 		seenPin[pin.Backend] = true
+	}
+	if err := checkAudit(p.AuditLog); err != nil {
+		return err
 	}
 	if p.ForceLocalOnly {
 		if err := requireLoopback(modelURL); err != nil {
@@ -359,6 +365,9 @@ func applyEnv(p *Policy) error {
 	if v, ok := lookupProxy("POLICY_NO_PROXY", "NO_PROXY", "no_proxy"); ok {
 		p.NoProxy = v
 	}
+	if v, ok := os.LookupEnv("POLICY_AUDIT_LOG"); ok {
+		p.AuditLog = strings.TrimSpace(v)
+	}
 	if v, ok := os.LookupEnv("POLICY_CLI_PINS"); ok {
 		pins, err := parsePinList(v, ";")
 		if err != nil {
@@ -462,6 +471,17 @@ func sha256Hex(s string) bool {
 		}
 	}
 	return true
+}
+
+func checkAudit(dest string) error {
+	switch strings.TrimSpace(dest) {
+	case "", "stderr", "syslog":
+		return nil
+	}
+	if !filepath.IsAbs(dest) || strings.ContainsAny(dest, "\r\n\x00") {
+		return fmt.Errorf("audit_log must be stderr, syslog, or an absolute path")
+	}
+	return nil
 }
 
 func versionToken(s string) bool {

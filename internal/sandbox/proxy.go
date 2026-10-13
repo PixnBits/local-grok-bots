@@ -16,6 +16,7 @@ type Event struct {
 	Kind   string `json:"kind"`
 	Grant  string `json:"grant,omitempty"`
 	Host   string `json:"host,omitempty"`
+	Port   int    `json:"port,omitempty"`
 	Detail string `json:"detail,omitempty"`
 	Notice string `json:"notice,omitempty"`
 }
@@ -210,20 +211,20 @@ func (p *proxy) decide(host string, port int) (bool, Event) {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	if port == 22 {
 		if !p.grants["ssh"] {
-			return false, Event{Kind: "grant_denied", Grant: "ssh", Host: host, Detail: "missing ssh grant"}
+			return false, Event{Kind: "grant_denied", Grant: "ssh", Host: host, Port: port, Detail: "missing ssh grant"}
 		}
 		if !p.sshAllow[host] {
-			return false, Event{Kind: "grant_denied", Grant: "ssh", Host: host, Detail: "not allowlisted"}
+			return false, Event{Kind: "grant_denied", Grant: "ssh", Host: host, Port: port, Detail: "not allowlisted"}
 		}
-		return true, Event{Kind: "grant_use", Grant: "ssh", Host: host, Notice: "SSH to " + host}
+		return true, Event{Kind: "grant_use", Grant: "ssh", Host: host, Port: port, Notice: "SSH to " + host}
 	}
 	if !p.grants["net"] {
-		return false, Event{Kind: "grant_denied", Grant: "net", Host: host, Detail: "missing net grant"}
+		return false, Event{Kind: "grant_denied", Grant: "net", Host: host, Port: port, Detail: "missing net grant"}
 	}
 	if !p.netAllow[host] {
-		return false, Event{Kind: "net_request", Grant: "net", Host: host, Detail: "not allowlisted"}
+		return false, Event{Kind: "net_request", Grant: "net", Host: host, Port: port, Detail: "not allowlisted"}
 	}
-	return true, Event{Kind: "grant_use", Grant: "net", Host: host}
+	return true, Event{Kind: "grant_use", Grant: "net", Host: host, Port: port}
 }
 
 func readLine(conn net.Conn) (string, error) {

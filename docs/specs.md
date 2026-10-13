@@ -242,7 +242,7 @@ The page is a client. Refreshing reloads from the daemon. Four surfaces. The con
 - Default model is the local Ollama endpoint, overridable by `OLLAMA_MODEL` and per bot. If Ollama is down, runs fail with a clear log line and do not hang.
 - Clean shutdown writes `daemon_stop`. Crash does not; the next start writes `daemon_start` and reconciles runs as above.
 - On Linux, `bwrap` or `unshare` must be usable for `run_shell`. On macOS, `sandbox-exec` must be usable for `run_shell` and for a CLI turn. Missing, the tool or the turn fails; the daemon still serves.
-- CLI network, CLI backends, the default shell allowlist, and build binds come from the Policy loaded at startup. The default leaves CLI network open and allows `grok` and `claude`. A backend the policy does not allow fails the turn. `explicit-proxy` sends allowlisted CLI destinations through the corporate proxy named by the policy. The proxy URL is not copied into the child. Optional `cli_pins` check the CLI binary before exec. No pin keeps the current launch.
+- CLI network, CLI backends, the default shell allowlist, and build binds come from the Policy loaded at startup. The default leaves CLI network open and allows `grok` and `claude`. A backend the policy does not allow fails the turn. `explicit-proxy` sends allowlisted CLI destinations through the corporate proxy named by the policy. The proxy URL is not copied into the child. Optional `cli_pins` check the CLI binary before exec. No pin keeps the current launch. Optional `audit_log` adds JSON lines for CLI process and grant events. Empty writes none. The schema is `docs/audit.md`.
 
 ## Out of these specs
 

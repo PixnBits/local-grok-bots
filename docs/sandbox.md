@@ -45,6 +45,8 @@ The airgap file is in the README. `GET /api/policy` returns the loaded value.
 
 `cli_pins` is optional. With no pin, the daemon execs whatever `grok` or `claude` is on `PATH`, as it does today. A pin names an absolute path, a SHA-256 of the file, a version token, or any combination. The path and hash are checked before the binary runs. The hash is of the file after symlinks are resolved. A version pin runs `<binary> --version` with a cleared environment and accepts the token only as a whole word. That command is the one case where a version-only pin executes the binary outside the jail, so prefer a hash. A mismatch fails the turn. The log event is `cli_pin` with `ok` or the reason. The expected hash and path are in the policy. The version command's output is not.
 
+`audit_log` can copy CLI process start and stop, network allow and deny, and other grant decisions to stderr, syslog, or a file. The schema and redaction rules are in `docs/audit.md`. Empty leaves that sink off. The store log is unchanged.
+
 ## Out
 
 - Per-bot microVMs.

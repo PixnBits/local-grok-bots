@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/config"
 	"github.com/PixnBits/local-grok-bots/internal/model"
@@ -35,6 +36,7 @@ type loopState struct {
 type App struct {
 	cfg    config.Config
 	policy policy.Policy
+	audit  *audit.Logger
 	st     *store.Store
 	model  model.Client
 	// runner executes grok/claude turns. Nil uses clisession.ExecRunner.
@@ -70,13 +72,19 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	aud, err := audit.Open(pol.AuditLog)
+	if err != nil {
+		return nil, err
+	}
 	cfg.BuildBinds = append([]string{}, pol.BuildBinds...)
 	st, err := store.Open(cfg.DBPath())
 	if err != nil {
+		_ = aud.Close()
 		return nil, err
 	}
 	if err := st.ReconcileOnBoot(cfg.Version); err != nil {
 		st.Close()
+		_ = aud.Close()
 		return nil, err
 	}
 	if m == nil {
@@ -86,6 +94,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	a := &App{
 		cfg:     cfg,
 		policy:  pol,
+		audit:   aud,
 		st:      st,
 		model:   m,
 		ws:      cfg.Workspace(),
@@ -98,6 +107,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	}
 	if err := mkdirWorkspace(a.ws); err != nil {
 		st.Close()
+		_ = aud.Close()
 		cancel()
 		return nil, err
 	}
@@ -135,6 +145,9 @@ func (a *App) Shutdown() {
 	_ = a.st.FailRunning("shutdown")
 	_ = a.st.AddLog("", "daemon_stop", map[string]any{})
 	_ = a.st.Close()
+	if a.audit != nil {
+		_ = a.audit.Close()
+	}
 }
 
 // Run serves HTTP until ctx is cancelled, then shuts down cleanly.

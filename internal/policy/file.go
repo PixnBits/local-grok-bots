@@ -87,6 +87,8 @@ func applyKey(p *Policy, key, val string) error {
 		p.HTTPSProxy = unquote(val)
 	case "no_proxy":
 		p.NoProxy = unquote(val)
+	case "audit_log":
+		p.AuditLog = unquote(val)
 	case "cli_pins":
 		list, err := parseList(val)
 		if err != nil {

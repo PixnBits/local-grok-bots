@@ -251,6 +251,26 @@ func TestCLIPinsParseAndRejectMistakes(t *testing.T) {
 	}
 }
 
+func TestAuditLogPath(t *testing.T) {
+	t.Setenv("POLICY_AUDIT_LOG", "audit.log")
+	if _, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true); err == nil {
+		t.Fatal("relative audit path was accepted")
+	}
+	t.Setenv("POLICY_AUDIT_LOG", "stderr")
+	p, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true)
+	if err != nil || p.AuditLog != "stderr" {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "policy.yaml"), []byte("audit_log: /var/log/lgb-audit.log\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	filePol, err := Load(dir, "http://127.0.0.1:11434", nil, true)
+	if err != nil || filePol.AuditLog != "/var/log/lgb-audit.log" {
+		t.Fatalf("%v %+v", err, filePol)
+	}
+}
+
 func TestNetAllowUsesDefaultWhenBotHasNone(t *testing.T) {
 	p := Default()
 	p.DefaultNetAllow = []string{"example.com"}

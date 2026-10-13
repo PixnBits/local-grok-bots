@@ -213,13 +213,49 @@ func (a *App) recordSandbox(botID string, ev sandbox.Event) {
 		if ev.Detail != "" {
 			detail["detail"] = ev.Detail
 		}
+		if ev.Port > 0 {
+			detail["port"] = ev.Port
+		}
 		a.log(botID, ev.Kind, detail)
+		a.auditDecision(ev)
 	}
 	if ev.Notice != "" {
 		_, _ = a.st.AddMessage(store.Message{
 			BotID: botID, Thread: "user", Role: "system", Content: "Notice: " + ev.Notice,
 		})
 	}
+}
+
+func (a *App) auditDecision(ev sandbox.Event) {
+	if a.audit == nil || !a.audit.Enabled() {
+		return
+	}
+	switch ev.Kind {
+	case "grant_use", "grant_denied", "net_request":
+	default:
+		return
+	}
+	action := "deny"
+	if ev.Kind == "grant_use" {
+		action = "allow"
+	}
+	event := "grant"
+	if ev.Host != "" || ev.Grant == "net" || ev.Grant == "ssh" || ev.Kind == "net_request" {
+		event = "net_decision"
+	}
+	fields := map[string]any{
+		"event":  event,
+		"action": action,
+		"grant":  ev.Grant,
+		"detail": ev.Detail,
+	}
+	if ev.Host != "" {
+		fields["host"] = ev.Host
+	}
+	if ev.Port > 0 {
+		fields["port"] = ev.Port
+	}
+	a.audit.Write(fields)
 }
 
 func formatShell(stdout, stderr string) string {
