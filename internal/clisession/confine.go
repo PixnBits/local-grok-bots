@@ -24,6 +24,8 @@ const (
 type launch struct {
 	Policy policy.Policy
 	Dial   func(context.Context, string, string) (net.Conn, error)
+	// NetLog receives each allowlist decision. Nil discards it.
+	NetLog func(sandbox.Event)
 }
 
 // confinePlan is the network and extra environment for one CLI jail.
@@ -39,7 +41,7 @@ func (l launch) command(ctx context.Context, bin string, args []string, workspac
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	plan, cleanup, err := prepareCLINet(ctx, l.Policy, l.Dial)
+	plan, cleanup, err := prepareCLINet(ctx, l.Policy, l.Dial, l.NetLog)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -56,7 +58,7 @@ func (l launch) command(ctx context.Context, bin string, args []string, workspac
 	}, nil
 }
 
-func prepareCLINet(ctx context.Context, pol policy.Policy, dial func(context.Context, string, string) (net.Conn, error)) (confinePlan, func(), error) {
+func prepareCLINet(ctx context.Context, pol policy.Policy, dial func(context.Context, string, string) (net.Conn, error), onEvent func(sandbox.Event)) (confinePlan, func(), error) {
 	extra, err := pol.ExtraEnv(os.LookupEnv)
 	if err != nil {
 		return confinePlan{}, nil, err
@@ -73,12 +75,19 @@ func prepareCLINet(ctx context.Context, pol policy.Policy, dial func(context.Con
 	case policy.NetNone:
 		plan.UnshareNet = true
 		return plan, noop, nil
-	case policy.NetProxy:
+	case policy.NetProxy, policy.NetExplicit:
+		if mode == policy.NetExplicit && strings.TrimSpace(pol.HTTPProxy) == "" && strings.TrimSpace(pol.HTTPSProxy) == "" {
+			return confinePlan{}, nil, fmt.Errorf("explicit-proxy requires http_proxy or https_proxy")
+		}
 		dir, err := os.MkdirTemp("", "lgb-cli-proxy-")
 		if err != nil {
 			return confinePlan{}, nil, err
 		}
-		preload, sock, closeProxy, err := sandbox.OpenCLIProxy(ctx, dir, pol.CLINetAllow, dial)
+		preload, sock, closeProxy, err := sandbox.OpenCLIProxy(ctx, dir, pol.CLINetAllow, dial, sandbox.Upstream{
+			HTTPProxy:  pol.HTTPProxy,
+			HTTPSProxy: pol.HTTPSProxy,
+			NoProxy:    pol.NoProxy,
+		}, onEvent)
 		if err != nil {
 			_ = os.RemoveAll(dir)
 			return confinePlan{}, nil, err

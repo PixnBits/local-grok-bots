@@ -13,7 +13,7 @@ func ProxyAvailable() bool { return true }
 // OpenCLIProxy compiles the connect interposer if needed and listens on
 // dir/proxy.sock. The caller removes dir. Close stops the listener.
 // A missing compiler fails closed.
-func OpenCLIProxy(ctx context.Context, dir string, allow []string, dial func(context.Context, string, string) (net.Conn, error)) (preload, sock string, closeFn func(), err error) {
+func OpenCLIProxy(ctx context.Context, dir string, allow []string, dial func(context.Context, string, string) (net.Conn, error), up Upstream, onEvent func(Event)) (preload, sock string, closeFn func(), err error) {
 	preload, err = ensurePreload()
 	if err != nil {
 		return "", "", nil, fmt.Errorf("cli network proxy unavailable: %w", err)
@@ -23,5 +23,7 @@ func OpenCLIProxy(ctx context.Context, dir string, allow []string, dial func(con
 	if err != nil {
 		return "", "", nil, fmt.Errorf("cli network proxy unavailable: %w", err)
 	}
+	np.UseUpstream(up)
+	np.SetObserver(onEvent)
 	return preload, sock, np.Close, nil
 }

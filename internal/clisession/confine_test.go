@@ -146,6 +146,70 @@ func TestProxyAndNoneNetworkFlags(t *testing.T) {
 	}
 }
 
+func TestProxyEnvStaysOutOfTheChild(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HTTP_PROXY", "http://user:s3cret@proxy.example:8080")
+	t.Setenv("HTTPS_PROXY", "http://user:s3cret@proxy.example:8443")
+	t.Setenv("NO_PROXY", "localhost")
+	t.Setenv("XAI_API_KEY", "supersecret")
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
+	t.Setenv("REVIEW_NOTE", "visible-note")
+
+	open := policy.Default()
+	if open.UsesUpstream() {
+		t.Fatal("open policy uses the corporate proxy")
+	}
+	openExtra, err := open.ExtraEnv(os.LookupEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	openArgs, err := confineArgsPlan(filepath.Join(dir, "missing"), nil, dir, confinePlan{ExtraEnv: openExtra})
+	if err != nil {
+		t.Fatal(err)
+	}
+	openJoined := strings.Join(openArgs, "\x00")
+	if strings.Contains(openJoined, "--unshare-net") || strings.Contains(openJoined, "s3cret") || strings.Contains(openJoined, "HTTP_PROXY") {
+		t.Fatal("open mode applied the proxy environment")
+	}
+
+	pol := policy.Default()
+	pol.CLINetwork = policy.NetExplicit
+	pol.HTTPProxy = "http://user:s3cret@proxy.example:8080"
+	pol.HTTPSProxy = "http://user:s3cret@proxy.example:8443"
+	pol.NoProxy = "localhost"
+	pol.EnvAllowlist = []string{"REVIEW_NOTE"}
+	if !pol.UsesUpstream() {
+		t.Fatal("explicit-proxy did not use the corporate proxy")
+	}
+	extra, err := pol.ExtraEnv(os.LookupEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err := confineArgsPlan(filepath.Join(dir, "missing"), nil, dir, confinePlan{
+		UnshareNet: true,
+		PreloadSrc: "/tmp/preload.so",
+		ProxyDir:   "/tmp/proxydir",
+		ExtraEnv:   extra,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, "\x00")
+	if !strings.Contains(joined, "--unshare-net") || !strings.Contains(joined, "--setenv\x00REVIEW_NOTE\x00visible-note") {
+		t.Fatal("explicit-proxy jail was not built")
+	}
+	for _, bad := range []string{"s3cret", "supersecret", "HTTP_PROXY", "HTTPS_PROXY", "SSH_AUTH_SOCK", "XAI_API_KEY"} {
+		if strings.Contains(joined, bad) {
+			t.Fatalf("child env contains %s", bad)
+		}
+	}
+
+	bare := launch{Policy: policy.Policy{CLINetwork: policy.NetExplicit}}
+	if _, _, err := bare.command(context.Background(), "/bin/true", nil, dir); err == nil || !strings.Contains(err.Error(), "explicit-proxy") {
+		t.Fatalf("missing proxy URL: %v", err)
+	}
+}
+
 func TestLaunchProxyProducesUnsharedNet(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("bubblewrap flags")

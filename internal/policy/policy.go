@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -19,6 +20,9 @@ const (
 	NetProxy = "proxy"
 	// NetNone gives the CLI no network and no proxy.
 	NetNone = "none"
+	// NetExplicit is the allowlist proxy plus an upstream corporate proxy.
+	// The CLI child does not receive the proxy URL.
+	NetExplicit = "explicit-proxy"
 )
 
 // Policy is the effective confinement policy.
@@ -31,6 +35,12 @@ type Policy struct {
 	DefaultNetAllow  []string `json:"default_net_allow"`
 	ForceLocalOnly   bool     `json:"force_local_only"`
 	BuildBinds       []string `json:"build_binds"`
+	// HTTPProxy, HTTPSProxy, and NoProxy are the corporate proxy settings.
+	// They are used only when CLINetwork is proxy or explicit-proxy.
+	// Logs and the API show the URL with the password redacted.
+	HTTPProxy  string `json:"http_proxy"`
+	HTTPSProxy string `json:"https_proxy"`
+	NoProxy    string `json:"no_proxy"`
 }
 
 // Default is the policy used when no file or environment sets a field.
@@ -79,12 +89,15 @@ func Load(dataDir, modelURL string, presetBinds []string, proxyAvailable bool) (
 func (p Policy) Validate(modelURL string, proxyAvailable bool) error {
 	switch p.CLINetwork {
 	case NetOpen, NetNone:
-	case NetProxy:
+	case NetProxy, NetExplicit:
 		if !proxyAvailable {
-			return fmt.Errorf("cli_network proxy is not available in this build")
+			return fmt.Errorf("cli_network %s is not available in this build", p.CLINetwork)
+		}
+		if err := p.checkUpstream(); err != nil {
+			return err
 		}
 	default:
-		return fmt.Errorf("cli_network must be open, proxy, or none")
+		return fmt.Errorf("cli_network must be open, proxy, none, or explicit-proxy")
 	}
 	for _, b := range p.AllowCLIBackends {
 		switch b {
@@ -169,7 +182,18 @@ func (p Policy) ExtraEnv(lookup func(string) (string, bool)) ([]string, error) {
 	return out, nil
 }
 
+// UsesUpstream reports whether CLI egress should dial through the corporate proxy.
+// Open and none ignore the proxy URLs. Proxy uses them only when one is set.
+func (p Policy) UsesUpstream() bool {
+	mode := strings.ToLower(strings.TrimSpace(p.CLINetwork))
+	if mode != NetProxy && mode != NetExplicit {
+		return false
+	}
+	return strings.TrimSpace(p.HTTPProxy) != "" || strings.TrimSpace(p.HTTPSProxy) != ""
+}
+
 // Line is the policy as one JSON line. Allowlisted values are not included.
+// Proxy passwords are redacted.
 func (p Policy) Line() string {
 	b, err := json.Marshal(p)
 	if err != nil {
@@ -178,12 +202,22 @@ func (p Policy) Line() string {
 	return string(b)
 }
 
+// MarshalJSON redacts proxy passwords. The dialer still has the original URL.
+func (p Policy) MarshalJSON() ([]byte, error) {
+	type wire Policy
+	w := wire(p)
+	w.HTTPProxy = redactProxyURL(p.HTTPProxy)
+	w.HTTPSProxy = redactProxyURL(p.HTTPSProxy)
+	return json.Marshal(w)
+}
+
 // BlockedEnv reports names the jail sets itself or must never receive.
 func BlockedEnv(name string) bool {
 	switch strings.ToUpper(name) {
 	case "XAI_API_KEY", "ANTHROPIC_API_KEY", "SSH_AUTH_SOCK",
 		"LD_PRELOAD", "LD_AUDIT", "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
 		"LGB_PROXY_SOCK", "LGB_KEY",
+		"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
 		"PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "TERM", "TZ":
 		return true
 	default:
@@ -294,7 +328,105 @@ func applyEnv(p *Policy) error {
 	if v, ok := os.LookupEnv("SANDBOX_BUILD_BINDS"); ok {
 		p.BuildBinds = splitList(v, string(os.PathListSeparator))
 	}
+	if v, ok := lookupProxy("POLICY_HTTP_PROXY", "HTTP_PROXY", "http_proxy"); ok {
+		p.HTTPProxy = v
+	}
+	if v, ok := lookupProxy("POLICY_HTTPS_PROXY", "HTTPS_PROXY", "https_proxy"); ok {
+		p.HTTPSProxy = v
+	}
+	if v, ok := lookupProxy("POLICY_NO_PROXY", "NO_PROXY", "no_proxy"); ok {
+		p.NoProxy = v
+	}
 	return nil
+}
+
+func lookupProxy(policyKey, upper, lower string) (string, bool) {
+	if v, ok := os.LookupEnv(policyKey); ok {
+		return strings.TrimSpace(v), true
+	}
+	if v, ok := os.LookupEnv(upper); ok {
+		return strings.TrimSpace(v), true
+	}
+	if v, ok := os.LookupEnv(lower); ok {
+		return strings.TrimSpace(v), true
+	}
+	return "", false
+}
+
+func (p Policy) checkUpstream() error {
+	if err := checkProxyURL(p.HTTPProxy); err != nil {
+		return fmt.Errorf("http_proxy: %w", err)
+	}
+	if err := checkProxyURL(p.HTTPSProxy); err != nil {
+		return fmt.Errorf("https_proxy: %w", err)
+	}
+	if p.CLINetwork == NetExplicit && strings.TrimSpace(p.HTTPProxy) == "" && strings.TrimSpace(p.HTTPSProxy) == "" {
+		return fmt.Errorf("explicit-proxy requires http_proxy or https_proxy")
+	}
+	if p.CLINetwork == NetExplicit || strings.TrimSpace(p.HTTPProxy) != "" || strings.TrimSpace(p.HTTPSProxy) != "" {
+		if err := checkNoProxy(p.NoProxy); err != nil {
+			return fmt.Errorf("no_proxy: %w", err)
+		}
+	}
+	return nil
+}
+
+func checkProxyURL(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	if len(raw) > 2048 || strings.ContainsAny(raw, "\r\n\x00 ") {
+		return fmt.Errorf("URL is invalid")
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return fmt.Errorf("URL must be http or https")
+	}
+	if u.User != nil {
+		user := u.User.Username()
+		pass, _ := u.User.Password()
+		if strings.ContainsAny(user, "\r\n\x00") || strings.ContainsAny(pass, "\r\n\x00") {
+			return fmt.Errorf("credentials are not safe")
+		}
+	}
+	return nil
+}
+
+func checkNoProxy(raw string) error {
+	if strings.ContainsAny(raw, "\r\n\x00/\\") {
+		return fmt.Errorf("list is invalid")
+	}
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" || part == "*" {
+			continue
+		}
+		host := part
+		if h, port, err := net.SplitHostPort(part); err == nil {
+			host = h
+			if n, nerr := strconv.Atoi(port); nerr != nil || n < 1 || n > 65535 {
+				return fmt.Errorf("host %q is invalid", part)
+			}
+		}
+		host = strings.TrimPrefix(host, ".")
+		if host == "" || strings.ContainsAny(host, " \t") {
+			return fmt.Errorf("host %q is invalid", part)
+		}
+	}
+	return nil
+}
+
+func redactProxyURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "redacted"
+	}
+	return u.Redacted()
 }
 
 func parseBool(s string) (bool, error) {

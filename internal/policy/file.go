@@ -81,6 +81,12 @@ func applyKey(p *Policy, key, val string) error {
 			return err
 		}
 		p.BuildBinds = list
+	case "http_proxy":
+		p.HTTPProxy = unquote(val)
+	case "https_proxy":
+		p.HTTPSProxy = unquote(val)
+	case "no_proxy":
+		p.NoProxy = unquote(val)
 	default:
 		return fmt.Errorf("unknown key")
 	}

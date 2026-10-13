@@ -20,6 +20,11 @@ Environment=OLLAMA_MODEL=llama3.2
 # Environment=POLICY_CLI_NETWORK=open
 # Environment=POLICY_CLI_BACKENDS=grok,claude
 # Environment=POLICY_FORCE_LOCAL_ONLY=false
+# Alternative to open: explicit-proxy needs a destination allowlist and an
+# upstream URL. The password stays in the daemon and is not copied into the CLI.
+# Environment=POLICY_CLI_NETWORK=explicit-proxy
+# Environment=POLICY_CLI_NET_ALLOW=api.example.com
+# Environment=POLICY_HTTPS_PROXY=http://proxy.example:8080
 # Required when BIND_ADDR is not loopback.
 # Environment=AUTH_TOKEN=replace-me
 NoNewPrivileges=true

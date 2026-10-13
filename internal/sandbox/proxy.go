@@ -27,6 +27,8 @@ type proxy struct {
 	netAllow map[string]bool
 	sshAllow map[string]bool
 	dial     func(context.Context, string, string) (net.Conn, error)
+	upstream Upstream
+	onEvent  func(Event)
 	mu       sync.Mutex
 	events   []Event
 }
@@ -41,6 +43,25 @@ func (n *NetProxy) Close() {
 	if n != nil {
 		n.p.close()
 	}
+}
+
+// UseUpstream dials later connections through up. Credentials stay in the
+// daemon. A disabled upstream leaves the dial unchanged.
+func (n *NetProxy) UseUpstream(up Upstream) {
+	if n == nil || n.p == nil || !up.Enabled() {
+		return
+	}
+	n.p.upstream = up
+	n.p.dial = up.Wrap(n.p.dial)
+}
+
+// SetObserver receives every allow and deny. The callback must not retain
+// secrets; events name hosts and the upstream host only.
+func (n *NetProxy) SetObserver(fn func(Event)) {
+	if n == nil || n.p == nil {
+		return
+	}
+	n.p.onEvent = fn
 }
 
 // ListenNetProxy serves the shell proxy protocol on sock.
@@ -125,6 +146,13 @@ func (p *proxy) add(ev Event) {
 	p.mu.Unlock()
 }
 
+func (p *proxy) emit(ev Event) {
+	p.add(ev)
+	if p.onEvent != nil {
+		p.onEvent(ev)
+	}
+}
+
 func (p *proxy) handle(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -139,8 +167,11 @@ func (p *proxy) handle(conn net.Conn) {
 		return
 	}
 	allowed, ev := p.decide(host, port)
+	if allowed && p.upstream.Enabled() {
+		ev.Detail = p.upstream.Label(host, port)
+	}
 	if !allowed {
-		p.add(ev)
+		p.emit(ev)
 		_, _ = conn.Write([]byte("DENY\n"))
 		return
 	}
@@ -152,13 +183,17 @@ func (p *proxy) handle(conn net.Conn) {
 	up, err := dial(p.ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	if err != nil {
 		ev.Notice = ""
+		label := ev.Detail
 		ev.Detail = "dial failed"
-		p.add(ev)
+		if label != "" && label != "direct" {
+			ev.Detail = "dial failed; " + label
+		}
+		p.emit(ev)
 		_, _ = conn.Write([]byte("DENY\n"))
 		return
 	}
 	defer up.Close()
-	p.add(ev)
+	p.emit(ev)
 	if _, err := conn.Write([]byte("OK\n")); err != nil {
 		return
 	}

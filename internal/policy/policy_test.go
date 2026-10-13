@@ -139,6 +139,74 @@ func TestBlockedEnvAndExtraEnv(t *testing.T) {
 	}
 }
 
+func TestCorporateProxyLoadAndRedaction(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "http://user:s3cret@ambient.example:8080")
+	t.Setenv("POLICY_CLI_NETWORK", "open")
+	openPol, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if openPol.UsesUpstream() || strings.Contains(openPol.Line(), "s3cret") {
+		t.Fatalf("open policy applied or leaked the proxy: %s", openPol.Line())
+	}
+	if !strings.Contains(openPol.Line(), "user:xxxxx@ambient.example:8080") {
+		t.Fatal(openPol.Line())
+	}
+	t.Setenv("HTTP_PROXY", "socks5://user:s3cret@127.0.0.1:1080")
+	if _, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("POLICY_CLI_NETWORK", "explicit-proxy")
+	t.Setenv("HTTP_PROXY", "socks5://user:s3cret@127.0.0.1:1080")
+	if _, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true); err == nil {
+		t.Fatal("socks5 proxy was accepted")
+	}
+
+	t.Setenv("POLICY_HTTP_PROXY", "http://user:s3cret@policy.example:8080")
+	t.Setenv("HTTP_PROXY", "http://other.example:1")
+	t.Setenv("POLICY_NO_PROXY", "localhost, .example.com")
+	pol, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pol.UsesUpstream() || pol.HTTPProxy != "http://user:s3cret@policy.example:8080" {
+		t.Fatalf("%+v", pol)
+	}
+	if strings.Contains(pol.Line(), "s3cret") || !strings.Contains(pol.Line(), "policy.example:8080") {
+		t.Fatal(pol.Line())
+	}
+
+	dir := t.TempDir()
+	body := "cli_network: explicit-proxy\nhttp_proxy: \"http://file.example:8080\"\nhttps_proxy: \"http://file.example:8443\"\nno_proxy: localhost\n"
+	if err := os.WriteFile(filepath.Join(dir, "policy.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	filePol, err := Load(dir, "http://127.0.0.1:11434", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filePol.HTTPProxy != "http://file.example:8080" || filePol.HTTPSProxy != "http://file.example:8443" {
+		t.Fatalf("%+v", filePol)
+	}
+
+	t.Setenv("POLICY_CLI_NETWORK", "proxy")
+	t.Setenv("POLICY_HTTP_PROXY", "")
+	t.Setenv("HTTP_PROXY", "")
+	t.Setenv("http_proxy", "")
+	empty, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty.UsesUpstream() || empty.HTTPProxy != "" {
+		t.Fatalf("%+v", empty)
+	}
+	empty.EnvAllowlist = []string{"HTTP_PROXY"}
+	if err := empty.Validate("http://127.0.0.1:11434", true); err == nil {
+		t.Fatal("HTTP_PROXY allowlist was accepted")
+	}
+}
+
 func TestNetAllowUsesDefaultWhenBotHasNone(t *testing.T) {
 	p := Default()
 	p.DefaultNetAllow = []string{"example.com"}

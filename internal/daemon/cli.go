@@ -10,6 +10,7 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/id"
 	"github.com/PixnBits/local-grok-bots/internal/notify"
+	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
@@ -65,7 +66,11 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID, backend stri
 	a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "working"})
 	runner := a.runner
 	if runner == nil {
-		runner = clisession.ExecRunner{Policy: a.policy, Dial: a.shellDial}
+		runner = clisession.ExecRunner{
+			Policy: a.policy,
+			Dial:   a.shellDial,
+			NetLog: func(ev sandbox.Event) { a.recordSandbox(bot.ID, ev) },
+		}
 	}
 	var lastText string
 	var needsInput bool

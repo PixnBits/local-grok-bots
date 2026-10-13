@@ -61,7 +61,7 @@ func proxyLine(t *testing.T, sock, line string) string {
 
 func TestOpenCLIProxyFailsClosedWithoutCompiler(t *testing.T) {
 	// The helper is exercised when a compiler exists. A failure must name the proxy.
-	_, _, closeFn, err := OpenCLIProxy(context.Background(), t.TempDir(), nil, nil)
+	_, _, closeFn, err := OpenCLIProxy(context.Background(), t.TempDir(), nil, nil, Upstream{}, nil)
 	if err != nil {
 		if !strings.Contains(err.Error(), "proxy unavailable") {
 			t.Fatal(err)

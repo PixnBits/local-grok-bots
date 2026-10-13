@@ -27,6 +27,8 @@ type ExecRunner struct {
 	Policy policy.Policy
 	// Dial, when set, is the CLI proxy's outbound dial. Tests use it.
 	Dial func(context.Context, string, string) (net.Conn, error)
+	// NetLog receives allow and deny decisions from the CLI proxy.
+	NetLog func(sandbox.Event)
 }
 
 func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Result, error) {
@@ -45,7 +47,7 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 		}
 		path = looked
 	}
-	cmd, cleanup, err := (launch{Policy: e.Policy, Dial: e.Dial}).command(ctx, path, argv[1:], spec.Workspace)
+	cmd, cleanup, err := (launch{Policy: e.Policy, Dial: e.Dial, NetLog: e.NetLog}).command(ctx, path, argv[1:], spec.Workspace)
 	if cleanup != nil {
 		defer cleanup()
 	}

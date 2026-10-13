@@ -35,7 +35,9 @@ A coding bot can clone, build, test, and (when granted) push or reach a host. Ev
 
 ## CLI network
 
-CLI turns are outside the shell grant list. Their network mode is `cli_network` on the Policy: `open` (the default), `proxy`, or `none`. `proxy` and `none` take the network away from the process. `proxy` puts back only the existing allowlist proxy, with `cli_net_allow` as the host list. An empty list denies every host. The interposer is the same `LD_PRELOAD` / `DYLD_INSERT_LIBRARIES` path the shell uses. A connect it does not see fails closed. `force_local_only` refuses a non-loopback Ollama URL and disables CLI backends.
+CLI turns are outside the shell grant list. Their network mode is `cli_network` on the Policy: `open` (the default), `proxy`, `explicit-proxy`, or `none`. `proxy`, `explicit-proxy`, and `none` take the network away from the process. `proxy` and `explicit-proxy` put back only the existing allowlist proxy, with `cli_net_allow` as the host list. An empty list denies every host. The interposer is the same `LD_PRELOAD` / `DYLD_INSERT_LIBRARIES` path the shell uses. A connect it does not see fails closed.
+
+`explicit-proxy`, and `proxy` when a URL is set, dials allowed destinations through the corporate proxy named by `http_proxy` / `https_proxy` (or `HTTP_PROXY` / `HTTPS_PROXY`). `no_proxy` skips that hop for matching hosts. The allowlist is still the real destination, so the corporate proxy host does not need to be listed. The proxy URL is not copied into the CLI child. A password in the URL is used for `Proxy-Authorization` and is redacted in the startup log and `GET /api/policy`. Each allow and deny is a log event. `open` and `none` do not use these URLs. `explicit-proxy` with no URL fails startup. `force_local_only` refuses a non-loopback Ollama URL and disables CLI backends.
 
 The airgap file is in the README. `GET /api/policy` returns the loaded value.
 
