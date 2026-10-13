@@ -4,12 +4,14 @@ import (
 	"context"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/PixnBits/local-grok-bots/internal/policy"
+	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 )
 
 func TestPlaceBinaryRewritesLoginDir(t *testing.T) {
@@ -232,5 +234,115 @@ func TestLaunchProxyProducesUnsharedNet(t *testing.T) {
 	joined := strings.Join(cmd.Args, "\x00")
 	if !strings.Contains(joined, "--unshare-net") || !strings.Contains(joined, cliProxySockJail) {
 		t.Fatalf("args missing proxy jail: %s", strings.Join(cmd.Args, " "))
+	}
+}
+
+func TestCLIROBindArgv(t *testing.T) {
+	ws := t.TempDir()
+	shared := filepath.Join(t.TempDir(), "shared")
+	plain, err := confineArgsPlan("/bin/true", nil, ws, confinePlan{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(plain, "\x00"), shared) {
+		t.Fatal("empty plan added a bind")
+	}
+	args, err := confineArgsPlan("/bin/true", nil, ws, confinePlan{ROBinds: []string{shared}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, "\x00")
+	want := "--ro-bind\x00" + shared + "\x00" + shared
+	ro := strings.Index(joined, want)
+	wsBind := strings.Index(joined, "--bind\x00"+ws+"\x00"+ws)
+	if ro < 0 || wsBind < 0 || ro > wsBind {
+		t.Fatalf("bind order:\n%s", strings.Join(args, " "))
+	}
+	if strings.Contains(joined, "--bind\x00"+shared+"\x00") {
+		t.Fatal("cli ro bind is writable")
+	}
+	if _, err := confineArgsPlan("/bin/true", nil, ws, confinePlan{ROBinds: []string{"/usr"}}); err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatal(err)
+	}
+}
+
+func TestCLIROBindIsReadOnly(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("bubblewrap")
+	}
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip(err)
+	}
+	cat, err := exec.LookPath("cat")
+	if err != nil {
+		t.Skip(err)
+	}
+	touch, err := exec.LookPath("touch")
+	if err != nil {
+		t.Skip(err)
+	}
+	ws := t.TempDir()
+	shared := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(shared, "marker")
+	if err := os.WriteFile(marker, []byte("shared-ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args, err := confineArgsPlan(cat, []string{marker}, ws, confinePlan{ROBinds: []string{shared}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bwrap", args...)
+	cmd.Env = []string{"PATH=/usr/bin:/bin"}
+	out, err := cmd.CombinedOutput()
+	if err != nil || string(out) != "shared-ok\n" {
+		t.Fatalf("read %v %s", err, out)
+	}
+	created := filepath.Join(shared, "newfile")
+	args, err = confineArgsPlan(touch, []string{created}, ws, confinePlan{ROBinds: []string{shared}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd = exec.Command("bwrap", args...)
+	cmd.Env = []string{"PATH=/usr/bin:/bin"}
+	out, err = cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("write succeeded: %s", out)
+	}
+	if _, statErr := os.Stat(created); !os.IsNotExist(statErr) {
+		t.Fatalf("read-only bind created %s (%v)", created, statErr)
+	}
+}
+
+func TestCLIROBindIsLogged(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("bubblewrap")
+	}
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		t.Skip(err)
+	}
+	ws := t.TempDir()
+	shared := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var got []sandbox.Event
+	l := launch{
+		Policy:  policy.Policy{CLINetwork: policy.NetOpen, CLIROBinds: []string{shared}},
+		BindLog: func(ev sandbox.Event) { got = append(got, ev) },
+	}
+	cmd, cleanup, err := l.command(context.Background(), "/bin/true", nil, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cleanup)
+	joined := strings.Join(cmd.Args, "\x00")
+	if !strings.Contains(joined, "--ro-bind\x00"+shared+"\x00"+shared) {
+		t.Fatalf("args %s", strings.Join(cmd.Args, " "))
+	}
+	if len(got) != 1 || got[0].Kind != "grant_use" || got[0].Grant != "cli_ro_bind" || got[0].Detail != shared+" read-only" {
+		t.Fatalf("%+v", got)
 	}
 }

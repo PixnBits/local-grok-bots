@@ -26,6 +26,8 @@ type launch struct {
 	Dial   func(context.Context, string, string) (net.Conn, error)
 	// NetLog receives each allowlist decision. Nil discards it.
 	NetLog func(sandbox.Event)
+	// BindLog receives each read-only CLI bind after the jail command is built.
+	BindLog func(sandbox.Event)
 }
 
 // confinePlan is the network and extra environment for one CLI jail.
@@ -35,6 +37,7 @@ type confinePlan struct {
 	ProxyDir   string
 	ProxySock  string
 	ExtraEnv   []string
+	ROBinds    []string
 }
 
 func (l launch) command(ctx context.Context, bin string, args []string, workspace string) (*exec.Cmd, func(), error) {
@@ -49,6 +52,15 @@ func (l launch) command(ctx context.Context, bin string, args []string, workspac
 	if err != nil {
 		cleanup()
 		return nil, nil, err
+	}
+	if l.BindLog != nil {
+		for _, path := range plan.ROBinds {
+			l.BindLog(sandbox.Event{
+				Kind:   "grant_use",
+				Grant:  "cli_ro_bind",
+				Detail: filepath.Clean(path) + " read-only",
+			})
+		}
 	}
 	return cmd, func() {
 		if extra != nil {
@@ -67,7 +79,7 @@ func prepareCLINet(ctx context.Context, pol policy.Policy, dial func(context.Con
 	if mode == "" {
 		mode = policy.NetOpen
 	}
-	plan := confinePlan{ExtraEnv: extra}
+	plan := confinePlan{ExtraEnv: extra, ROBinds: append([]string{}, pol.CLIROBinds...)}
 	noop := func() {}
 	switch mode {
 	case policy.NetOpen:
@@ -156,6 +168,10 @@ func confineArgsPlan(bin string, args []string, workspace string, plan confinePl
 	b = append(b, "--dir", cliHome)
 	seen[cliHome] = true
 	b = appendCLIState(b, seen, home)
+	b, err = appendCLIROBinds(b, seen, plan.ROBinds)
+	if err != nil {
+		return nil, err
+	}
 
 	b = appendParents(b, seen, ws)
 	b = append(b, "--bind", ws, ws, "--chdir", ws)
@@ -339,6 +355,22 @@ func hostFile(path string) (string, bool) {
 		return "", false
 	}
 	return real, true
+}
+
+func appendCLIROBinds(args []string, seen map[string]bool, binds []string) ([]string, error) {
+	for _, raw := range binds {
+		raw = filepath.Clean(strings.TrimSpace(raw))
+		if raw == "" || raw == "." || !filepath.IsAbs(raw) {
+			return nil, fmt.Errorf("cli ro bind %q must be an absolute path", raw)
+		}
+		if seen[raw] {
+			return nil, fmt.Errorf("cli ro bind %q conflicts with a jail mount", raw)
+		}
+		args = appendParents(args, seen, raw)
+		args = append(args, "--ro-bind", raw, raw)
+		seen[raw] = true
+	}
+	return args, nil
 }
 
 func appendParents(args []string, seen map[string]bool, dst string) []string {

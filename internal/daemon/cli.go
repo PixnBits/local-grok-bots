@@ -82,6 +82,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID, backend stri
 					"backend": backend, "path": path, "result": result,
 				})
 			},
+			BindLog: func(ev sandbox.Event) { a.recordSandbox(bot.ID, ev) },
 		}
 	}
 	var lastText string

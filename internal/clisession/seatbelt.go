@@ -13,6 +13,7 @@ type cliNet struct {
 	Open      bool
 	ProxySock string
 	ExtraRead string
+	ROBinds   []string
 }
 
 // cliSeatbelt is the macOS profile for one CLI turn.
@@ -24,6 +25,13 @@ func cliSeatbelt(ws, home, tmp, binDir string, net cliNet) sandbox.Seatbelt {
 	}
 	if net.ExtraRead != "" && !covered(net.ExtraRead, reads) {
 		reads = append(reads, net.ExtraRead)
+	}
+	for _, path := range net.ROBinds {
+		path = filepath.Clean(strings.TrimSpace(path))
+		if path == "" {
+			continue
+		}
+		reads = append(reads, path)
 	}
 	writes := []string{ws}
 	if tmp != "" {

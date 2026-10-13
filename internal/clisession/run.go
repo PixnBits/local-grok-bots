@@ -32,6 +32,8 @@ type ExecRunner struct {
 	// PinLog receives a pin result when that backend is pinned.
 	// result is "ok" or the failure reason. Unpinned backends are not logged.
 	PinLog func(backend, path, result string)
+	// BindLog receives each read-only CLI bind included in the jail.
+	BindLog func(sandbox.Event)
 }
 
 func (e ExecRunner) notePin(ctx context.Context, backend, path string) error {
@@ -68,7 +70,7 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 	if err := e.notePin(ctx, spec.Backend, path); err != nil {
 		return Result{}, err
 	}
-	cmd, cleanup, err := (launch{Policy: e.Policy, Dial: e.Dial, NetLog: e.NetLog}).command(ctx, path, argv[1:], spec.Workspace)
+	cmd, cleanup, err := (launch{Policy: e.Policy, Dial: e.Dial, NetLog: e.NetLog, BindLog: e.BindLog}).command(ctx, path, argv[1:], spec.Workspace)
 	if cleanup != nil {
 		defer cleanup()
 	}
