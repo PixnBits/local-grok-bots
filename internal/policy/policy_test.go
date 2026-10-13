@@ -326,3 +326,72 @@ func TestNetAllowUsesDefaultWhenBotHasNone(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestCLIROBindsValidation(t *testing.T) {
+	if len(Default().CLIROBinds) != 0 {
+		t.Fatal("default cli ro binds are set")
+	}
+	data := t.TempDir()
+	shared := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "cli_ro_binds: [\"" + shared + "\"]\n"
+	if err := os.WriteFile(filepath.Join(data, "policy.yaml"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POLICY_CLI_RO_BINDS", filepath.Join(t.TempDir(), "from-env"))
+	p, err := Load(data, "http://127.0.0.1:11434", nil, true)
+	if err != nil || len(p.CLIROBinds) != 1 || p.CLIROBinds[0] != shared {
+		t.Fatalf("%v %+v", err, p.CLIROBinds)
+	}
+	raw, err := p.MarshalJSON()
+	if err != nil || !strings.Contains(string(raw), shared) || !strings.Contains(string(raw), `"cli_ro_binds"`) {
+		t.Fatalf("%s %v", raw, err)
+	}
+
+	t.Setenv("POLICY_CLI_RO_BINDS", "")
+	empty, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true)
+	if err != nil || len(empty.CLIROBinds) != 0 {
+		t.Fatal(err)
+	}
+
+	t.Setenv("POLICY_CLI_RO_BINDS", "relative/path")
+	if _, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatal(err)
+	}
+
+	refused := filepath.Join(t.TempDir(), ".ssh")
+	if err := os.Mkdir(refused, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POLICY_CLI_RO_BINDS", refused)
+	if _, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "refused") {
+		t.Fatal(err)
+	}
+
+	missing := filepath.Join(t.TempDir(), "missing")
+	t.Setenv("POLICY_CLI_RO_BINDS", missing)
+	if _, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatal(err)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POLICY_CLI_RO_BINDS", filepath.Join(home, ".grok"))
+	if _, err := Load(t.TempDir(), "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "login") {
+		t.Fatal(err)
+	}
+
+	overlap := t.TempDir()
+	ws := filepath.Join(overlap, "workspace")
+	if err := os.Mkdir(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POLICY_CLI_RO_BINDS", ws)
+	if _, err := Load(overlap, "http://127.0.0.1:11434", nil, true); err == nil || !strings.Contains(err.Error(), "workspace") {
+		t.Fatal(err)
+	}
+}

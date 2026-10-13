@@ -250,6 +250,12 @@ func putBack(root, rel string, old snapFile) {
 	_ = os.WriteFile(path, old.data, mode)
 }
 
+// RefusedBind reports a path that must not be mounted into a jail.
+// It matches credentials and shell rc files.
+func RefusedBind(p string) bool {
+	return refusedBind(p)
+}
+
 // refusedBind reports toolchain paths that would mount credentials or rc files.
 func refusedBind(p string) bool {
 	p = filepath.Clean(p)

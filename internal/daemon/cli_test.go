@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -141,7 +143,24 @@ func TestPolicyEndpoint(t *testing.T) {
 		t.Fatalf("policy %d", res.StatusCode)
 	}
 	res, b := do(t, "GET", srv.URL+"/api/policy", nil, "sekrit")
-	if res.StatusCode != 200 || !strings.Contains(string(b), `"cli_network":"open"`) || !strings.Contains(string(b), `"grok"`) {
+	if res.StatusCode != 200 || !strings.Contains(string(b), `"cli_network":"open"`) || !strings.Contains(string(b), `"grok"`) || !strings.Contains(string(b), `"cli_ro_binds":[]`) {
+		t.Fatalf("policy %d %s", res.StatusCode, b)
+	}
+}
+
+func TestPolicyListsCLIROBinds(t *testing.T) {
+	shared := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(shared, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POLICY_CLI_RO_BINDS", shared)
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{}, nil
+	}})
+	app.cfg.AuthToken = "sekrit"
+	srv := serve(t, app)
+	res, b := do(t, "GET", srv.URL+"/api/policy", nil, "sekrit")
+	if res.StatusCode != 200 || !strings.Contains(string(b), shared) || strings.Contains(string(b), `"cli_ro_binds":[]`) {
 		t.Fatalf("policy %d %s", res.StatusCode, b)
 	}
 }

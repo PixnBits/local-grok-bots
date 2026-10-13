@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 )
 
 const (
@@ -45,6 +47,9 @@ type Policy struct {
 	DefaultNetAllow  []string `json:"default_net_allow"`
 	ForceLocalOnly   bool     `json:"force_local_only"`
 	BuildBinds       []string `json:"build_binds"`
+	// CLIROBinds are extra read-only paths in the CLI jail.
+	// Empty means the jail mounts only its built-in paths.
+	CLIROBinds []string `json:"cli_ro_binds"`
 	// HTTPProxy, HTTPSProxy, and NoProxy are the corporate proxy settings.
 	// They are used only when CLINetwork is proxy or explicit-proxy.
 	// Logs and the API show the URL with the password redacted.
@@ -74,6 +79,7 @@ func Default() Policy {
 		EnvAllowlist:     []string{},
 		DefaultNetAllow:  []string{},
 		BuildBinds:       []string{},
+		CLIROBinds:       []string{},
 		CLIPins:          []CLIPin{},
 		DLPPatterns:      []string{},
 	}
@@ -103,6 +109,9 @@ func Load(dataDir, modelURL string, presetBinds []string, proxyAvailable bool) (
 		return Policy{}, fmt.Errorf("policy file not found")
 	}
 	if err := p.Validate(modelURL, proxyAvailable); err != nil {
+		return Policy{}, err
+	}
+	if err := p.checkCLIROBinds(dataDir); err != nil {
 		return Policy{}, err
 	}
 	return p, nil
@@ -367,6 +376,9 @@ func applyEnv(p *Policy) error {
 	if v, ok := os.LookupEnv("SANDBOX_BUILD_BINDS"); ok {
 		p.BuildBinds = splitList(v, string(os.PathListSeparator))
 	}
+	if v, ok := os.LookupEnv("POLICY_CLI_RO_BINDS"); ok {
+		p.CLIROBinds = splitList(v, string(os.PathListSeparator))
+	}
 	if v, ok := lookupProxy("POLICY_HTTP_PROXY", "HTTP_PROXY", "http_proxy"); ok {
 		p.HTTPProxy = v
 	}
@@ -498,6 +510,108 @@ func sha256Hex(s string) bool {
 		}
 	}
 	return true
+}
+
+// checkCLIROBinds fails closed unless every extra CLI path is an absolute
+// path that exists and is safe to mount read-only. An empty list is the
+// current jail. The stored list is the cleaned paths.
+func (p *Policy) checkCLIROBinds(dataDir string) error {
+	if len(p.CLIROBinds) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(dataDir) == "" {
+		return fmt.Errorf("cli_ro_binds requires a data directory")
+	}
+	workspace, err := filepath.Abs(filepath.Join(dataDir, "workspace"))
+	if err != nil {
+		return fmt.Errorf("cli_ro_binds: %w", err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return fmt.Errorf("cli_ro_binds requires a home directory")
+	}
+	home, err = filepath.Abs(home)
+	if err != nil {
+		return fmt.Errorf("cli_ro_binds: %w", err)
+	}
+	login := []string{
+		filepath.Join(home, ".grok"),
+		filepath.Join(home, ".claude"),
+		filepath.Join(home, ".claude.json"),
+	}
+	cleaned := make([]string, 0, len(p.CLIROBinds))
+	seen := map[string]bool{}
+	for _, raw := range p.CLIROBinds {
+		if strings.TrimSpace(raw) == "" || strings.ContainsAny(raw, "\r\n\x00") {
+			return fmt.Errorf("cli_ro_binds entry is empty")
+		}
+		if !filepath.IsAbs(raw) {
+			return fmt.Errorf("cli_ro_binds %q must be an absolute path", raw)
+		}
+		if strings.ContainsAny(raw, "\"\\()") {
+			return fmt.Errorf("cli_ro_binds %q contains a reserved character", raw)
+		}
+		clean := filepath.Clean(raw)
+		switch clean {
+		case "/usr", "/bin", "/lib", "/lib64", "/etc", "/tmp", "/proc", "/dev", "/lgb-home", "/lgb-proxy":
+			return fmt.Errorf("cli_ro_binds %q conflicts with a jail mount", clean)
+		}
+		if seen[clean] {
+			return fmt.Errorf("cli_ro_binds %q is duplicated", clean)
+		}
+		if err := refuseCLIRO(clean, workspace, login); err != nil {
+			return err
+		}
+		resolved, err := filepath.EvalSymlinks(clean)
+		if err != nil {
+			return fmt.Errorf("cli_ro_binds %q: %w", clean, err)
+		}
+		resolved = filepath.Clean(resolved)
+		if resolved != clean {
+			if err := refuseCLIRO(resolved, workspace, login); err != nil {
+				return err
+			}
+		}
+		if _, err := os.Stat(resolved); err != nil {
+			return fmt.Errorf("cli_ro_binds %q: %w", clean, err)
+		}
+		seen[clean] = true
+		cleaned = append(cleaned, clean)
+	}
+	p.CLIROBinds = cleaned
+	return nil
+}
+
+func refuseCLIRO(path, workspace string, login []string) error {
+	if sandbox.RefusedBind(path) {
+		return fmt.Errorf("cli_ro_binds %q is refused", path)
+	}
+	if pathOverlaps(path, workspace) {
+		return fmt.Errorf("cli_ro_binds %q overlaps the workspace", path)
+	}
+	for _, root := range login {
+		if pathOverlaps(path, root) {
+			return fmt.Errorf("cli_ro_binds %q overlaps a CLI login path", path)
+		}
+	}
+	return nil
+}
+
+func pathOverlaps(a, b string) bool {
+	a = filepath.Clean(a)
+	b = filepath.Clean(b)
+	if a == b {
+		return true
+	}
+	if rel, err := filepath.Rel(a, b); err == nil && insideRel(rel) {
+		return true
+	}
+	rel, err := filepath.Rel(b, a)
+	return err == nil && insideRel(rel)
+}
+
+func insideRel(rel string) bool {
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // DLPEnabled reports whether a prompt check is configured.

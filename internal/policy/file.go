@@ -81,6 +81,12 @@ func applyKey(p *Policy, key, val string) error {
 			return err
 		}
 		p.BuildBinds = list
+	case "cli_ro_binds":
+		list, err := parseList(val)
+		if err != nil {
+			return err
+		}
+		p.CLIROBinds = list
 	case "http_proxy":
 		p.HTTPProxy = unquote(val)
 	case "https_proxy":
