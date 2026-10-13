@@ -11,7 +11,7 @@ func TestCLISeatbeltWritesLoginDirsOnly(t *testing.T) {
 	ws := t.TempDir()
 	home := t.TempDir()
 	tmp := t.TempDir()
-	sb := cliSeatbelt(ws, home, tmp, filepath.Join(home, "bin"))
+	sb := cliSeatbelt(ws, home, tmp, filepath.Join(home, "bin"), cliNet{Open: true})
 	for _, p := range sb.Write {
 		if p == home || p == filepath.Join(home, ".ssh") {
 			t.Fatalf("write path %s", p)
@@ -32,6 +32,22 @@ func TestCLISeatbeltWritesLoginDirsOnly(t *testing.T) {
 	}
 	if strings.Contains(text, ".ssh") {
 		t.Fatal(text)
+	}
+	closed := cliSeatbelt(ws, home, tmp, "", cliNet{})
+	closedText, err := closed.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(closedText, "(allow network-outbound)\n") {
+		t.Fatal(closedText)
+	}
+	proxied := cliSeatbelt(ws, home, tmp, "", cliNet{ProxySock: filepath.Join(tmp, "proxy.sock")})
+	proxyText, err := proxied.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(proxyText, "(allow network-outbound)\n") || !strings.Contains(proxyText, "proxy.sock") {
+		t.Fatal(proxyText)
 	}
 	env := cliChildEnv(home, tmp)
 	blob := strings.Join(env, "\n")

@@ -10,7 +10,7 @@ The 2026 sandbox-escape research (Pillar Security, CSA) is the relevant caution.
 
 ## The model
 
-One base jail. A short list of named grants on the bot (or on a run). No policy language. No microVM.
+One base jail. A short list of named grants on the bot (or on a run). No policy language and no microVM. A fixed Policy, loaded from `DATA_DIR/policy.yaml` or the environment, sets the CLI network mode, the default shell allowlist, the extra CLI environment, and the build binds. It is not a language: unknown keys fail startup.
 
 The base is the current workspace jail. On Linux it is bubblewrap when `bwrap` is installed, and otherwise unshare. Bubblewrap is what Claude Code and Codex use on Linux. It handles `--unshare-net` and selective binds cleanly, and it avoids the AppArmor friction raw unshare hit on this machine. On macOS the same grants run under `sandbox-exec`. Seatbelt cannot bind-mount, so the shell's working directory is the host workspace path rather than `/work`. MicroVMs stay out. That was the AegisClaw path; the overhead is not justified for a single-user desktop.
 
@@ -19,7 +19,7 @@ Grants are explicit. The daemon checks the grant before the tool runs. Missing g
 | Grant | What it enables | How it stays safe |
 |---|---|---|
 | Base (default) | Workspace files + shell | Current jail. No network. |
-| `net` | Domain allowlist | Proxy outside the jail. Empty list means no egress. |
+| `net` | Domain allowlist | Proxy outside the jail. Empty list means no egress, unless Policy `default_net_allow` supplies hosts. A bot list wins. |
 | `git` | Clone, commit, push | Dedicated worktree inside the workspace. Never mount `~/.ssh` or host git config. Push via a short-lived token injected by the daemon, or surface the diff for review. |
 | `ssh` | Reach specific hosts | Dedicated key or proxy. Never the user's full agent. Log every connection. |
 | `build` | Toolchains, tests, binaries | Extra read-only binds for compilers if needed. Output stays in the workspace. |
@@ -32,6 +32,12 @@ Every grant use and every denial is a log event. Surface irreversible actions (p
 ## What this enables
 
 A coding bot can clone, build, test, and (when granted) push or reach a host. Every other bot stays in the locked-down workspace. The log remains the place to verify what actually happened.
+
+## CLI network
+
+CLI turns are outside the shell grant list. Their network mode is `cli_network` on the Policy: `open` (the default), `proxy`, or `none`. `proxy` and `none` take the network away from the process. `proxy` puts back only the existing allowlist proxy, with `cli_net_allow` as the host list. An empty list denies every host. The interposer is the same `LD_PRELOAD` / `DYLD_INSERT_LIBRARIES` path the shell uses. A connect it does not see fails closed. `force_local_only` refuses a non-loopback Ollama URL and disables CLI backends.
+
+The airgap file is in the README. `GET /api/policy` returns the loaded value.
 
 ## Out
 

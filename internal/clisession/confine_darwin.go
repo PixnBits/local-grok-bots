@@ -7,14 +7,17 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
 
-// confinedCommand runs bin under sandbox-exec. The workspace is writable.
+// applyLaunch runs bin under sandbox-exec. The workspace is writable.
 // The login directories under the user home are the only other writable
 // home paths. The child environment is built fresh, so API keys and the
 // SSH agent are not inherited. cleanup removes the profile and temp dir
 // after the process has exited.
-func confinedCommand(bin string, args []string, workspace string) (*exec.Cmd, func(), error) {
+func applyLaunch(bin string, args []string, workspace string, plan confinePlan) (*exec.Cmd, func(), error) {
 	ws, home, err := absWorkspace(workspace)
 	if err != nil {
 		return nil, nil, err
@@ -35,7 +38,11 @@ func confinedCommand(bin string, args []string, workspace string) (*exec.Cmd, fu
 	if home != "" {
 		ensureCLIState(home)
 	}
-	text, err := cliSeatbelt(ws, home, tmp, filepath.Dir(absBin)).Render()
+	net := cliNet{Open: !plan.UnshareNet, ProxySock: plan.ProxySock}
+	if plan.PreloadSrc != "" {
+		net.ExtraRead = filepath.Dir(plan.PreloadSrc)
+	}
+	text, err := cliSeatbelt(ws, home, tmp, filepath.Dir(absBin), net).Render()
 	if err != nil {
 		cleanup()
 		return nil, nil, err
@@ -47,6 +54,33 @@ func confinedCommand(bin string, args []string, workspace string) (*exec.Cmd, fu
 	}
 	cmd := exec.Command(sb, append([]string{"-f", profilePath, absBin}, args...)...)
 	cmd.Dir = ws
-	cmd.Env = cliChildEnv(home, tmp)
+	env, err := appendExtraEnv(cliChildEnv(home, tmp), plan.ExtraEnv)
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	if plan.ProxySock != "" {
+		env = append(env,
+			"LGB_PROXY_SOCK="+plan.ProxySock,
+			"DYLD_INSERT_LIBRARIES="+plan.PreloadSrc,
+		)
+	}
+	cmd.Env = env
 	return cmd, cleanup, nil
+}
+
+func confinedCommand(bin string, args []string, workspace string) (*exec.Cmd, func(), error) {
+	return launch{}.command(nil, bin, args, workspace)
+}
+
+func appendExtraEnv(base, extra []string) ([]string, error) {
+	out := append([]string{}, base...)
+	for _, entry := range extra {
+		key, _, ok := strings.Cut(entry, "=")
+		if !ok || policy.BlockedEnv(key) {
+			return nil, fmt.Errorf("env %s is not permitted", key)
+		}
+		out = append(out, entry)
+	}
+	return out, nil
 }

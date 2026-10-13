@@ -6,11 +6,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
 	"syscall"
 
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 )
 
@@ -20,9 +22,14 @@ type Runner interface {
 }
 
 // ExecRunner runs the real grok or claude binary. Auth stays in the CLI.
-type ExecRunner struct{}
+// A zero Policy keeps the network open.
+type ExecRunner struct {
+	Policy policy.Policy
+	// Dial, when set, is the CLI proxy's outbound dial. Tests use it.
+	Dial func(context.Context, string, string) (net.Conn, error)
+}
 
-func (ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Result, error) {
+func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
@@ -38,7 +45,7 @@ func (ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Resu
 		}
 		path = looked
 	}
-	cmd, cleanup, err := confinedCommand(path, argv[1:], spec.Workspace)
+	cmd, cleanup, err := (launch{Policy: e.Policy, Dial: e.Dial}).command(ctx, path, argv[1:], spec.Workspace)
 	if cleanup != nil {
 		defer cleanup()
 	}

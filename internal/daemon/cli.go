@@ -27,6 +27,12 @@ func (a *App) resolvedBackend(bot store.Bot) string {
 }
 
 func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID, backend string) {
+	if !a.policy.AllowsBackend(backend) {
+		a.takePending(runID)
+		a.dropResume(bot.ID)
+		a.failCLI(bot.ID, runID, backend, fmt.Errorf("cli backend %q is not allowed by policy", backend))
+		return
+	}
 	a.takePending(runID)
 	a.dropResume(bot.ID)
 	a.touchActivity(bot.ID)
@@ -59,7 +65,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID, backend stri
 	a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "working"})
 	runner := a.runner
 	if runner == nil {
-		runner = clisession.ExecRunner{}
+		runner = clisession.ExecRunner{Policy: a.policy, Dial: a.shellDial}
 	}
 	var lastText string
 	var needsInput bool

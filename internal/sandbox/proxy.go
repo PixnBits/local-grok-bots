@@ -31,6 +31,28 @@ type proxy struct {
 	events   []Event
 }
 
+// NetProxy is the allowlist proxy used by a CLI turn.
+type NetProxy struct {
+	p *proxy
+}
+
+// Close stops the proxy listener.
+func (n *NetProxy) Close() {
+	if n != nil {
+		n.p.close()
+	}
+}
+
+// ListenNetProxy serves the shell proxy protocol on sock.
+// The net grant is on. SSH is not. An empty allowlist denies every host.
+func ListenNetProxy(ctx context.Context, sock string, allow []string, dial func(context.Context, string, string) (net.Conn, error)) (*NetProxy, error) {
+	p, err := startProxy(ctx, sock, []string{"net"}, allow, nil, dial)
+	if err != nil {
+		return nil, err
+	}
+	return &NetProxy{p: p}, nil
+}
+
 func startProxy(ctx context.Context, sock string, grants, netAllow, sshAllow []string, dial func(context.Context, string, string) (net.Conn, error)) (*proxy, error) {
 	if err := os.MkdirAll(filepathDir(sock), 0o755); err != nil {
 		return nil, err

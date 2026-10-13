@@ -17,6 +17,7 @@ import (
 func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", a.handleHealth)
+	mux.HandleFunc("GET /api/policy", a.handlePolicy)
 	mux.HandleFunc("GET /api/bots", a.handleListBots)
 	mux.HandleFunc("POST /api/bots", a.handleCreateBot)
 	mux.HandleFunc("GET /api/bots/{id}", a.handleGetBot)
@@ -74,6 +75,10 @@ func authorized(r *http.Request, token string) bool {
 
 func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": a.cfg.Version})
+}
+
+func (a *App) handlePolicy(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, a.policy)
 }
 
 func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {

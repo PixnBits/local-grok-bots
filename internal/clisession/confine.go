@@ -1,18 +1,111 @@
 package clisession
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
+
+	"github.com/PixnBits/local-grok-bots/internal/policy"
+	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 )
+
+// Jail paths for a CLI proxy. The socket file inside ProxyDir is proxy.sock.
+const (
+	cliPreloadJail   = "/lgb-proxy/preload.so"
+	cliProxySockJail = "/lgb-proxy/run/proxy.sock"
+)
+
+// launch is one confined CLI process.
+type launch struct {
+	Policy policy.Policy
+	Dial   func(context.Context, string, string) (net.Conn, error)
+}
+
+// confinePlan is the network and extra environment for one CLI jail.
+type confinePlan struct {
+	UnshareNet bool
+	PreloadSrc string
+	ProxyDir   string
+	ProxySock  string
+	ExtraEnv   []string
+}
+
+func (l launch) command(ctx context.Context, bin string, args []string, workspace string) (*exec.Cmd, func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	plan, cleanup, err := prepareCLINet(ctx, l.Policy, l.Dial)
+	if err != nil {
+		return nil, nil, err
+	}
+	cmd, extra, err := applyLaunch(bin, args, workspace, plan)
+	if err != nil {
+		cleanup()
+		return nil, nil, err
+	}
+	return cmd, func() {
+		if extra != nil {
+			extra()
+		}
+		cleanup()
+	}, nil
+}
+
+func prepareCLINet(ctx context.Context, pol policy.Policy, dial func(context.Context, string, string) (net.Conn, error)) (confinePlan, func(), error) {
+	extra, err := pol.ExtraEnv(os.LookupEnv)
+	if err != nil {
+		return confinePlan{}, nil, err
+	}
+	mode := strings.ToLower(strings.TrimSpace(pol.CLINetwork))
+	if mode == "" {
+		mode = policy.NetOpen
+	}
+	plan := confinePlan{ExtraEnv: extra}
+	noop := func() {}
+	switch mode {
+	case policy.NetOpen:
+		return plan, noop, nil
+	case policy.NetNone:
+		plan.UnshareNet = true
+		return plan, noop, nil
+	case policy.NetProxy:
+		dir, err := os.MkdirTemp("", "lgb-cli-proxy-")
+		if err != nil {
+			return confinePlan{}, nil, err
+		}
+		preload, sock, closeProxy, err := sandbox.OpenCLIProxy(ctx, dir, pol.CLINetAllow, dial)
+		if err != nil {
+			_ = os.RemoveAll(dir)
+			return confinePlan{}, nil, err
+		}
+		plan.UnshareNet = true
+		plan.PreloadSrc = preload
+		plan.ProxyDir = dir
+		plan.ProxySock = sock
+		return plan, func() {
+			closeProxy()
+			_ = os.RemoveAll(dir)
+		}, nil
+	default:
+		return confinePlan{}, nil, fmt.Errorf("cli network %q is not supported", mode)
+	}
+}
 
 // cliHome is the only home directory inside the CLI jail.
 const cliHome = "/lgb-home"
 
-// confineArgs builds the bwrap argv after argv0.
+// confineArgs builds the bwrap argv after argv0 for the default open network.
 func confineArgs(bin string, args []string, workspace string) ([]string, error) {
+	return confineArgsPlan(bin, args, workspace, confinePlan{})
+}
+
+// confineArgsPlan builds the bwrap argv after argv0.
+func confineArgsPlan(bin string, args []string, workspace string, plan confinePlan) ([]string, error) {
 	ws, home, err := absWorkspace(workspace)
 	if err != nil {
 		return nil, err
@@ -28,8 +121,11 @@ func confineArgs(bin string, args []string, workspace string) ([]string, error) 
 
 	seen := map[string]bool{}
 	var b []string
-	b = append(b,
-		"--unshare-user", "--unshare-pid", "--die-with-parent", "--clearenv",
+	b = append(b, "--unshare-user")
+	if plan.UnshareNet {
+		b = append(b, "--unshare-net")
+	}
+	b = append(b, "--unshare-pid", "--die-with-parent", "--clearenv",
 		"--ro-bind", "/usr", "/usr",
 		"--ro-bind", "/bin", "/bin",
 		"--ro-bind", "/lib", "/lib",
@@ -63,6 +159,15 @@ func confineArgs(bin string, args []string, workspace string) ([]string, error) 
 		}
 		b = append(b, flag, m.src, m.dst)
 	}
+	if plan.PreloadSrc != "" {
+		if plan.ProxyDir == "" {
+			return nil, fmt.Errorf("cli network proxy socket is missing")
+		}
+		b = appendParents(b, seen, "/lgb-proxy/run")
+		b = append(b, "--bind", plan.ProxyDir, "/lgb-proxy/run")
+		seen["/lgb-proxy/run"] = true
+		b = append(b, "--ro-bind", plan.PreloadSrc, cliPreloadJail)
+	}
 
 	b = append(b, "--setenv", "PATH", cliPATH(), "--setenv", "HOME", cliHome)
 	if name := currentName(); name != "" {
@@ -70,6 +175,19 @@ func confineArgs(bin string, args []string, workspace string) ([]string, error) 
 	}
 	for _, key := range []string{"LANG", "LC_ALL", "TERM", "TZ"} {
 		b = appendLocale(b, key)
+	}
+	for _, entry := range plan.ExtraEnv {
+		key, val, ok := strings.Cut(entry, "=")
+		if !ok || policy.BlockedEnv(key) {
+			return nil, fmt.Errorf("env %s is not permitted", key)
+		}
+		b = append(b, "--setenv", key, val)
+	}
+	if plan.PreloadSrc != "" {
+		b = append(b,
+			"--setenv", "LD_PRELOAD", cliPreloadJail,
+			"--setenv", "LGB_PROXY_SOCK", cliProxySockJail,
+		)
 	}
 	b = append(b, "--", argv0)
 	b = append(b, args...)

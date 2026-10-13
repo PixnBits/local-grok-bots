@@ -11,6 +11,8 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/config"
 	"github.com/PixnBits/local-grok-bots/internal/model"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
+	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
@@ -31,9 +33,10 @@ type loopState struct {
 
 // App is the daemon: HTTP API, turn queue, timers, and the model loop.
 type App struct {
-	cfg   config.Config
-	st    *store.Store
-	model model.Client
+	cfg    config.Config
+	policy policy.Policy
+	st     *store.Store
+	model  model.Client
 	// runner executes grok/claude turns. Nil uses clisession.ExecRunner.
 	runner clisession.Runner
 	ws     string
@@ -63,6 +66,11 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+	pol, err := policy.Load(cfg.DataDir, cfg.OllamaURL, cfg.BuildBinds, sandbox.ProxyAvailable())
+	if err != nil {
+		return nil, err
+	}
+	cfg.BuildBinds = append([]string{}, pol.BuildBinds...)
 	st, err := store.Open(cfg.DBPath())
 	if err != nil {
 		return nil, err
@@ -77,6 +85,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{
 		cfg:     cfg,
+		policy:  pol,
 		st:      st,
 		model:   m,
 		ws:      cfg.Workspace(),
@@ -109,6 +118,11 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 
 func mkdirWorkspace(path string) error {
 	return mkdir(path)
+}
+
+// PolicyLine is the loaded policy as one JSON line.
+func (a *App) PolicyLine() string {
+	return a.policy.Line()
 }
 
 // Shutdown stops timers and runs, records daemon_stop, and closes the database.

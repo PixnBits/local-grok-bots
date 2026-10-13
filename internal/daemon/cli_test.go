@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
@@ -94,6 +95,54 @@ func TestCLITurnPersistsReplyAndResumes(t *testing.T) {
 	defer mu.Unlock()
 	if len(specs) != 2 || specs[1].SessionID != session || specs[1].Fresh {
 		t.Fatalf("specs %#v", specs)
+	}
+}
+
+func TestPolicyDeniesCLIBackend(t *testing.T) {
+	t.Setenv("POLICY_CLI_BACKENDS", "")
+	var called atomic.Int32
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		called.Add(1)
+		return model.ChatResponse{Content: "no"}, nil
+	}})
+	app.runner = runnerFunc(func(context.Context, clisession.Spec, func(clisession.Event)) (clisession.Result, error) {
+		t.Errorf("runner called")
+		return clisession.Result{}, nil
+	})
+	srv := serve(t, app)
+	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{
+		"name": "Ada", "description": "be brief", "cli_backend": "grok",
+	}, "")
+	if res.StatusCode != 201 {
+		t.Fatalf("create %d %s", res.StatusCode, b)
+	}
+	var bot store.Bot
+	decodeJSON(t, b, &bot)
+	do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]string{"content": "hi"}, "")
+	waitIdle(t, srv.URL, bot.ID, "")
+	_, b = do(t, "GET", srv.URL+"/api/bots/"+bot.ID, nil, "")
+	decodeJSON(t, b, &bot)
+	if bot.LastRunStatus != "error" || !strings.Contains(bot.LastRunError, "not allowed by policy") {
+		t.Fatalf("run %s %s", bot.LastRunStatus, bot.LastRunError)
+	}
+	if called.Load() != 0 {
+		t.Fatal("ollama ran for a denied cli backend")
+	}
+}
+
+func TestPolicyEndpoint(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{}, nil
+	}})
+	app.cfg.AuthToken = "sekrit"
+	srv := serve(t, app)
+	res, _ := do(t, "GET", srv.URL+"/api/policy", nil, "")
+	if res.StatusCode != 401 {
+		t.Fatalf("policy %d", res.StatusCode)
+	}
+	res, b := do(t, "GET", srv.URL+"/api/policy", nil, "sekrit")
+	if res.StatusCode != 200 || !strings.Contains(string(b), `"cli_network":"open"`) || !strings.Contains(string(b), `"grok"`) {
+		t.Fatalf("policy %d %s", res.StatusCode, b)
 	}
 }
 

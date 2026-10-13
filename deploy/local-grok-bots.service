@@ -14,6 +14,12 @@ Environment=DATA_DIR=/var/lib/local-grok-bots
 Environment=BIND_ADDR=127.0.0.1:8080
 Environment=OLLAMA_URL=http://127.0.0.1:11434
 Environment=OLLAMA_MODEL=llama3.2
+# Optional confinement policy. The default matches an unset file:
+# CLI network open, grok and claude allowed. A file at
+# DATA_DIR/policy.yaml, or POLICY_FILE, overrides these.
+# Environment=POLICY_CLI_NETWORK=open
+# Environment=POLICY_CLI_BACKENDS=grok,claude
+# Environment=POLICY_FORCE_LOCAL_ONLY=false
 # Required when BIND_ADDR is not loopback.
 # Environment=AUTH_TOKEN=replace-me
 NoNewPrivileges=true

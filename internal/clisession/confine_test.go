@@ -1,10 +1,15 @@
 package clisession
 
 import (
+	"context"
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
 
 func TestPlaceBinaryRewritesLoginDir(t *testing.T) {
@@ -77,5 +82,91 @@ func TestConfinedCommandEnvIsMinimal(t *testing.T) {
 	}
 	if len(cmd.Env) == 0 || !strings.HasPrefix(cmd.Env[0], "PATH=") {
 		t.Fatalf("env %v", cmd.Env)
+	}
+}
+
+func TestEnvAllowlistIsAddedAndSecretsStayOut(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("REVIEW_NOTE", "visible-note")
+	t.Setenv("XAI_API_KEY", "supersecret")
+	t.Setenv("ANTHROPIC_API_KEY", "supersecret")
+	t.Setenv("SSH_AUTH_SOCK", "/tmp/agent.sock")
+	pol := policy.Default()
+	pol.EnvAllowlist = []string{"REVIEW_NOTE"}
+	extra, err := pol.ExtraEnv(os.LookupEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, err := confineArgsPlan(filepath.Join(dir, "missing"), nil, dir, confinePlan{ExtraEnv: extra})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, "\x00")
+	if !strings.Contains(joined, "--setenv\x00REVIEW_NOTE\x00visible-note") {
+		t.Fatal("allowlisted variable was not set")
+	}
+	for _, bad := range []string{"supersecret", "SSH_AUTH_SOCK", "XAI_API_KEY", "ANTHROPIC_API_KEY"} {
+		if strings.Contains(joined, bad) {
+			t.Fatalf("args contain %s", bad)
+		}
+	}
+	pol.EnvAllowlist = []string{"XAI_API_KEY"}
+	if _, err := pol.ExtraEnv(os.LookupEnv); err == nil {
+		t.Fatal("secret env was accepted")
+	}
+}
+
+func TestProxyAndNoneNetworkFlags(t *testing.T) {
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "missing")
+	none, err := confineArgsPlan(bin, nil, dir, confinePlan{UnshareNet: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	noneJoined := strings.Join(none, "\x00")
+	if !strings.Contains(noneJoined, "--unshare-net") || strings.Contains(noneJoined, "LGB_PROXY_SOCK") || strings.Contains(noneJoined, "--disable-userns") {
+		t.Fatalf("none args %v", none)
+	}
+	proxy, err := confineArgsPlan(bin, nil, dir, confinePlan{
+		UnshareNet: true,
+		PreloadSrc: "/tmp/preload.so",
+		ProxyDir:   "/tmp/proxydir",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyJoined := strings.Join(proxy, "\x00")
+	for _, want := range []string{"--unshare-net", "--bind\x00/tmp/proxydir\x00/lgb-proxy/run", "--ro-bind\x00/tmp/preload.so\x00" + cliPreloadJail, "LGB_PROXY_SOCK\x00" + cliProxySockJail, "LD_PRELOAD\x00" + cliPreloadJail} {
+		if !strings.Contains(proxyJoined, want) {
+			t.Fatalf("missing %q", want)
+		}
+	}
+	if strings.Contains(proxyJoined, "--disable-userns") {
+		t.Fatal("proxy mode disabled user namespaces")
+	}
+}
+
+func TestLaunchProxyProducesUnsharedNet(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("bubblewrap flags")
+	}
+	dir := t.TempDir()
+	pol := policy.Default()
+	pol.CLINetwork = policy.NetProxy
+	pol.CLINetAllow = []string{"allowed.test"}
+	l := launch{Policy: pol, Dial: func(context.Context, string, string) (net.Conn, error) {
+		return nil, net.ErrClosed
+	}}
+	cmd, cleanup, err := l.command(context.Background(), "/bin/true", nil, dir)
+	if err != nil {
+		if strings.Contains(err.Error(), "unavailable") {
+			t.Skip(err.Error())
+		}
+		t.Fatal(err)
+	}
+	t.Cleanup(cleanup)
+	joined := strings.Join(cmd.Args, "\x00")
+	if !strings.Contains(joined, "--unshare-net") || !strings.Contains(joined, cliProxySockJail) {
+		t.Fatalf("args missing proxy jail: %s", strings.Join(cmd.Args, " "))
 	}
 }

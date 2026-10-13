@@ -24,7 +24,14 @@ Two guides are written so a CLI can install this daemon on your machine. Each on
 | `CLI_BACKEND` | unset | Default for a new bot: `grok`, `claude`, or empty. Empty and `ollama` call Ollama. |
 | `BIND_ADDR` | `127.0.0.1:8080` | Address the daemon listens on. A non-loopback address requires `AUTH_TOKEN` |
 | `AUTH_TOKEN` | unset | If set, every route except `GET /api/health` requires `Authorization: Bearer <token>`. Required when `BIND_ADDR` is not loopback |
-| `SANDBOX_BUILD_BINDS` | unset | Colon-separated absolute paths. With the `build` grant, each path is a read-only bind in the shell jail. |
+| `SANDBOX_BUILD_BINDS` | unset | Colon-separated absolute paths. With the `build` grant, each path is a read-only bind in the shell jail. A `build_binds` list in the policy file replaces this. |
+| `POLICY_FILE` | `DATA_DIR/policy.yaml` when that file exists | Policy file. A named file that cannot be read fails startup. A missing default file is fine. |
+| `POLICY_CLI_BACKENDS` | `grok,claude` | Comma-separated CLI backends. `*` allows grok and claude. An empty value allows none. |
+| `POLICY_CLI_NETWORK` | `open` | `open`, `proxy`, or `none`. `proxy` sends CLI TCP through the shell allowlist proxy. `none` gives the CLI no network. |
+| `POLICY_CLI_NET_ALLOW` | empty | Comma-separated hosts for `POLICY_CLI_NETWORK=proxy`. Empty denies every host. |
+| `POLICY_ENV_ALLOWLIST` | empty | Extra environment variables copied into a CLI child when they are set. API keys, `SSH_AUTH_SOCK`, and the jail's own variables are rejected. |
+| `POLICY_DEFAULT_NET_ALLOW` | empty | Hosts used when a bot has the `net` grant and no `net_allow` of its own. |
+| `POLICY_FORCE_LOCAL_ONLY` | false | Refuse a non-loopback Ollama URL and refuse CLI backends. |
 
 Paths inside `DATA_DIR`:
 
@@ -39,9 +46,24 @@ data/workspace/    the only tree bots may read, write, or shell in
 
 A bot with `cli_backend` `grok` or `claude` does not call Ollama. The daemon spawns that CLI in `workspace/bots/<bot id>/`, mode `0700`, one headless process per turn, and stores the CLI session id on the bot. The next message, DM, or timer resumes the same session. Auth is the CLI's (`grok login` or `claude` login) under the daemon user's `~/.grok` or `~/.claude`. This daemon does not store API keys, and it does not pass `XAI_API_KEY` or `ANTHROPIC_API_KEY` through the environment.
 
-On Linux the CLI process is wrapped in bubblewrap. That bot directory is bind-mounted at its host path. Ollama file and shell tools still use the shared `workspace/`. The only home paths mounted are `~/.grok`, `~/.claude`, and `~/.claude.json` when that file exists, and they appear under `/lgb-home`. The child environment is cleared, so an SSH agent socket is not inherited. `bwrap` is required; the turn fails closed when it is missing. Network stays open so the CLI can reach its model API. On kernels that block nested user namespaces, `grok --sandbox workspace` may be unable to start a second sandbox inside this jail. `--always-approve` and Claude's permission bypass stay on because a headless turn cannot prompt. The daemon refuses to start as root.
+On Linux the CLI process is wrapped in bubblewrap. That bot directory is bind-mounted at its host path. Ollama file and shell tools still use the shared `workspace/`. The only home paths mounted are `~/.grok`, `~/.claude`, and `~/.claude.json` when that file exists, and they appear under `/lgb-home`. The child environment is cleared, then the jail sets `PATH`, `HOME`, and the locale names. An allowlisted variable is added only when it is set. An SSH agent socket and API keys are not copied. `bwrap` is required; the turn fails closed when it is missing. The default policy leaves the CLI network open so the CLI can reach its model API. `POLICY_CLI_NETWORK=proxy` adds `--unshare-net` and the same Unix-socket proxy the shell uses. `none` unshares the network and does not start a proxy. A connect the interposer does not see fails closed. On kernels that block nested user namespaces, `grok --sandbox workspace` may be unable to start a second sandbox inside this jail. `--always-approve` and Claude's permission bypass stay on because a headless turn cannot prompt. The daemon refuses to start as root.
 
-On macOS the same turn runs under `sandbox-exec`. There is no bind mount. `HOME` stays the user home, and the profile allows writes only in `~/.grok`, `~/.claude`, `~/.claude.json`, the bot directory, and a private temp directory. Other home paths, including `~/.ssh`, are not readable. Network stays open. `sandbox-exec` is required; the turn fails closed when it is missing. Apple marks `sandbox-exec` as deprecated. It is still the Seatbelt entry point this daemon uses, and its deprecation warning is not treated as a failed turn. A CLI that starts its own Seatbelt sandbox inside this one can fail the same way a nested `bwrap` can fail on Linux.
+On macOS the same turn runs under `sandbox-exec`. There is no bind mount. `HOME` stays the user home, and the profile allows writes only in `~/.grok`, `~/.claude`, `~/.claude.json`, the bot directory, and a private temp directory. Other home paths, including `~/.ssh`, are not readable. The default policy leaves the network open. `proxy` allows only the proxy socket. `none` allows no network. `sandbox-exec` is required; the turn fails closed when it is missing. Apple marks `sandbox-exec` as deprecated. It is still the Seatbelt entry point this daemon uses, and its deprecation warning is not treated as a failed turn. A CLI that starts its own Seatbelt sandbox inside this one can fail the same way a nested `bwrap` can fail on Linux.
+
+A bot whose backend is not in the policy fails that turn. It does not fall through to Ollama. `GET /api/policy` returns the loaded policy and uses the same authentication as the other routes.
+
+For a machine that should not call a hosted model API:
+
+```yaml
+force_local_only: true
+cli_network: none
+allow_cli_backends: []
+cli_net_allow: []
+default_net_allow: []
+env_allowlist: []
+```
+
+`force_local_only` refuses a non-loopback `OLLAMA_URL` at startup and disables CLI backends. `cli_network: none` is the setting when those backends stay enabled and must not reach the network. The file is `DATA_DIR/policy.yaml`, or the path in `POLICY_FILE`. The file wins over the environment. See `docs/plans/2026-10-13-policy-cli-network-plan.md`.
 
 ```bash
 # new bots use Grok unless they set cli_backend

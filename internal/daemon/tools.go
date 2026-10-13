@@ -178,9 +178,9 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			Workspace:  a.ws,
 			Command:    command,
 			Grants:     current.Grants,
-			NetAllow:   current.NetAllow,
+			NetAllow:   a.policy.NetAllow(current.Grants, current.NetAllow),
 			SSHAllow:   current.SSHAllow,
-			BuildBinds: a.cfg.BuildBinds,
+			BuildBinds: a.policy.BuildBinds,
 			SSHKey:     a.sshKeyPath(),
 			Dial:       a.shellDial,
 		})

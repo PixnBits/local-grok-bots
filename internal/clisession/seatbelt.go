@@ -8,12 +8,22 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 )
 
-// cliSeatbelt is the macOS profile for one CLI turn. Network stays open.
+// cliNet is the network half of a CLI Seatbelt profile.
+type cliNet struct {
+	Open      bool
+	ProxySock string
+	ExtraRead string
+}
+
+// cliSeatbelt is the macOS profile for one CLI turn.
 // The only home paths that can be written are the CLI login directories.
-func cliSeatbelt(ws, home, tmp, binDir string) sandbox.Seatbelt {
+func cliSeatbelt(ws, home, tmp, binDir string, net cliNet) sandbox.Seatbelt {
 	reads := sandbox.ExistingReadRoots()
 	if binDir != "" && !covered(binDir, reads) {
 		reads = append(reads, binDir)
+	}
+	if net.ExtraRead != "" && !covered(net.ExtraRead, reads) {
+		reads = append(reads, net.ExtraRead)
 	}
 	writes := []string{ws}
 	if tmp != "" {
@@ -27,11 +37,16 @@ func cliSeatbelt(ws, home, tmp, binDir string) sandbox.Seatbelt {
 		}
 		writes = append(writes, filepath.Join(home, ".claude.json"))
 	}
+	var socks []string
+	if net.ProxySock != "" {
+		socks = []string{net.ProxySock}
+	}
 	return sandbox.Seatbelt{
-		Read:    reads,
-		Write:   writes,
-		Meta:    meta,
-		OpenNet: true,
+		Read:         reads,
+		Write:        writes,
+		Meta:         meta,
+		OpenNet:      net.Open,
+		ProxySockets: socks,
 	}
 }
 

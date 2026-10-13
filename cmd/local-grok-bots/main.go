@@ -29,6 +29,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	fmt.Fprintf(os.Stderr, "local-grok-bots %s listening on %s\n", cfg.Version, cfg.BindAddr)
+	fmt.Fprintf(os.Stderr, "local-grok-bots policy %s\n", app.PolicyLine())
 	if err := app.Run(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "local-grok-bots:", err)
 		os.Exit(1)
