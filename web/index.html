@@ -215,6 +215,21 @@
     font-family: var(--mono); font-size: 12px; background: #f3eee6; border-radius: 8px; padding: 6px 8px;
     overflow-wrap: anywhere;
   }
+  .perm-card {
+    align-self: flex-start; max-width: min(78ch, 100%);
+    background: #fff; border: 1px solid var(--line); border-radius: 14px;
+    border-bottom-left-radius: 4px; padding: 10px 12px; display: grid; gap: 8px;
+  }
+  .perm-card .perm-tool { font-weight: 600; }
+  .perm-card .perm-args {
+    margin: 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap;
+    overflow-wrap: anywhere; background: #f3eee6; border-radius: 8px; padding: 6px 8px;
+    max-height: 12em; overflow: auto;
+  }
+  .perm-card .perm-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .perm-card .perm-count, .perm-card .perm-outcome, .perm-card .perm-err { font-size: 12px; color: var(--muted); }
+  .perm-card .perm-err { color: var(--err); }
+  .perm-card.settled { opacity: .8; }
   .note { margin: 0 14px 8px; color: var(--err); background: var(--err-bg); border-radius: 10px; padding: 8px 10px; font-size: 13px; }
   .note.continue {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -1046,7 +1061,124 @@ async function continueRun(runId) {
     state.continuing = false;
   }
 }
+// perm:begin
+const permCards = new Map();
+
+function permissionArgsText(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  try { return JSON.stringify(value, null, 2); } catch (e) { return ""; }
+}
+
+function clearPermissionCards() {
+  for (const rec of permCards.values()) {
+    clearInterval(rec.timer);
+    clearTimeout(rec.expire);
+  }
+  permCards.clear();
+}
+
+function showPermissionRequest(payload, runId) {
+  const id = payload && payload.id ? String(payload.id) : "";
+  if (!id || permCards.has(id)) return permCards.get(id) || null;
+  const run = (payload && payload.run_id) || runId || "";
+  const card = el("div", "perm-card");
+  card.dataset.id = id;
+  const tool = el("div", "perm-tool");
+  tool.textContent = payload.tool == null ? "" : String(payload.tool);
+  const args = el("pre", "perm-args");
+  args.textContent = permissionArgsText(payload.arguments);
+  const count = el("div", "perm-count");
+  const outcome = el("div", "perm-outcome");
+  const errLine = el("div", "perm-err");
+  const actions = el("div", "perm-actions");
+  const allow = el("button", "primary", "Allow once");
+  allow.type = "button";
+  const deny = el("button", null, "Deny");
+  deny.type = "button";
+  actions.append(allow, deny);
+  if (payload.session_allowed) {
+    const sess = el("button", null, "Allow for session");
+    sess.type = "button";
+    sess.addEventListener("click", () => postPermission(id, run, "allow_session"));
+    actions.append(sess);
+  }
+  allow.addEventListener("click", () => postPermission(id, run, "allow_once"));
+  deny.addEventListener("click", () => postPermission(id, run, "deny"));
+  card.append(tool, args, count, actions, outcome, errLine);
+  const live = $("#live");
+  if (live) live.append(card);
+  const deadline = Date.parse(payload.deadline || "");
+  const rec = {card, count, actions, outcome, errLine, timer: 0, expire: 0, settled: false, server: false, pending: false};
+  permCards.set(id, rec);
+  const paint = (maySettle) => {
+    const cur = permCards.get(id);
+    if (!cur || cur.server) return;
+    if (Number.isNaN(deadline)) {
+      cur.count.textContent = "";
+      return;
+    }
+    const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    cur.count.textContent = left + "s";
+    if (maySettle && left <= 0) settlePermission(id, "deny", "timeout", false);
+  };
+  paint(false);
+  rec.timer = setInterval(() => paint(true), 250);
+  if (!Number.isNaN(deadline)) rec.expire = setTimeout(() => paint(true), Math.max(0, deadline - Date.now()));
+  return rec;
+}
+
+function settlePermission(id, decision, source, fromServer) {
+  const rec = permCards.get(id);
+  if (!rec) return;
+  if (rec.server) return;
+  if (rec.settled && !fromServer) return;
+  rec.settled = true;
+  if (fromServer) rec.server = true;
+  clearInterval(rec.timer);
+  clearTimeout(rec.expire);
+  rec.card.classList.add("settled");
+  for (const b of rec.actions.querySelectorAll("button")) b.disabled = true;
+  rec.outcome.textContent = (decision || "deny") + " (" + (source || "") + ")";
+}
+
+function showPermissionDecision(payload) {
+  if (!payload) return;
+  const id = payload.id ? String(payload.id) : "";
+  if (!id) return;
+  if (!permCards.has(id)) {
+    showPermissionRequest({
+      id: id,
+      tool: payload.tool,
+      arguments: payload.arguments,
+      run_id: payload.run_id,
+      session_allowed: false
+    }, payload.run_id || "");
+  }
+  settlePermission(id, payload.decision, payload.source, true);
+}
+
+async function postPermission(id, runId, decision) {
+  const rec = permCards.get(id);
+  if (!rec || rec.settled || rec.pending) return;
+  rec.pending = true;
+  for (const b of rec.actions.querySelectorAll("button")) b.disabled = true;
+  try {
+    await api("/api/bots/" + state.botId + "/runs/" + encodeURIComponent(runId) + "/permissions/" + encodeURIComponent(id), {
+      method: "POST",
+      body: JSON.stringify({decision: decision})
+    });
+  } catch (err) {
+    rec.pending = false;
+    if (!rec.settled) {
+      for (const b of rec.actions.querySelectorAll("button")) b.disabled = false;
+      rec.errLine.textContent = err && err.message ? err.message : "request failed";
+    }
+  }
+}
+// perm:end
 function stopStream() {
+  clearPermissionCards();
   if (state.streamCtl) { state.streamCtl.abort(); state.streamCtl = null; }
   state.streaming = "";
   $("#live").replaceChildren();
@@ -1074,7 +1206,7 @@ async function follow(runId) {
   try {
     const headers = {};
     if (state.token) headers.Authorization = "Bearer " + state.token;
-    const res = await fetch(base() + "/api/bots/" + state.botId + "/thread/stream?run_id=" + encodeURIComponent(runId), {headers, signal: ctl.signal});
+    const res = await fetch(base() + "/api/bots/" + state.botId + "/thread/stream?run_id=" + encodeURIComponent(runId) + "&prompts=1", {headers, signal: ctl.signal});
     if (res.status === 401) { showAuth(); return; }
     if (!res.ok || !res.body) throw new Error("stream failed");
     const reader = res.body.getReader();
@@ -1109,6 +1241,10 @@ async function follow(runId) {
         } else if (event === "tool_result") {
           const ok = payload.ok ? "ok" : "error";
           live.append(el("div", "tool", (payload.name || "tool") + " " + ok + ": " + (payload.result_or_error || "")));
+        } else if (event === "permission_request") {
+          showPermissionRequest(payload, runId);
+        } else if (event === "permission_decision") {
+          showPermissionDecision(payload);
         } else if (event === "done" || event === "error") {
           setWorking(false);
           if (event === "error" && payload.error !== "tool round limit") {
