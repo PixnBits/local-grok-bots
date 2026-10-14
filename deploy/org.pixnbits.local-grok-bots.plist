@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- macOS LaunchAgent. Replace USERNAME; launchd does not expand ~. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>org.pixnbits.local-grok-bots</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/local-grok-bots</string>
+	</array>
+	<key>WorkingDirectory</key>
+	<string>/Users/USERNAME/Library/Application Support/local-grok-bots</string>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>DATA_DIR</key>
+		<string>/Users/USERNAME/Library/Application Support/local-grok-bots</string>
+		<key>BIND_ADDR</key>
+		<string>127.0.0.1:8080</string>
+		<key>OLLAMA_URL</key>
+		<string>http://127.0.0.1:11434</string>
+		<key>OLLAMA_MODEL</key>
+		<string>llama3.2</string>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>TZ</key>
+		<string>America/Phoenix</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/Users/USERNAME/Library/Logs/local-grok-bots.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/USERNAME/Library/Logs/local-grok-bots.log</string>
+</dict>
+</plist>
