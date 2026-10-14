@@ -113,6 +113,13 @@
   .status.running .dot { background: var(--run); box-shadow: 0 0 0 4px rgba(138,78,8,.15); }
   .status.paused .dot { background: var(--paused); }
   .status.idle .dot { background: var(--accent); }
+  .thread { position: relative; }
+  .new-pill {
+    position: absolute; left: 50%; transform: translateX(-50%); bottom: 84px; z-index: 5;
+    background: var(--accent); color: #f4fbf7; border: 0; border-radius: 99px; padding: 6px 14px;
+    font-size: 13px; box-shadow: 0 2px 8px rgba(0,0,0,.18); cursor: pointer;
+  }
+  .new-pill[hidden] { display: none; }
   .thread {
     flex: 1; min-height: 240px; display: flex; flex-direction: column; overflow: hidden;
   }
@@ -290,6 +297,7 @@
           </div>
         </div>
         <div class="msgs" id="msgs"><p class="empty">Choose a bot to read its thread.</p><div class="live" id="live"></div><div class="working" id="working" hidden aria-live="polite"><span class="pulse" aria-hidden="true"></span><span id="working-text">working</span></div></div>
+        <button type="button" class="new-pill" id="new-pill" hidden>New messages ↓</button>
         <div class="note" id="run-note" hidden></div>
         <form class="composer" id="composer">
           <textarea id="composer-input" placeholder="Message… Enter to send, Shift+Enter for a new line"></textarea>
@@ -374,6 +382,7 @@ const state = {
   messages: [],
   tools: {},
   hasMore: false,
+  pinned: true,
   loadingOlder: false,
   token: sessionStorage.getItem("lgb_token") || "",
   streamCtl: null,
@@ -865,19 +874,21 @@ function renderMessages(mode = "bottom") {
   if (mode === "prepend") box.scrollTop = prevTop + (box.scrollHeight - prevH);
   else if (mode === "keep") box.scrollTop = prevTop;
   else box.scrollTop = box.scrollHeight;
+  if (mode === "bottom") { state.pinned = true; $("#new-pill").hidden = true; }
   // A short page (or a prepend that still leaves the top in view) loads more.
   if (state.hasMore && box.scrollTop < 200) setTimeout(loadOlder, 0);
 }
 const PAGE = 50;
 // loadThread fetches the newest page. Older pages already loaded stay, so a
 // refresh after a run does not throw away what the user scrolled back to.
-async function loadThread(mode = "bottom") {
+async function loadThread(mode = "auto") {
   if (!state.botId) return;
   const id = state.botId;
   const data = await api("/api/bots/" + id + "/thread?limit=" + PAGE);
   if (state.botId !== id) return;
   const page = data.messages || [];
   const fresh = state.loadedFor !== id;
+  const lastBefore = state.messages.length ? state.messages[state.messages.length - 1].id : null;
   state.loadedFor = id;
   if (fresh || !page.length) {
     state.messages = page;
@@ -889,7 +900,9 @@ async function loadThread(mode = "bottom") {
     state.tools = Object.assign({}, state.tools, data.tools || {});
     if (state.messages.length === page.length) state.hasMore = !!data.has_more;
   }
-  renderMessages(fresh ? "bottom" : mode);
+  const grew = !fresh && page.length && state.messages[state.messages.length - 1].id !== lastBefore;
+  renderMessages(fresh ? "bottom" : mode === "auto" ? (state.pinned ? "bottom" : "keep") : mode);
+  if (grew && !state.pinned) $("#new-pill").hidden = false;
 }
 // loadOlder prepends the page before the oldest loaded message.
 async function loadOlder() {
@@ -907,9 +920,44 @@ async function loadOlder() {
     state.loadingOlder = false;
   }
 }
+// Auto-scroll follows new output only while the reader is at the bottom
+// (within 80px). Scrolled away, new output shows the "New messages" pill.
+const PIN_PX = 80;
+function distFromBottom() {
+  const b = $("#msgs");
+  return b.scrollHeight - b.scrollTop - b.clientHeight;
+}
+function stick() {
+  const b = $("#msgs");
+  if (state.pinned) b.scrollTop = b.scrollHeight;
+  else $("#new-pill").hidden = false;
+}
 $("#msgs").addEventListener("scroll", () => {
-  if ($("#msgs").scrollTop < 200) loadOlder();
+  const b = $("#msgs");
+  // Only a scroll that moved the view changes pinning; content growth while
+  // pinned is handled by stick() and the observers below.
+  state.pinned = distFromBottom() <= PIN_PX;
+  if (state.pinned) $("#new-pill").hidden = true;
+  if (b.scrollTop < 200) loadOlder();
 }, {passive: true});
+$("#new-pill").addEventListener("click", () => {
+  state.pinned = true;
+  $("#new-pill").hidden = true;
+  const b = $("#msgs");
+  b.scrollTo({top: b.scrollHeight, behavior: "smooth"});
+});
+// Streaming text, markdown and code re-renders, tool lines, and the working
+// line change heights; stay pinned through all of them.
+new MutationObserver((muts) => {
+  if (!state.pinned) {
+    // Growth in the live area while scrolled away gets the pill.
+    if (muts.some(m => $("#live").contains(m.target) || m.target === $("#live"))) $("#new-pill").hidden = false;
+    return;
+  }
+  const b = $("#msgs");
+  b.scrollTop = b.scrollHeight;
+}).observe($("#msgs"), {childList: true, subtree: true, characterData: true});
+new ResizeObserver(() => { if (state.pinned) { const b = $("#msgs"); b.scrollTop = b.scrollHeight; } }).observe($("#msgs"));
 function setWorking(on, text) {
   const w = $("#working");
   const box = $("#msgs");
@@ -919,7 +967,7 @@ function setWorking(on, text) {
     const empty = box.querySelector(":scope > p.empty");
     if (empty) empty.remove();
     if (w.parentNode !== box || box.lastElementChild !== w) box.append($("#live"), w);
-    box.scrollTop = box.scrollHeight;
+    stick();
   }
 }
 $("#create-form").addEventListener("submit", async (e) => {
@@ -970,7 +1018,8 @@ async function send() {
     const data = await api("/api/bots/" + state.botId + "/thread/messages", {
       method: "POST", body: JSON.stringify({content})
     });
-    await loadThread();
+    // Sending is a jump to the bottom, wherever the reader was.
+    await loadThread("bottom");
     if (data.run_id) follow(data.run_id);
     else pollActive();
   } catch (err) {
@@ -1047,8 +1096,6 @@ async function follow(runId) {
           acc += payload.text || "";
           renderMarkdown(acc, text);
           if (!bubble.parentNode) live.append(bubble);
-          const msgs = $("#msgs");
-          msgs.scrollTop = msgs.scrollHeight;
         } else if (event === "tool_call") {
           bubble = null;
           live.append(el("div", "tool", "tool " + (payload.name || "") + " " + JSON.stringify(payload.arguments || {})));
