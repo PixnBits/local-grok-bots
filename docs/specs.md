@@ -232,7 +232,7 @@ The page is a client. Refreshing reloads from the daemon. Four surfaces. The con
 
 **Roster.** Mark, name, label, status. Click to open the conversation. A create control.
 
-**Conversation.** The thread and the composer. The composer is never disabled during a run. While a run is in progress, a status animation sits at the bottom of the message list, near the latest messages, driven by `status` events on the stream. It clears when the run ends. User and bot messages render markdown (headings, emphasis, inline and fenced code, lists, quotes, links) in the page only; the thread, log, and API keep the original text. The renderer builds DOM nodes from text, so HTML in a message shows as text, and links keep only `http`, `https`, and `mailto`. Inbound DMs appear as a system line in this thread. There is no description editor on this view.
+**Conversation.** The thread and the composer. The composer is never disabled during a run. While a run is in progress, a status animation sits inside the message list at the position of the next reply, after the latest message and any live output (in an empty thread it is the first item), driven by `status` events on the stream. It clears when the run ends. User and bot messages render markdown (headings, emphasis, inline and fenced code, lists, quotes, links) in the page only; the thread, log, and API keep the original text. The renderer builds DOM nodes from text, so HTML in a message shows as text, and links keep only `http`, `https`, and `mailto`. Inbound DMs appear as a system line in this thread. There is no description editor on this view.
 
 **Bot menu.** Opened from the conversation header, not as a side panel. Items: View profile, Pin, Hide, Duplicate, Delete.
 

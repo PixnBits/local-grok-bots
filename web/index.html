@@ -151,8 +151,9 @@
   .md a { color: var(--accent); }
   .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; max-width: 100%; }
   .working {
-    display: flex; align-items: center; gap: 8px;
-    padding: 0 14px 8px; color: var(--run); font-size: 13px;
+    display: flex; align-items: center; gap: 8px; align-self: flex-start;
+    padding: 10px 12px; color: var(--run); font-size: 13px;
+    border: 1px dashed var(--line); border-radius: 14px; border-bottom-left-radius: 4px;
   }
   .working[hidden] { display: none !important; }
   .pulse {
@@ -160,7 +161,10 @@
     animation: pulse 1s ease-in-out infinite;
   }
   @keyframes pulse { 50% { opacity: .3; transform: scale(.75); } }
-  .live { padding: 0 14px 8px; display: flex; flex-direction: column; gap: 6px; }
+  /* The live run sits inside the message list; its bubbles and tool lines
+     are laid out as list items, followed by the working indicator. */
+  .live { display: contents; }
+  .live .tool { align-self: flex-start; max-width: min(78ch, 100%); }
   .tool {
     font-family: var(--mono); font-size: 12px; background: #f3eee6; border-radius: 8px; padding: 6px 8px;
     overflow-wrap: anywhere;
@@ -251,12 +255,7 @@
             </div>
           </div>
         </div>
-        <div class="msgs" id="msgs"><p class="empty">Choose a bot to read its thread.</p></div>
-        <div class="working" id="working" hidden>
-          <span class="pulse" aria-hidden="true"></span>
-          <span id="working-text">working</span>
-        </div>
-        <div class="live" id="live"></div>
+        <div class="msgs" id="msgs"><p class="empty">Choose a bot to read its thread.</p><div class="live" id="live"></div><div class="working" id="working" hidden aria-live="polite"><span class="pulse" aria-hidden="true"></span><span id="working-text">working</span></div></div>
         <div class="note" id="run-note" hidden></div>
         <form class="composer" id="composer">
           <textarea id="composer-input" placeholder="Message… Enter to send, Shift+Enter for a new line"></textarea>
@@ -616,10 +615,10 @@ function renderMarkdown(text, target) {
 // md:end
 function renderMessages() {
   const box = $("#msgs");
+  const live = $("#live"), working = $("#working");
   box.replaceChildren();
-  if (!state.messages.length && $("#working").hidden) {
+  if (!state.messages.length && working.hidden) {
     box.append(el("p", "empty", "No messages yet. The composer stays available while a run is in progress."));
-    return;
   }
   for (const m of state.messages) {
     const bubble = el("div", "bubble " + (m.role || "system"));
@@ -629,6 +628,8 @@ function renderMessages() {
     else bubble.append(document.createTextNode(m.content || ""));
     box.append(bubble);
   }
+  // The live run and the working indicator sit where the next reply will appear.
+  box.append(live, working);
   box.scrollTop = box.scrollHeight;
 }
 async function loadThread() {
@@ -639,8 +640,15 @@ async function loadThread() {
 }
 function setWorking(on, text) {
   const w = $("#working");
+  const box = $("#msgs");
   w.hidden = !on;
-  if (on) $("#working-text").textContent = text || "working";
+  if (on) {
+    $("#working-text").textContent = text || "working";
+    const empty = box.querySelector(":scope > p.empty");
+    if (empty) empty.remove();
+    if (w.parentNode !== box || box.lastElementChild !== w) box.append($("#live"), w);
+    box.scrollTop = box.scrollHeight;
+  }
 }
 $("#create-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -822,7 +830,7 @@ async function deleteBot() {
   stopStream();
   $("#thread-name").textContent = "No bot selected";
   $("#thread-label").textContent = "";
-  $("#msgs").replaceChildren(el("p", "empty", "Choose a bot to read its thread."));
+  $("#msgs").replaceChildren(el("p", "empty", "Choose a bot to read its thread."), $("#live"), $("#working"));
   await loadBots();
   setView("bots");
 }
