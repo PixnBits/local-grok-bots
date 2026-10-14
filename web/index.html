@@ -232,6 +232,8 @@
   .tools { margin: 0 0 6px; font-size: 12px; color: var(--muted); white-space: normal; }
   .tools summary { cursor: pointer; }
   .tools .tool { margin-top: 6px; white-space: pre-wrap; max-height: 16em; overflow: auto; }
+  .tools .tool-perm { font-family: var(--mono); }
+  .tools .tool-perm.denied { color: var(--ink); }
   .tool-text { margin-top: 6px; color: var(--ink, inherit); font-size: 13px; padding-left: 8px; border-left: 2px solid var(--line); }
   .tool-result { color: var(--muted); margin-top: 2px; }
   .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; max-width: 100%; }
@@ -718,15 +720,51 @@ function copyButton(cls, label, getText) {
 }
 // toolSummary is the collapsed "N tool calls: a, b" line on a reply.
 // It opens to show each call with its arguments and result.
+// permline:begin
+// permissionLine is one stored permission decision, e.g.
+// "✅ allowed Bash(git status) · ui". Plain text; callers use textContent.
+function permissionLine(r) {
+  let d = {};
+  try { d = JSON.parse(r.result_or_error || "{}") || {}; } catch (e) { d = {}; }
+  const allowed = d.decision === "allow";
+  const a = r.arguments || {};
+  let arg = "";
+  for (const k of ["command", "file_path", "path", "url", "pattern"]) {
+    if (typeof a[k] === "string" && a[k]) { arg = a[k]; break; }
+  }
+  if (!arg && Object.keys(a).length) arg = JSON.stringify(a);
+  if (arg.length > 120) arg = arg.slice(0, 117) + "…";
+  const tool = (r.name || "tool") + (arg ? "(" + arg + ")" : "");
+  let line = (allowed ? "✅ allowed " : "⛔ denied ") + tool;
+  if (d.source) line += " · " + d.source;
+  if (d.rule) line += " · " + d.rule;
+  return line;
+}
+// hasToolRecords is true when a run has calls or permission decisions to show.
+function hasToolRecords(recs) {
+  return (recs || []).some(r => { const k = r.kind || "call"; return k === "call" || k === "permission"; });
+}
+// permline:end
 function toolSummary(recs) {
   const d = el("details", "tools");
   const calls = recs.filter(r => (r.kind || "call") === "call");
+  const perms = recs.filter(r => r.kind === "permission");
   const names = [...new Set(calls.map(r => r.name))];
-  d.append(el("summary", null, calls.length + (calls.length === 1 ? " tool call: " : " tool calls: ") + names.join(", ")));
-  // Records arrive in order: each round's pre-tool text, then its calls.
+  let label = calls.length + (calls.length === 1 ? " tool call" : " tool calls") + (names.length ? ": " + names.join(", ") : "");
+  if (perms.length) {
+    const denied = perms.filter(r => !r.ok).length;
+    label += " · " + perms.length + (perms.length === 1 ? " permission" : " permissions") + (denied ? " (" + denied + " denied)" : "");
+  }
+  d.append(el("summary", null, label));
+  // Records arrive in order: each round's pre-tool text, then its calls,
+  // with permission decisions where the CLI asked.
   for (const r of recs) {
     if (r.kind === "text") {
       d.append(renderMarkdown(r.result_or_error, el("div", "md tool-text")));
+      continue;
+    }
+    if (r.kind === "permission") {
+      d.append(el("div", "tool tool-perm" + (r.ok ? "" : " denied"), permissionLine(r)));
       continue;
     }
     const call = el("div", "tool");
@@ -929,7 +967,7 @@ function renderMessages(mode = "bottom") {
     const bubble = el("div", "bubble " + (m.role || "system"));
     const who = whoText(m);
     if (who) bubble.append(el("span", "who", who));
-    if (m.role === "bot" && m.run_id && !shownTools.has(m.run_id) && (state.tools[m.run_id] || []).some(r => (r.kind || "call") === "call")) {
+    if (m.role === "bot" && m.run_id && !shownTools.has(m.run_id) && hasToolRecords(state.tools[m.run_id])) {
       shownTools.add(m.run_id);
       bubble.append(toolSummary(state.tools[m.run_id]));
     }
