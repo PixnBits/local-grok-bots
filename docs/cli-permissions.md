@@ -157,7 +157,13 @@ A headless permission prompt is still a deny: the turn fails with `ErrPermission
 Every broker decision, from any transport and including `permission_denials`
 on a Claude result, is also written to `run_tools` as `kind: "permission"`
 with the tool, redacted arguments, and `{decision, source, rule, transport}`.
-The reply's tool summary shows them after a reload. Launch isolation, which
+The reply's tool summary shows them after a reload. Each request has exactly one record: `ok` is true for
+`allow`, `allow_once`, and `allow_session`. A CLI-side denial report
+(`permission_denied` or `result.permission_denials`) adds a record only when
+the broker did not already decide that request; it is matched by
+`tool_use_id`, else by tool and redacted arguments, else (for a report that
+names only the tool) by tool. A second answer to an answered or timed-out
+request returns 409 and records nothing. Launch isolation, which
 keeps workspace and user CLI config from adding allow rules, is in
 `docs/cli-isolation.md`.
 
