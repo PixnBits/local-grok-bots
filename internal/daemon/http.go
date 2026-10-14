@@ -140,7 +140,7 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusCreated, b)
+	writeJSON(w, http.StatusCreated, a.decorateBot(b))
 }
 
 func firstText(primary, alias *string) string {

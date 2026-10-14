@@ -72,8 +72,14 @@ func TestGetBotIncludesWarnings(t *testing.T) {
 	if res.StatusCode != 200 && res.StatusCode != 201 {
 		t.Fatalf("create %d %s", res.StatusCode, b)
 	}
-	var bot struct{ ID string }
+	var bot struct {
+		ID       string
+		Warnings []string `json:"warnings"`
+	}
 	decodeJSON(t, b, &bot)
+	if len(bot.Warnings) != 1 {
+		t.Fatalf("create warnings = %q", bot.Warnings)
+	}
 	_, b = do(t, "GET", srv.URL+"/api/bots/"+bot.ID, nil, "")
 	var got struct {
 		Warnings []string `json:"warnings"`
