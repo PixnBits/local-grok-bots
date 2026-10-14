@@ -459,6 +459,7 @@ async function loadBots() {
 }
 function paintHeader(b) {
   $("#thread-name").textContent = b.name;
+  setTitle();
   $("#thread-label").textContent = b.label || "";
   $("#menu-pin").textContent = b.pinned ? "Unpin" : "Pin";
   $("#menu-hide").textContent = b.hidden ? "Unhide" : "Hide";
@@ -494,8 +495,39 @@ function closeMenu() {
   $("#bot-menu").hidden = true;
   $("#menu-btn").setAttribute("aria-expanded", "false");
 }
-async function openBot(id) {
+// The selected bot lives in the URL as {base}/bots/{id}, so reload and
+// back/forward restore it. push=false is for popstate and the first load.
+function botPath(id) { return base() + (id ? "/bots/" + encodeURIComponent(id) : "/"); }
+function botFromPath() {
+  const rest = location.pathname.slice(base().length);
+  const m = rest.match(/^\/bots\/([^/]+)\/?$/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+function setTitle() {
+  const b = state.botId && currentBot();
+  document.title = b ? b.name + " — Local Grok Bots" : "Local Grok Bots";
+}
+function goHome(push = true) {
+  state.botId = null;
+  stopStream();
+  if (push && location.pathname !== botPath(null)) history.pushState({}, "", botPath(null));
+  $("#thread-name").textContent = "No bot selected";
+  $("#thread-label").textContent = "";
+  state.messages = [];
+  $("#msgs").replaceChildren(el("p", "empty", "Choose a bot to read its thread."), $("#live"), $("#working"));
+  setTitle();
+  setView("bots");
+}
+window.addEventListener("popstate", () => {
+  const id = botFromPath();
+  if (id && state.bots.some(b => b.id === id)) openBot(id, false);
+  else goHome(false);
+});
+async function openBot(id, push = true) {
+  if (state.botId !== id) stopStream();
   state.botId = id;
+  if (push && location.pathname !== botPath(id)) history.pushState({bot: id}, "", botPath(id));
+  setTitle();
   closeMenu();
   setView("chat");
   await refreshBot();
@@ -950,13 +982,8 @@ $("#bot-menu").addEventListener("click", async (e) => {
 async function deleteBot() {
   if (!confirm("Delete this bot and its thread?")) return;
   await api("/api/bots/" + state.botId, {method:"DELETE"});
-  state.botId = null;
-  stopStream();
-  $("#thread-name").textContent = "No bot selected";
-  $("#thread-label").textContent = "";
-  $("#msgs").replaceChildren(el("p", "empty", "Choose a bot to read its thread."), $("#live"), $("#working"));
+  goHome();
   await loadBots();
-  setView("bots");
 }
 async function duplicateBot(id) {
   const full = await api("/api/bots/" + id);
@@ -1156,6 +1183,9 @@ fillKinds();
     const h = await api("/api/health");
     $("#health").textContent = "daemon " + h.version;
     await loadBots();
+    const id = botFromPath();
+    if (id && state.bots.some(b => b.id === id)) await openBot(id, false);
+    else if (id) history.replaceState({}, "", botPath(null));
   } catch (err) {
     if (err.message !== "unauthorized") $("#health").textContent = err.message;
   }

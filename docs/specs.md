@@ -107,6 +107,7 @@ JSON over HTTP. One SSE stream for a live turn. All routes under `/api`.
 | GET | /api/bots/{id} | | bot including description |
 | PATCH | /api/bots/{id} | `{name?, label?, description?, mark?, model?, status?}` | bot |
 | DELETE | /api/bots/{id} | | 204 |
+| GET | /bots/{id} | | the page (HTML), same as `/`; the client opens that bot. Without a token under `AUTH_TOKEN` it is served with 401 like `/` |
 | GET | /api/bots/{id}/thread | `?before=&limit=` | `{messages: [...], tools: {run_id: [{name, arguments, ok, result_or_error, created_at}]}}` oldest-first; `tools` lists, per reply run, that run's records in order: `kind: "text"` is what the model wrote in the same response as a tool call (in `result_or_error`, no name or arguments), stored before that round's calls; `kind: "call"` is a tool call (arguments redacted, result clipped to 4000 bytes) |
 | POST | /api/bots/{id}/thread/messages | `{content}` | `{message, run_id}` immediately |
 | GET | /api/bots/{id}/thread/stream | `?run_id=` | SSE |
@@ -230,7 +231,7 @@ No catch-up of missed timers. No replay of in-flight model calls.
 
 The page is a client. Refreshing reloads from the daemon. Four surfaces. The conversation does not contain the editor.
 
-**Roster.** Mark, name, label, status. Click to open the conversation. A create control.
+**Roster.** Mark, name, label, status. Click to open the conversation. The create control sits below the list. Opening a bot sets the URL to `/bots/{id}` (history entry; back/forward and reload restore the selection) and the title to `Name — Local Grok Bots`.
 
 **Conversation.** The thread and the composer. The composer is never disabled during a run. Enter sends; Shift+Enter inserts a newline, and the box grows with its content up to 40% of the viewport. Newlines in a message are kept when it is shown. While a run is in progress, a status animation sits inside the message list at the position of the next reply, after the latest message and any live output (in an empty thread it is the first item), driven by `status` events on the stream. It clears when the run ends. User and bot messages render markdown (headings, emphasis, inline code, fenced code blocks, GFM pipe tables, lists, quotes, links). A fenced block is a monospace block that keeps whitespace and indentation, scrolls sideways, and shows its info-string language as a label; there is no syntax highlighting. A table needs a header row and an alignment row (`---`, `:--`, `--:`, `:-:`) with the same cell count; `\|` is a literal pipe in the page only; the thread, log, and API keep the original text. The renderer builds DOM nodes from text, so HTML in a message shows as text, and links keep only `http`, `https`, and `mailto`. A reply whose run called tools carries a collapsed summary (`3 tool calls: read_file, run_shell`) that opens to show each call, interleaved in order with the text the model wrote before each round's calls; tool records live in the `run_tools` table and survive reload, and the reply text is unchanged. Every message is its own bubble; while a run streams, each model round's text starts a new bubble rather than appending to the previous one. Inbound DMs appear as a system line in this thread. There is no description editor on this view.
 

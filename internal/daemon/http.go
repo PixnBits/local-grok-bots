@@ -39,6 +39,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/log", a.handleLog)
 	mux.HandleFunc("GET /", a.handleIndex)
 	mux.HandleFunc("GET /index.html", a.handleIndex)
+	// A bot's page. The client reads the id from the path.
+	mux.HandleFunc("GET /bots/{id}", a.handleIndex)
 	return a.withAuth(mux)
 }
 
@@ -48,7 +50,7 @@ func (a *App) withAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/index.html") {
+		if r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/index.html" || strings.HasPrefix(r.URL.Path, "/bots/")) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			w.WriteHeader(http.StatusUnauthorized)
