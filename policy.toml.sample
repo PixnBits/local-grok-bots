@@ -62,8 +62,10 @@ imminent_timer_minutes = 2
 # allow = ["Read", "Bash(git status*)"]
 # deny = ["Bash(rm *)"]
 # ask = ["Bash(git push*)"]
-# ui_prompts asks a connected UI. The stock page ignores the event, so
-# leave this false unless a client posts a decision. Default false.
+# ui_prompts asks a page that subscribed with ?prompts=1. A stream
+# without that flag does not count, and the check is denied at once.
+# Off (the default) passes Claude --permission-prompts none, so a
+# residual ask is denied instead of waiting.
 # ui_prompts = false
 # prompt_timeout = "60s"
 # allow_session_grants = false
