@@ -184,7 +184,7 @@
   .note.continue button { flex: none; }
   .note[hidden] { display: none !important; }
   .composer { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); align-items: flex-end; }
-  .composer textarea { min-height: 44px; max-height: 140px; }
+  .composer textarea { min-height: 44px; max-height: 40vh; height: 44px; resize: none; overflow-y: hidden; }
   .routine { display: grid; gap: 4px; padding: 8px 0; border-top: 1px solid var(--line); }
   .routine .meta { color: var(--muted); font-size: 12px; }
   .filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -707,14 +707,25 @@ $("#show-hidden").addEventListener("click", () => {
   renderBots();
 });
 $("#composer").addEventListener("submit", (e) => { e.preventDefault(); send(); });
+// Enter sends; Shift+Enter (or Enter while an IME is composing) inserts a
+// newline. The box grows with its content up to 40% of the viewport.
 $("#composer-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
 });
+function fitComposer() {
+  const t = $("#composer-input");
+  t.style.height = "auto";
+  const max = window.innerHeight * 0.4;
+  t.style.height = Math.min(t.scrollHeight + 2, max) + "px";
+  t.style.overflowY = t.scrollHeight + 2 > max ? "auto" : "hidden";
+}
+$("#composer-input").addEventListener("input", fitComposer);
 async function send() {
   const input = $("#composer-input");
   const content = input.value.trim();
   if (!content || !state.botId) return;
   input.value = "";
+  fitComposer();
   $("#run-note").hidden = true;
   try {
     const data = await api("/api/bots/" + state.botId + "/thread/messages", {
