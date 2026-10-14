@@ -134,20 +134,20 @@
     padding: 12px 14px; border-bottom: 1px solid var(--line);
   }
   .thread-id { min-width: 0; flex: 1; }
-  /* Bot state panel. Three placements share one renderer; ?statepanel=a|b|c
-     picks one while the user compares them. */
+  /* Bot state: the header chip opens a slide-over (bottom sheet on mobile). */
   .state-chip {
-    flex: none; border: 1px solid var(--line); background: var(--paper); color: var(--muted);
-    border-radius: 99px; padding: 3px 10px; font-size: 13px; cursor: pointer; white-space: nowrap;
+    flex: none; display: inline-flex; align-items: center; gap: 4px;
+    border: 1px solid var(--line); background: var(--paper); color: var(--ink);
+    border-radius: 99px; padding: 4px 10px 4px 12px; font-size: 13px; cursor: pointer; white-space: nowrap;
+    box-shadow: 0 1px 2px rgba(29,25,20,.08); min-height: 32px;
   }
+  .state-chip::after { content: "›"; color: var(--muted); font-size: 15px; line-height: 1; margin-left: 2px; }
+  .state-chip:hover { border-color: var(--accent); background: var(--accent-2); }
+  .state-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .state-chip.zero { color: var(--muted); opacity: .75; }
+  .state-chip.warn { border-color: #e8d39a; background: #fff6df; }
   .state-chip[aria-expanded="true"] { background: var(--accent-2); color: var(--accent); border-color: var(--accent); }
-  .state-chip[hidden], .state-btn[hidden] { display: none; }
-  .state-btn { flex: none; font-size: 13px; padding: 4px 10px; }
-  .state-drawer {
-    border-bottom: 1px solid var(--line); background: var(--paper);
-    max-height: 42%; overflow-y: auto; padding: 4px 14px 10px; flex: none;
-  }
-  .state-drawer[hidden] { display: none; }
+  .state-chip[hidden] { display: none; }
   .state-backdrop { position: fixed; inset: 0; background: rgba(29,25,20,.25); z-index: 40; }
   .state-backdrop[hidden], .state-sheet[hidden] { display: none; }
   .state-sheet {
@@ -161,12 +161,6 @@
   @media (max-width: 979px) {
     .state-sheet { top: auto; left: 0; width: auto; height: 75vh; height: 75dvh; border-radius: 16px 16px 0 0; box-shadow: 0 -8px 30px rgba(29,25,20,.18); }
   }
-  .ptabs { display: flex; gap: 6px; }
-  .ptabs[hidden] { display: none; }
-  .ptabs button { border-radius: 99px; padding: 5px 14px; }
-  .ptabs button[aria-selected="true"] { background: var(--ink); color: var(--paper); }
-  #profile-state { padding: 4px 14px 14px; }
-  #profile-state[hidden], #profile-form[hidden] { display: none; }
   .st-sec h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 14px 0 6px; }
   .st-row { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; border-top: 1px solid var(--line); font-size: 14px; }
   .st-row:first-of-type { border-top: 0; }
@@ -337,8 +331,7 @@
             <h2 id="thread-name">No bot selected</h2>
             <div class="role" id="thread-label"></div>
           </div>
-          <button type="button" class="state-chip" id="state-chip" hidden aria-expanded="false" aria-controls="state-drawer" title="Timers and memory"></button>
-          <button type="button" class="ghost state-btn" id="state-btn" hidden aria-expanded="false">State</button>
+          <button type="button" class="state-chip" id="state-chip" hidden aria-label="Bot state" aria-haspopup="dialog" aria-expanded="false" aria-controls="state-sheet" title="Bot state: timers, memory, tools, runs"></button>
           <div class="menu">
             <button type="button" id="menu-btn" aria-haspopup="menu" aria-expanded="false" aria-label="Bot menu">⋯</button>
             <div class="menu-pop" id="bot-menu" hidden role="menu">
@@ -351,7 +344,6 @@
             </div>
           </div>
         </div>
-        <div class="state-drawer" id="state-drawer" hidden></div>
         <div class="msgs" id="msgs"><p class="empty">Choose a bot to read its thread.</p><div class="live" id="live"></div><div class="working" id="working" hidden aria-live="polite"><span class="pulse" aria-hidden="true"></span><span id="working-text">working</span></div></div>
         <button type="button" class="new-pill" id="new-pill" hidden>New messages ↓</button>
         <div class="note" id="run-note" hidden></div>
@@ -362,11 +354,6 @@
       </div>
     </section>
     <section class="view" id="view-profile">
-      <div class="ptabs" id="ptabs" hidden role="tablist">
-        <button type="button" role="tab" data-tab="profile" aria-selected="true">Profile</button>
-        <button type="button" role="tab" data-tab="state" aria-selected="false">State</button>
-      </div>
-      <div class="panel" id="profile-state" hidden></div>
       <form class="panel profile" id="profile-form">
         <div class="row" style="justify-content:space-between;align-items:center">
           <h2>Profile</h2>
@@ -434,7 +421,7 @@
   </form>
 </div>
 <div class="state-backdrop" id="state-backdrop" hidden></div>
-<aside class="state-sheet" id="state-sheet" hidden aria-label="Bot state">
+<aside class="state-sheet" id="state-sheet" hidden role="dialog" aria-label="Bot state">
   <div class="sheet-head"><h2 id="state-sheet-title">Bot state</h2><button type="button" class="ghost" id="state-close">Close</button></div>
   <div class="sheet-body" id="state-sheet-body"></div>
 </aside>
@@ -627,6 +614,7 @@ function goHome(push = true) {
   closeState();
   state.botState = null;
   state.botId = null;
+  paintStateChip();
   state.loadedFor = null;
   state.hasMore = false;
   stopStream();
@@ -1299,7 +1287,6 @@ function paintMarkPicker() {
 }
 async function openProfile(id) {
   state.botId = id;
-  selectProfileTab("profile");
   closeMenu();
   const b = await api("/api/bots/" + id);
   const i = state.bots.findIndex(x => x.id === b.id);
@@ -1455,14 +1442,8 @@ $("#auth form").addEventListener("submit", async (e) => {
 });
 fillKinds();
 // ---- Bot state panel ----
-// Temporary switch so the user can compare placements: ?statepanel=a|b|c.
-// a: chip in the thread header opening an inline drawer.
-// b: State button / menu item opening a right slide-over (bottom sheet on mobile).
-// c: State tab inside the profile view.
-const STATE_OPT = (() => {
-  const v = (new URLSearchParams(location.search).get("statepanel") || "a").toLowerCase();
-  return ["a", "b", "c"].includes(v) ? v : "a";
-})();
+// The header chip (⏱ timers · 🧠 notes) and the ⋯ menu open a slide-over
+// on desktop and a bottom sheet under 980px.
 const PHX = new Intl.DateTimeFormat("en-US", {timeZone: "America/Phoenix", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit"});
 const PHX_SHORT = new Intl.DateTimeFormat("en-US", {timeZone: "America/Phoenix", month: "short", day: "numeric", hour: "numeric", minute: "2-digit"});
 function phx(iso, short) {
@@ -1480,16 +1461,8 @@ function countdown(ms) {
   const parts = d ? [d + "d", h + "h"] : h ? [h + "h", m + "m"] : m ? [m + "m", s + "s"] : [s + "s"];
   return neg ? parts.join(" ") + " ago" : "in " + parts.join(" ");
 }
-function stateOpen() {
-  if (STATE_OPT === "a") return !$("#state-drawer").hidden;
-  if (STATE_OPT === "b") return !$("#state-sheet").hidden;
-  return state.view === "profile" && !$("#profile-state").hidden;
-}
-function stateBox() {
-  if (STATE_OPT === "a") return $("#state-drawer");
-  if (STATE_OPT === "b") return $("#state-sheet-body");
-  return $("#profile-state");
-}
+function stateOpen() { return !$("#state-sheet").hidden; }
+function stateBox() { return $("#state-sheet-body"); }
 async function loadState() {
   const id = state.botId;
   if (!id) return;
@@ -1501,54 +1474,35 @@ async function loadState() {
   if (stateOpen()) renderState(stateBox(), s);
 }
 function paintStateChip() {
-  const chip = $("#state-chip"), btn = $("#state-btn");
-  chip.hidden = !(STATE_OPT === "a" && state.botId);
-  btn.hidden = !(STATE_OPT === "b" && state.botId);
+  const chip = $("#state-chip");
+  chip.hidden = !state.botId;
   const s = state.botState;
-  if (!s) { chip.textContent = "⏱ · 🧠"; return; }
-  const on = s.timers.filter(t => t.enabled).length;
-  chip.textContent = "⏱ " + on + " · 🧠 " + s.memory.length + (s.warnings && s.warnings.length ? " · ⚠" : "");
-  chip.title = on + " active timer" + (on === 1 ? "" : "s") + ", " + s.memory.length + " memory note" + (s.memory.length === 1 ? "" : "s");
+  const on = s ? s.timers.filter(t => t.enabled).length : 0;
+  const notes = s ? s.memory.length : 0;
+  const warn = !!(s && s.warnings && s.warnings.length);
+  chip.textContent = "⏱ " + on + " · 🧠 " + notes + (warn ? " · ⚠" : "");
+  chip.classList.toggle("zero", !on && !notes && !warn);
+  chip.classList.toggle("warn", warn);
+  const desc = on + " active timer" + (on === 1 ? "" : "s") + ", " + notes + " memory note" + (notes === 1 ? "" : "s") + (warn ? ", warnings" : "");
+  chip.title = "Bot state: " + desc;
+  chip.setAttribute("aria-label", "Bot state (" + desc + ")");
 }
 function closeState() {
-  $("#state-drawer").hidden = true;
-  $("#state-chip").setAttribute("aria-expanded", "false");
   $("#state-sheet").hidden = true;
   $("#state-backdrop").hidden = true;
-  $("#state-btn").setAttribute("aria-expanded", "false");
+  $("#state-chip").setAttribute("aria-expanded", "false");
 }
 async function openState() {
   if (!state.botId) return;
   closeMenu();
-  if (STATE_OPT === "c") {
-    await openProfile(state.botId);
-    selectProfileTab("state");
-    return;
-  }
-  if (STATE_OPT === "a") {
-    $("#state-drawer").hidden = false;
-    $("#state-chip").setAttribute("aria-expanded", "true");
-  } else {
-    const b = currentBot();
-    $("#state-sheet-title").textContent = (b ? b.name + " · " : "") + "state";
-    $("#state-sheet").hidden = false;
-    $("#state-backdrop").hidden = false;
-    $("#state-btn").setAttribute("aria-expanded", "true");
-  }
+  const b = currentBot();
+  $("#state-sheet-title").textContent = (b ? b.name + " · " : "") + "state";
+  $("#state-sheet").hidden = false;
+  $("#state-backdrop").hidden = false;
+  $("#state-chip").setAttribute("aria-expanded", "true");
   if (state.botState) renderState(stateBox(), state.botState);
   else stateBox().replaceChildren(el("p", "st-empty", "Loading…"));
   await loadState();
-}
-function selectProfileTab(tab) {
-  $("#ptabs").hidden = STATE_OPT !== "c";
-  for (const b of document.querySelectorAll("#ptabs button")) b.setAttribute("aria-selected", b.dataset.tab === tab ? "true" : "false");
-  const st = tab === "state" && STATE_OPT === "c";
-  $("#profile-state").hidden = !st;
-  $("#profile-form").hidden = st;
-  if (st) {
-    if (state.botState) renderState($("#profile-state"), state.botState);
-    loadState().catch(() => {});
-  }
 }
 function stSection(title, count) {
   const sec = el("section", "st-sec");
@@ -1657,17 +1611,10 @@ function tickFires() {
   }
 }
 setInterval(tickFires, 1000);
-$("#state-chip").addEventListener("click", () => {
-  if (!$("#state-drawer").hidden) closeState(); else openState();
-});
-$("#state-btn").addEventListener("click", () => {
-  if (!$("#state-sheet").hidden) closeState(); else openState();
-});
+$("#state-chip").addEventListener("click", () => { if (stateOpen()) closeState(); else openState(); });
 $("#state-close").addEventListener("click", closeState);
 $("#state-backdrop").addEventListener("click", closeState);
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && STATE_OPT === "b" && !$("#state-sheet").hidden) closeState(); });
-for (const b of document.querySelectorAll("#ptabs button")) b.addEventListener("click", () => selectProfileTab(b.dataset.tab));
-selectProfileTab("profile");
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && stateOpen()) closeState(); });
 (async function init() {
   try {
     const h = await api("/api/health");

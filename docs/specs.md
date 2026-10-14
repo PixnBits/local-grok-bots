@@ -247,7 +247,7 @@ The page is a client. Refreshing reloads from the daemon. Four surfaces. The con
 
 **Log.** Filterable by bot and by kind. The verification surface.
 
-- Bot state panel (closed by default): timers with a live countdown and next fire time in America/Phoenix, memory notes, grants and allowlists, tool status and last tool notice, and the latest 5 runs, from `GET /api/bots/{id}/state`. Clear timer and delete memory ask for confirmation. Placement is temporarily chosen with `?statepanel=a|b|c` (kept across bot navigation): a = chip in the thread header (`⏱ active timers · 🧠 notes`) opening an inline drawer; b = State button / "Bot state" menu item opening a right slide-over (bottom sheet under 980px); c = State tab in the profile view. Default is a.
+- Bot state panel (closed by default): timers with a live countdown and next fire time in America/Phoenix, memory notes, grants and allowlists, tool status and last tool notice, and the latest 5 runs, from `GET /api/bots/{id}/state`. Clear timer and delete memory ask for confirmation. It opens from a chip in the thread header (`⏱ active timers · 🧠 notes`, plus `⚠` when the description has warnings; dimmed when all are 0) or from "Bot state" in the ⋯ menu, as a right slide-over on desktop and a bottom sheet under 980px. Close, a backdrop tap, or Esc closes it.
 ## 8. Process
 
 - Daemon starts on boot via a systemd user or system unit.
