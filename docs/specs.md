@@ -118,6 +118,7 @@ JSON over HTTP. One SSE stream for a live turn. All routes under `/api`.
 | POST | /api/bots/{id}/memory | `{key, value}` | memory row |
 | DELETE | /api/bots/{id}/memory/{key} | | 204 |
 | GET | /api/bots/{id}/timers | | `[timer]` |
+| GET | /api/bots/{id}/state | | `{timers, memory, grants, net_allow, ssh_allow, tools: {current, seen, up_to_date, last_notice}, runs (latest 5), warnings?}` read-only summary for the state panel |
 | POST | /api/bots/{id}/timers | `{name?, schedule, prompt, enabled?}` | timer |
 | PATCH | /api/timers/{id} | `{name?, schedule?, prompt?, enabled?}` | timer |
 | DELETE | /api/timers/{id} | | 204 |
@@ -155,7 +156,11 @@ Optional gate: if `AUTH_TOKEN` is set in the daemon environment, require `Author
 
 ## 4. Bot tool surface
 
-Tools the model can call. Each is logged on start and on finish. Every model call sends the whole list in Ollama's `tools` field as JSON Schema objects: each argument has a `type` and a `description` with an example. There is no discovery tool or step. A call missing a required argument, or with arguments in the wrong shape, fails with an error that names the problem and lists the tool's expected arguments. The system prompt starts with the current time in RFC 3339 and the daemon's time zone.
+Tools the model can call. Each is logged on start and on finish. Every model call sends the whole list in Ollama's `tools` field as JSON Schema objects: each argument has a `type` and a `description` with an example. There is no discovery tool or step. A call missing a required argument, or with arguments in the wrong shape, fails with an error that names the problem and lists the tool's expected arguments. The system prompt starts with the current time in RFC 3339 and the daemon's time zone. It also states that the attached tools are the current, authoritative set and override anything said earlier in the conversation or in memory about which tools exist.
+
+Tool-change notices: each bot stores the SHA-256 and a JSON snapshot of the tool list (names, descriptions, schemas) it last saw, in `bots.tool_hash` and `bots.tool_snapshot`. At the start of every run that is not a continuation, if the current list differs, the daemon posts a thread line `Notice: Tools updated: added X; changed Y (now takes a/b/c); removed Z.` and saves the new snapshot. A bot with no snapshot (one that existed before this) that has replied before gets a one-time `Notice: Tools available now: <names>. ...`; a brand-new bot just records its snapshot. Notice lines reach the model as user messages, show in the thread, do not queue a turn, and are logged as `tools_changed`.
+
+Belief lint: `write_memory` rejects notes whose key or value claim tool availability or absence (phrases like "only have", "no access", "cannot", "don't have" near a tool name or the word "tool"), returning an error that tools are attached per call and must not be stored. Description warnings: on create/update and on GET bot, the daemon computes advisory `warnings` for standing prompts that name a `Something CLI` or a backticked command not on PATH in the jail, or a tool-like name not in `toolDefs`. Warnings appear on the profile page; they do not block saves.
 
 | Tool | Arguments | Effect |
 |---|---|---|
@@ -245,6 +250,7 @@ The page is a client. Refreshing reloads from the daemon. Four surfaces. The con
 
 **Log.** Filterable by bot and by kind. The verification surface.
 
+- Bot state panel (closed by default): timers with a live countdown and next fire time in America/Phoenix, memory notes, grants and allowlists, tool status and last tool notice, and the latest 5 runs, from `GET /api/bots/{id}/state`. Clear timer and delete memory ask for confirmation. It opens from a chip in the thread header (`⏱ active timers · 🧠 notes`, plus `⚠` when the description has warnings; dimmed when all are 0) or from "Bot state" in the ⋯ menu, as a right slide-over on desktop and a bottom sheet under 980px. Close, a backdrop tap, or Esc closes it.
 ## 8. Process
 
 - Daemon starts on boot via a systemd user or system unit.

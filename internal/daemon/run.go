@@ -13,6 +13,10 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
+// toolAuthority tells the model the attached tools are the truth, so its own
+// stale claims in history or memory do not hide tools it has.
+const toolAuthority = "The tools attached to this request are the current, authoritative set. They override anything said earlier in this conversation or in your memory about which tools exist or how they are called. If you said before that you lack a tool that is attached now, you were wrong; use it."
+
 const (
 	maxToolRounds = 8
 	modelTimeout  = 3 * time.Minute
@@ -76,6 +80,7 @@ func (a *App) execute(botID, runID string) {
 	msgs, ok := a.takePending(runID)
 	if !ok {
 		a.dropResume(botID)
+		a.noteToolChanges(bot)
 		var hist []store.Message
 		msgs, hist, err = a.buildMessagesHist(bot)
 		if err != nil {
@@ -284,7 +289,7 @@ func (a *App) buildMessagesHist(bot store.Bot) ([]model.Message, []store.Message
 		b.WriteString(m.Value)
 		b.WriteString("\n")
 	}
-	b.WriteString("\nYou can call tools. create_bot creates a bot: pass name and description. description is the standing prompt the new bot is given. instructions is an old name for that same field and still works. Do not use the shell to create a bot. update_bot changes a bot. list_bots and read_bot inspect bots. send_dm sends a direct message. write_memory and delete_memory keep notes. set_timer schedules a prompt back to you: pass prompt plus one of in (one-shot duration such as \"5m\"), at (one-shot RFC 3339 time), or every (repeating interval); list_timers and clear_timer manage them. Each tool's arguments are described in its schema; use those names. read_file, write_file, and run_shell stay inside the workspace; paths outside it are rejected. go, gofmt, and other tools installed under /usr are on PATH. Network, git push, and SSH stay off unless the user turned them on in the profile. After tools, send a short reply to the user. Direct messages from other bots appear as user messages prefixed with [DM from Name]. Scheduled prompts are prefixed with [scheduled]. If you need a tool, call it in this response. Do not reply with only an announcement such as \"Let me check.\"\n")
+	b.WriteString("\n" + toolAuthority + "\n\nYou can call tools. create_bot creates a bot: pass name and description. description is the standing prompt the new bot is given. instructions is an old name for that same field and still works. Do not use the shell to create a bot. update_bot changes a bot. list_bots and read_bot inspect bots. send_dm sends a direct message. write_memory and delete_memory keep notes. set_timer schedules a prompt back to you: pass prompt plus one of in (one-shot duration such as \"5m\"), at (one-shot RFC 3339 time), or every (repeating interval); list_timers and clear_timer manage them. Each tool's arguments are described in its schema; use those names. read_file, write_file, and run_shell stay inside the workspace; paths outside it are rejected. go, gofmt, and other tools installed under /usr are on PATH. Network, git push, and SSH stay off unless the user turned them on in the profile. After tools, send a short reply to the user. Direct messages from other bots appear as user messages prefixed with [DM from Name]. Scheduled prompts are prefixed with [scheduled]. If you need a tool, call it in this response. Do not reply with only an announcement such as \"Let me check.\"\n")
 	out := []model.Message{{Role: "system", Content: b.String()}}
 	for _, m := range hist {
 		out = append(out, mapHist(m, names))

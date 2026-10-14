@@ -33,6 +33,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /api/bots/{id}/memory", a.handlePutMemory)
 	mux.HandleFunc("DELETE /api/bots/{id}/memory/{key}", a.handleDeleteMemory)
 	mux.HandleFunc("GET /api/bots/{id}/timers", a.handleListTimers)
+	mux.HandleFunc("GET /api/bots/{id}/state", a.handleBotState)
 	mux.HandleFunc("POST /api/bots/{id}/timers", a.handleCreateTimer)
 	mux.HandleFunc("PATCH /api/timers/{id}", a.handlePatchTimer)
 	mux.HandleFunc("DELETE /api/timers/{id}", a.handleDeleteTimer)
@@ -142,7 +143,7 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusCreated, b)
+	writeJSON(w, http.StatusCreated, a.decorateBot(b))
 }
 
 func firstText(primary, alias *string) string {

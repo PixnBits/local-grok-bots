@@ -162,20 +162,22 @@ func decodeList(s string) ([]string, error) {
 }
 
 type Bot struct {
-	ID          string   `json:"id"`
-	Name        string   `json:"name"`
-	Label       string   `json:"label"`
-	Description string   `json:"description,omitempty"`
-	Mark        Mark     `json:"mark"`
-	Pinned      bool     `json:"pinned"`
-	Hidden      bool     `json:"hidden"`
-	Archived    bool     `json:"archived"`
-	ArchivedAt  *string  `json:"archived_at,omitempty"`
-	Grants      []string `json:"grants"`
-	NetAllow    []string `json:"net_allow"`
-	SSHAllow    []string `json:"ssh_allow"`
-	Status      string   `json:"status"`
-	Model       *string  `json:"model"`
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	Label       string  `json:"label"`
+	Description string  `json:"description,omitempty"`
+	Mark        Mark    `json:"mark"`
+	Pinned      bool    `json:"pinned"`
+	Hidden      bool    `json:"hidden"`
+	Archived    bool    `json:"archived"`
+	ArchivedAt  *string `json:"archived_at,omitempty"`
+	// Warnings are advisory notes the daemon computes on read; not stored.
+	Warnings []string `json:"warnings,omitempty"`
+	Grants   []string `json:"grants"`
+	NetAllow []string `json:"net_allow"`
+	SSHAllow []string `json:"ssh_allow"`
+	Status   string   `json:"status"`
+	Model    *string  `json:"model"`
 	// SessionID is the CLI session. It is not part of the web API.
 	SessionID     string  `json:"-"`
 	CreatedAt     string  `json:"created_at,omitempty"`
@@ -404,6 +406,9 @@ func (s *Store) evolve() error {
 		{"runs", "input_through", "TEXT"},
 		{"run_tools", "kind", "TEXT NOT NULL DEFAULT 'call'"},
 		{"bots", "archived_at", "TEXT"},
+		{"timers", "archive_paused", "INTEGER NOT NULL DEFAULT 0"},
+		{"bots", "tool_hash", "TEXT"},
+		{"bots", "tool_snapshot", "TEXT"},
 	}
 	for _, a := range adds {
 		ok, err := s.hasColumn(a.table, a.col)
@@ -1943,4 +1948,69 @@ func (s *Store) SetArchived(id string, archived bool, by string) (Bot, error) {
 	}
 	b, err = s.getBot(id, true)
 	return b, err
+}
+
+// ToolSnapshot returns the hash and JSON snapshot of the tool list the bot
+// last saw. Both are empty when the bot has never had one recorded.
+func (s *Store) ToolSnapshot(botID string) (hash, snapshot string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var h, sn sql.NullString
+	err = s.db.QueryRow(`SELECT tool_hash, tool_snapshot FROM bots WHERE id=?`, botID).Scan(&h, &sn)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", ErrNotFound
+	}
+	return h.String, sn.String, err
+}
+
+// SetToolSnapshot records the tool list the bot has now been told about.
+func (s *Store) SetToolSnapshot(botID, hash, snapshot string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`UPDATE bots SET tool_hash=?, tool_snapshot=? WHERE id=?`, hash, snapshot, botID)
+	return err
+}
+
+// RecentRuns returns the bot's latest runs, newest first.
+func (s *Store) RecentRuns(botID string, limit int) ([]Run, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT id, bot_id, status, started_at, finished_at, error FROM runs WHERE bot_id=? ORDER BY started_at DESC LIMIT ?`, botID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Run{}
+	for rows.Next() {
+		var r Run
+		var fin, errText sql.NullString
+		if err := rows.Scan(&r.ID, &r.BotID, &r.Status, &r.StartedAt, &fin, &errText); err != nil {
+			return nil, err
+		}
+		if fin.Valid {
+			r.FinishedAt = &fin.String
+		}
+		if errText.Valid {
+			r.Error = &errText.String
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// LastToolNotice returns the newest "Notice: Tools …" line on the bot's
+// thread, or nil.
+func (s *Store) LastToolNotice(botID string) (*Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row := s.db.QueryRow(`SELECT id, bot_id, thread, role, content, run_id, created_at FROM messages
+		WHERE bot_id=? AND role='system' AND content LIKE 'Notice: Tools %' ORDER BY created_at DESC, id DESC LIMIT 1`, botID)
+	m, err := scanMessage(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &m, nil
 }
