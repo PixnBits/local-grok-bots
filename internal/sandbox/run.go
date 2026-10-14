@@ -57,6 +57,7 @@ type prepared struct {
 	proxy     *proxy
 	before    *treeSnap
 	extra     []Event
+	grants    map[string]bool
 }
 
 func (p *prepared) close() {
@@ -143,6 +144,7 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 
 	p.mounts = append(p.mounts, mount{Src: rw, Dst: "/lgb", RO: false})
 	grants := map[string]bool{}
+	p.grants = grants
 	for _, g := range req.Grants {
 		grants[strings.ToLower(strings.TrimSpace(g))] = true
 	}
