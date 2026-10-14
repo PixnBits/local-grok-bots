@@ -93,10 +93,14 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		_ = aud.Close()
 		return nil, err
 	}
-	if err := st.ReconcileOnBoot(cfg.Version); err != nil {
+	pids, err := st.ReconcileOnBoot(cfg.Version, pol.UsesCLI())
+	if err != nil {
 		st.Close()
 		_ = aud.Close()
 		return nil, err
+	}
+	for _, pid := range pids {
+		clisession.KillStoredCLI(pid)
 	}
 	if m == nil {
 		m = model.NewOllama(cfg.OllamaURL)
@@ -145,6 +149,10 @@ func mkdirWorkspace(path string) error {
 // Shutdown stops timers and runs, records daemon_stop, and closes the database.
 func (a *App) Shutdown() {
 	a.rtMu.Lock()
+	if a.closing {
+		a.rtMu.Unlock()
+		return
+	}
 	a.closing = true
 	a.rtMu.Unlock()
 	a.cancel()

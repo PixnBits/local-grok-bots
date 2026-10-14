@@ -156,6 +156,10 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		_, _ = a.st.FinishRun(runID, "error", "turn_timeout")
 		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": "turn_timeout"})
 	case ctx.Err() != nil:
+		if a.ctx.Err() != nil {
+			a.finishCLIInterrupted(bot.ID, runID, text)
+			break
+		}
 		if text != "" {
 			a.persistBotText(bot.ID, runID, text)
 		}

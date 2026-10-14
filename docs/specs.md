@@ -143,7 +143,7 @@ Optional gate: if `AUTH_TOKEN` is set in the daemon environment, require `Author
 - If the bot is `idle`, the post starts a run and returns its `run_id`.
 - If the bot is `running`, the message joins that bot's queue. The running turn may observe new user messages before it finishes, or the next run starts the moment the current one ends and consumes the queue. Either is acceptable. Dropping the message or blocking the POST is not.
 - A run ends in exactly one of `done`, `error`, `cancelled`.
-- On daemon start, any run still marked `running` is marked `error` with reason `daemon_restart`. No resume of a half-finished model call.
+- On daemon start, any run still marked `running` is marked `error` with reason `daemon_restart`. No resume of a half-finished Ollama model call. A CLI backend instead marks that run `interrupted`, keeps `session_id`, and the next user message or timer resumes with `--resume`.
 - Cancel sets the run to `cancelled` and stops further tool calls. Partial output already persisted stays.
 - Bot-to-bot DMs use the same queue on the receiving bot. The sender does not block waiting for a reply.
 - Order is preserved. Nothing is dropped.

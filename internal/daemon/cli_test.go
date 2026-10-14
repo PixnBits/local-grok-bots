@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -9,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/clisession"
+	"github.com/PixnBits/local-grok-bots/internal/config"
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"github.com/PixnBits/local-grok-bots/internal/store"
@@ -249,6 +253,225 @@ func TestCLIPermissionPromptNeedsTTY(t *testing.T) {
 	}
 }
 
+func TestCLICrashRestartKillsGroupAndResumes(t *testing.T) {
+	dir := t.TempDir()
+	installCLIStub(t, dir, "claude")
+	policyPath := writeCLIPolicy(t, dir)
+	childPath := filepath.Join(dir, "child")
+	logPath := filepath.Join(dir, "argv.log")
+	t.Setenv("LGB_CLI_MODE", "sleep")
+	t.Setenv("LGB_CHILD", childPath)
+	t.Setenv("LGB_READY", filepath.Join(dir, "ready"))
+	t.Setenv("LGB_ARGV_LOG", logPath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan int, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = (clisession.ExecRunner{HasTTY: func() bool { return false }}).Run(ctx, clisession.Spec{
+			Backend: "claude", Bin: filepath.Join(dir, "bin", "claude"),
+			Prompt: "orphan", Workspace: dir, Fresh: true,
+			OnStart: func(pid int) { started <- pid },
+		}, nil)
+	}()
+	var leader int
+	select {
+	case leader = <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("orphan cli did not start")
+	}
+	child := pidFile(t, childPath)
+	t.Cleanup(func() {
+		cancel()
+		_ = syscall.Kill(-leader, syscall.SIGKILL)
+		_ = syscall.Kill(child, syscall.SIGKILL)
+	})
+
+	const session = "11111111-1111-4111-8111-111111111111"
+	st, err := store.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bot, err := st.CreateBot("Ada", "local", nil, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetBotSession(bot.ID, session); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AddMessage(store.Message{BotID: bot.ID, Thread: "user", Role: "user", Content: "old"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetStatus(bot.ID, "running"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.InsertRunningRun(bot.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetCLIPID(bot.ID, leader); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	app := newCLIApp(t, dir, policyPath)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("orphan cli was not killed on restart")
+	}
+	waitDead(t, leader)
+	waitDead(t, child)
+	got, err := app.st.GetBot(bot.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SessionID != session || got.LastRunStatus != "error" || got.LastRunError != "interrupted" || got.Status == "running" {
+		t.Fatalf("after crash %#v", got)
+	}
+
+	t.Setenv("LGB_CLI_MODE", "ok")
+	_ = os.WriteFile(logPath, nil, 0o644)
+	srv := serve(t, app)
+	res, b := do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "next"}, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("post %d %s", res.StatusCode, b)
+	}
+	waitIdle(t, srv.URL, bot.ID, "")
+	argv := readArgv(t, logPath)
+	if !strings.Contains(argv, "--resume") || !strings.Contains(argv, session) || strings.Contains(argv, "--session-id") {
+		t.Fatalf("next message did not resume %s:\n%s", session, argv)
+	}
+	if strings.Contains(argv, "bwrap") || strings.Contains(argv, "sandbox-exec") {
+		t.Fatalf("daemon jail wrapped the resume:\n%s", argv)
+	}
+
+	_ = os.WriteFile(logPath, nil, 0o644)
+	tm, err := app.st.CreateTimer(bot.ID, "tick", "1h", "check the gate", true, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app.st.BackdateTimer(tm.ID, time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	app.fireDue()
+	waitIdle(t, srv.URL, bot.ID, "")
+	argv = readArgv(t, logPath)
+	if !strings.Contains(argv, "--resume") || !strings.Contains(argv, session) || !strings.Contains(argv, "[scheduled] check the gate") {
+		t.Fatalf("timer did not resume:\n%s", argv)
+	}
+}
+
+func TestCLIShutdownMidTurnResumes(t *testing.T) {
+	dir := t.TempDir()
+	installCLIStub(t, dir, "claude")
+	policyPath := writeCLIPolicy(t, dir)
+	childPath := filepath.Join(dir, "child")
+	logPath := filepath.Join(dir, "argv.log")
+	t.Setenv("LGB_CLI_MODE", "sleep")
+	t.Setenv("LGB_CHILD", childPath)
+	t.Setenv("LGB_READY", filepath.Join(dir, "ready"))
+	t.Setenv("LGB_ARGV_LOG", logPath)
+	app := newCLIApp(t, dir, policyPath)
+	bot, err := app.st.CreateBot("Ada", "local", nil, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.st.AddMessage(store.Message{BotID: bot.ID, Thread: "user", Role: "user", Content: "run"}); err != nil {
+		t.Fatal(err)
+	}
+	app.kick(bot.ID)
+	child := pidFile(t, childPath)
+	t.Cleanup(func() { _ = syscall.Kill(child, syscall.SIGKILL) })
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got, err := app.st.GetBot(bot.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.SessionID != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("session was not stored before shutdown")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	app.Shutdown()
+	waitDead(t, child)
+	st, err := store.Open(filepath.Join(dir, "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetBot(bot.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SessionID == "" || got.LastRunStatus != "error" || got.LastRunError != "interrupted" {
+		t.Fatalf("after shutdown %#v", got)
+	}
+	session := got.SessionID
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("LGB_CLI_MODE", "ok")
+	_ = os.WriteFile(logPath, nil, 0o644)
+	app2 := newCLIApp(t, dir, policyPath)
+	srv := serve(t, app2)
+	res, b := do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "next"}, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("post %d %s", res.StatusCode, b)
+	}
+	waitIdle(t, srv.URL, bot.ID, "")
+	argv := readArgv(t, logPath)
+	if !strings.Contains(argv, "--resume") || !strings.Contains(argv, session) || strings.Contains(argv, "--session-id") {
+		t.Fatalf("shutdown resume %s:\n%s", session, argv)
+	}
+	_ = os.WriteFile(logPath, nil, 0o644)
+	tm, err := app2.st.CreateTimer(bot.ID, "tick", "1h", "check the gate", true, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := app2.st.BackdateTimer(tm.ID, time.Now().Add(-time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	app2.fireDue()
+	waitIdle(t, srv.URL, bot.ID, "")
+	argv = readArgv(t, logPath)
+	if !strings.Contains(argv, "--resume") || !strings.Contains(argv, session) || !strings.Contains(argv, "[scheduled] check the gate") {
+		t.Fatalf("timer after shutdown:\n%s", argv)
+	}
+}
+
+func newCLIApp(t *testing.T, dir, policyPath string) *App {
+	t.Helper()
+	cfg := config.Config{
+		DataDir: dir, BindAddr: "127.0.0.1:0",
+		OllamaURL: "http://127.0.0.1:9", Model: "test-model", Version: "0.1.0",
+		PolicyPath: policyPath,
+	}
+	app, err := New(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Shutdown)
+	return app
+}
+
+func writeCLIPolicy(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "policy.toml")
+	body := "[backend]\nbackend = \"claude\"\n[timers]\nenabled = true\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestOllamaModelAllowList(t *testing.T) {
 	dir := t.TempDir()
 	var calls int
@@ -382,6 +605,30 @@ func pidFile(t *testing.T, path string) int {
 func processAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)
 	return err == nil
+}
+
+func waitDead(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !stillRunningProc(pid) {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("pid %d still running", pid)
+}
+
+func stillRunningProc(pid int) bool {
+	if !processAlive(pid) {
+		return false
+	}
+	out, err := exec.Command("ps", "-o", "state=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return false
+	}
+	state := strings.TrimSpace(string(out))
+	return state != "" && !strings.HasPrefix(state, "Z")
 }
 
 func waitIdleDirect(t *testing.T, app *App, id string) {

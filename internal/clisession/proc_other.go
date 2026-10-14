@@ -18,3 +18,6 @@ func killGroup(p *os.Process) {
 	}
 	_ = p.Kill()
 }
+
+// KillStoredCLI has no process group to signal on this OS.
+func KillStoredCLI(pid int) {}

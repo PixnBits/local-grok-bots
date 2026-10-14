@@ -38,17 +38,23 @@ func (a *App) touchActivity(botID string) {
 
 func (a *App) setCLIPID(botID string, pid int) {
 	a.rtMu.Lock()
-	defer a.rtMu.Unlock()
 	if st := a.loops[botID]; st != nil {
 		st.cliPID = pid
 	}
+	a.rtMu.Unlock()
+	_ = a.st.SetCLIPID(botID, pid)
 }
 
 func (a *App) clearCLIPID(botID, runID string) {
 	a.rtMu.Lock()
-	defer a.rtMu.Unlock()
+	match := false
 	if st := a.loops[botID]; st != nil && st.runID == runID {
 		st.cliPID = 0
+		match = true
+	}
+	a.rtMu.Unlock()
+	if match {
+		_ = a.st.SetCLIPID(botID, 0)
 	}
 }
 

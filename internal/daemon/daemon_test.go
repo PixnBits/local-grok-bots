@@ -511,7 +511,7 @@ func TestTimerMissedOnBoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.ReconcileOnBoot("0.1.0"); err != nil {
+	if _, err := st.ReconcileOnBoot("0.1.0", false); err != nil {
 		t.Fatal(err)
 	}
 	bot, err := st.CreateBot("Ada", "", nil, "user")

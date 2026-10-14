@@ -20,7 +20,8 @@ A live CLI process is killed after `idle_timeout_minutes` of no user message and
 - Only user-created timers keep the process alive. Bot-created timers do not.
 - Kill is a process-group kill. Linux sends `SIGKILL` to the group created with `setpgid`, then signals the leader. macOS uses the same POSIX group signal. If that signal is rejected, macOS falls back to `SIGKILL` of the leader only. Seatbelt is not a kill API. The behavior is the same call from the daemon on both platforms.
 - `session_id` remains stored. The next user message, DM, or timer resumes with `--resume`.
-- CLI turns are not under the Ollama round cap. They stop on daemon shutdown, cancel, or idle kill.
+- A graceful restart process-group kills the live CLI and marks that run `error` / `interrupted`. A crash leaves the pid in the database. The next boot, when policy still selects a CLI, marks a leftover `running` run `interrupted`, keeps `session_id`, and signals that process group if it is still claude or grok. The next user message or timer passes `--resume`. An Ollama boot still uses `daemon_restart` and does not resume the model call. Linux and macOS use the same process-group signal for both the idle kill and this restart kill.
+- CLI turns are not under the Ollama round cap. They stop on daemon shutdown, cancel, idle kill, or restart.
 
 These values come from the `[cli]` section of `policy.toml` (or managed settings). Missing or unparseable policy falls back to the defaults and logs loudly (fail-closed for the overall backend choice remains unchanged).
 
