@@ -26,6 +26,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	a.takePending(runID)
 	a.dropResume(bot.ID)
 	defer a.clearCLIPID(bot.ID, runID)
+	defer a.forgetRunPerms(runID)
 	if !a.policy.AllowsBackend(backend) {
 		a.failCLI(bot.ID, runID, backend, fmt.Errorf("cli backend %q is not allowed by policy", backend))
 		return
@@ -191,10 +192,10 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 			a.bus.Publish(runID, "tool_result", map[string]any{"name": name, "ok": true, "result_or_error": body})
 			a.log(bot.ID, "tool_end", map[string]any{"name": name, "ok": true})
 		case "permission_decision":
-			a.noteCLIPermission(bot.ID, runID, ev.ToolName, ev.ToolArgs, cliDenySource, eventTransport)
+			a.noteCLIPermission(bot.ID, runID, ev.ToolName, ev.ToolArgs, "", cliDenySource, eventTransport)
 		case "end":
 			for _, d := range ev.Denials {
-				a.noteCLIPermission(bot.ID, runID, d.Tool, d.Args, cliDenySource, eventTransport)
+				a.noteCLIPermission(bot.ID, runID, d.Tool, d.Args, d.UseID, cliDenySource, eventTransport)
 			}
 		}
 	})
@@ -473,15 +474,25 @@ func (a *App) recordControlDeny(botID, runID, tool string, args map[string]any, 
 	}, permission.Deny, "cli", rule)
 }
 
-func (a *App) noteCLIPermission(botID, runID, tool string, args map[string]any, source, transport string) {
+// noteCLIPermission records a denial the CLI reported (a permission_denied
+// event or result.permission_denials). It adds a record only when the broker
+// has not already decided that request for this run.
+func (a *App) noteCLIPermission(botID, runID, tool string, args map[string]any, useID, source, transport string) {
 	if a.perm == nil {
+		return
+	}
+	raw, err := json.Marshal(audit.RedactValue(args))
+	if err != nil || string(raw) == "null" {
+		raw = []byte(`{}`)
+	}
+	if a.claimEcho(runID, useID, permShape(tool, raw)) {
 		return
 	}
 	if source == "" {
 		source = "cli"
 	}
 	a.perm.Record(permission.Request{
-		RunID: runID, BotID: botID, Tool: tool, Args: args, Transport: transport,
+		RunID: runID, BotID: botID, Tool: tool, Args: args, ToolUseID: useID, Transport: transport,
 	}, permission.Deny, source, "")
 }
 

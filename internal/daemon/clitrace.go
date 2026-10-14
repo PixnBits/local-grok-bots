@@ -89,8 +89,92 @@ func (t *cliTrace) add(rec store.ToolRecord) {
 	_ = t.a.st.AddRunTool(t.runID, t.botID, rec)
 }
 
-// recordPermission stores a broker decision with the run's tool records.
-// Arguments are already redacted by the broker.
+// runPerms is one run's stored decisions: request ids, tool_use_ids, and a
+// count per tool+arguments for reports that carry no id.
+type runPerms struct {
+	ids     map[string]bool
+	useIDs  map[string]bool
+	byShape map[string]int
+	byTool  map[string]int
+}
+
+func permShape(tool string, redactedArgs []byte) string {
+	return tool + "\x00" + string(redactedArgs)
+}
+
+// notePermLocked registers a decision and reports whether it is new.
+func (a *App) notePermLocked(runID, reqID, useID, shape string) bool {
+	if a.permSeen == nil {
+		a.permSeen = map[string]*runPerms{}
+	}
+	rp := a.permSeen[runID]
+	if rp == nil {
+		rp = &runPerms{ids: map[string]bool{}, useIDs: map[string]bool{}, byShape: map[string]int{}, byTool: map[string]int{}}
+		a.permSeen[runID] = rp
+	}
+	if reqID != "" && rp.ids[reqID] {
+		return false
+	}
+	if reqID != "" {
+		rp.ids[reqID] = true
+	}
+	if useID != "" {
+		rp.useIDs[useID] = true
+	}
+	rp.byShape[shape]++
+	rp.byTool[toolOf(shape)]++
+	return true
+}
+
+func toolOf(shape string) string {
+	tool, _, _ := strings.Cut(shape, "\x00")
+	return tool
+}
+
+// claimEcho reports whether a CLI-side denial matches a decision already
+// stored for the run, by tool_use_id, else by tool and arguments. A matched
+// shape is consumed, so a repeated identical call still gets its own record.
+func (a *App) claimEcho(runID, useID, shape string) bool {
+	a.seenMu.Lock()
+	defer a.seenMu.Unlock()
+	rp := a.permSeen[runID]
+	if rp == nil {
+		return false
+	}
+	consume := func() {
+		if rp.byShape[shape] > 0 {
+			rp.byShape[shape]--
+		}
+		if rp.byTool[toolOf(shape)] > 0 {
+			rp.byTool[toolOf(shape)]--
+		}
+	}
+	if useID != "" && rp.useIDs[useID] {
+		delete(rp.useIDs, useID)
+		consume()
+		return true
+	}
+	if rp.byShape[shape] > 0 {
+		consume()
+		return true
+	}
+	// A permission_denied event may name only the tool.
+	if strings.HasSuffix(shape, "\x00{}") && rp.byTool[toolOf(shape)] > 0 {
+		rp.byTool[toolOf(shape)]--
+		return true
+	}
+	return false
+}
+
+// forgetRunPerms drops a finished run's dedupe state.
+func (a *App) forgetRunPerms(runID string) {
+	a.seenMu.Lock()
+	delete(a.permSeen, runID)
+	a.seenMu.Unlock()
+}
+
+// recordPermission stores a broker decision with the run's tool records,
+// once per request id. Arguments are already redacted by the broker.
 func (a *App) recordPermission(payload any) {
 	m, ok := payload.(map[string]any)
 	if !ok {
@@ -100,12 +184,20 @@ func (a *App) recordPermission(payload any) {
 	botID, _ := m["bot_id"].(string)
 	tool, _ := m["tool"].(string)
 	decision, _ := m["decision"].(string)
+	reqID, _ := m["id"].(string)
+	useID, _ := m["tool_use_id"].(string)
 	if runID == "" || botID == "" {
 		return
 	}
 	args, err := json.Marshal(m["arguments"])
 	if err != nil || string(args) == "null" {
 		args = []byte(`{}`)
+	}
+	a.seenMu.Lock()
+	fresh := a.notePermLocked(runID, reqID, useID, permShape(tool, args))
+	a.seenMu.Unlock()
+	if !fresh {
+		return
 	}
 	// The broker reports a UI allow as allow_once or allow_session, not allow.
 	allowed := decision == permission.Allow || decision == permission.AllowOnce || decision == permission.AllowSession

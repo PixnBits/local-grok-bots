@@ -60,6 +60,10 @@ type App struct {
 	cancel    context.CancelFunc
 
 	rtMu sync.Mutex
+	// permSeen is each live run's stored permission decisions, so a CLI
+	// denial report for a request the broker already decided adds nothing.
+	seenMu   sync.Mutex
+	permSeen map[string]*runPerms
 	// loginChecked holds bot ids whose Claude login source was recorded.
 	loginChecked sync.Map
 	loops        map[string]*loopState

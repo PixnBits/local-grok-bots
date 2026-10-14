@@ -367,7 +367,7 @@ func (b *Broker) complete(req Request, decision, source, rule string) Outcome {
 func (b *Broker) emit(req Request, decision, source, rule string) {
 	when := b.now().UTC().Format(time.RFC3339Nano)
 	redacted := audit.RedactValue(req.Args)
-	b.publish(req.RunID, "permission_decision", withTransport(map[string]any{
+	payload := withTransport(map[string]any{
 		"id":        req.ID,
 		"run_id":    req.RunID,
 		"bot_id":    req.BotID,
@@ -377,7 +377,11 @@ func (b *Broker) emit(req Request, decision, source, rule string) {
 		"source":    source,
 		"rule":      rule,
 		"time":      when,
-	}, req.Transport))
+	}, req.Transport)
+	if req.ToolUseID != "" {
+		payload["tool_use_id"] = req.ToolUseID
+	}
+	b.publish(req.RunID, "permission_decision", payload)
 	if b.audit == nil {
 		return
 	}
