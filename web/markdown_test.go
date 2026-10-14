@@ -56,6 +56,10 @@ console.log(JSON.stringify(cases.map(c=>h(renderMarkdown(c,new N("div"))))));
 		// GFM tables: header, alignment, inline markdown, escaped pipes.
 		{"| a | b | c |\n|:--|:-:|--:|\n| **x** | y\\|z | 3 |\n| 1 | 2 |", "<div><div.table-wrap><table><thead><tr><th align=left>a</th><th align=center>b</th><th align=right>c</th></tr></thead><tbody><tr><td align=left><strong>x</strong></td><td align=center>y|z</td><td align=right>3</td></tr><tr><td align=left>1</td><td align=center>2</td><td align=right></td></tr></tbody></table></div></div>"},
 		{"intro\na | b\n--- | ---\n1 | 2\n\nafter", "<div><p>intro</p><div.table-wrap><table><thead><tr><th>a</th><th>b</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table></div><p>after</p></div>"},
+		// Raw reply from bot Round267562: alignment tokens in the header row.
+		{"| Name   | :---: | ---: |\n|:-------|:-----:|-----:|\n| Apple  | Red   |  $1.00 |", "<div><div.table-wrap><table><thead><tr><th align=left>Name</th><th align=center></th><th align=right></th></tr></thead><tbody><tr><td align=left>Apple</td><td align=center>Red</td><td align=right>$1.00</td></tr></tbody></table></div></div>"},
+		// Two alignment rows: no header text, so no header row.
+		{"| :-- | --: |\n| :-- | --: |\n| a | 1 |", "<div><div.table-wrap><table><tbody><tr><td align=left>a</td><td align=right>1</td></tr></tbody></table></div></div>"},
 		{"a | b\n--- | --- | ---", "<div><p>a | b<br></br>--- | --- | ---</p></div>"},
 		{"[x](javascript:alert(1)) [y](https://e.com)", "<div><p>[x](javascript:alert(1)) <a href=\"https://e.com\">y</a></p></div>"},
 		{"snake_case_name", "<div><p>snake_case_name</p></div>"},

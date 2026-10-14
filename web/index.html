@@ -629,7 +629,11 @@ function isTableStart(lines, i) {
   return tableCells(lines[i]).length === tableCells(sep).length;
 }
 function mdTable(lines, i, parent) {
-  const head = tableCells(lines[i]);
+  // Models sometimes put alignment tokens (":---:") in the header row where
+  // the column names belong. Such a cell is shown empty, and a header row
+  // that is all alignment tokens is dropped.
+  const isAlign = (c) => /^:?-{1,}:?$/.test(c);
+  const head = tableCells(lines[i]).map(c => isAlign(c) ? "" : c);
   const aligns = tableCells(lines[i + 1]).map(c => c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : c.startsWith(":") ? "left" : "");
   i += 2;
   const wrap = el("div", "table-wrap");
@@ -644,9 +648,11 @@ function mdTable(lines, i, parent) {
     });
     return tr;
   };
-  const thead = el("thead");
-  thead.append(row(head, "th"));
-  table.append(thead);
+  if (head.some(c => c)) {
+    const thead = el("thead");
+    thead.append(row(head, "th"));
+    table.append(thead);
+  }
   const tbody = el("tbody");
   while (i < lines.length && lines[i].trim() && lines[i].includes("|")) tbody.append(row(tableCells(lines[i++]), "td"));
   if (tbody.children.length) table.append(tbody);
