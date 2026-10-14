@@ -64,6 +64,16 @@ func (b *Bus) Subscribe(runID string) ([]frame, chan frame) {
 	return hist, ch
 }
 
+// Subscribed reports whether a UI stream is attached to the run.
+func (b *Bus) Subscribed(runID string) bool {
+	if b == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.subs[runID]) > 0
+}
+
 func (b *Bus) Unsubscribe(runID string, ch chan frame) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

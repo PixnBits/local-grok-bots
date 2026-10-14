@@ -27,6 +27,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/bots/{id}/thread/stream", a.handleStream)
 	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/cancel", a.handleCancel)
 	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/continue", a.handleContinue)
+	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/permissions/{req_id}", a.handlePermissionDecision)
+	mux.HandleFunc("POST /api/mcp/permission/{token}", a.handleMCPPermission)
 	mux.HandleFunc("GET /api/bots/{id}/memory", a.handleListMemory)
 	mux.HandleFunc("POST /api/bots/{id}/memory", a.handlePutMemory)
 	mux.HandleFunc("DELETE /api/bots/{id}/memory/{key}", a.handleDeleteMemory)
@@ -46,7 +48,7 @@ func (a *App) Handler() http.Handler {
 
 func (a *App) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/health" || a.cfg.AuthToken == "" || authorized(r, a.cfg.AuthToken) {
+		if r.URL.Path == "/api/health" || strings.HasPrefix(r.URL.Path, "/api/mcp/permission/") || a.cfg.AuthToken == "" || authorized(r, a.cfg.AuthToken) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -433,6 +435,9 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	hist, ch := a.bus.Subscribe(runID)
 	defer a.bus.Unsubscribe(runID, ch)
+	// Flush headers so a permission client counts as present before the next event.
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
 	for _, f := range hist {
 		if _, err := w.Write(f.bytes()); err != nil {
 			return

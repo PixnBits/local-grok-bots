@@ -12,6 +12,8 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/dlp"
 	"github.com/PixnBits/local-grok-bots/internal/id"
+	"github.com/PixnBits/local-grok-bots/internal/permission"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
@@ -79,9 +81,15 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	}
 	var streamed bool
 	var pid int
+	mode := a.policy.PermissionMode
+	if policy.IsBypassMode(mode) && !a.policy.ManagedBypass {
+		mode = ""
+	}
 	spec := clisession.Spec{
 		Backend: backend, SessionID: sessionID, Fresh: fresh,
-		Prompt: prompt, Workspace: ws, PermissionMode: a.policy.PermissionMode,
+		Prompt: prompt, Workspace: ws, PermissionMode: mode,
+		AllowRules: append([]string(nil), a.policy.ToolAllow...),
+		DenyRules:  append([]string(nil), a.policy.ToolDeny...),
 		OnStart: func(child int) {
 			if child <= 0 {
 				return
@@ -93,6 +101,12 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	}
 	if bot.Model != nil {
 		spec.Model = strings.TrimSpace(*bot.Model)
+	}
+	if strings.EqualFold(backend, "claude") && a.policy.UIPrompts && strings.TrimSpace(a.permBase) != "" {
+		tok := a.registerPerm(bot.ID, runID, sessionID)
+		defer a.unregisterPerm(tok)
+		spec.MCPConfig = permissionMCPConfig(a.permBase, tok)
+		spec.PermissionTool = permissionToolName
 	}
 	res, err := runner.Run(turnCtx, spec, func(ev clisession.Event) {
 		switch ev.Kind {
@@ -123,6 +137,12 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 			body := clip(audit.RedactText(ev.Text), 4000)
 			a.bus.Publish(runID, "tool_result", map[string]any{"name": name, "ok": true, "result_or_error": body})
 			a.log(bot.ID, "tool_end", map[string]any{"name": name, "ok": true})
+		case "permission_decision":
+			a.noteCLIPermission(bot.ID, runID, ev.ToolName, ev.ToolArgs)
+		case "end":
+			for _, d := range ev.Denials {
+				a.noteCLIPermission(bot.ID, runID, d.Tool, d.Args)
+			}
 		}
 	})
 	if pid > 0 {
@@ -212,6 +232,15 @@ func (a *App) screenDLP(ctx context.Context, botID, runID, backend, content stri
 	}
 	a.failCLI(botID, runID, backend, err)
 	return err
+}
+
+func (a *App) noteCLIPermission(botID, runID, tool string, args map[string]any) {
+	if a.perm == nil {
+		return
+	}
+	a.perm.Record(permission.Request{
+		RunID: runID, BotID: botID, Tool: tool, Args: args,
+	}, permission.Deny, "cli", "")
 }
 
 func (a *App) auditCLI(event, backend, sessionID string, pid int, result string) {

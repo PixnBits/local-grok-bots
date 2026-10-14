@@ -24,6 +24,10 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "--lgb-fake-claude" {
+		fakeClaudeMain()
+		return
+	}
 	if sandbox.HandleArgs(os.Args[1:]) {
 		return
 	}

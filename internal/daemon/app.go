@@ -14,6 +14,7 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/config"
 	"github.com/PixnBits/local-grok-bots/internal/model"
+	"github.com/PixnBits/local-grok-bots/internal/permission"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
@@ -42,6 +43,12 @@ type App struct {
 	ws     string
 	bus    *Bus
 	policy policy.Policy
+	perm   *permission.Broker
+	// permBase is the HTTP origin the CLI calls back, such as http://127.0.0.1:8787.
+	// Empty means there is no permission host. A headless prompt still fails closed.
+	permBase   string
+	permMu     sync.Mutex
+	permTokens map[string]permBind
 	// runner, when set, replaces the real CLI exec. Tests use it.
 	runner clisession.Runner
 	// cliTTY, when set, overrides /dev/tty detection for permission prompts.
@@ -107,20 +114,35 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{
-		cfg:      cfg,
-		st:       st,
-		model:    m,
-		ws:       cfg.Workspace(),
-		bus:      NewBus(),
-		policy:   pol,
-		audit:    aud,
-		ctx:      ctx,
-		cancel:   cancel,
-		loops:    map[string]*loopState{},
-		resume:   map[string]resumeHold{},
-		pending:  map[string][]model.Message{},
-		activity: map[string]time.Time{},
+		cfg:        cfg,
+		st:         st,
+		model:      m,
+		ws:         cfg.Workspace(),
+		bus:        NewBus(),
+		policy:     pol,
+		audit:      aud,
+		ctx:        ctx,
+		cancel:     cancel,
+		loops:      map[string]*loopState{},
+		resume:     map[string]resumeHold{},
+		pending:    map[string][]model.Message{},
+		activity:   map[string]time.Time{},
+		permTokens: map[string]permBind{},
+		permBase:   httpBase(cfg.BindAddr),
 	}
+	a.perm = permission.New(permission.Options{
+		Publish: func(runID, event string, payload any) {
+			a.bus.Publish(runID, event, payload)
+		},
+		UIPresent: func(runID string) bool {
+			return a.bus.Subscribed(runID)
+		},
+		Audit: func(fields map[string]any) {
+			if a.audit != nil && a.audit.Enabled() {
+				a.audit.Write(fields)
+			}
+		},
+	})
 	if err := mkdirWorkspace(a.ws); err != nil {
 		st.Close()
 		_ = aud.Close()
