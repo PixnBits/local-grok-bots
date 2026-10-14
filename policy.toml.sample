@@ -54,6 +54,14 @@ imminent_timer_minutes = 2
 # set one, after InfoSec has approved it for unattended timers.
 # permission_mode = "default"
 #
+# [cli.isolation]
+# Workspace .claude/, .mcp.json, CLAUDE.md, AGENTS.md, and .grok/ files are
+# never obeyed. ignore tells the CLI not to load them; refuse fails the turn.
+# home = "user" and env are honored only from managed policy.
+# See docs/cli-isolation.md.
+# overrides = "ignore"
+# home = "isolated"
+#
 # [cli.permission]
 # mode is the same knob as permission_mode above. The table wins when both
 # are set. always-allow / bypass / dontAsk, and allow_session_grants, are
