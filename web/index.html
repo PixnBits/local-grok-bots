@@ -74,6 +74,9 @@
   .view { display: none; flex: 1; min-height: 0; }
   .view.on { display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
   #view-chat.on { overflow: hidden; }
+  /* In the scrolling views, panels keep their full height and the view
+     scrolls; without this, flex shrinks them and forms spill out. */
+  #view-bots > *, #view-profile > * { flex-shrink: 0; }
   .create, .profile { padding: 14px; display: grid; gap: 8px; }
   .grants { border: 1px solid var(--line); border-radius: 10px; margin: 0; padding: 8px 12px; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
   .grants legend { padding: 0 6px; color: var(--muted); }
