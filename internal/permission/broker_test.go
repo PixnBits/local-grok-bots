@@ -148,7 +148,7 @@ func TestTimeoutDenies(t *testing.T) {
 	if time.Since(start) > 2*time.Second {
 		t.Fatalf("timeout took %s", time.Since(start))
 	}
-	if err := b.DecideFor("bot", "run", out.ID, Deny); !errors.Is(err, ErrNotFound) {
+	if err := b.DecideFor("bot", "run", out.ID, Deny); !errors.Is(err, ErrDecided) {
 		t.Fatalf("deciding a finished request: %v", err)
 	}
 }

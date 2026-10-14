@@ -27,6 +27,8 @@ var (
 	ErrMismatch     = errors.New("permission request does not belong to this run")
 	ErrSessionGrant = errors.New("session grants are not permitted by policy")
 	ErrDecision     = errors.New("decision must be allow_once, deny, or allow_session")
+	// ErrDecided means the request was already answered or timed out.
+	ErrDecided = errors.New("permission request already decided")
 )
 
 // Hook is consulted before policy rules. An empty Decision continues.
@@ -88,7 +90,17 @@ type Broker struct {
 	hooks   []Hook
 	pending map[string]*wait
 	grants  map[string][]string
+	// decided remembers answered request ids so a second answer is refused
+	// rather than reported as unknown. Entries expire after decidedTTL.
+	decided map[string]decidedEntry
 }
+
+type decidedEntry struct {
+	botID, runID string
+	at           time.Time
+}
+
+const decidedTTL = 30 * time.Minute
 
 type wait struct {
 	id        string
@@ -110,6 +122,7 @@ func New(opts Options) *Broker {
 		now:       opts.Now,
 		newID:     opts.NewID,
 		pending:   map[string]*wait{},
+		decided:   map[string]decidedEntry{},
 		grants:    map[string][]string{},
 	}
 	if b.now == nil {
@@ -210,6 +223,9 @@ func (b *Broker) DecideFor(botID, runID, reqID, decision string) error {
 	defer b.mu.Unlock()
 	w := b.pending[reqID]
 	if w == nil {
+		if d, ok := b.decided[reqID]; ok && d.botID == botID && d.runID == runID {
+			return ErrDecided
+		}
 		return ErrNotFound
 	}
 	if w.botID != botID || w.runID != runID {
@@ -219,9 +235,9 @@ func (b *Broker) DecideFor(botID, runID, reqID, decision string) error {
 		return ErrSessionGrant
 	}
 	if !w.resolve(decision) {
-		return ErrNotFound
+		return ErrDecided
 	}
-	delete(b.pending, reqID)
+	b.markDecidedLocked(w)
 	if decision == AllowSession {
 		b.rememberLocked(w)
 	}
@@ -306,7 +322,19 @@ func (b *Broker) finishWait(w *wait, kind string) {
 	if !w.resolve(kind) {
 		return
 	}
+	b.markDecidedLocked(w)
+}
+
+// markDecidedLocked moves a resolved wait out of pending. Callers hold b.mu.
+func (b *Broker) markDecidedLocked(w *wait) {
 	delete(b.pending, w.id)
+	now := b.now()
+	for id, d := range b.decided {
+		if now.Sub(d.at) > decidedTTL {
+			delete(b.decided, id)
+		}
+	}
+	b.decided[w.id] = decidedEntry{botID: w.botID, runID: w.runID, at: now}
 }
 
 func (w *wait) resolve(decision string) bool {

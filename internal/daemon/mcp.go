@@ -128,6 +128,8 @@ func (a *App) handlePermissionDecision(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	case errors.Is(err, permission.ErrDecision):
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+	case errors.Is(err, permission.ErrDecided):
+		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
 	case errors.Is(err, permission.ErrSessionGrant):
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 	case errors.Is(err, permission.ErrNotFound), errors.Is(err, permission.ErrMismatch):
