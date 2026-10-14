@@ -46,10 +46,9 @@ imminent_timer_minutes = 2
 # Optional hard deadline on a CLI turn (seconds or Go duration, e.g. "30m").
 # Empty keeps existing behavior (idle kill + shutdown govern).
 # turn_timeout = ""
-# Permission mode must match what InfoSec has approved for headless use.
-# "bypassPermissions" is the likely requirement for unattended timers;
-# that is an InfoSec conversation, not something the daemon invents.
-permission_mode = "bypassPermissions"
+# Permission mode is a policy setting. Value comes from managed settings
+# or this file after the InfoSec conversation. Empty fails the turn.
+# permission_mode = "default"
 # Optional binary pins. Prefer path + SHA-256. Empty keeps PATH launch.
 # pins = [
 #   { path = "/usr/local/bin/claude", sha256 = "..." },

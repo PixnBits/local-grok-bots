@@ -33,6 +33,10 @@ Timer injection is resume-with-prompt only.
 
 When a timer fires, the daemon spawns (or resumes) the CLI with the routine prompt prefixed `[scheduled]`. No append-only file, Unix socket, or other side channel is required or implemented. The resume invocation is the injection. This keeps the daemon thin and avoids extra doors into the CLI's sandbox.
 
+## Permission mode
+
+`permission_mode` is a policy setting. Its value is supplied by managed settings or by the local policy file after the InfoSec conversation. The daemon does not invent a default. An empty or missing value fails the CLI turn (fail-closed). Unattended timers are possible only when InfoSec has approved a mode that allows them.
+
 ## Status
 
-These three are locked. The remaining open item is the InfoSec conversation on `bypassPermissions` for unattended timers; that does not change the architecture.
+The three questions above are locked. Permission mode is a configurable policy field, not an open design question.
