@@ -100,7 +100,7 @@ func versionMatches(ctx context.Context, path, want string) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, path, "--version")
-	cmd.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+	cmd.Env = []string{"PATH=/opt/homebrew/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
 	out, err := cmd.CombinedOutput()
 	if len(out) > 8192 {
 		out = out[:8192]
