@@ -516,6 +516,11 @@ func installCLIStub(t *testing.T, dir, name string) {
 		t.Fatal(err)
 	}
 	script := `#!/bin/sh
+if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
+  [ -n "$LGB_AUTH_LOG" ] && env > "$LGB_AUTH_LOG"
+  printf '{"loggedIn":true,"authMethod":"%s","configDirectory":"%s"}\n' "${LGB_AUTH_METHOD:-claude.ai}" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  exit 0
+fi
 if [ -n "$LGB_ARGV_LOG" ]; then
   printf '%s\n' "$@" >> "$LGB_ARGV_LOG"
   printf '\n---\n' >> "$LGB_ARGV_LOG"

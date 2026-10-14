@@ -2,11 +2,15 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
@@ -301,14 +305,99 @@ func (a *App) cliIsolation(botID, backend, ws string) (*clisession.Isolation, er
 		Extra:    a.policy.CLIEnv,
 	}
 	opts.UserHome, _ = os.UserHomeDir()
-	if isolated {
+	ownHome := isolated
+	if strings.EqualFold(backend, "claude") {
+		// On macOS Claude's login is in the Keychain, found through the real
+		// HOME and default config dir; claude_home = auto keeps both there.
+		ownHome = !a.policy.ClaudeUsesUserHome(cliGOOS)
+	}
+	if ownHome {
 		opts.Home = filepath.Join(state, "home")
 	}
 	iso, err := clisession.PrepareIsolation(opts)
 	if err != nil {
 		return nil, err
 	}
+	if strings.EqualFold(backend, "claude") {
+		if _, seen := a.loginChecked.LoadOrStore(botID, true); !seen {
+			a.recordClaudeLogin(botID, ws, iso, ownHome)
+		}
+	}
 	return &iso, nil
+}
+
+// cliGOOS is the OS the Claude home default is chosen for. Tests set it.
+var cliGOOS = runtime.GOOS
+
+// claudeLoginSource names where Claude should find its login under this
+// launch, from what the daemon set up. No secret value is read or logged.
+func claudeLoginSource(iso clisession.Isolation, ownHome bool, goos string) string {
+	for _, kv := range iso.Env {
+		switch {
+		case strings.HasPrefix(kv, "CLAUDE_CODE_OAUTH_TOKEN="):
+			return "env_oauth_token"
+		case strings.HasPrefix(kv, "ANTHROPIC_API_KEY="):
+			return "env_api_key"
+		}
+	}
+	if ownHome {
+		if _, err := os.Lstat(filepath.Join(iso.Home, ".claude", ".credentials.json")); err == nil {
+			return "credentials_symlink"
+		}
+		return "none_found"
+	}
+	if goos == "darwin" {
+		return "keychain_or_user_home"
+	}
+	return "user_home"
+}
+
+// recordClaudeLogin logs, once per bot per daemon run, the login source the
+// launch provides (an API key is reported before an OAuth token, as Claude
+// orders them) and what "claude auth status" reports under the same
+// environment: its authMethod, loggedIn, and configDirectory only.
+func (a *App) recordClaudeLogin(botID, ws string, iso clisession.Isolation, ownHome bool) {
+	fields := map[string]any{
+		"backend": "claude", "os": cliGOOS, "own_home": ownHome,
+		"source": claudeLoginSource(iso, ownHome, cliGOOS),
+	}
+	if path, err := exec.LookPath("claude"); err == nil {
+		ctx, cancel := context.WithTimeout(a.ctx, 10*time.Second)
+		cmd := exec.CommandContext(ctx, path, "auth", "status")
+		cmd.Env = append([]string{}, iso.Env...)
+		cmd.Dir = ws
+		out, runErr := cmd.Output()
+		cancel()
+		var st struct {
+			LoggedIn   *bool  `json:"loggedIn"`
+			AuthMethod string `json:"authMethod"`
+			ConfigDir  string `json:"configDirectory"`
+		}
+		if json.Unmarshal(out, &st) == nil {
+			fields["auth_method"] = clip(st.AuthMethod, 40)
+			if st.LoggedIn != nil {
+				fields["logged_in"] = *st.LoggedIn
+			}
+			if st.ConfigDir != "" {
+				fields["config_directory"] = clip(st.ConfigDir, 400)
+			}
+		} else {
+			fields["auth_status"] = "unparsed"
+		}
+		if runErr != nil {
+			fields["auth_status_error"] = clip(runErr.Error(), 200)
+		}
+	} else {
+		fields["auth_status"] = "claude not on PATH"
+	}
+	a.log(botID, "cli_login", fields)
+	if a.audit != nil && a.audit.Enabled() {
+		rec := map[string]any{"event": "cli_login", "bot_id": botID}
+		for k, v := range fields {
+			rec[k] = v
+		}
+		a.audit.Write(rec)
+	}
 }
 
 // cliWorkspace is the CLI process cwd. It is not a jail.

@@ -59,13 +59,15 @@ type App struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 
-	rtMu     sync.Mutex
-	loops    map[string]*loopState
-	resume   map[string]resumeHold
-	pending  map[string][]model.Message
-	activity map[string]time.Time
-	closing  bool
-	wg       sync.WaitGroup
+	rtMu sync.Mutex
+	// loginChecked holds bot ids whose Claude login source was recorded.
+	loginChecked sync.Map
+	loops        map[string]*loopState
+	resume       map[string]resumeHold
+	pending      map[string][]model.Message
+	activity     map[string]time.Time
+	closing      bool
+	wg           sync.WaitGroup
 }
 
 func New(cfg config.Config, m model.Client) (*App, error) {
