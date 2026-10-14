@@ -589,7 +589,7 @@ function mdLines(lines, parent) {
       while (i < lines.length && /^\s*>/.test(lines[i])) body.push(lines[i++].replace(/^\s*>\s?/, ""));
       const q = el("blockquote"); mdLines(body, q); parent.append(q); continue;
     }
-    if (isList(line)) {
+    if (isList(line) && line.search(/\S/) < 2) {
       const ordered = /^\s*\d/.test(line);
       const list = el(ordered ? "ol" : "ul");
       if (ordered) {
@@ -616,8 +616,11 @@ function mdLines(lines, parent) {
       parent.append(list);
       continue;
     }
-    const para = [];
-    while (i < lines.length && lines[i].trim() && !/^\s*(```|~~~|#{1,6}\s|>)/.test(lines[i]) && !(para.length && isList(lines[i]))) {
+    // The first line always joins the paragraph, so a line no block rule
+    // took (a fence with an info string, an indented list marker) cannot
+    // stall the loop.
+    const para = [lines[i++]];
+    while (i < lines.length && lines[i].trim() && !/^\s*(```|~~~|#{1,6}\s|>)/.test(lines[i]) && !isList(lines[i])) {
       para.push(lines[i++]);
     }
     const p = el("p");

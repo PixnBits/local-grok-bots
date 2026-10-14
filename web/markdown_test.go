@@ -2,12 +2,14 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The page's markdown renderer runs under node when node is installed.
@@ -49,13 +51,19 @@ console.log(JSON.stringify(cases.map(c=>h(renderMarkdown(c,new N("div"))))));
 		{"```\n<b>\n```", "<div><pre><code>&lt;b></code></pre></div>"},
 		{"[x](javascript:alert(1)) [y](https://e.com)", "<div><p>[x](javascript:alert(1)) <a href=\"https://e.com\">y</a></p></div>"},
 		{"snake_case_name", "<div><p>snake_case_name</p></div>"},
+		// Lines no block rule takes must not stall the renderer.
+		{"```bash title\nx", "<div><p>```bash title<br></br>x</p></div>"},
+		{"   - deep", "<div><p>   - deep</p></div>"},
+		{"a\n```", "<div><p>a</p><pre><code></code></pre></div>"},
 	}
 	inputs := make([]string, len(cases))
 	for k, c := range cases {
 		inputs[k] = c.in
 	}
 	raw, _ := json.Marshal(inputs)
-	cmd := exec.Command(node, path)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, node, path)
 	cmd.Stdin = bytes.NewReader(raw)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
