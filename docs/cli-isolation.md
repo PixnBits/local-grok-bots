@@ -13,8 +13,12 @@ cannot guarantee that.
 # refuse: any workspace override file fails the turn closed.
 overrides = "ignore"
 # isolated (default): per-bot HOME under DATA_DIR/cli/<bot>/home.
-# user: the daemon user's HOME. Only managed policy can set this.
+# user: the daemon user's HOME for every backend. Only managed policy can set this.
 home = "isolated"
+# Claude only. auto (default): the user's HOME on macOS, isolated elsewhere.
+# isolated: per-bot HOME on every OS. user: managed policy only.
+# home = "user" overrides this.
+claude_home = "auto"
 # Added to the scrubbed environment. Only managed policy can set this.
 # env = { ANTHROPIC_BASE_URL = "https://gateway.corp.example" }
 ```
@@ -36,6 +40,38 @@ shared with the user's home is a symlink to the login credential
 servers, skills, memory, and folder-trust grants stay behind. Sessions live in
 the per-bot home, so a session started before this change cannot be resumed;
 the bot starts a fresh one.
+
+### Claude home per OS
+
+Claude on macOS keeps its login in the Keychain, and a different
+`CLAUDE_CONFIG_DIR` or `HOME` may keep it from finding that login. So under
+`claude_home = "auto"`:
+
+| OS | HOME | CLAUDE_CONFIG_DIR | Login |
+| --- | --- | --- | --- |
+| darwin | the user's | not set (an inherited value is dropped) | Keychain / `~/.claude` as normal |
+| linux and others | `DATA_DIR/cli/<bot>/home` | `<home>/.claude` | symlinked `.credentials.json` |
+
+On macOS, isolation then rests on `--setting-sources=`, the daemon
+`--settings` file, `--strict-mcp-config`, and the scrubbed environment. User
+settings, `~/.claude/CLAUDE.md`, user hooks, and `~/.claude.json` MCP servers
+still exist on disk but are not loaded, given the setting sources and strict MCP
+config. Claude can still write session transcripts and other state under the
+user's `~/.claude`. Grok is unchanged and always gets its own `GROK_HOME`.
+
+### Login source record
+
+On each bot's first Claude turn after the daemon starts, the daemon writes a
+`cli_login` entry to the bot log and the audit sink with:
+
+- `source`: what the launch provides. In order: `env_api_key`,
+  `env_oauth_token` (variable names only), then `credentials_symlink` or
+  `none_found` for an isolated home, or `keychain_or_user_home` (darwin) /
+  `user_home` for the user's home;
+- `os` and `own_home`;
+- from `claude auth status` run with the same environment and cwd (10 s
+  limit): `auth_method`, `logged_in`, and `config_directory`. Nothing else
+  from its output is kept.
 
 ### Claude
 
@@ -94,6 +130,15 @@ Under `overrides = "refuse"` every hit fails the turn with
 - Claude was not installed on the test machine. The flags come from the CLI
   reference and the Agent SDK source; that `--setting-sources=` with an empty
   list also skips project `CLAUDE.md`, and that the credential symlink works
-  with `CLAUDE_CONFIG_DIR`, need a live run. On macOS Claude keeps its login in
-  the Keychain, keyed in part by the config dir, so an isolated home may need
-  `ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` or managed `home = "user"`.
+  with `CLAUDE_CONFIG_DIR`, need a live run.
+- macOS is compile-checked and tested only through an OS seam on Linux
+  (fake CLI). On a real Mac, check that under `claude_home = "auto"`:
+  - `claude auth status` reports a logged-in Keychain method;
+  - a turn authenticates without an API key;
+  - user `~/.claude/settings.json` hooks and allow rules and `~/.claude.json`
+    MCP servers really don't apply;
+  - `cli_login` shows `keychain_or_user_home` with the expected
+    `config_directory`.
+  Also check whether `claude_home = "isolated"` on macOS loses the Keychain
+  login, as expected, and whether `claude auth status` JSON has the
+  `configDirectory` field (CLI v2.1.268 or later).
