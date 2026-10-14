@@ -169,6 +169,8 @@ type Bot struct {
 	Mark          Mark     `json:"mark"`
 	Pinned        bool     `json:"pinned"`
 	Hidden        bool     `json:"hidden"`
+	Archived      bool     `json:"archived"`
+	ArchivedAt    *string  `json:"archived_at,omitempty"`
 	Grants        []string `json:"grants"`
 	NetAllow      []string `json:"net_allow"`
 	SSHAllow      []string `json:"ssh_allow"`
@@ -390,6 +392,8 @@ func (s *Store) evolve() error {
 		{"timers", "name", "TEXT NOT NULL DEFAULT ''"},
 		{"runs", "input_through", "TEXT"},
 		{"run_tools", "kind", "TEXT NOT NULL DEFAULT 'call'"},
+		{"bots", "archived_at", "TEXT"},
+		{"timers", "archive_paused", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, a := range adds {
 		ok, err := s.hasColumn(a.table, a.col)
@@ -718,14 +722,15 @@ func (s *Store) attachRun(b *Bot) {
 	}
 }
 
-const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, status, model, created_at, updated_at FROM bots`
+const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, status, model, created_at, updated_at, archived_at FROM bots`
 
 func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	var b Bot
 	var model sql.NullString
 	var shape, color, grants, netAllow, sshAllow string
 	var pinned, hidden int
-	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &b.Status, &model, &b.CreatedAt, &b.UpdatedAt)
+	var archived sql.NullString
+	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &b.Status, &model, &b.CreatedAt, &b.UpdatedAt, &archived)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Bot{}, ErrNotFound
 	}
@@ -738,6 +743,11 @@ func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	}
 	b.Pinned = pinned != 0
 	b.Hidden = hidden != 0
+	if archived.Valid && archived.String != "" {
+		a := archived.String
+		b.ArchivedAt = &a
+		b.Archived = true
+	}
 	b.Grants, err = decodeList(grants)
 	if err != nil {
 		return Bot{}, err
@@ -1684,4 +1694,75 @@ func (s *Store) RunTools(runIDs []string) (map[string][]ToolRecord, error) {
 		out[runID] = append(out[runID], rec)
 	}
 	return out, rows.Err()
+}
+
+// SetArchived archives or restores a bot. Archiving keeps every row, stamps
+// archived_at, and pauses the bot's enabled timers, marking them so restore
+// turns back on only those. Restore schedules them from now, so a timer that
+// came due while archived does not fire at once. Unchanged state is a no-op.
+func (s *Store) SetArchived(id string, archived bool, by string) (Bot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, err := s.getBot(id, false)
+	if err != nil {
+		return Bot{}, err
+	}
+	if b.Archived == archived {
+		s.attachRun(&b)
+		return b, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Bot{}, err
+	}
+	defer tx.Rollback()
+	now := FormatTime(Now())
+	if archived {
+		if _, err := tx.Exec(`UPDATE bots SET archived_at=?, updated_at=? WHERE id=?`, now, now, id); err != nil {
+			return Bot{}, err
+		}
+		if _, err := tx.Exec(`UPDATE timers SET enabled=0, archive_paused=1 WHERE bot_id=? AND enabled=1`, id); err != nil {
+			return Bot{}, err
+		}
+	} else {
+		if _, err := tx.Exec(`UPDATE bots SET archived_at=NULL, updated_at=? WHERE id=?`, now, id); err != nil {
+			return Bot{}, err
+		}
+		rows, err := tx.Query(`SELECT id, schedule FROM timers WHERE bot_id=? AND archive_paused=1`, id)
+		if err != nil {
+			return Bot{}, err
+		}
+		type tm struct{ id, schedule string }
+		var paused []tm
+		for rows.Next() {
+			var t tm
+			if err := rows.Scan(&t.id, &t.schedule); err != nil {
+				rows.Close()
+				return Bot{}, err
+			}
+			paused = append(paused, t)
+		}
+		rows.Close()
+		for _, t := range paused {
+			next, err := nextAfter(Now(), t.schedule)
+			if err != nil {
+				return Bot{}, err
+			}
+			if _, err := tx.Exec(`UPDATE timers SET enabled=1, archive_paused=0, next_fire_at=? WHERE id=?`, FormatTime(next), t.id); err != nil {
+				return Bot{}, err
+			}
+		}
+	}
+	field := "archived"
+	if !archived {
+		field = "unarchived"
+	}
+	if err := s.addLogTx(tx, id, "bot_updated", map[string]any{"fields": []string{field}, "by": by, "bot_id": id, "name": b.Name}); err != nil {
+		return Bot{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Bot{}, err
+	}
+	b, err = s.getBot(id, true)
+	return b, err
 }

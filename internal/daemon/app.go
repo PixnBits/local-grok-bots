@@ -190,7 +190,8 @@ func (a *App) kickLocked(botID string) string {
 		return ""
 	}
 	bot, err := a.st.GetBot(botID)
-	if err != nil || bot.Status == "paused" {
+	// An archived bot keeps its queue; restoring it kicks a run.
+	if err != nil || bot.Status == "paused" || bot.Archived {
 		return ""
 	}
 	st := a.loops[botID]

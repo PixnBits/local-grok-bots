@@ -271,6 +271,15 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	var archived *bool
+	if v, ok := raw["archived"]; ok {
+		var on bool
+		if err := json.Unmarshal(v, &on); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid archived"})
+			return
+		}
+		archived = &on
+	}
 	var setIdle bool
 	if v, ok := raw["status"]; ok {
 		var status string
@@ -297,6 +306,15 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
+	}
+	if archived != nil {
+		if _, err := a.st.SetArchived(id, *archived, "user"); err != nil {
+			writeErr(w, err)
+			return
+		}
+		if !*archived {
+			a.kick(id)
+		}
 	}
 	if patch.Status != nil && *patch.Status == "paused" {
 		a.cancelBot(id)

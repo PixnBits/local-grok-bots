@@ -247,6 +247,7 @@
         <div class="row">
           <button class="primary" type="submit">Create bot</button>
           <button type="button" id="show-hidden" class="ghost">Show hidden</button>
+          <button type="button" id="show-archived" class="ghost">Archived</button>
         </div>
         <div class="err" id="create-err"></div>
       </form>
@@ -265,7 +266,7 @@
               <button type="button" data-act="pin" role="menuitem" id="menu-pin">Pin</button>
               <button type="button" data-act="hide" role="menuitem" id="menu-hide">Hide</button>
               <button type="button" data-act="duplicate" role="menuitem">Duplicate</button>
-              <button type="button" data-act="delete" class="danger" role="menuitem">Delete</button>
+              <button type="button" data-act="archive" role="menuitem" id="menu-archive">Archive</button>
             </div>
           </div>
         </div>
@@ -357,6 +358,7 @@ const state = {
   streamCtl: null,
   streaming: "",
   showHidden: false,
+  showArchived: false,
   mark: {shape: "circle", color: "#1b654c"},
   desktopLog: false
 };
@@ -424,19 +426,25 @@ function currentBot() { return state.bots.find(b => b.id === state.botId) || nul
 function renderBots() {
   const list = $("#bot-list");
   list.replaceChildren();
-  const visible = state.bots.filter(b => state.showHidden || !b.hidden);
-  const hiddenCount = state.bots.filter(b => b.hidden).length;
+  // The archived view lists only archived bots; the normal roster never does.
+  const live = state.bots.filter(b => !b.archived);
+  const archived = state.bots.filter(b => b.archived);
+  const visible = state.showArchived ? archived : live.filter(b => state.showHidden || !b.hidden);
+  const hiddenCount = live.filter(b => b.hidden).length;
   $("#show-hidden").textContent = state.showHidden ? "Hide hidden" : (hiddenCount ? "Show hidden (" + hiddenCount + ")" : "Show hidden");
+  $("#show-hidden").hidden = state.showArchived;
+  $("#show-archived").textContent = state.showArchived ? "Back to bots" : "Archived (" + archived.length + ")";
+  $("#show-archived").hidden = !state.showArchived && !archived.length;
   if (!visible.length) {
-    list.append(el("p", "empty", state.bots.length ? "Every bot is hidden." : "No bots yet. Create one to start a thread."));
+    list.append(el("p", "empty", state.showArchived ? "No archived bots." : live.length ? "Every bot is hidden." : "No bots yet. Create one to start a thread."));
   }
   for (const b of visible) {
-    const btn = el("button", "bot" + (b.hidden ? " dim" : ""));
+    const btn = el("button", "bot" + (b.hidden || b.archived ? " dim" : ""));
     btn.type = "button";
     const copy = el("span", "bot-copy");
     copy.append(el("strong", null, b.name));
     copy.append(el("small", null, b.label || ""));
-    btn.append(markEl(b.mark), copy, statusNode(b.status));
+    btn.append(markEl(b.mark), copy, b.archived ? el("span", "status", "archived") : statusNode(b.status));
     btn.addEventListener("click", () => openBot(b.id));
     list.append(btn);
   }
@@ -463,7 +471,18 @@ function paintHeader(b) {
   $("#thread-label").textContent = b.label || "";
   $("#menu-pin").textContent = b.pinned ? "Unpin" : "Pin";
   $("#menu-hide").textContent = b.hidden ? "Unhide" : "Hide";
+  $("#menu-archive").textContent = b.archived ? "Unarchive" : "Archive";
   const note = $("#run-note");
+  if (b.archived) {
+    note.hidden = false;
+    note.className = "note continue";
+    note.replaceChildren(document.createTextNode("Archived. Routines are paused and new messages wait until it is restored. "));
+    const btn = el("button", "primary", "Unarchive");
+    btn.type = "button";
+    btn.addEventListener("click", () => setArchived(b.id, false));
+    note.append(btn);
+    return;
+  }
   const offer = !state.streaming && b.status !== "running" && b.last_run_error === "tool round limit" && b.continue_run_id;
   if (offer) {
     note.hidden = false;
@@ -809,6 +828,10 @@ $("#create-form").addEventListener("submit", async (e) => {
     openBot(bot.id);
   } catch (err) { $("#create-err").textContent = err.message; }
 });
+$("#show-archived").addEventListener("click", () => {
+  state.showArchived = !state.showArchived;
+  renderBots();
+});
 $("#show-hidden").addEventListener("click", () => {
   state.showHidden = !state.showHidden;
   renderBots();
@@ -980,16 +1003,18 @@ $("#bot-menu").addEventListener("click", async (e) => {
       await loadBots();
       if (!(b && b.hidden)) setView("bots");
     } else if (act === "duplicate") { await duplicateBot(state.botId); }
-    else if (act === "delete") { await deleteBot(); }
+    else if (act === "archive") { await setArchived(state.botId, !(b && b.archived)); }
   } catch (err) {
     showRunError(err.message);
   }
 });
-async function deleteBot() {
-  if (!confirm("Delete this bot and its thread?")) return;
-  await api("/api/bots/" + state.botId, {method:"DELETE"});
-  goHome();
+// Archive keeps the bot, its thread, and its routines (paused). The main UI
+// has no delete; DELETE /api/bots/{id} stays in the API.
+async function setArchived(id, archived) {
+  await api("/api/bots/" + id, {method:"PATCH", body: JSON.stringify({archived})});
   await loadBots();
+  if (archived) { state.showArchived = false; goHome(); renderBots(); }
+  else { state.showArchived = false; renderBots(); if (state.botId === id) await refreshBot(); }
 }
 async function duplicateBot(id) {
   const full = await api("/api/bots/" + id);
