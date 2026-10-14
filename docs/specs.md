@@ -156,6 +156,8 @@ Optional gate: if `AUTH_TOKEN` is set in the daemon environment, require `Author
 
 Tools the model can call. Each is logged on start and on finish. Every model call sends the whole list in Ollama's `tools` field as JSON Schema objects: each argument has a `type` and a `description` with an example. There is no discovery tool or step. A call missing a required argument, or with arguments in the wrong shape, fails with an error that names the problem and lists the tool's expected arguments. The system prompt starts with the current time in RFC 3339 and the daemon's time zone. It also states that the attached tools are the current, authoritative set and override anything said earlier in the conversation or in memory about which tools exist.
 
+Tool-change notices: each bot stores the SHA-256 and a JSON snapshot of the tool list (names, descriptions, schemas) it last saw, in `bots.tool_hash` and `bots.tool_snapshot`. At the start of every run that is not a continuation, if the current list differs, the daemon posts a thread line `Notice: Tools updated: added X; changed Y (now takes a/b/c); removed Z.` and saves the new snapshot. A bot with no snapshot (one that existed before this) that has replied before gets a one-time `Notice: Tools available now: <names>. ...`; a brand-new bot just records its snapshot. Notice lines reach the model as user messages, show in the thread, do not queue a turn, and are logged as `tools_changed`.
+
 | Tool | Arguments | Effect |
 |---|---|---|
 | list_bots | | `[{id, name, label, status}]` |

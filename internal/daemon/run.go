@@ -56,6 +56,7 @@ func (a *App) execute(botID, runID string) {
 	msgs, ok := a.takePending(runID)
 	if !ok {
 		a.dropResume(botID)
+		a.noteToolChanges(bot)
 		var hist []store.Message
 		msgs, hist, err = a.buildMessagesHist(bot)
 		if err != nil {

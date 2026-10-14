@@ -394,6 +394,8 @@ func (s *Store) evolve() error {
 		{"run_tools", "kind", "TEXT NOT NULL DEFAULT 'call'"},
 		{"bots", "archived_at", "TEXT"},
 		{"timers", "archive_paused", "INTEGER NOT NULL DEFAULT 0"},
+		{"bots", "tool_hash", "TEXT"},
+		{"bots", "tool_snapshot", "TEXT"},
 	}
 	for _, a := range adds {
 		ok, err := s.hasColumn(a.table, a.col)
@@ -1802,4 +1804,25 @@ func (s *Store) SetArchived(id string, archived bool, by string) (Bot, error) {
 	}
 	b, err = s.getBot(id, true)
 	return b, err
+}
+
+// ToolSnapshot returns the hash and JSON snapshot of the tool list the bot
+// last saw. Both are empty when the bot has never had one recorded.
+func (s *Store) ToolSnapshot(botID string) (hash, snapshot string, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var h, sn sql.NullString
+	err = s.db.QueryRow(`SELECT tool_hash, tool_snapshot FROM bots WHERE id=?`, botID).Scan(&h, &sn)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", ErrNotFound
+	}
+	return h.String, sn.String, err
+}
+
+// SetToolSnapshot records the tool list the bot has now been told about.
+func (s *Store) SetToolSnapshot(botID, hash, snapshot string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`UPDATE bots SET tool_hash=?, tool_snapshot=? WHERE id=?`, hash, snapshot, botID)
+	return err
 }
