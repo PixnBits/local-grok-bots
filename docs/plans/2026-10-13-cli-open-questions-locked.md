@@ -35,8 +35,14 @@ When a timer fires, the daemon spawns (or resumes) the CLI with the routine prom
 
 ## Permission mode
 
-`permission_mode` is a policy setting. Its value is supplied by managed settings or by the local policy file after the InfoSec conversation. The daemon does not invent a default. An empty or missing value fails the CLI turn (fail-closed). Unattended timers are possible only when InfoSec has approved a mode that allows them.
+`permission_mode` is a policy setting.
+
+- If unspecified (empty or absent), the daemon runs the CLI in the mode that prompts the user for approval — the same behavior as interactive use. The turn waits for the user (or times out / fails if no one is present).
+- Policy (or managed settings) can set an explicit value, including an always-allow mode, when InfoSec has approved unattended operation for timers.
+- The daemon does not invent an always-allow default.
+
+Unattended timers therefore require an explicit policy choice. Interactive use works with no setting.
 
 ## Status
 
-The three questions above are locked. Permission mode is a configurable policy field, not an open design question.
+The three questions above are locked. Permission mode is a configurable policy field with a prompt-the-user default.
