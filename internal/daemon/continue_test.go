@@ -303,7 +303,7 @@ func TestContinueClearedByTimer(t *testing.T) {
 	bot := createBot(t, srv.URL, "Dora")
 	capped := postUser(t, srv.URL, bot.ID, "look around")
 	waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool { return b.ContinueRunID == capped })
-	tm, err := app.st.CreateTimer(bot.ID, "soon", "1h", "look again", true)
+	tm, err := app.st.CreateTimer(bot.ID, "soon", "1h", "look again", true, "user")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -162,23 +162,25 @@ func decodeList(s string) ([]string, error) {
 }
 
 type Bot struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	Label         string   `json:"label"`
-	Description   string   `json:"description,omitempty"`
-	Mark          Mark     `json:"mark"`
-	Pinned        bool     `json:"pinned"`
-	Hidden        bool     `json:"hidden"`
-	Grants        []string `json:"grants"`
-	NetAllow      []string `json:"net_allow"`
-	SSHAllow      []string `json:"ssh_allow"`
-	Status        string   `json:"status"`
-	Model         *string  `json:"model"`
-	CreatedAt     string   `json:"created_at,omitempty"`
-	UpdatedAt     string   `json:"updated_at,omitempty"`
-	ActiveRunID   *string  `json:"active_run_id,omitempty"`
-	LastRunStatus string   `json:"last_run_status,omitempty"`
-	LastRunError  string   `json:"last_run_error,omitempty"`
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Label       string   `json:"label"`
+	Description string   `json:"description,omitempty"`
+	Mark        Mark     `json:"mark"`
+	Pinned      bool     `json:"pinned"`
+	Hidden      bool     `json:"hidden"`
+	Grants      []string `json:"grants"`
+	NetAllow    []string `json:"net_allow"`
+	SSHAllow    []string `json:"ssh_allow"`
+	Status      string   `json:"status"`
+	Model       *string  `json:"model"`
+	// SessionID is the CLI session. It is not part of the web API.
+	SessionID     string  `json:"-"`
+	CreatedAt     string  `json:"created_at,omitempty"`
+	UpdatedAt     string  `json:"updated_at,omitempty"`
+	ActiveRunID   *string `json:"active_run_id,omitempty"`
+	LastRunStatus string  `json:"last_run_status,omitempty"`
+	LastRunError  string  `json:"last_run_error,omitempty"`
 	// ContinueRunID is not a column. The daemon fills it from the in-memory offer.
 	ContinueRunID string `json:"continue_run_id,omitempty"`
 }
@@ -208,6 +210,8 @@ type Timer struct {
 	Enabled    bool    `json:"enabled"`
 	NextFireAt string  `json:"next_fire_at"`
 	LastFireAt *string `json:"last_fire_at"`
+	// Source is "user" or "bot". Only user timers keep a live CLI past idle.
+	Source string `json:"source,omitempty"`
 }
 
 type Run struct {
@@ -282,6 +286,7 @@ CREATE TABLE IF NOT EXISTS bots (
   ssh_allow TEXT NOT NULL DEFAULT '[]',
   status TEXT NOT NULL DEFAULT 'idle',
   model TEXT,
+  session_id TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -310,7 +315,8 @@ CREATE TABLE IF NOT EXISTS timers (
   prompt TEXT NOT NULL,
   enabled INTEGER NOT NULL,
   next_fire_at TEXT NOT NULL,
-  last_fire_at TEXT
+  last_fire_at TEXT,
+  source TEXT NOT NULL DEFAULT 'user'
 );
 CREATE INDEX IF NOT EXISTS idx_timers_due ON timers(enabled, next_fire_at);
 CREATE TABLE IF NOT EXISTS runs (
@@ -362,7 +368,9 @@ func (s *Store) evolve() error {
 		{"bots", "grants", "TEXT NOT NULL DEFAULT '[]'"},
 		{"bots", "net_allow", "TEXT NOT NULL DEFAULT '[]'"},
 		{"bots", "ssh_allow", "TEXT NOT NULL DEFAULT '[]'"},
+		{"bots", "session_id", "TEXT NOT NULL DEFAULT ''"},
 		{"timers", "name", "TEXT NOT NULL DEFAULT ''"},
+		{"timers", "source", "TEXT NOT NULL DEFAULT 'user'"},
 	}
 	for _, a := range adds {
 		ok, err := s.hasColumn(a.table, a.col)
@@ -691,14 +699,14 @@ func (s *Store) attachRun(b *Bot) {
 	}
 }
 
-const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, status, model, created_at, updated_at FROM bots`
+const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, status, model, session_id, created_at, updated_at FROM bots`
 
 func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	var b Bot
 	var model sql.NullString
 	var shape, color, grants, netAllow, sshAllow string
 	var pinned, hidden int
-	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &b.Status, &model, &b.CreatedAt, &b.UpdatedAt)
+	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &b.Status, &model, &b.SessionID, &b.CreatedAt, &b.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Bot{}, ErrNotFound
 	}
@@ -885,6 +893,22 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 	}
 	s.attachRun(&b)
 	return b, nil
+}
+
+// SetBotSession records the CLI session id. It does not write a log row.
+// An idle kill keeps this value so the next turn can --resume.
+func (s *Store) SetBotSession(id, sessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`UPDATE bots SET session_id=? WHERE id=?`, sessionID, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) SetStatus(id, status string) error {
@@ -1170,6 +1194,50 @@ func (s *Store) NeedsRun(botID string) (bool, error) {
 	return pending.String > started.String, nil
 }
 
+// TurnInputs returns the messages for this CLI turn: user text, scheduled
+// prompts, and inbound DMs created after the previous run started and before
+// this run started. Notices are excluded. The daemon store is the source of
+// truth; CLI transcripts are not read.
+func (s *Store) TurnInputs(botID, currentRunID string) ([]Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var current string
+	err := s.db.QueryRow(`SELECT started_at FROM runs WHERE id=?`, currentRunID).Scan(&current)
+	if err != nil {
+		return nil, err
+	}
+	var prev sql.NullString
+	err = s.db.QueryRow(`SELECT started_at FROM runs WHERE bot_id=? AND id!=? ORDER BY started_at DESC LIMIT 1`, botID, currentRunID).Scan(&prev)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	q := `SELECT id, bot_id, thread, role, content, run_id, created_at FROM messages WHERE bot_id=? AND created_at<? AND (
+		(thread='user' AND role='user')
+		OR (thread='user' AND role='system' AND content NOT LIKE 'Notice: %')
+		OR (thread LIKE 'dm:%' AND role='user')
+	)`
+	args := []any{botID, current}
+	if prev.Valid && prev.String != "" {
+		q += ` AND created_at>?`
+		args = append(args, prev.String)
+	}
+	q += ` ORDER BY created_at ASC, id ASC`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Message{}
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) CreateRun(botID string) (Run, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1236,9 +1304,13 @@ func (s *Store) GetRun(id string) (Run, error) {
 	return r, nil
 }
 
-func (s *Store) CreateTimer(botID, name, schedule, prompt string, enabled bool) (Timer, error) {
+func (s *Store) CreateTimer(botID, name, schedule, prompt string, enabled bool, source string) (Timer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	source, err := timerSource(source)
+	if err != nil {
+		return Timer{}, err
+	}
 	d, err := ParseInterval(schedule)
 	if err != nil {
 		return Timer{}, err
@@ -1249,11 +1321,22 @@ func (s *Store) CreateTimer(botID, name, schedule, prompt string, enabled bool) 
 	}
 	t := Timer{
 		ID: id.New(), BotID: botID, Name: strings.TrimSpace(name), Schedule: strings.TrimSpace(schedule), Prompt: prompt,
-		Enabled: enabled, NextFireAt: FormatTime(Now().Add(d)),
+		Enabled: enabled, NextFireAt: FormatTime(Now().Add(d)), Source: source,
 	}
-	_, err = s.db.Exec(`INSERT INTO timers(id, bot_id, name, schedule, prompt, enabled, next_fire_at) VALUES(?,?,?,?,?,?,?)`,
-		t.ID, t.BotID, t.Name, t.Schedule, t.Prompt, en, t.NextFireAt)
+	_, err = s.db.Exec(`INSERT INTO timers(id, bot_id, name, schedule, prompt, enabled, next_fire_at, source) VALUES(?,?,?,?,?,?,?,?)`,
+		t.ID, t.BotID, t.Name, t.Schedule, t.Prompt, en, t.NextFireAt, t.Source)
 	return t, err
+}
+
+func timerSource(source string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "user":
+		return "user", nil
+	case "bot":
+		return "bot", nil
+	default:
+		return "", fmt.Errorf("timer source must be user or bot")
+	}
 }
 
 func (s *Store) ListTimers(botID string) ([]Timer, error) {
@@ -1391,19 +1474,22 @@ func scanTimers(rows *sql.Rows) ([]Timer, error) {
 	return out, rows.Err()
 }
 
-const timerSelect = `SELECT id, bot_id, name, schedule, prompt, enabled, next_fire_at, last_fire_at FROM timers`
+const timerSelect = `SELECT id, bot_id, name, schedule, prompt, enabled, next_fire_at, last_fire_at, source FROM timers`
 
 func scanTimer(sc interface{ Scan(...any) error }) (Timer, error) {
 	var t Timer
 	var en int
 	var last sql.NullString
-	err := sc.Scan(&t.ID, &t.BotID, &t.Name, &t.Schedule, &t.Prompt, &en, &t.NextFireAt, &last)
+	err := sc.Scan(&t.ID, &t.BotID, &t.Name, &t.Schedule, &t.Prompt, &en, &t.NextFireAt, &last, &t.Source)
 	if err != nil {
 		return Timer{}, err
 	}
 	t.Enabled = en == 1
 	if last.Valid {
 		t.LastFireAt = &last.String
+	}
+	if t.Source == "" {
+		t.Source = "user"
 	}
 	return t, nil
 }

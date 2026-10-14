@@ -36,13 +36,22 @@ The middle ground between `main` (Ollama + custom daemon jail) and
 - `docs/plans/2026-10-13-cli-enterprise-controls.md` — pins, DLP, audit,
   turn timeout, and allow-list carried forward.
 
+## Implementation
+
+The first vertical slice is on this branch:
+
+- `internal/policy` loads `policy.toml` (TOML) and an optional managed JSON or TOML file. Precedence is managed settings, then the file, then built-in defaults. A missing or unparseable file fail-closes to daemon jail ON and CLI backends OFF, and the daemon logs that.
+- `backend = ollama` keeps the existing model loop and workspace jail. `claude` or `grok` turns that jail off for the turn and spawns the CLI directly. There is no outer jail around the CLI.
+- Each bot stores `session_id`. The first turn passes `--session-id`. Later turns, including timers, pass `--resume`. Timer text is the routine prompt prefixed with `[scheduled]`.
+- The daemon parses `stream-json` / `streaming-json` into SSE tokens, tool events, and the stored reply. A stream with no final result is `error` / `interrupted`. The web thread is the daemon store. CLI transcript files are not read.
+- A live CLI is process-group killed after `idle_timeout_minutes` (default 30) unless a user-created timer is due within `imminent_timer_minutes` (default 2). The session id is kept.
+- `permission_mode` is passed through only when policy sets it. Empty means the CLI prompts. It is not defaulted to always-allow.
+- Binary pins, DLP prompt scan, CLI start/stop audit, turn timeout, the backend allow-list, and the Ollama model allow-list are enforced when the policy sets them. Unset, they stay off (allow-lists default to ollama, claude, and grok).
+
 ## Open questions
 
-- Does the CLI's headless output format give clean parseable events
-  (tokens, tool calls) or do we scrape text? (stream-json / streaming-json
-  is the documented path.)
-- What does InfoSec say about `bypassPermissions` for unattended
-  timer-driven sessions?
-- Session history lives in the CLI's store (`~/.claude/projects/`,
-  `~/.grok/sessions/`) — live stream capture is preferred for the web
-  thread; direct JSONL parsing is version-fragile for Claude.
+The stream format, history source of truth, timer injection channel, and
+permission-mode default are locked in
+`docs/plans/2026-10-13-cli-open-questions-locked.md`. InfoSec still has to
+choose whether unattended timers may set an always-allow `permission_mode`.
+The daemon does not assume that choice.

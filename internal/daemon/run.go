@@ -26,11 +26,35 @@ func (a *App) execute(botID, runID string) {
 	}
 	a.rtMu.Unlock()
 	defer cancel()
+	a.touchActivity(botID)
 
 	bot, err := a.st.GetBot(botID)
 	if err != nil {
 		a.takePending(runID)
 		a.dropResume(botID)
+		_, _ = a.st.FinishRun(runID, "error", err.Error())
+		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+		return
+	}
+	modelName := a.cfg.Model
+	if bot.Model != nil && *bot.Model != "" {
+		modelName = *bot.Model
+	}
+	if a.policy.UsesCLI() {
+		a.executeCLI(ctx, bot, runID)
+		return
+	}
+	if !a.policy.AllowsBackend("ollama") {
+		a.takePending(runID)
+		a.dropResume(bot.ID)
+		msg := "ollama backend is not allowed by policy"
+		_, _ = a.st.FinishRun(runID, "error", msg)
+		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": msg})
+		return
+	}
+	if err := a.policy.AllowsModel(modelName); err != nil {
+		a.takePending(runID)
+		a.dropResume(bot.ID)
 		_, _ = a.st.FinishRun(runID, "error", err.Error())
 		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
 		return
@@ -47,11 +71,6 @@ func (a *App) execute(botID, runID string) {
 			return
 		}
 	}
-	modelName := a.cfg.Model
-	if bot.Model != nil && *bot.Model != "" {
-		modelName = *bot.Model
-	}
-
 	a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "working"})
 	for round := 0; round < maxToolRounds; round++ {
 		if ctx.Err() != nil {

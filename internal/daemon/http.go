@@ -359,6 +359,7 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.log(id, "user_message", map[string]any{"message_id": msg.ID})
+	a.touchActivity(id)
 	a.dropResume(id)
 	runID := a.kick(id)
 	resp := map[string]any{"message": msg, "run_id": nil}
@@ -551,7 +552,7 @@ func (a *App) handleCreateTimer(w http.ResponseWriter, r *http.Request) {
 	if body.Enabled != nil {
 		enabled = *body.Enabled
 	}
-	t, err := a.st.CreateTimer(id, body.Name, body.Schedule, body.Prompt, enabled)
+	t, err := a.st.CreateTimer(id, body.Name, body.Schedule, body.Prompt, enabled, "user")
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

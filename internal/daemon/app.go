@@ -3,13 +3,18 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/audit"
+	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/config"
 	"github.com/PixnBits/local-grok-bots/internal/model"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
@@ -21,39 +26,74 @@ type resumeHold struct {
 }
 
 type loopState struct {
-	running bool
-	again   bool
-	runID   string
-	cancel  context.CancelFunc
+	running  bool
+	again    bool
+	runID    string
+	cancel   context.CancelFunc
+	cliPID   int
+	idleKill bool
 }
 
 // App is the daemon: HTTP API, turn queue, timers, and the model loop.
 type App struct {
-	cfg   config.Config
-	st    *store.Store
-	model model.Client
-	ws    string
-	bus   *Bus
+	cfg    config.Config
+	st     *store.Store
+	model  model.Client
+	ws     string
+	bus    *Bus
+	policy policy.Policy
+	// runner, when set, replaces the real CLI exec. Tests use it.
+	runner clisession.Runner
+	audit  *audit.Logger
 	// shellDial, when set, is the sandbox proxy's outbound dial. Tests use it.
 	shellDial func(context.Context, string, string) (net.Conn, error)
 	ctx       context.Context
 	cancel    context.CancelFunc
 
-	rtMu    sync.Mutex
-	loops   map[string]*loopState
-	resume  map[string]resumeHold
-	pending map[string][]model.Message
-	closing bool
-	wg      sync.WaitGroup
+	rtMu     sync.Mutex
+	loops    map[string]*loopState
+	resume   map[string]resumeHold
+	pending  map[string][]model.Message
+	activity map[string]time.Time
+	closing  bool
+	wg       sync.WaitGroup
 }
 
 func New(cfg config.Config, m model.Client) (*App, error) {
+	pol, err := policy.Load(policy.Options{
+		Path:           cfg.PolicyPath,
+		ManagedPath:    os.Getenv("MANAGED_POLICY"),
+		EnvBind:        os.Getenv("BIND_ADDR"),
+		EnvOllamaURL:   os.Getenv("OLLAMA_URL"),
+		EnvOllamaModel: os.Getenv("OLLAMA_MODEL"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, w := range pol.Warnings {
+		fmt.Fprintf(os.Stderr, "local-grok-bots: %s\n", w)
+	}
+	if pol.HasBind {
+		cfg.BindAddr = pol.Bind
+	}
+	if pol.HasOllamaHost {
+		cfg.OllamaURL = pol.OllamaHost
+	}
+	if pol.HasOllamaModel {
+		cfg.Model = pol.OllamaModel
+	}
+	aud, err := audit.Open(pol.AuditLog)
+	if err != nil {
+		return nil, err
+	}
 	st, err := store.Open(cfg.DBPath())
 	if err != nil {
+		_ = aud.Close()
 		return nil, err
 	}
 	if err := st.ReconcileOnBoot(cfg.Version); err != nil {
 		st.Close()
+		_ = aud.Close()
 		return nil, err
 	}
 	if m == nil {
@@ -61,19 +101,23 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{
-		cfg:     cfg,
-		st:      st,
-		model:   m,
-		ws:      cfg.Workspace(),
-		bus:     NewBus(),
-		ctx:     ctx,
-		cancel:  cancel,
-		loops:   map[string]*loopState{},
-		resume:  map[string]resumeHold{},
-		pending: map[string][]model.Message{},
+		cfg:      cfg,
+		st:       st,
+		model:    m,
+		ws:       cfg.Workspace(),
+		bus:      NewBus(),
+		policy:   pol,
+		audit:    aud,
+		ctx:      ctx,
+		cancel:   cancel,
+		loops:    map[string]*loopState{},
+		resume:   map[string]resumeHold{},
+		pending:  map[string][]model.Message{},
+		activity: map[string]time.Time{},
 	}
 	if err := mkdirWorkspace(a.ws); err != nil {
 		st.Close()
+		_ = aud.Close()
 		cancel()
 		return nil, err
 	}
@@ -106,6 +150,9 @@ func (a *App) Shutdown() {
 	_ = a.st.FailRunning("shutdown")
 	_ = a.st.AddLog("", "daemon_stop", map[string]any{})
 	_ = a.st.Close()
+	if a.audit != nil {
+		_ = a.audit.Close()
+	}
 }
 
 // Run serves HTTP until ctx is cancelled, then shuts down cleanly.
@@ -147,12 +194,19 @@ func (a *App) timerLoop() {
 			return
 		case <-t.C:
 			a.fireDue()
+			a.killIdle()
 		}
 	}
 }
 
 func (a *App) fireDue() {
 	if a.ctx.Err() != nil {
+		return
+	}
+	a.rtMu.Lock()
+	enabled := a.policy.TimersEnabled
+	a.rtMu.Unlock()
+	if !enabled {
 		return
 	}
 	due, err := a.st.ClaimDueTimers(time.Now().UTC())

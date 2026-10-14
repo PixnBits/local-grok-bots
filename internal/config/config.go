@@ -18,6 +18,9 @@ type Config struct {
 	AuthToken  string
 	Version    string
 	BuildBinds []string
+	// PolicyPath is the policy.toml to load. Empty skips the file and keeps
+	// built-in defaults. The daemon sets this to "policy.toml" unless POLICY_PATH is set.
+	PolicyPath string
 }
 
 func FromEnv() Config {
@@ -29,6 +32,7 @@ func FromEnv() Config {
 		AuthToken:  os.Getenv("AUTH_TOKEN"),
 		Version:    Version,
 		BuildBinds: splitList(os.Getenv("SANDBOX_BUILD_BINDS")),
+		PolicyPath: getenv("POLICY_PATH", "policy.toml"),
 	}
 }
 

@@ -1,0 +1,285 @@
+package daemon
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/PixnBits/local-grok-bots/internal/clisession"
+	"github.com/PixnBits/local-grok-bots/internal/dlp"
+	"github.com/PixnBits/local-grok-bots/internal/id"
+	"github.com/PixnBits/local-grok-bots/internal/store"
+)
+
+func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
+	backend := a.policy.EffectiveBackend()
+	a.takePending(runID)
+	a.dropResume(bot.ID)
+	defer a.clearCLIPID(bot.ID, runID)
+	if !a.policy.AllowsBackend(backend) {
+		a.failCLI(bot.ID, runID, backend, fmt.Errorf("cli backend %q is not allowed by policy", backend))
+		return
+	}
+	inputs, err := a.st.TurnInputs(bot.ID, runID)
+	if err != nil {
+		a.failCLI(bot.ID, runID, backend, err)
+		return
+	}
+	fresh := strings.TrimSpace(bot.SessionID) == ""
+	sessionID := bot.SessionID
+	if fresh {
+		sessionID = id.New()
+		if err := a.st.SetBotSession(bot.ID, sessionID); err != nil {
+			a.failCLI(bot.ID, runID, backend, err)
+			return
+		}
+	}
+	prompt, err := a.cliPrompt(bot, fresh, inputs)
+	if err != nil {
+		if fresh {
+			_ = a.st.SetBotSession(bot.ID, "")
+		}
+		a.failCLI(bot.ID, runID, backend, err)
+		return
+	}
+	if err := a.screenDLP(ctx, bot.ID, runID, backend, prompt); err != nil {
+		if fresh {
+			_ = a.st.SetBotSession(bot.ID, "")
+		}
+		return
+	}
+	ws, err := cliWorkspace(a.ws, bot.ID)
+	if err != nil {
+		if fresh {
+			_ = a.st.SetBotSession(bot.ID, "")
+		}
+		a.failCLI(bot.ID, runID, backend, err)
+		return
+	}
+	turnCtx := ctx
+	if a.policy.TurnTimeout > 0 {
+		var cancel context.CancelFunc
+		turnCtx, cancel = context.WithTimeout(ctx, a.policy.TurnTimeout)
+		defer cancel()
+	}
+	a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "working"})
+	var runner clisession.Runner = clisession.ExecRunner{
+		Policy: a.policy,
+		PinLog: func(backend, path, result string) {
+			a.log(bot.ID, "cli_pin", map[string]any{"backend": backend, "path": path, "result": result})
+		},
+	}
+	if a.runner != nil {
+		runner = a.runner
+	}
+	var streamed bool
+	var pid int
+	spec := clisession.Spec{
+		Backend: backend, SessionID: sessionID, Fresh: fresh,
+		Prompt: prompt, Workspace: ws, PermissionMode: a.policy.PermissionMode,
+		OnStart: func(child int) {
+			if child <= 0 {
+				return
+			}
+			pid = child
+			a.setCLIPID(bot.ID, child)
+			a.auditCLI("cli_start", backend, sessionID, child, "")
+		},
+	}
+	if bot.Model != nil {
+		spec.Model = strings.TrimSpace(*bot.Model)
+	}
+	res, err := runner.Run(turnCtx, spec, func(ev clisession.Event) {
+		switch ev.Kind {
+		case "token":
+			if ev.Text == "" {
+				return
+			}
+			streamed = true
+			a.bus.Publish(runID, "token", map[string]string{"text": ev.Text})
+		case "tool":
+			name := ev.ToolName
+			if name == "" {
+				name = "tool"
+			}
+			args := ev.ToolArgs
+			if args == nil {
+				args = map[string]any{}
+			}
+			redacted := redactValue(args)
+			a.bus.Publish(runID, "status", map[string]any{"state": name, "text": name})
+			a.bus.Publish(runID, "tool_call", map[string]any{"name": name, "arguments": redacted})
+			a.log(bot.ID, "tool_start", map[string]any{"name": name, "arguments": redacted})
+		case "tool_result":
+			name := ev.ToolName
+			if name == "" {
+				name = "tool"
+			}
+			body := clip(secretValRe.ReplaceAllString(ev.Text, "[redacted]"), 4000)
+			a.bus.Publish(runID, "tool_result", map[string]any{"name": name, "ok": true, "result_or_error": body})
+			a.log(bot.ID, "tool_end", map[string]any{"name": name, "ok": true})
+		}
+	})
+	if pid > 0 {
+		result := "ok"
+		if err != nil {
+			result = "error"
+			a.rtMu.Lock()
+			idle := a.loops[bot.ID] != nil && a.loops[bot.ID].idleKill
+			a.rtMu.Unlock()
+			if idle || ctx.Err() != nil || turnCtx.Err() != nil {
+				result = "interrupted"
+			}
+		}
+		a.auditCLI("cli_stop", backend, sessionID, pid, result)
+	}
+	if res.SessionID != "" && res.SessionID != sessionID {
+		_ = a.st.SetBotSession(bot.ID, res.SessionID)
+		sessionID = res.SessionID
+	}
+	text := strings.TrimSpace(res.Text)
+	if text != "" && !streamed {
+		a.bus.Publish(runID, "token", map[string]string{"text": text})
+	}
+	a.log(bot.ID, "model_call", map[string]any{"model": backend, "ok": err == nil, "session_id": sessionID})
+	switch {
+	case a.consumeIdleKill(bot.ID):
+		a.finishCLIInterrupted(bot.ID, runID, text)
+	case a.policy.TurnTimeout > 0 && turnCtx.Err() != nil && ctx.Err() == nil && errors.Is(turnCtx.Err(), context.DeadlineExceeded):
+		if text != "" {
+			a.persistBotText(bot.ID, runID, text)
+		}
+		_, _ = a.st.FinishRun(runID, "error", "turn_timeout")
+		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": "turn_timeout"})
+	case ctx.Err() != nil:
+		if text != "" {
+			a.persistBotText(bot.ID, runID, text)
+		}
+		a.finishInterrupted(bot.ID, runID, ctx)
+	case errors.Is(err, clisession.ErrTruncated) || res.Interrupted:
+		a.finishCLIInterrupted(bot.ID, runID, text)
+	case err != nil:
+		if fresh && strings.TrimSpace(res.SessionID) == "" {
+			_ = a.st.SetBotSession(bot.ID, "")
+		}
+		a.failCLI(bot.ID, runID, backend, err)
+	default:
+		if text != "" {
+			a.persistBotText(bot.ID, runID, text)
+		}
+		_, _ = a.st.FinishRun(runID, "done", "")
+		a.bus.Publish(runID, "done", map[string]any{"run_id": runID})
+	}
+}
+
+func (a *App) finishCLIInterrupted(botID, runID, text string) {
+	if strings.TrimSpace(text) != "" {
+		a.persistBotText(botID, runID, text)
+	}
+	_, _ = a.st.FinishRun(runID, "error", "interrupted")
+	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": "interrupted"})
+}
+
+// cliWorkspace is the CLI process cwd. It is not a jail.
+func cliWorkspace(root, botID string) (string, error) {
+	if strings.TrimSpace(botID) == "" || strings.Contains(botID, "/") || strings.Contains(botID, `\`) || strings.Contains(botID, "..") {
+		return "", fmt.Errorf("invalid bot id")
+	}
+	dir := filepath.Join(root, "bots", botID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return filepath.Abs(dir)
+}
+
+func (a *App) screenDLP(ctx context.Context, botID, runID, backend, content string) error {
+	err := dlp.Scan(ctx, a.policy, content)
+	if err == nil {
+		return nil
+	}
+	a.log(botID, "dlp_denied", map[string]any{"error": err.Error()})
+	if a.audit != nil && a.audit.Enabled() {
+		a.audit.Write(map[string]any{"event": "dlp", "action": "deny", "detail": err.Error()})
+	}
+	a.failCLI(botID, runID, backend, err)
+	return err
+}
+
+func (a *App) auditCLI(event, backend, sessionID string, pid int, result string) {
+	if a.audit == nil || !a.audit.Enabled() {
+		return
+	}
+	fields := map[string]any{
+		"event":      event,
+		"pid":        pid,
+		"backend":    backend,
+		"session_id": sessionID,
+	}
+	if result != "" {
+		fields["result"] = result
+	}
+	a.audit.Write(fields)
+}
+
+func (a *App) failCLI(botID, runID, backend string, err error) {
+	a.log(botID, "model_call", map[string]any{"model": backend, "ok": false, "error": err.Error()})
+	_, _ = a.st.FinishRun(runID, "error", err.Error())
+	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+}
+
+func (a *App) cliPrompt(bot store.Bot, fresh bool, inputs []store.Message) (string, error) {
+	var b strings.Builder
+	if fresh {
+		if err := a.writeCLIPreamble(&b, bot); err != nil {
+			return "", err
+		}
+	}
+	names, err := a.st.BotNames()
+	if err != nil {
+		return "", err
+	}
+	if len(inputs) == 0 {
+		b.WriteString("Continue.\n")
+		return b.String(), nil
+	}
+	for i, m := range inputs {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(mapHist(m, names).Content)
+	}
+	return b.String(), nil
+}
+
+func (a *App) writeCLIPreamble(b *strings.Builder, bot store.Bot) error {
+	mem, err := a.st.ListMemory(bot.ID)
+	if err != nil {
+		return err
+	}
+	b.WriteString("You are ")
+	b.WriteString(bot.Name)
+	b.WriteString(", a bot running on a local daemon.\n\nDescription:\n")
+	if strings.TrimSpace(bot.Description) == "" {
+		b.WriteString("(none)\n")
+	} else {
+		b.WriteString(bot.Description)
+		b.WriteString("\n")
+	}
+	b.WriteString("\nMemory:\n")
+	if len(mem) == 0 {
+		b.WriteString("(none)\n")
+	}
+	for _, m := range mem {
+		b.WriteString("- ")
+		b.WriteString(m.Key)
+		b.WriteString(": ")
+		b.WriteString(m.Value)
+		b.WriteString("\n")
+	}
+	b.WriteString("\nUse your own tools. This process is not wrapped in the daemon jail; your own sandbox is the boundary.\n")
+	b.WriteString("Scheduled prompts are prefixed with [scheduled]. Direct messages from other bots are prefixed with [DM from Name].\n\n")
+	return nil
+}

@@ -204,7 +204,7 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		if strings.TrimSpace(prompt) == "" {
 			return "", errors.New("prompt required")
 		}
-		t, err := a.st.CreateTimer(bot.ID, strArg(args, "name"), schedule, prompt, true)
+		t, err := a.st.CreateTimer(bot.ID, strArg(args, "name"), schedule, prompt, true, "bot")
 		if err != nil {
 			return "", err
 		}
