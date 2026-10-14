@@ -726,7 +726,8 @@ function copyButton(cls, label, getText) {
 function permissionLine(r) {
   let d = {};
   try { d = JSON.parse(r.result_or_error || "{}") || {}; } catch (e) { d = {}; }
-  const allowed = d.decision === "allow";
+  // ok is the stored verdict. A UI allow is decision allow_once or allow_session.
+  const allowed = r.ok === true || /^allow/.test(d.decision || "");
   const a = r.arguments || {};
   let arg = "";
   for (const k of ["command", "file_path", "path", "url", "pattern"]) {

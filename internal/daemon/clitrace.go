@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/PixnBits/local-grok-bots/internal/audit"
+	"github.com/PixnBits/local-grok-bots/internal/permission"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
@@ -106,7 +107,9 @@ func (a *App) recordPermission(payload any) {
 	if err != nil || string(args) == "null" {
 		args = []byte(`{}`)
 	}
-	detail := map[string]any{"decision": decision, "source": m["source"]}
+	// The broker reports a UI allow as allow_once or allow_session, not allow.
+	allowed := decision == permission.Allow || decision == permission.AllowOnce || decision == permission.AllowSession
+	detail := map[string]any{"decision": decision, "allowed": allowed, "source": m["source"]}
 	if r, _ := m["rule"].(string); r != "" {
 		detail["rule"] = r
 	}
@@ -115,6 +118,6 @@ func (a *App) recordPermission(payload any) {
 	}
 	body, _ := json.Marshal(detail)
 	_ = a.st.AddRunTool(runID, botID, store.ToolRecord{
-		Kind: "permission", Name: tool, Arguments: args, OK: decision == "allow", Result: string(body),
+		Kind: "permission", Name: tool, Arguments: args, OK: allowed, Result: string(body),
 	})
 }

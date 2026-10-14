@@ -30,6 +30,8 @@ const out = [
   permissionLine({kind:"permission", name:"Bash", ok:true, arguments:{command:"git status"}, result_or_error:'{"decision":"allow","source":"ui"}'}),
   permissionLine({kind:"permission", name:"Bash", ok:false, arguments:{command:"rm -rf build"}, result_or_error:'{"decision":"deny","source":"policy","rule":"Bash(rm *)"}'}),
   permissionLine({kind:"permission", name:"Edit", ok:false, arguments:{}, result_or_error:"not json"}),
+  permissionLine({kind:"permission", name:"Bash", ok:true, arguments:{command:"ls"}, result_or_error:'{"decision":"allow_once","allowed":true,"source":"ui"}'}),
+  permissionLine({kind:"permission", name:"Bash", ok:false, arguments:{command:"ls"}, result_or_error:'{"decision":"allow_session","source":"ui"}'}),
   String(hasToolRecords([{kind:"text"},{kind:"permission"}])),
   String(hasToolRecords([{kind:"text"}])),
 ];
@@ -45,7 +47,7 @@ console.log(out.join("\n"));
 	if err != nil {
 		t.Fatalf("node: %v\n%s", err, out)
 	}
-	want := "✅ allowed Bash(git status) · ui\n⛔ denied Bash(rm -rf build) · policy · Bash(rm *)\n⛔ denied Edit\ntrue\nfalse"
+	want := "✅ allowed Bash(git status) · ui\n⛔ denied Bash(rm -rf build) · policy · Bash(rm *)\n⛔ denied Edit\n✅ allowed Bash(ls) · ui\n✅ allowed Bash(ls) · ui\ntrue\nfalse"
 	if got := strings.TrimSpace(string(out)); got != want {
 		t.Fatalf("got\n%s\nwant\n%s", got, want)
 	}

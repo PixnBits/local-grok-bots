@@ -129,3 +129,14 @@ func TestBrokerAllowIsStoredAsPermissionRecord(t *testing.T) {
 		t.Fatalf("records %+v", recs)
 	}
 }
+
+func TestUIAllowOnceIsStoredAsAllowed(t *testing.T) {
+	app, _, bot, _ := isolationApp(t, "claude", "")
+	for _, d := range []string{permission.AllowOnce, permission.AllowSession} {
+		app.perm.Record(permission.Request{RunID: "run-" + d, BotID: bot.ID, Tool: "Bash"}, d, "ui", "")
+		tools, _ := app.st.RunTools([]string{"run-" + d})
+		if r := tools["run-"+d]; len(r) != 1 || !r[0].OK || !strings.Contains(r[0].Result, `"allowed":true`) {
+			t.Fatalf("%s stored as %+v", d, r)
+		}
+	}
+}
