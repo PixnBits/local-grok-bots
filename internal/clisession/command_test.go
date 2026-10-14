@@ -100,3 +100,21 @@ func TestPermissionRulesArePassedThrough(t *testing.T) {
 		t.Fatalf("mcp config %v", claude)
 	}
 }
+
+func TestClaudePromptsNoneSkipsThePromptTool(t *testing.T) {
+	args, err := Args(Spec{
+		Backend: "claude", Prompt: "hi", Workspace: "/w",
+		PermissionPrompts: "none",
+		MCPConfig:         `{"mcpServers":{"lgbperm":{"type":"http","url":"http://127.0.0.1:9/t"}}}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, "\n")
+	if !strings.Contains(joined, "--permission-prompts\nnone") {
+		t.Fatalf("flag %v", args)
+	}
+	if strings.Contains(joined, "--permission-prompt-tool") || strings.Contains(joined, "--mcp-config") {
+		t.Fatalf("none still attached a host: %v", args)
+	}
+}

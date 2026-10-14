@@ -25,11 +25,14 @@ type Spec struct {
 	// AllowRules and DenyRules are Claude-style patterns such as "Bash(git *)".
 	AllowRules []string
 	DenyRules  []string
-	// MCPConfig is inline JSON for Claude's --mcp-config. When set, the
-	// permission prompt tool is passed too.
+	// MCPConfig is inline JSON for Claude's --mcp-config. When set, and
+	// PermissionPrompts is not "none", the permission prompt tool is passed too.
 	MCPConfig string
 	// PermissionTool is the MCP tool name, mcp__<server>__approve.
 	PermissionTool string
+	// PermissionPrompts is Claude's --permission-prompts value. "none" denies
+	// residual asks instead of sending them to a host. Empty omits the flag.
+	PermissionPrompts string
 	// Bin overrides the executable. Empty uses "grok" or "claude".
 	Bin string
 	// OnStart is called with the child pid after Start.
@@ -137,7 +140,13 @@ func claudeFlags(spec Spec) []string {
 	for _, rule := range spec.DenyRules {
 		args = append(args, "--disallowedTools", rule)
 	}
-	if strings.TrimSpace(spec.MCPConfig) != "" {
+	prompts := strings.TrimSpace(spec.PermissionPrompts)
+	if prompts != "" {
+		args = append(args, "--permission-prompts", prompts)
+	}
+	// "none" means nobody can answer. Do not attach a prompt tool: Claude
+	// would wait for that MCP server before the turn.
+	if prompts != "none" && strings.TrimSpace(spec.MCPConfig) != "" {
 		tool := spec.PermissionTool
 		if tool == "" {
 			tool = "mcp__lgbperm__approve"
