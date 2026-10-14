@@ -520,6 +520,9 @@ if [ -n "$LGB_ARGV_LOG" ]; then
   printf '%s\n' "$@" >> "$LGB_ARGV_LOG"
   printf '\n---\n' >> "$LGB_ARGV_LOG"
 fi
+if [ -n "$LGB_ENV_LOG" ]; then
+  env > "$LGB_ENV_LOG"
+fi
 mode=${LGB_CLI_MODE:-ok}
 if [ "$mode" = "sleep" ]; then
   sleep 60 &

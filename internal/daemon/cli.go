@@ -68,6 +68,14 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		a.failCLI(bot.ID, runID, backend, err)
 		return
 	}
+	iso, err := a.cliIsolation(bot.ID, backend, ws)
+	if err != nil {
+		if fresh {
+			_ = a.st.SetBotSession(bot.ID, "")
+		}
+		a.failCLI(bot.ID, runID, backend, err)
+		return
+	}
 	turnCtx := ctx
 	if a.policy.TurnTimeout > 0 {
 		var cancel context.CancelFunc
@@ -96,6 +104,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		Prompt: prompt, Workspace: ws, PermissionMode: mode,
 		AllowRules: append([]string(nil), a.policy.ToolAllow...),
 		DenyRules:  append([]string(nil), a.policy.ToolDeny...),
+		Isolate:    iso,
 		OnStart: func(child int) {
 			if child <= 0 {
 				return
@@ -243,6 +252,58 @@ func (a *App) finishCLIInterrupted(botID, runID, text string) {
 	}
 	_, _ = a.st.FinishRun(runID, "error", "interrupted")
 	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": "interrupted"})
+}
+
+// cliIsolation checks the workspace for CLI override files and builds the
+// daemon-owned CLI environment. A file the launch cannot neutralize, or any
+// file under overrides = "refuse", fails the turn closed. Each detection is
+// audited.
+func (a *App) cliIsolation(botID, backend, ws string) (*clisession.Isolation, error) {
+	isolated := a.policy.CLIHome != policy.HomeUser
+	found := clisession.ScanOverrides(ws)
+	if len(found) > 0 {
+		var blocked []string
+		for _, f := range found {
+			if a.policy.CLIOverrides == policy.OverridesRefuse || !clisession.Neutralized(backend, f, isolated) {
+				blocked = append(blocked, f)
+			}
+		}
+		action := "ignore"
+		if len(blocked) > 0 {
+			action = "refuse"
+		}
+		fields := map[string]any{"backend": backend, "files": found, "action": action, "mode": a.policy.CLIOverrides}
+		if len(blocked) > 0 {
+			fields["blocked"] = blocked
+		}
+		a.log(botID, "cli_override", fields)
+		if a.audit != nil && a.audit.Enabled() {
+			rec := map[string]any{"event": "cli_override", "bot_id": botID}
+			for k, v := range fields {
+				rec[k] = v
+			}
+			a.audit.Write(rec)
+		}
+		if len(blocked) > 0 {
+			return nil, fmt.Errorf("workspace CLI config override refused: %s", strings.Join(blocked, ", "))
+		}
+	}
+	state := filepath.Join(filepath.Dir(a.ws), "cli", botID)
+	opts := clisession.IsolationOptions{
+		Backend:  backend,
+		StateDir: state,
+		Base:     os.Environ(),
+		Extra:    a.policy.CLIEnv,
+	}
+	opts.UserHome, _ = os.UserHomeDir()
+	if isolated {
+		opts.Home = filepath.Join(state, "home")
+	}
+	iso, err := clisession.PrepareIsolation(opts)
+	if err != nil {
+		return nil, err
+	}
+	return &iso, nil
 }
 
 // cliWorkspace is the CLI process cwd. It is not a jail.
