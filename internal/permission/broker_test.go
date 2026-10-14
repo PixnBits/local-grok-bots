@@ -278,6 +278,34 @@ func TestAuditRedactsSecretArg(t *testing.T) {
 	}
 }
 
+func TestTransportIsRecorded(t *testing.T) {
+	var event map[string]any
+	var recorded map[string]any
+	b := New(Options{
+		Publish: func(_, name string, payload any) {
+			if name == "permission_decision" {
+				event = payload.(map[string]any)
+			}
+		},
+		Audit: func(fields map[string]any) { recorded = fields },
+	})
+	out := b.Evaluate(context.Background(), policy.Permission{Deny: []string{"Bash"}}, Request{
+		RunID: "r", BotID: "b", Tool: "Bash", Transport: "stream_control",
+	})
+	if out.Decision != Deny || event["transport"] != "stream_control" || recorded["transport"] != "stream_control" {
+		t.Fatalf("out %+v event %#v audit %#v", out, event, recorded)
+	}
+	plain := b.Evaluate(context.Background(), policy.Permission{Deny: []string{"Read"}}, Request{
+		RunID: "r", BotID: "b", Tool: "Read",
+	})
+	if plain.Decision != Deny {
+		t.Fatal(plain)
+	}
+	if _, ok := event["transport"]; ok {
+		t.Fatalf("empty transport was recorded: %#v", event)
+	}
+}
+
 func waitForPending(t *testing.T, b *Broker, id string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

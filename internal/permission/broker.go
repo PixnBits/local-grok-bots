@@ -49,6 +49,8 @@ type Request struct {
 	Tool      string
 	Args      map[string]any
 	ToolUseID string
+	// Transport is mcp, stream_control, or none. Empty omits the field.
+	Transport string
 }
 
 // Outcome is the broker's decision. Behavior is allow or deny, which is the
@@ -263,7 +265,7 @@ func (b *Broker) canUseTool(ctx context.Context, pol policy.Permission, req Requ
 	b.mu.Unlock()
 
 	deadline := b.now().Add(timeout)
-	b.publish(req.RunID, "permission_request", map[string]any{
+	b.publish(req.RunID, "permission_request", withTransport(map[string]any{
 		"id":              req.ID,
 		"run_id":          req.RunID,
 		"bot_id":          req.BotID,
@@ -271,7 +273,7 @@ func (b *Broker) canUseTool(ctx context.Context, pol policy.Permission, req Requ
 		"arguments":       audit.RedactValue(req.Args),
 		"deadline":        deadline.UTC().Format(time.RFC3339Nano),
 		"session_allowed": pol.AllowSessionGrants,
-	})
+	}, req.Transport))
 
 	waitCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -337,7 +339,7 @@ func (b *Broker) complete(req Request, decision, source, rule string) Outcome {
 func (b *Broker) emit(req Request, decision, source, rule string) {
 	when := b.now().UTC().Format(time.RFC3339Nano)
 	redacted := audit.RedactValue(req.Args)
-	b.publish(req.RunID, "permission_decision", map[string]any{
+	b.publish(req.RunID, "permission_decision", withTransport(map[string]any{
 		"id":        req.ID,
 		"run_id":    req.RunID,
 		"bot_id":    req.BotID,
@@ -347,7 +349,7 @@ func (b *Broker) emit(req Request, decision, source, rule string) {
 		"source":    source,
 		"rule":      rule,
 		"time":      when,
-	})
+	}, req.Transport))
 	if b.audit == nil {
 		return
 	}
@@ -355,7 +357,7 @@ func (b *Broker) emit(req Request, decision, source, rule string) {
 	if err != nil {
 		raw = []byte(`{}`)
 	}
-	b.audit(map[string]any{
+	b.audit(withTransport(map[string]any{
 		"event":      "permission_decision",
 		"source":     source,
 		"rule":       rule,
@@ -366,7 +368,14 @@ func (b *Broker) emit(req Request, decision, source, rule string) {
 		"time":       when,
 		"decision":   decision,
 		"request_id": req.ID,
-	})
+	}, req.Transport))
+}
+
+func withTransport(fields map[string]any, transport string) map[string]any {
+	if transport != "" {
+		fields["transport"] = transport
+	}
+	return fields
 }
 
 func (b *Broker) publish(runID, event string, payload any) {
