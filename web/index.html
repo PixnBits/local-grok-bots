@@ -373,6 +373,8 @@ const state = {
   bots: [],
   messages: [],
   tools: {},
+  hasMore: false,
+  loadingOlder: false,
   token: sessionStorage.getItem("lgb_token") || "",
   streamCtl: null,
   streaming: "",
@@ -547,6 +549,8 @@ function setTitle() {
 }
 function goHome(push = true) {
   state.botId = null;
+  state.loadedFor = null;
+  state.hasMore = false;
   stopStream();
   if (push && location.pathname !== botPath(null)) history.pushState({}, "", botPath(null));
   $("#thread-name").textContent = "No bot selected";
@@ -562,7 +566,7 @@ window.addEventListener("popstate", () => {
   else goHome(false);
 });
 async function openBot(id, push = true) {
-  if (state.botId !== id) stopStream();
+  if (state.botId !== id) { stopStream(); state.loadedFor = null; }
   state.botId = id;
   if (push && location.pathname !== botPath(id)) history.pushState({bot: id}, "", botPath(id));
   setTitle();
@@ -827,8 +831,12 @@ function renderMarkdown(text, target) {
   return target;
 }
 // md:end
-function renderMessages() {
+// renderMessages rebuilds the list. mode "bottom" lands at the newest
+// message; "prepend" keeps the visible messages where they were after older
+// ones are added above; "keep" leaves the scroll offset alone.
+function renderMessages(mode = "bottom") {
   const box = $("#msgs");
+  const prevH = box.scrollHeight, prevTop = box.scrollTop;
   const live = $("#live"), working = $("#working");
   box.replaceChildren();
   if (!state.messages.length && working.hidden) {
@@ -854,15 +862,54 @@ function renderMessages() {
   }
   // The live run and the working indicator sit where the next reply will appear.
   box.append(live, working);
-  box.scrollTop = box.scrollHeight;
+  if (mode === "prepend") box.scrollTop = prevTop + (box.scrollHeight - prevH);
+  else if (mode === "keep") box.scrollTop = prevTop;
+  else box.scrollTop = box.scrollHeight;
+  // A short page (or a prepend that still leaves the top in view) loads more.
+  if (state.hasMore && box.scrollTop < 200) setTimeout(loadOlder, 0);
 }
-async function loadThread() {
+const PAGE = 50;
+// loadThread fetches the newest page. Older pages already loaded stay, so a
+// refresh after a run does not throw away what the user scrolled back to.
+async function loadThread(mode = "bottom") {
   if (!state.botId) return;
-  const data = await api("/api/bots/" + state.botId + "/thread?limit=100");
-  state.messages = data.messages || [];
-  state.tools = data.tools || {};
-  renderMessages();
+  const id = state.botId;
+  const data = await api("/api/bots/" + id + "/thread?limit=" + PAGE);
+  if (state.botId !== id) return;
+  const page = data.messages || [];
+  const fresh = state.loadedFor !== id;
+  state.loadedFor = id;
+  if (fresh || !page.length) {
+    state.messages = page;
+    state.tools = data.tools || {};
+    state.hasMore = !!data.has_more;
+  } else {
+    const first = page[0].created_at;
+    state.messages = state.messages.filter(m => m.created_at < first).concat(page);
+    state.tools = Object.assign({}, state.tools, data.tools || {});
+    if (state.messages.length === page.length) state.hasMore = !!data.has_more;
+  }
+  renderMessages(fresh ? "bottom" : mode);
 }
+// loadOlder prepends the page before the oldest loaded message.
+async function loadOlder() {
+  if (!state.botId || !state.hasMore || state.loadingOlder || !state.messages.length) return;
+  state.loadingOlder = true;
+  const id = state.botId;
+  try {
+    const data = await api("/api/bots/" + id + "/thread?limit=" + PAGE + "&before=" + encodeURIComponent(state.messages[0].id));
+    if (state.botId !== id) return;
+    state.messages = (data.messages || []).concat(state.messages);
+    state.tools = Object.assign({}, data.tools || {}, state.tools);
+    state.hasMore = !!data.has_more;
+    renderMessages("prepend");
+  } finally {
+    state.loadingOlder = false;
+  }
+}
+$("#msgs").addEventListener("scroll", () => {
+  if ($("#msgs").scrollTop < 200) loadOlder();
+}, {passive: true});
 function setWorking(on, text) {
   const w = $("#working");
   const box = $("#msgs");

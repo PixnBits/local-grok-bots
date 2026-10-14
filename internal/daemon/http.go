@@ -342,11 +342,18 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// The newest page, oldest first. before=<message id> pages back from that
+	// message. One extra row is read to tell the client whether older
+	// messages remain.
 	limit := queryLimit(r, 50, 200)
-	msgs, err := a.st.ListMessages(r.PathValue("id"), "user", r.URL.Query().Get("before"), limit)
+	msgs, err := a.st.ListMessages(r.PathValue("id"), "user", r.URL.Query().Get("before"), limit+1)
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	hasMore := len(msgs) > limit
+	if hasMore {
+		msgs = msgs[1:]
 	}
 	// tools maps each listed reply's run_id to the tool calls that run made.
 	var runIDs []string
@@ -362,7 +369,7 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs, "tools": tools})
+	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs, "tools": tools, "has_more": hasMore})
 }
 
 func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
