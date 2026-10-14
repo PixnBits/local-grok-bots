@@ -134,6 +134,51 @@
     padding: 12px 14px; border-bottom: 1px solid var(--line);
   }
   .thread-id { min-width: 0; flex: 1; }
+  /* Bot state panel. Three placements share one renderer; ?statepanel=a|b|c
+     picks one while the user compares them. */
+  .state-chip {
+    flex: none; border: 1px solid var(--line); background: var(--paper); color: var(--muted);
+    border-radius: 99px; padding: 3px 10px; font-size: 13px; cursor: pointer; white-space: nowrap;
+  }
+  .state-chip[aria-expanded="true"] { background: var(--accent-2); color: var(--accent); border-color: var(--accent); }
+  .state-chip[hidden], .state-btn[hidden] { display: none; }
+  .state-btn { flex: none; font-size: 13px; padding: 4px 10px; }
+  .state-drawer {
+    border-bottom: 1px solid var(--line); background: var(--paper);
+    max-height: 42%; overflow-y: auto; padding: 4px 14px 10px; flex: none;
+  }
+  .state-drawer[hidden] { display: none; }
+  .state-backdrop { position: fixed; inset: 0; background: rgba(29,25,20,.25); z-index: 40; }
+  .state-backdrop[hidden], .state-sheet[hidden] { display: none; }
+  .state-sheet {
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(400px, 100vw); z-index: 41;
+    background: var(--paper); box-shadow: -8px 0 30px rgba(29,25,20,.18);
+    display: flex; flex-direction: column;
+  }
+  .state-sheet .sheet-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  .state-sheet .sheet-head h2 { margin: 0; font-family: var(--serif); font-size: 18px; }
+  .state-sheet .sheet-body { overflow-y: auto; padding: 4px 14px 16px; flex: 1; }
+  @media (max-width: 979px) {
+    .state-sheet { top: auto; left: 0; width: auto; height: 75vh; height: 75dvh; border-radius: 16px 16px 0 0; box-shadow: 0 -8px 30px rgba(29,25,20,.18); }
+  }
+  .ptabs { display: flex; gap: 6px; }
+  .ptabs[hidden] { display: none; }
+  .ptabs button { border-radius: 99px; padding: 5px 14px; }
+  .ptabs button[aria-selected="true"] { background: var(--ink); color: var(--paper); }
+  #profile-state { padding: 4px 14px 14px; }
+  #profile-state[hidden], #profile-form[hidden] { display: none; }
+  .st-sec h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 14px 0 6px; }
+  .st-row { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; border-top: 1px solid var(--line); font-size: 14px; }
+  .st-row:first-of-type { border-top: 0; }
+  .st-main { flex: 1; min-width: 0; }
+  .st-main .st-sub { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+  .st-main b { font-weight: 600; }
+  .st-act { flex: none; font-size: 12px; padding: 2px 8px; }
+  .st-tag { display: inline-block; border: 1px solid var(--line); border-radius: 99px; padding: 0 8px; font-size: 12px; margin: 2px 4px 2px 0; }
+  .st-tag.off { color: var(--muted); text-decoration: line-through; }
+  .st-tag.ok { color: var(--accent); border-color: var(--accent); }
+  .st-tag.bad { color: var(--err); border-color: var(--err); }
+  .st-empty { color: var(--muted); font-size: 13px; margin: 2px 0; }
   .thread-id h2 { margin: 0; font-family: var(--serif); font-size: 20px; }
   .thread-id .role { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .menu { position: relative; flex: none; }
@@ -292,10 +337,13 @@
             <h2 id="thread-name">No bot selected</h2>
             <div class="role" id="thread-label"></div>
           </div>
+          <button type="button" class="state-chip" id="state-chip" hidden aria-expanded="false" aria-controls="state-drawer" title="Timers and memory"></button>
+          <button type="button" class="ghost state-btn" id="state-btn" hidden aria-expanded="false">State</button>
           <div class="menu">
             <button type="button" id="menu-btn" aria-haspopup="menu" aria-expanded="false" aria-label="Bot menu">⋯</button>
             <div class="menu-pop" id="bot-menu" hidden role="menu">
               <button type="button" data-act="profile" role="menuitem">View profile</button>
+              <button type="button" data-act="state" role="menuitem">Bot state</button>
               <button type="button" data-act="pin" role="menuitem" id="menu-pin">Pin</button>
               <button type="button" data-act="hide" role="menuitem" id="menu-hide">Hide</button>
               <button type="button" data-act="duplicate" role="menuitem">Duplicate</button>
@@ -303,6 +351,7 @@
             </div>
           </div>
         </div>
+        <div class="state-drawer" id="state-drawer" hidden></div>
         <div class="msgs" id="msgs"><p class="empty">Choose a bot to read its thread.</p><div class="live" id="live"></div><div class="working" id="working" hidden aria-live="polite"><span class="pulse" aria-hidden="true"></span><span id="working-text">working</span></div></div>
         <button type="button" class="new-pill" id="new-pill" hidden>New messages ↓</button>
         <div class="note" id="run-note" hidden></div>
@@ -313,6 +362,11 @@
       </div>
     </section>
     <section class="view" id="view-profile">
+      <div class="ptabs" id="ptabs" hidden role="tablist">
+        <button type="button" role="tab" data-tab="profile" aria-selected="true">Profile</button>
+        <button type="button" role="tab" data-tab="state" aria-selected="false">State</button>
+      </div>
+      <div class="panel" id="profile-state" hidden></div>
       <form class="panel profile" id="profile-form">
         <div class="row" style="justify-content:space-between;align-items:center">
           <h2>Profile</h2>
@@ -379,6 +433,11 @@
     <div class="err" id="auth-err"></div>
   </form>
 </div>
+<div class="state-backdrop" id="state-backdrop" hidden></div>
+<aside class="state-sheet" id="state-sheet" hidden aria-label="Bot state">
+  <div class="sheet-head"><h2 id="state-sheet-title">Bot state</h2><button type="button" class="ghost" id="state-close">Close</button></div>
+  <div class="sheet-body" id="state-sheet-body"></div>
+</aside>
 <script>
 const KINDS = ["user_message","bot_message","dm_sent","dm_received","tool_start","tool_end","bot_created","bot_updated","bot_deleted","timer_fired","timer_missed","model_call","run_input","run_started","run_finished","daemon_start","daemon_stop","grant_use","grant_denied","net_request","sandbox_block"];
 const SHAPES = ["circle","square","diamond","triangle","hex"];
@@ -565,11 +624,13 @@ function setTitle() {
   document.title = b ? b.name + " — Local Grok Bots" : "Local Grok Bots";
 }
 function goHome(push = true) {
+  closeState();
+  state.botState = null;
   state.botId = null;
   state.loadedFor = null;
   state.hasMore = false;
   stopStream();
-  if (push && location.pathname !== botPath(null)) history.pushState({}, "", botPath(null));
+  if (push && location.pathname !== botPath(null)) history.pushState({}, "", botPath(null) + location.search);
   $("#thread-name").textContent = "No bot selected";
   $("#thread-label").textContent = "";
   state.messages = [];
@@ -583,14 +644,15 @@ window.addEventListener("popstate", () => {
   else goHome(false);
 });
 async function openBot(id, push = true) {
-  if (state.botId !== id) { stopStream(); state.loadedFor = null; }
+  if (state.botId !== id) { stopStream(); state.loadedFor = null; closeState(); state.botState = null; paintStateChip(); }
   state.botId = id;
-  if (push && location.pathname !== botPath(id)) history.pushState({bot: id}, "", botPath(id));
+  if (push && location.pathname !== botPath(id)) history.pushState({bot: id}, "", botPath(id) + location.search);
   setTitle();
   closeMenu();
   setView("chat");
   await refreshBot();
   await loadThread();
+  loadState().catch(() => {});
   const b = currentBot();
   if (b && b.active_run_id) follow(b.active_run_id);
 }
@@ -1118,6 +1180,7 @@ async function follow(runId) {
           stopStream();
           await loadThread();
           await refreshBot();
+          loadState().catch(() => {});
           if (event === "error" && payload.error === "tool round limit" && currentBot() && currentBot().status === "running") {
             await refreshBot();
           }
@@ -1159,6 +1222,7 @@ $("#bot-menu").addEventListener("click", async (e) => {
   const b = currentBot();
   try {
     if (act === "profile") { await openProfile(state.botId); }
+    else if (act === "state") { await openState(); }
     else if (act === "pin") {
       await api("/api/bots/" + state.botId, {method:"PATCH", body: JSON.stringify({pinned: !(b && b.pinned)})});
       await loadBots();
@@ -1235,6 +1299,7 @@ function paintMarkPicker() {
 }
 async function openProfile(id) {
   state.botId = id;
+  selectProfileTab("profile");
   closeMenu();
   const b = await api("/api/bots/" + id);
   const i = state.bots.findIndex(x => x.id === b.id);
@@ -1389,6 +1454,220 @@ $("#auth form").addEventListener("submit", async (e) => {
   } catch (err) { $("#auth-err").textContent = err.message; }
 });
 fillKinds();
+// ---- Bot state panel ----
+// Temporary switch so the user can compare placements: ?statepanel=a|b|c.
+// a: chip in the thread header opening an inline drawer.
+// b: State button / menu item opening a right slide-over (bottom sheet on mobile).
+// c: State tab inside the profile view.
+const STATE_OPT = (() => {
+  const v = (new URLSearchParams(location.search).get("statepanel") || "a").toLowerCase();
+  return ["a", "b", "c"].includes(v) ? v : "a";
+})();
+const PHX = new Intl.DateTimeFormat("en-US", {timeZone: "America/Phoenix", month: "short", day: "numeric", hour: "numeric", minute: "2-digit", second: "2-digit"});
+const PHX_SHORT = new Intl.DateTimeFormat("en-US", {timeZone: "America/Phoenix", month: "short", day: "numeric", hour: "numeric", minute: "2-digit"});
+function phx(iso, short) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  return (short ? PHX_SHORT : PHX).format(d) + " MST";
+}
+function countdown(ms) {
+  const neg = ms < 0;
+  let s = Math.round(Math.abs(ms) / 1000);
+  const d = Math.floor(s / 86400); s -= d * 86400;
+  const h = Math.floor(s / 3600); s -= h * 3600;
+  const m = Math.floor(s / 60); s -= m * 60;
+  const parts = d ? [d + "d", h + "h"] : h ? [h + "h", m + "m"] : m ? [m + "m", s + "s"] : [s + "s"];
+  return neg ? parts.join(" ") + " ago" : "in " + parts.join(" ");
+}
+function stateOpen() {
+  if (STATE_OPT === "a") return !$("#state-drawer").hidden;
+  if (STATE_OPT === "b") return !$("#state-sheet").hidden;
+  return state.view === "profile" && !$("#profile-state").hidden;
+}
+function stateBox() {
+  if (STATE_OPT === "a") return $("#state-drawer");
+  if (STATE_OPT === "b") return $("#state-sheet-body");
+  return $("#profile-state");
+}
+async function loadState() {
+  const id = state.botId;
+  if (!id) return;
+  const s = await api("/api/bots/" + id + "/state");
+  if (state.botId !== id) return;
+  state.botState = s;
+  state.stateReloadAt = 0;
+  paintStateChip();
+  if (stateOpen()) renderState(stateBox(), s);
+}
+function paintStateChip() {
+  const chip = $("#state-chip"), btn = $("#state-btn");
+  chip.hidden = !(STATE_OPT === "a" && state.botId);
+  btn.hidden = !(STATE_OPT === "b" && state.botId);
+  const s = state.botState;
+  if (!s) { chip.textContent = "⏱ · 🧠"; return; }
+  const on = s.timers.filter(t => t.enabled).length;
+  chip.textContent = "⏱ " + on + " · 🧠 " + s.memory.length + (s.warnings && s.warnings.length ? " · ⚠" : "");
+  chip.title = on + " active timer" + (on === 1 ? "" : "s") + ", " + s.memory.length + " memory note" + (s.memory.length === 1 ? "" : "s");
+}
+function closeState() {
+  $("#state-drawer").hidden = true;
+  $("#state-chip").setAttribute("aria-expanded", "false");
+  $("#state-sheet").hidden = true;
+  $("#state-backdrop").hidden = true;
+  $("#state-btn").setAttribute("aria-expanded", "false");
+}
+async function openState() {
+  if (!state.botId) return;
+  closeMenu();
+  if (STATE_OPT === "c") {
+    await openProfile(state.botId);
+    selectProfileTab("state");
+    return;
+  }
+  if (STATE_OPT === "a") {
+    $("#state-drawer").hidden = false;
+    $("#state-chip").setAttribute("aria-expanded", "true");
+  } else {
+    const b = currentBot();
+    $("#state-sheet-title").textContent = (b ? b.name + " · " : "") + "state";
+    $("#state-sheet").hidden = false;
+    $("#state-backdrop").hidden = false;
+    $("#state-btn").setAttribute("aria-expanded", "true");
+  }
+  if (state.botState) renderState(stateBox(), state.botState);
+  else stateBox().replaceChildren(el("p", "st-empty", "Loading…"));
+  await loadState();
+}
+function selectProfileTab(tab) {
+  $("#ptabs").hidden = STATE_OPT !== "c";
+  for (const b of document.querySelectorAll("#ptabs button")) b.setAttribute("aria-selected", b.dataset.tab === tab ? "true" : "false");
+  const st = tab === "state" && STATE_OPT === "c";
+  $("#profile-state").hidden = !st;
+  $("#profile-form").hidden = st;
+  if (st) {
+    if (state.botState) renderState($("#profile-state"), state.botState);
+    loadState().catch(() => {});
+  }
+}
+function stSection(title, count) {
+  const sec = el("section", "st-sec");
+  sec.append(el("h3", null, count == null ? title : title + " · " + count));
+  return sec;
+}
+function stRow(main, sub, action) {
+  const row = el("div", "st-row");
+  const m = el("div", "st-main");
+  if (typeof main === "string") m.append(el("b", null, main)); else m.append(main);
+  for (const line of [].concat(sub || [])) if (line) m.append(line instanceof Node ? line : el("div", "st-sub", line));
+  row.append(m);
+  if (action) row.append(action);
+  return row;
+}
+function stAction(label, confirmText, fn) {
+  const b = el("button", "ghost st-act", label);
+  b.type = "button";
+  b.addEventListener("click", async () => {
+    if (!confirm(confirmText)) return;
+    b.disabled = true;
+    try { await fn(); await loadState(); }
+    catch (err) { alert(err.message); b.disabled = false; }
+  });
+  return b;
+}
+function renderState(box, s) {
+  const out = [];
+  if (s.warnings && s.warnings.length) {
+    const sec = stSection("Warnings");
+    for (const w of s.warnings) sec.append(stRow(el("span", null, "⚠ " + w)));
+    out.push(sec);
+  }
+  const timers = [...s.timers].sort((a, b) => (b.enabled - a.enabled) || String(a.next_fire_at).localeCompare(String(b.next_fire_at)));
+  const ts = stSection("Timers", timers.length);
+  if (!timers.length) ts.append(el("p", "st-empty", "No timers."));
+  for (const t of timers) {
+    const kind = t.schedule === "once" ? "once" : "every " + t.schedule;
+    const head = el("div");
+    head.append(el("b", null, t.name || "(unnamed)"), " ", el("span", "st-tag" + (t.enabled ? "" : " off"), t.enabled ? kind : kind + " · off"));
+    const when = el("div", "st-sub");
+    if (t.enabled) {
+      const cd = el("span", "st-fire");
+      cd.dataset.fire = t.next_fire_at;
+      when.append("Next: ", cd, " · " + phx(t.next_fire_at));
+    } else {
+      when.textContent = t.last_fire_at ? "Fired " + phx(t.last_fire_at) : "Not scheduled";
+    }
+    const prompt = el("div", "st-sub", t.prompt.length > 160 ? t.prompt.slice(0, 157) + "…" : t.prompt);
+    ts.append(stRow(head, [when, prompt], stAction("Clear", "Delete timer “" + (t.name || t.prompt.slice(0, 40)) + "”?", () => api("/api/timers/" + t.id, {method: "DELETE"}))));
+  }
+  out.push(ts);
+  const ms = stSection("Memory", s.memory.length);
+  if (!s.memory.length) ms.append(el("p", "st-empty", "No memory notes."));
+  for (const m of s.memory) {
+    ms.append(stRow(m.key, [m.value, el("div", "st-sub", "Updated " + phx(m.updated_at, true))],
+      stAction("Delete", "Delete memory note “" + m.key + "”?", () => api("/api/bots/" + state.botId + "/memory/" + encodeURIComponent(m.key), {method: "DELETE"}))));
+  }
+  out.push(ms);
+  const as = stSection("Access");
+  const tags = el("div");
+  for (const g of ["net", "git", "ssh", "build"]) tags.append(el("span", "st-tag" + ((s.grants || []).includes(g) ? " ok" : " off"), g));
+  as.append(stRow(tags, [
+    (s.net_allow && s.net_allow.length) ? "Network: " + s.net_allow.join(", ") : "",
+    (s.ssh_allow && s.ssh_allow.length) ? "SSH: " + s.ssh_allow.join(", ") : ""
+  ]));
+  out.push(as);
+  const tl = stSection("Tools", s.tools.current.length);
+  const st = el("div");
+  if (s.tools.up_to_date) st.append(el("span", "st-tag ok", "bot is up to date"));
+  else if (!s.tools.seen.length) st.append(el("span", "st-tag", "not yet told · notice on next run"));
+  else st.append(el("span", "st-tag bad", "changed since last run · notice on next run"));
+  tl.append(stRow(st, [
+    s.tools.current.join(", "),
+    s.tools.last_notice ? el("div", "st-sub", "Last notice " + phx(s.tools.last_notice.created_at, true) + ": " + s.tools.last_notice.content.replace(/^Notice: /, "")) : ""
+  ]));
+  out.push(tl);
+  const rs = stSection("Recent runs", s.runs.length);
+  if (!s.runs.length) rs.append(el("p", "st-empty", "No runs yet."));
+  for (const r of s.runs) {
+    const head = el("div");
+    const cls = r.status === "done" ? " ok" : (r.status === "error" ? " bad" : "");
+    head.append(el("span", "st-tag" + cls, r.status), " " + phx(r.started_at, true));
+    let dur = "";
+    if (r.finished_at) dur = Math.max(0, Math.round((new Date(r.finished_at) - new Date(r.started_at)) / 1000)) + "s";
+    rs.append(stRow(head, [dur ? "Took " + dur : "", r.error ? "Error: " + r.error : ""]));
+  }
+  out.push(rs);
+  box.replaceChildren(...out);
+  tickFires();
+}
+function tickFires() {
+  const now = Date.now();
+  let due = false;
+  for (const n of document.querySelectorAll("[data-fire]")) {
+    const t = new Date(n.dataset.fire).getTime();
+    if (isNaN(t)) continue;
+    const ms = t - now;
+    n.textContent = ms > -1000 ? countdown(Math.max(ms, 0)) : "due " + countdown(ms);
+    if (ms < -3000) due = true;
+  }
+  // A timer just fired: refetch once so next_fire_at moves on.
+  if (due && state.botId && !state.stateReloadAt) {
+    state.stateReloadAt = now;
+    loadState().catch(() => {});
+  }
+}
+setInterval(tickFires, 1000);
+$("#state-chip").addEventListener("click", () => {
+  if (!$("#state-drawer").hidden) closeState(); else openState();
+});
+$("#state-btn").addEventListener("click", () => {
+  if (!$("#state-sheet").hidden) closeState(); else openState();
+});
+$("#state-close").addEventListener("click", closeState);
+$("#state-backdrop").addEventListener("click", closeState);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && STATE_OPT === "b" && !$("#state-sheet").hidden) closeState(); });
+for (const b of document.querySelectorAll("#ptabs button")) b.addEventListener("click", () => selectProfileTab(b.dataset.tab));
+selectProfileTab("profile");
 (async function init() {
   try {
     const h = await api("/api/health");
@@ -1396,7 +1675,7 @@ fillKinds();
     await loadBots();
     const id = botFromPath();
     if (id && state.bots.some(b => b.id === id)) await openBot(id, false);
-    else if (id) history.replaceState({}, "", botPath(null));
+    else if (id) history.replaceState({}, "", botPath(null) + location.search);
   } catch (err) {
     if (err.message !== "unauthorized") $("#health").textContent = err.message;
   }
