@@ -57,6 +57,10 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 	if spec.Workspace != "" {
 		cmd.Dir = spec.Workspace
 	}
+	if spec.Isolate != nil {
+		// Nothing is inherited; an empty list still means an empty environment.
+		cmd.Env = append([]string{}, spec.Isolate.Env...)
+	}
 	// Linux kills this process group. macOS uses the same group signal,
 	// with a leader-only fallback if the group signal is rejected.
 	prepareProc(cmd)

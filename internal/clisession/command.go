@@ -38,6 +38,9 @@ type Spec struct {
 	StreamControl bool
 	// Control is the broker hook for a stream-json turn. Nil denies every ask.
 	Control *ControlHooks
+	// Isolate, when set, replaces the inherited environment and tells Claude
+	// to load only daemon-provided settings and MCP servers.
+	Isolate *Isolation
 	// Bin overrides the executable. Empty uses "grok" or "claude".
 	Bin string
 	// OnStart is called with the child pid after Start.
@@ -148,6 +151,7 @@ func claudeFlags(spec Spec) []string {
 	for _, rule := range spec.DenyRules {
 		args = append(args, "--disallowedTools", rule)
 	}
+	args = append(args, isolationFlags(spec)...)
 	prompts := strings.TrimSpace(spec.PermissionPrompts)
 	if prompts != "" {
 		args = append(args, "--permission-prompts", prompts)
@@ -179,6 +183,7 @@ func claudeStreamFlags(spec Spec) []string {
 		"--verbose",
 		"--permission-prompt-tool", "stdio",
 	)
+	args = append(args, isolationFlags(spec)...)
 	if strings.TrimSpace(spec.PermissionMode) != "" {
 		args = append(args, "--permission-mode", spec.PermissionMode)
 	}
@@ -187,6 +192,20 @@ func claudeStreamFlags(spec Spec) []string {
 	}
 	for _, rule := range spec.DenyRules {
 		args = append(args, "--disallowedTools", rule)
+	}
+	return args
+}
+
+// isolationFlags limits Claude to managed settings, the daemon's --settings
+// file, and the daemon's --mcp-config. The equals form of --setting-sources
+// with an empty list is what the Agent SDK passes for setting_sources=[].
+func isolationFlags(spec Spec) []string {
+	if spec.Isolate == nil {
+		return nil
+	}
+	args := []string{"--setting-sources=", "--strict-mcp-config"}
+	if spec.Isolate.SettingsPath != "" {
+		args = append(args, "--settings", spec.Isolate.SettingsPath)
 	}
 	return args
 }
