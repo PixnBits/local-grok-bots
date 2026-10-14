@@ -152,6 +152,15 @@ Grok stays on `grok -p` with policy flags:
 
 A headless permission prompt is still a deny: the turn fails with `ErrPermissionPrompt`. There is no MCP host and no UI round trip for Grok.
 
+## Stored decisions
+
+Every broker decision, from any transport and including `permission_denials`
+on a Claude result, is also written to `run_tools` as `kind: "permission"`
+with the tool, redacted arguments, and `{decision, source, rule, transport}`.
+The reply's tool summary shows them after a reload. Launch isolation, which
+keeps workspace and user CLI config from adding allow rules, is in
+`docs/cli-isolation.md`.
+
 ## Audit and redaction
 
 Secret-looking keys (`token`, `secret`, `password`, `api_key`, `authorization`, `credential`, `bearer`) and values (`sk-…`, `ghp_…`, `github_pat_…`, bearer tokens) are redacted before the event and the audit line. The `updatedInput` sent back to Claude, over MCP or `stream_control`, is not redacted.
