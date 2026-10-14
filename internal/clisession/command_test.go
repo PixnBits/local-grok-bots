@@ -118,3 +118,47 @@ func TestClaudePromptsNoneSkipsThePromptTool(t *testing.T) {
 		t.Fatalf("none still attached a host: %v", args)
 	}
 }
+
+func TestClaudeStreamControlArgv(t *testing.T) {
+	args, err := Args(Spec{
+		Backend: "claude", SessionID: "abc", Fresh: false, Prompt: "secret prompt",
+		Workspace: "/w", Model: "opus", PermissionMode: "default",
+		AllowRules: []string{"Read"}, DenyRules: []string{"Bash(rm *)"},
+		StreamControl:     true,
+		PermissionPrompts: "none",
+		MCPConfig:         `{"mcpServers":{"lgbperm":{"type":"http","url":"http://127.0.0.1:9/t"}}}`,
+		PermissionTool:    "mcp__lgbperm__approve",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"claude",
+		"--model", "opus",
+		"--resume", "abc",
+		"--input-format", "stream-json",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--permission-prompt-tool", "stdio",
+		"--permission-mode", "default",
+		"--allowedTools", "Read",
+		"--disallowedTools", "Bash(rm *)",
+	}
+	if strings.Join(args, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("argv\n%s", strings.Join(args, "\n"))
+	}
+	fresh, err := Args(Spec{
+		Backend: "claude", SessionID: "11111111-1111-4111-8111-111111111111", Fresh: true,
+		Prompt: "hi", Workspace: "/w", StreamControl: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(fresh, "\n")
+	if !strings.Contains(joined, "--session-id\n11111111-1111-4111-8111-111111111111") {
+		t.Fatalf("fresh %v", fresh)
+	}
+	if strings.Contains(joined, "\n-p\n") || strings.Contains(joined, "--mcp-config") || strings.Contains(joined, "--include-partial-messages") || strings.Contains(joined, "hi") {
+		t.Fatalf("stream control still looks like a print turn: %v", fresh)
+	}
+}

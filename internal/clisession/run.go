@@ -68,11 +68,20 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 	if err != nil {
 		return Result{}, err
 	}
+	var stdin io.WriteCloser
+	if spec.StreamControl {
+		stdin, err = cmd.StdinPipe()
+		if err != nil {
+			return Result{}, err
+		}
+	}
 	// Empty permission_mode lets the CLI prompt. With no controlling terminal,
 	// a prompt fails the turn. An explicit mode is passed through and is not
 	// treated as a prompt, even if the stream mentions one.
-	failPrompt := strings.TrimSpace(spec.PermissionMode) == "" && !e.interactive()
-	if e.interactive() && strings.TrimSpace(spec.PermissionMode) == "" {
+	// Stream control is itself the permission host, so a can_use_tool line is
+	// not a headless prompt failure.
+	failPrompt := !spec.StreamControl && strings.TrimSpace(spec.PermissionMode) == "" && !e.interactive()
+	if !spec.StreamControl && e.interactive() && strings.TrimSpace(spec.PermissionMode) == "" {
 		cmd.Stdin = os.Stdin
 	}
 	var stderr bytes.Buffer
@@ -89,6 +98,9 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 		cmd.Stderr = &stderr
 	}
 	if err := cmd.Start(); err != nil {
+		if stdin != nil {
+			_ = stdin.Close()
+		}
 		return Result{}, err
 	}
 	if spec.OnStart != nil && cmd.Process != nil {
@@ -103,7 +115,13 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 		case <-done:
 		}
 	}()
-	res, parseErr := readTurn(stdout, onEvent, failPrompt, promptCh, cmd)
+	var res Result
+	var parseErr error
+	if spec.StreamControl {
+		res, parseErr = runControlSession(ctx, cmd, stdout, stdin, spec, onEvent)
+	} else {
+		res, parseErr = readTurn(stdout, onEvent, failPrompt, promptCh, cmd)
+	}
 	waitErr := cmd.Wait()
 	if errors.Is(parseErr, ErrPermissionPrompt) {
 		return res, ErrPermissionPrompt
@@ -178,86 +196,103 @@ func readTurn(stdout io.Reader, onEvent func(Event), failPrompt bool, promptCh <
 func readEvents(r io.Reader, onEvent func(Event), failPrompt bool) (Result, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	var b strings.Builder
-	var sawDelta bool
-	var sawFinal bool
-	var out Result
-	var errMsg string
+	var st streamAcc
 	for sc.Scan() {
 		line := sc.Text()
 		if failPrompt && permissionText(line) {
 			if ev, ok := Parse(line); ok && ev.SessionID != "" {
-				out.SessionID = ev.SessionID
+				st.out.SessionID = ev.SessionID
 			}
-			return out, ErrPermissionPrompt
+			return st.out, ErrPermissionPrompt
 		}
 		ev, ok := Parse(line)
 		if !ok {
 			continue
 		}
-		if ev.SessionID != "" {
-			out.SessionID = ev.SessionID
-		}
-		switch ev.Kind {
-		case "token":
-			sawDelta = true
-			b.WriteString(ev.Text)
-			if onEvent != nil {
-				onEvent(ev)
-			}
-		case "tool", "tool_result", "permission_decision":
-			if onEvent != nil {
-				onEvent(ev)
-			}
-		case "end":
-			sawFinal = true
-			if ev.StopReason != "" {
-				out.StopReason = ev.StopReason
-			}
-			if ev.NeedsInput {
-				out.NeedsInput = true
-			}
-			if ev.Final && strings.TrimSpace(ev.Text) != "" {
-				out.Text = ev.Text
-			}
-			if onEvent != nil {
-				onEvent(ev)
-			}
-		case "permission":
-			if failPrompt {
-				return out, ErrPermissionPrompt
-			}
-		case "error":
-			errMsg = ev.Text
-			if onEvent != nil {
-				onEvent(ev)
-			}
+		if err := st.apply(ev, onEvent, failPrompt); err != nil {
+			return st.out, err
 		}
 	}
-	if err := sc.Err(); err != nil {
-		out.Interrupted = true
-		if sawDelta && strings.TrimSpace(out.Text) == "" {
-			out.Text = b.String()
+	return st.finish(sc.Err())
+}
+
+// streamAcc is the text and session captured from one CLI stdout stream.
+type streamAcc struct {
+	b        strings.Builder
+	sawDelta bool
+	sawFinal bool
+	out      Result
+	errMsg   string
+}
+
+func (st *streamAcc) apply(ev Event, onEvent func(Event), failPrompt bool) error {
+	if ev.SessionID != "" {
+		st.out.SessionID = ev.SessionID
+	}
+	switch ev.Kind {
+	case "token":
+		st.sawDelta = true
+		st.b.WriteString(ev.Text)
+		if onEvent != nil {
+			onEvent(ev)
 		}
-		return out, fmt.Errorf("cli stream: %w", err)
-	}
-	if !sawFinal {
-		out.Interrupted = true
-		if sawDelta {
-			out.Text = b.String()
+	case "tool", "tool_result", "permission_decision":
+		if onEvent != nil {
+			onEvent(ev)
 		}
-		return out, nil
-	}
-	if strings.TrimSpace(out.Text) == "" && sawDelta {
-		out.Text = b.String()
-	}
-	if errMsg != "" && strings.TrimSpace(out.Text) == "" {
-		if errMsg == "" {
-			errMsg = "cli error"
+	case "end":
+		st.sawFinal = true
+		if ev.StopReason != "" {
+			st.out.StopReason = ev.StopReason
 		}
-		return out, fmt.Errorf("%s", errMsg)
+		if ev.NeedsInput {
+			st.out.NeedsInput = true
+		}
+		if ev.Final && strings.TrimSpace(ev.Text) != "" {
+			st.out.Text = ev.Text
+		}
+		if onEvent != nil {
+			onEvent(ev)
+		}
+	case "permission":
+		if failPrompt {
+			return ErrPermissionPrompt
+		}
+	case "error":
+		st.errMsg = ev.Text
+		if onEvent != nil {
+			onEvent(ev)
+		}
 	}
-	return out, nil
+	return nil
+}
+
+func (st *streamAcc) finish(scanErr error) (Result, error) {
+	if scanErr != nil {
+		st.out.Interrupted = true
+		if st.sawDelta && strings.TrimSpace(st.out.Text) == "" {
+			st.out.Text = st.b.String()
+		}
+		return st.out, fmt.Errorf("cli stream: %w", scanErr)
+	}
+	if !st.sawFinal {
+		st.out.Interrupted = true
+		if st.sawDelta {
+			st.out.Text = st.b.String()
+		}
+		return st.out, nil
+	}
+	if strings.TrimSpace(st.out.Text) == "" && st.sawDelta {
+		st.out.Text = st.b.String()
+	}
+	if st.errMsg != "" && strings.TrimSpace(st.out.Text) == "" {
+		msg := st.errMsg
+		if msg == "" {
+			msg = "cli error"
+		}
+		return st.out, fmt.Errorf("%s", msg)
+	}
+	return st.out, nil
 }
 
 func clip(s string, n int) string {

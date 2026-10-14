@@ -33,6 +33,11 @@ type Spec struct {
 	// PermissionPrompts is Claude's --permission-prompts value. "none" denies
 	// residual asks instead of sending them to a host. Empty omits the flag.
 	PermissionPrompts string
+	// StreamControl speaks the stream-json control protocol on stdin.
+	// The prompt is a user message, not -p, and no MCP config is attached.
+	StreamControl bool
+	// Control is the broker hook for a stream-json turn. Nil denies every ask.
+	Control *ControlHooks
 	// Bin overrides the executable. Empty uses "grok" or "claude".
 	Bin string
 	// OnStart is called with the child pid after Start.
@@ -120,6 +125,9 @@ func grokFlags(spec Spec) []string {
 }
 
 func claudeFlags(spec Spec) []string {
+	if spec.StreamControl {
+		return claudeStreamFlags(spec)
+	}
 	var args []string
 	if spec.Model != "" {
 		args = append(args, "--model", spec.Model)
@@ -152,6 +160,33 @@ func claudeFlags(spec Spec) []string {
 			tool = "mcp__lgbperm__approve"
 		}
 		args = append(args, "--mcp-config", spec.MCPConfig, "--permission-prompt-tool", tool)
+	}
+	return args
+}
+
+// claudeStreamFlags is the stream-json control transport.
+// The prompt is written to stdin. There is no -p and no --mcp-config.
+// Model, session, permission mode, and allow/deny rules stay as on the -p path.
+func claudeStreamFlags(spec Spec) []string {
+	var args []string
+	if spec.Model != "" {
+		args = append(args, "--model", spec.Model)
+	}
+	args = append(args, sessionFlags(spec)...)
+	args = append(args,
+		"--input-format", "stream-json",
+		"--output-format", "stream-json",
+		"--verbose",
+		"--permission-prompt-tool", "stdio",
+	)
+	if strings.TrimSpace(spec.PermissionMode) != "" {
+		args = append(args, "--permission-mode", spec.PermissionMode)
+	}
+	for _, rule := range spec.AllowRules {
+		args = append(args, "--allowedTools", rule)
+	}
+	for _, rule := range spec.DenyRules {
+		args = append(args, "--disallowedTools", rule)
 	}
 	return args
 }
