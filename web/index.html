@@ -318,7 +318,7 @@
   </form>
 </div>
 <script>
-const KINDS = ["user_message","bot_message","dm_sent","dm_received","tool_start","tool_end","bot_created","bot_updated","bot_deleted","timer_fired","timer_missed","model_call","run_started","run_finished","daemon_start","daemon_stop","grant_use","grant_denied","net_request","sandbox_block"];
+const KINDS = ["user_message","bot_message","dm_sent","dm_received","tool_start","tool_end","bot_created","bot_updated","bot_deleted","timer_fired","timer_missed","model_call","run_input","run_started","run_finished","daemon_start","daemon_stop","grant_use","grant_denied","net_request","sandbox_block"];
 const SHAPES = ["circle","square","diamond","triangle","hex"];
 const COLORS = ["#1b654c","#8a4e08","#8d2d2d","#1d4e89","#5c4d7a","#3f6b4a","#a15c38","#2f2f2f"];
 const state = {
@@ -423,7 +423,12 @@ async function loadBots() {
   state.bots = await api("/api/bots");
   renderBots();
   const b = currentBot();
-  if (b) paintHeader(b);
+  if (b) {
+    paintHeader(b);
+    // A message sent mid-run can start a follow-up run after the stream
+    // ended; pick it up so its reply streams in.
+    if (b.active_run_id && b.active_run_id !== state.streaming) follow(b.active_run_id);
+  }
 }
 function paintHeader(b) {
   $("#thread-name").textContent = b.name;

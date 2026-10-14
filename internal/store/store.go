@@ -363,6 +363,7 @@ func (s *Store) evolve() error {
 		{"bots", "net_allow", "TEXT NOT NULL DEFAULT '[]'"},
 		{"bots", "ssh_allow", "TEXT NOT NULL DEFAULT '[]'"},
 		{"timers", "name", "TEXT NOT NULL DEFAULT ''"},
+		{"runs", "input_through", "TEXT"},
 	}
 	for _, a := range adds {
 		ok, err := s.hasColumn(a.table, a.col)
@@ -1147,17 +1148,15 @@ func (s *Store) NeedsRun(botID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var started sql.NullString
-	err := s.db.QueryRow(`SELECT started_at FROM runs WHERE bot_id=? ORDER BY started_at DESC LIMIT 1`, botID).Scan(&started)
+	// A run has consumed every message up to input_through when it folded
+	// messages in mid-run, and up to started_at otherwise.
+	err := s.db.QueryRow(`SELECT COALESCE(input_through, started_at) FROM runs WHERE bot_id=? ORDER BY started_at DESC LIMIT 1`, botID).Scan(&started)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
 	var pending sql.NullString
 	// Notice lines are visible on the thread. They do not queue another turn.
-	err = s.db.QueryRow(`SELECT MAX(created_at) FROM messages WHERE bot_id=? AND (
-		(thread='user' AND role='user')
-		OR (thread='user' AND role='system' AND content NOT LIKE 'Notice: %')
-		OR (thread LIKE 'dm:%' AND role='user')
-	)`, botID).Scan(&pending)
+	err = s.db.QueryRow(`SELECT MAX(created_at) FROM messages WHERE bot_id=? AND `+turnInput, botID).Scan(&pending)
 	if err != nil {
 		return false, err
 	}
@@ -1168,6 +1167,44 @@ func (s *Store) NeedsRun(botID string) (bool, error) {
 		return true, nil
 	}
 	return pending.String > started.String, nil
+}
+
+// turnInput matches the messages that queue a turn. NeedsRun and
+// TurnInputSince share it.
+const turnInput = `(
+		(thread='user' AND role='user')
+		OR (thread='user' AND role='system' AND content NOT LIKE 'Notice: %')
+		OR (thread LIKE 'dm:%' AND role='user')
+	)`
+
+// TurnInputSince returns turn-queuing messages created after since, oldest first.
+func (s *Store) TurnInputSince(botID, since string) ([]Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT id, bot_id, thread, role, content, run_id, created_at FROM messages
+		WHERE bot_id=? AND created_at > ? AND `+turnInput+` ORDER BY created_at ASC, id ASC`, botID, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Message{}
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// MarkRunInput records that a live run has read turn input through ts.
+// It only moves forward.
+func (s *Store) MarkRunInput(runID, ts string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`UPDATE runs SET input_through=? WHERE id=? AND (input_through IS NULL OR input_through < ?)`, ts, runID, ts)
+	return err
 }
 
 func (s *Store) CreateRun(botID string) (Run, error) {

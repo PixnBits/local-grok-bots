@@ -140,7 +140,7 @@ Optional gate: if `AUTH_TOKEN` is set in the daemon environment, require `Author
 
 - `POST .../messages` always persists the user message, ordered, and returns.
 - If the bot is `idle`, the post starts a run and returns its `run_id`.
-- If the bot is `running`, the message joins that bot's queue. The running turn may observe new user messages before it finishes, or the next run starts the moment the current one ends and consumes the queue. Either is acceptable. Dropping the message or blocking the POST is not.
+- If the bot is `running`, the post returns the live `run_id` and the message is folded into that run: before each model call the run appends any turn input (user messages, scheduled prompts, inbound DMs) stored after what it has already read, records how far it has read in `runs.input_through`, and writes `run_input`. A message that lands after the run's last model call is not lost: the next run starts the moment the current one ends and consumes it. The page follows whichever run is active. Dropping the message or blocking the POST is not acceptable.
 - A run ends in exactly one of `done`, `error`, `cancelled`.
 - On daemon start, any run still marked `running` is marked `error` with reason `daemon_restart`. No resume of a half-finished model call.
 - Cancel sets the run to `cancelled` and stops further tool calls. Partial output already persisted stays.
@@ -194,7 +194,7 @@ Named grants (`net`, `git`, `ssh`, `build`) live on the bot. The profile and the
 
 Append-only. `kind` is a closed set:
 
-`user_message`, `bot_message`, `dm_sent`, `dm_received`, `tool_start`, `tool_end`, `bot_created`, `bot_updated`, `bot_deleted`, `timer_fired`, `timer_missed`, `model_call`, `run_started`, `run_finished`, `daemon_start`, `daemon_stop`, `grant_use`, `grant_denied`, `net_request`, `sandbox_block`.
+`user_message`, `bot_message`, `dm_sent`, `dm_received`, `tool_start`, `tool_end`, `bot_created`, `bot_updated`, `bot_deleted`, `timer_fired`, `timer_missed`, `model_call`, `run_input`, `run_started`, `run_finished`, `daemon_start`, `daemon_stop`, `grant_use`, `grant_denied`, `net_request`, `sandbox_block`.
 
 `detail` holds the useful bits and stays small:
 

@@ -37,16 +37,30 @@ func (a *App) execute(botID, runID string) {
 	}
 	// A continuation already holds the transcript, including tool results.
 	// Any other run drops the offer so a timer or DM does not keep it.
+	run, err := a.st.GetRun(runID)
+	if err != nil {
+		_, _ = a.st.FinishRun(runID, "error", err.Error())
+		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+		return
+	}
+	// seen holds turn input already in the transcript, so a message that
+	// lands between CreateRun and buildMessages is not folded in twice.
+	seen := map[string]bool{}
 	msgs, ok := a.takePending(runID)
 	if !ok {
 		a.dropResume(botID)
-		msgs, err = a.buildMessages(bot)
+		var hist []store.Message
+		msgs, hist, err = a.buildMessagesHist(bot)
 		if err != nil {
 			_, _ = a.st.FinishRun(runID, "error", err.Error())
 			a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
 			return
 		}
+		for _, m := range hist {
+			seen[m.ID] = true
+		}
 	}
+	through := run.StartedAt
 	modelName := a.cfg.Model
 	if bot.Model != nil && *bot.Model != "" {
 		modelName = *bot.Model
@@ -60,6 +74,7 @@ func (a *App) execute(botID, runID string) {
 			return
 		}
 		a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "working"})
+		msgs, through = a.foldInput(bot.ID, runID, msgs, through, seen)
 		mctx, mcancel := context.WithTimeout(ctx, modelTimeout)
 		resp, err := a.model.Chat(mctx, model.ChatRequest{
 			Model:    modelName,
@@ -164,18 +179,52 @@ func (a *App) persistBotText(botID, runID, content string) {
 	a.log(botID, "bot_message", map[string]any{"message_id": m.ID, "run_id": runID})
 }
 
+// foldInput appends turn input that arrived after through to the live
+// transcript, so a message sent mid-run is answered by this run. The run
+// then records how far it has read; NeedsRun only queues a new run for
+// messages past that point.
+func (a *App) foldInput(botID, runID string, msgs []model.Message, through string, seen map[string]bool) ([]model.Message, string) {
+	fresh, err := a.st.TurnInputSince(botID, through)
+	if err != nil || len(fresh) == 0 {
+		return msgs, through
+	}
+	names, _ := a.st.BotNames()
+	n := 0
+	for _, m := range fresh {
+		if m.CreatedAt > through {
+			through = m.CreatedAt
+		}
+		if seen[m.ID] {
+			continue
+		}
+		seen[m.ID] = true
+		msgs = append(msgs, mapHist(m, names))
+		n++
+	}
+	_ = a.st.MarkRunInput(runID, through)
+	if n > 0 {
+		a.log(botID, "run_input", map[string]any{"run_id": runID, "messages": n})
+	}
+	return msgs, through
+}
+
 func (a *App) buildMessages(bot store.Bot) ([]model.Message, error) {
+	out, _, err := a.buildMessagesHist(bot)
+	return out, err
+}
+
+func (a *App) buildMessagesHist(bot store.Bot) ([]model.Message, []store.Message, error) {
 	mem, err := a.st.ListMemory(bot.ID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	names, err := a.st.BotNames()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	hist, err := a.st.RecentContext(bot.ID, 40)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var b strings.Builder
 	b.WriteString("You are ")
@@ -203,7 +252,7 @@ func (a *App) buildMessages(bot store.Bot) ([]model.Message, error) {
 	for _, m := range hist {
 		out = append(out, mapHist(m, names))
 	}
-	return out, nil
+	return out, hist, nil
 }
 
 func mapHist(m store.Message, names map[string]string) model.Message {
