@@ -29,10 +29,13 @@ model = "llama3.1"
 [cli]
 # Only consulted when backend = "claude" or "grok"
 # The daemon spawns the CLI headless and resumes sessions; it never
-# re-jails the CLI process. Timer ticks are injected as text into the
-# existing session (append-only channel), and Claude/Grok's own tools
-# execute them inside their sandbox.
+# re-jails the CLI process. Timer ticks are injected by resuming the
+# session with a [scheduled] prompt. Claude/Grok's own tools execute
+# them inside their sandbox.
 idle_timeout_minutes = 30
+# Window in which a user-created timer keeps a live process from being
+# killed. Bot-created timers do not. Default 2.
+imminent_timer_minutes = 2
 # Permission mode must match what InfoSec has approved for headless use.
 # "bypassPermissions" is the likely requirement for unattended timers;
 # that is an InfoSec conversation, not something the daemon invents.

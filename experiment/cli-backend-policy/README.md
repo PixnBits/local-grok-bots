@@ -20,20 +20,24 @@ The middle ground between `main` (Ollama + custom daemon jail) and
   accidentally run Claude inside a nested jail.
 - **Fail-closed + strict precedence**: managed settings > this file >
   defaults. Missing or unparseable policy -> strictest mode, loud log.
-- **Timer injection via a narrow channel**: append-only file or Unix
-  socket that Claude's own tools read. One small door, no shell.
+- **Session lifetime is policy-driven**: 30-minute idle kill (configurable)
+  with a 2-minute user-timer exception; process-group kill; resume on
+  next event. See `docs/plans/2026-10-13-cli-session-lifetime.md`.
 
 ## Files
 
 - `policy.toml.sample` (repo root) — annotated sample policy. Copy to
   `policy.toml` (or the managed path) and edit.
+- `docs/plans/2026-10-13-cli-session-lifetime.md` — idle/resume decisions
+  carried forward and made policy-configurable.
 
 ## Open questions
 
 - Does the CLI's headless output format give clean parseable events
-  (tokens, tool calls) or do we scrape text?
+  (tokens, tool calls) or do we scrape text? (stream-json / streaming-json
+  is the documented path.)
 - What does InfoSec say about `bypassPermissions` for unattended
   timer-driven sessions?
 - Session history lives in the CLI's store (`~/.claude/projects/`,
-  `~/.grok/sessions/`) — how cleanly can the daemon project it into
-  the web thread?
+  `~/.grok/sessions/`) — live stream capture is preferred for the web
+  thread; direct JSONL parsing is version-fragile for Claude.
