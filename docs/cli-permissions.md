@@ -1,6 +1,6 @@
 # CLI permission approvals
 
-A headless CLI turn used to fail with `permission prompt requires a TTY or an explicit permission_mode` as soon as the CLI asked for a tool. The daemon is the permission host for Claude when `ui_prompts` is on and it has an HTTP base. Otherwise Claude is started with `--permission-prompts none`. Grok stays on policy flags only. A raw permission prompt that is not covered by that flag still fails the turn.
+A headless CLI turn used to fail with `permission prompt requires a TTY or an explicit permission_mode` as soon as the CLI asked for a tool. The daemon is the permission host for Claude. `cli.permission.claude_transport` selects that host: `mcp` (the default), `stream_control`, or `none`. Grok stays on policy flags only. A raw permission prompt that is not covered by a host or by `--permission-prompts none` still fails the turn.
 
 The stock page subscribes to the run stream with `?prompts=1` and renders `permission_request`. A stream client that does not pass that flag is not a UI. Turning `ui_prompts` on while an older page is open fails closed at once with source `no_ui`.
 
@@ -17,6 +17,7 @@ The stock page subscribes to the run stream with `?prompts=1` and renders `permi
 | `ui_prompts` | When true, a stream client that subscribed with `?prompts=1` may answer a residual ask. Default false. |
 | `prompt_timeout` | How long the host waits. Default 60s. A non-positive value is 60s. |
 | `allow_session_grants` | Lets a UI answer `allow_session`. Honored only from the managed policy file. |
+| `claude_transport` | `mcp` (default), `stream_control`, or `none`. Empty is `mcp`. Any other value is a config error, and load uses the existing fail-closed fallback (daemon jail on, CLI backends off). |
 
 Precedence is unchanged: managed settings, then `policy.toml`, then defaults. A missing or unparseable file still fail-closes (daemon jail on, CLI backends off).
 
@@ -39,13 +40,27 @@ Rules match the tool name, with an optional argument glob in parentheses: `Bash(
 
 canUseTool denies with source `no_ui` when `ui_prompts` is off or no stream client has declared it can answer prompts (`?prompts=1` on that run). It does not publish `permission_request` in that case. Otherwise it publishes and waits for `Decide`. The page shows the tool name, the arguments as sent (already redacted), a countdown to `deadline`, and posts `{"decision":"allow_once"|"deny"|"allow_session"}` to the route above. `allow_session` is offered only when `session_allowed` is true. A `permission_decision`, or the countdown hitting zero, disables the card and shows the decision and source. Timeout, context cancel, an unknown id, and a daemon restart deny. Pending requests live only in memory. `allow_session` is rejected and the request stays pending when managed policy did not allow session grants. A grant is stored per bot and session (or per run when the session id is empty) and is checked after allow rules, so a later deny or ask still wins.
 
-Each decision emits `permission_decision` and, when audit is on, one audit record: `source` (`policy`, `hook`, `ui`, `timeout`, `no_ui`, `cancel`, or `cli`), the rule that matched, tool, redacted arguments, bot, run, time, and decision. Arguments go through `audit.RedactValue` (the same redactor the daemon uses for tool payloads). The allow payload sent back to Claude keeps the original arguments so the tool still runs.
+Each decision emits `permission_decision` and, when audit is on, one audit record: `source` (`policy`, `hook`, `ui`, `timeout`, `no_ui`, `cancel`, or `cli`), the rule that matched, tool, redacted arguments, bot, run, time, decision, and `transport`. Arguments go through `audit.RedactValue` (the same redactor the daemon uses for tool payloads). The allow payload sent back to Claude keeps the original arguments so the tool still runs.
+
+`transport` is the wire actually used, not a second copy of the policy string. `stream_control` is stamped for every decision on that transport, including a broker `no_ui` deny. `mcp` is stamped only when the HTTP prompt tool is attached. `none` is stamped when the turn passes `--permission-prompts none`: the policy value `none`, or `mcp` with `ui_prompts` off or with no HTTP base. The approval card ignores the field.
 
 `POST /api/bots/{id}/runs/{run_id}/permissions/{req_id}` with `{"decision":"allow_once"|"deny"|"allow_session"}` calls `Decide`. The request must belong to that bot and run. Bearer auth still applies to this route.
 
-## Claude
+## Claude transport
 
-When the backend is Claude, `ui_prompts` is on, and the daemon knows a non-zero HTTP base, the turn gets a random token and these flags:
+| | `mcp` | `stream_control` | `none` |
+|---|---|---|---|
+| When | Default, and the empty value. The HTTP tool is attached only when `ui_prompts` is on and the daemon has an HTTP base. Otherwise this mode behaves as `none`. | `claude_transport = "stream_control"`. Stdio is the host even when `ui_prompts` is off or there is no HTTP base. Residual asks still die in the broker as `no_ui`. | `claude_transport = "none"`, or `mcp` falling through as above. |
+| Argv | `-p`, `--output-format stream-json`, `--verbose`, `--include-partial-messages`, and, when a host is attached, `--mcp-config` plus `--permission-prompt-tool mcp__lgbperm__approve`. | `--input-format stream-json`, `--output-format stream-json`, `--verbose`, `--permission-prompt-tool stdio`. No `-p`, no `--mcp-config`, no `--include-partial-messages`, no `--permission-prompts`. The prompt is a stdin message. Model, session, `--permission-mode`, `--allowedTools`, and `--disallowedTools` stay. | `--permission-prompts none`. No prompt tool and no MCP server. |
+| Ask | HTTP `tools/call` of `approve`. | Stdin `control_request` subtype `can_use_tool`. | Claude denies. The daemon audits `permission_denied`. |
+| Broker | Same order. Deny wins. The card is only for a residual ask. | Same broker, same card. | No card. |
+| `transport` on the event | `mcp` when the tool is attached, otherwise `none`. | `stream_control`. | `none`. |
+
+A denial Claude reports itself stays source `cli` while a host is attached (`mcp` or `stream_control`). With `--permission-prompts none`, source is `no_ui` when prompts are off and `policy` when prompts are on but there is no host.
+
+### MCP
+
+When the backend is Claude, the transport is `mcp`, `ui_prompts` is on, and the daemon knows a non-zero HTTP base, the turn gets a random token and these flags:
 
 - `--permission-mode` from policy, when set
 - `--allowedTools` / `--disallowedTools` from allow and deny rules
@@ -62,6 +77,69 @@ Ask rules are broker-only. Claude has no matching flag, so an ask applies when C
 
 The token is dropped when the turn ends. A bind address of `:0` has no stable base URL, so tests that use `httptest` set the base to the server URL.
 
+### stream_control
+
+The daemon keeps the CLI's stdin open and writes one JSON object per line. Writes are serialized with a mutex. After a `result` (or `end`) message it closes stdin so the CLI exits. Ordinary stream events (`assistant`, `stream_event`, `system`, `result`) are parsed as on the `-p` path and may arrive between control messages.
+
+The framing matches PyPI `claude-agent-sdk` 0.2.167:
+
+- `claude_agent_sdk/_internal/query.py` `initialize` sends `{"subtype":"initialize","hooks":null}` through `_send_control_request`, which uses `request_id` `req_{n}_{8 hex chars}` from `os.urandom(4).hex()`.
+- The same file's `_handle_control_request` answers `can_use_tool` with `behavior` `allow` and `updatedInput`, or `behavior` `deny` and `message`. Any other subtype, including `hook_callback` and `mcp_message`, is an error. A `control_cancel_request` cancels the in-flight ask and writes no response.
+- `claude_agent_sdk/_internal/transport/subprocess_cli.py` passes `--input-format stream-json` with `--output-format stream-json` and `--verbose`.
+- `claude_agent_sdk/types.py` sets `permission_prompt_tool_name="stdio"` when a permission callback is routed over the control protocol (`_configure_can_use_tool`).
+
+The first write is the initialize request. The daemon waits for a matching `control_response`. `subtype` `error`, a malformed response, or stdout ending first fails the turn closed. The user prompt is not sent.
+
+```json
+{"type":"control_request","request_id":"req_1_0123abcd","request":{"subtype":"initialize","hooks":null}}
+```
+
+Success is `{"type":"control_response","response":{"subtype":"success","request_id":"req_1_0123abcd","response":{...}}}`. An error is the same envelope with `subtype` `error` and `error` set, and no `response` field.
+
+The prompt follows, with an empty `session_id`, which is the SDK string-prompt path in `_internal/client.py`:
+
+```json
+{"type":"user","session_id":"","message":{"role":"user","content":"<prompt>"},"parent_tool_use_id":null}
+```
+
+Claude asks with:
+
+```json
+{"type":"control_request","request_id":"X","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{},"tool_use_id":"...","permission_suggestions":[],"blocked_path":null,"decision_reason":null}}
+```
+
+That call goes through the broker. Allow echoes the original `input` bytes as `updatedInput` (not the redacted copy):
+
+```json
+{"type":"control_response","response":{"subtype":"success","request_id":"X","response":{"behavior":"allow","updatedInput":{}}}}
+```
+
+Deny:
+
+```json
+{"type":"control_response","response":{"subtype":"success","request_id":"X","response":{"behavior":"deny","message":"denied by policy rule Bash(rm *)"}}}
+```
+
+A different `control_request` subtype, or a request object that is not an object, gets `{"type":"control_response","response":{"subtype":"error","request_id":"X","error":"..."}}` and a deny audit. The turn keeps going. A line that is not JSON, or a control message with no `request_id`, is audited and ignored. `{"type":"control_cancel_request","request_id":"X"}` denies the pending ask with source `cancel` and writes nothing.
+
+### Managed policy with MCP off
+
+Managed settings win over `policy.toml`. This managed file selects Claude and answers tool checks on stdin, so the daemon does not attach the HTTP MCP server:
+
+```json
+{
+  "backend": { "backend": "claude" },
+  "cli": {
+    "permission": {
+      "ui_prompts": true,
+      "claude_transport": "stream_control",
+      "allow": ["Read"],
+      "deny": ["Bash(rm *)"]
+    }
+  }
+}
+```
+
 ## Grok
 
 `grok agent stdio` speaks ACP. A full client would implement `initialize`, `authenticate`, `session/new`, `session/prompt`, and `session/request_permission`, then pick the allow or reject option id from that request. That client is not in this branch.
@@ -76,4 +154,4 @@ A headless permission prompt is still a deny: the turn fails with `ErrPermission
 
 ## Audit and redaction
 
-Secret-looking keys (`token`, `secret`, `password`, `api_key`, `authorization`, `credential`, `bearer`) and values (`sk-…`, `ghp_…`, `github_pat_…`, bearer tokens) are redacted before the event and the audit line. The MCP `updatedInput` is not redacted.
+Secret-looking keys (`token`, `secret`, `password`, `api_key`, `authorization`, `credential`, `bearer`) and values (`sk-…`, `ghp_…`, `github_pat_…`, bearer tokens) are redacted before the event and the audit line. The `updatedInput` sent back to Claude, over MCP or `stream_control`, is not redacted.
