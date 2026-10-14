@@ -205,7 +205,7 @@ func readEvents(r io.Reader, onEvent func(Event), failPrompt bool) (Result, erro
 			if onEvent != nil {
 				onEvent(ev)
 			}
-		case "tool", "tool_result":
+		case "tool", "tool_result", "permission_decision":
 			if onEvent != nil {
 				onEvent(ev)
 			}

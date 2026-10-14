@@ -61,4 +61,42 @@ func TestGrokDoesNotAlwaysApproveUnlessPolicySaysSo(t *testing.T) {
 	if !strings.Contains(joined, "--always-approve") || !strings.Contains(joined, "--resume\ns") {
 		t.Fatalf("allow args %v", allow)
 	}
+	if strings.Contains(joined, "--permission-mode") {
+		t.Fatalf("bypass mode was also passed as --permission-mode: %v", allow)
+	}
+}
+
+func TestPermissionRulesArePassedThrough(t *testing.T) {
+	grok, err := Args(Spec{
+		Backend: "grok", Prompt: "hi", Workspace: "/w", PermissionMode: "ask",
+		AllowRules: []string{"Bash(git status*)"}, DenyRules: []string{"Bash(rm *)"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(grok, "\n")
+	if !strings.Contains(joined, "--allow\nBash(git status*)") || !strings.Contains(joined, "--deny\nBash(rm *)") {
+		t.Fatalf("grok rules %v", grok)
+	}
+	if strings.Contains(joined, "--always-approve") || !strings.Contains(joined, "--permission-mode\nask") {
+		t.Fatalf("grok mode %v", grok)
+	}
+	claude, err := Args(Spec{
+		Backend: "claude", Prompt: "hi", Workspace: "/w", PermissionMode: "default",
+		AllowRules: []string{"Read"}, DenyRules: []string{"Bash(rm *)"},
+		MCPConfig: `{"mcpServers":{"lgbperm":{"type":"http","url":"http://127.0.0.1:9/api/mcp/permission/abc"}}}`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined = strings.Join(claude, "\n")
+	if !strings.Contains(joined, "--allowedTools\nRead") || !strings.Contains(joined, "--disallowedTools\nBash(rm *)") {
+		t.Fatalf("claude rules %v", claude)
+	}
+	if !strings.Contains(joined, "--permission-mode\ndefault") || !strings.Contains(joined, "--permission-prompt-tool\nmcp__lgbperm__approve") {
+		t.Fatalf("claude prompt tool %v", claude)
+	}
+	if !strings.Contains(joined, "--mcp-config\n{\"mcpServers\"") {
+		t.Fatalf("mcp config %v", claude)
+	}
 }

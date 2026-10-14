@@ -3,6 +3,8 @@ package clisession
 import (
 	"fmt"
 	"strings"
+
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
 
 // Spec is one headless CLI turn. A fresh session is created with --session-id.
@@ -17,7 +19,17 @@ type Spec struct {
 	Model     string
 	// PermissionMode is the policy value. Empty means do not pass a mode flag:
 	// the CLI prompts the user, the same as interactive use.
+	// An always-allow mode is passed through only when the caller already
+	// checked that managed policy set it.
 	PermissionMode string
+	// AllowRules and DenyRules are Claude-style patterns such as "Bash(git *)".
+	AllowRules []string
+	DenyRules  []string
+	// MCPConfig is inline JSON for Claude's --mcp-config. When set, the
+	// permission prompt tool is passed too.
+	MCPConfig string
+	// PermissionTool is the MCP tool name, mcp__<server>__approve.
+	PermissionTool string
 	// Bin overrides the executable. Empty uses "grok" or "claude".
 	Bin string
 	// OnStart is called with the child pid after Start.
@@ -34,6 +46,15 @@ type Event struct {
 	StopReason string
 	NeedsInput bool
 	Final      bool
+	// Denials are permission_denials on a result event. They do not fail the turn.
+	Denials []Denial
+}
+
+// Denial is one tool call the CLI refused.
+type Denial struct {
+	Tool  string
+	Args  map[string]any
+	UseID string
 }
 
 // Result is the captured end of a turn.
@@ -79,9 +100,18 @@ func grokFlags(spec Spec) []string {
 		"--output-format", "streaming-json",
 		"--no-auto-update",
 	)
+	for _, rule := range spec.AllowRules {
+		args = append(args, "--allow", rule)
+	}
+	for _, rule := range spec.DenyRules {
+		args = append(args, "--deny", rule)
+	}
 	// --always-approve is an explicit always-allow policy, never a default.
+	// Other modes are passed through. Grok does not speak the Claude mode names.
 	if alwaysAllow(spec.PermissionMode) {
 		args = append(args, "--always-approve")
+	} else if strings.TrimSpace(spec.PermissionMode) != "" {
+		args = append(args, "--permission-mode", spec.PermissionMode)
 	}
 	return args
 }
@@ -101,6 +131,19 @@ func claudeFlags(spec Spec) []string {
 	if strings.TrimSpace(spec.PermissionMode) != "" {
 		args = append(args, "--permission-mode", spec.PermissionMode)
 	}
+	for _, rule := range spec.AllowRules {
+		args = append(args, "--allowedTools", rule)
+	}
+	for _, rule := range spec.DenyRules {
+		args = append(args, "--disallowedTools", rule)
+	}
+	if strings.TrimSpace(spec.MCPConfig) != "" {
+		tool := spec.PermissionTool
+		if tool == "" {
+			tool = "mcp__lgbperm__approve"
+		}
+		args = append(args, "--mcp-config", spec.MCPConfig, "--permission-prompt-tool", tool)
+	}
 	return args
 }
 
@@ -115,10 +158,5 @@ func sessionFlags(spec Spec) []string {
 }
 
 func alwaysAllow(mode string) bool {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "always", "always-allow", "always_allow", "bypasspermissions", "bypass", "dontask":
-		return true
-	default:
-		return false
-	}
+	return policy.IsBypassMode(mode)
 }

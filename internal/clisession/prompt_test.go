@@ -25,9 +25,13 @@ func TestParsePermissionPrompts(t *testing.T) {
 			t.Fatalf("line %s -> %+v ok=%v", line, ev, ok)
 		}
 	}
-	ev, ok := Parse(`{"type":"system","subtype":"permission_denied","session_id":"s","tool":"Bash"}`)
-	if !ok || ev.Kind != "tool" {
+	ev, ok := Parse(`{"type":"system","subtype":"permission_denied","session_id":"s","tool":"Bash","tool_input":{"command":"rm -rf /"}}`)
+	if !ok || ev.Kind != "permission_decision" || ev.ToolName != "Bash" || ev.ToolArgs["command"] != "rm -rf /" {
 		t.Fatalf("denial was treated as a prompt: %+v", ev)
+	}
+	ev, ok = Parse(`{"type":"result","result":"ok","session_id":"s","permission_denials":[{"tool_name":"Bash","tool_use_id":"tu","tool_input":{"command":"rm -rf /"}}]}`)
+	if !ok || ev.Kind != "end" || len(ev.Denials) != 1 || ev.Denials[0].Tool != "Bash" || ev.Denials[0].UseID != "tu" {
+		t.Fatalf("result denials %+v", ev)
 	}
 }
 
@@ -99,6 +103,28 @@ printf '%s\n' '{"type":"result","result":"ok","session_id":"kept"}'
 	}, nil)
 	if err != nil || withTTY.Text != "ok" {
 		t.Fatalf("tty present: %v %+v", err, withTTY)
+	}
+}
+
+func TestPermissionDenialDoesNotFailTheTurn(t *testing.T) {
+	dir := t.TempDir()
+	bin := writeScript(t, dir, "deny.sh", `#!/bin/sh
+printf '%s\n' '{"type":"system","subtype":"permission_denied","session_id":"s","tool":"Bash","tool_input":{"command":"rm -rf /"}}'
+printf '%s\n' '{"type":"result","result":"continued","session_id":"s","permission_denials":[{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}]}'
+`)
+	var kinds []string
+	var denials int
+	res, err := (ExecRunner{HasTTY: func() bool { return false }}).Run(context.Background(), Spec{
+		Backend: "claude", Bin: bin, Fresh: true, Prompt: "hi", Workspace: dir,
+	}, func(ev Event) {
+		kinds = append(kinds, ev.Kind)
+		denials += len(ev.Denials)
+	})
+	if err != nil || res.Text != "continued" {
+		t.Fatalf("err %v res %+v kinds %v", err, res, kinds)
+	}
+	if !strings.Contains(strings.Join(kinds, ","), "permission_decision") || denials != 1 {
+		t.Fatalf("kinds %v denials %d", kinds, denials)
 	}
 }
 

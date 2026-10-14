@@ -37,6 +37,7 @@ func Parse(line string) (Event, bool) {
 		ev := Event{
 			Kind: "end", SessionID: session, StopReason: stop,
 			NeedsInput: needsInput(stop, firstString(raw, "subtype")),
+			Denials:    permissionDenials(raw),
 		}
 		if text != "" {
 			ev.Text = text
@@ -77,11 +78,11 @@ func Parse(line string) (Event, bool) {
 		return Event{Kind: "meta", SessionID: session}, true
 	case "system":
 		if firstString(raw, "subtype") == "permission_denied" {
-			tool := firstString(raw, "tool")
+			tool := firstString(raw, "tool", "tool_name", "name")
 			if tool == "" {
 				tool = "permission_denied"
 			}
-			return Event{Kind: "tool", ToolName: tool, SessionID: session}, true
+			return Event{Kind: "permission_decision", ToolName: tool, ToolArgs: toolArgs(raw), SessionID: session}, true
 		}
 		if session == "" {
 			return Event{}, false
@@ -178,8 +179,32 @@ func claudeToolResult(v any) (string, string, bool) {
 	return "", "", false
 }
 
+func permissionDenials(raw map[string]any) []Denial {
+	items, ok := raw["permission_denials"].([]any)
+	if !ok {
+		return nil
+	}
+	var out []Denial
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		tool := firstString(m, "tool_name", "tool", "name")
+		if tool == "" {
+			tool = "permission_denied"
+		}
+		args := toolArgs(m)
+		if args == nil {
+			args = asMap(m["tool_input"])
+		}
+		out = append(out, Denial{Tool: tool, Args: args, UseID: firstString(m, "tool_use_id", "id")})
+	}
+	return out
+}
+
 func toolArgs(raw map[string]any) map[string]any {
-	for _, key := range []string{"arguments", "args", "input", "parameters"} {
+	for _, key := range []string{"arguments", "args", "input", "parameters", "tool_input"} {
 		if m := asMap(raw[key]); m != nil {
 			return m
 		}
