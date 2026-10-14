@@ -46,7 +46,9 @@
     padding: 10px 12px;
   }
   textarea { resize: vertical; min-height: 72px; }
-  .app { min-height: 100%; display: flex; flex-direction: column; }
+  /* The app is exactly one viewport tall so the message list, not the page,
+     is what scrolls; paging and auto-scroll depend on that. */
+  .app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
   header.top {
     display: flex; align-items: center; gap: 12px;
     padding: 14px 16px 8px;
@@ -70,7 +72,8 @@
     min-height: 0;
   }
   .view { display: none; flex: 1; min-height: 0; }
-  .view.on { display: flex; flex-direction: column; gap: 12px; }
+  .view.on { display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+  #view-chat.on { overflow: hidden; }
   .create, .profile { padding: 14px; display: grid; gap: 8px; }
   .grants { border: 1px solid var(--line); border-radius: 10px; margin: 0; padding: 8px 12px; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
   .grants legend { padding: 0 6px; color: var(--muted); }
@@ -237,13 +240,14 @@
   .desktop-log { display: none; }
   @media (min-width: 980px) {
     nav.tabs { display: none; }
-    main { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 12px; align-items: stretch; }
+    main { display: grid; grid-template-columns: 280px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 12px; align-items: stretch; }
+    #view-bots { overflow-y: auto; }
+    #view-chat { overflow: hidden; }
     #view-bots, #view-chat { display: flex !important; }
     #view-profile, #view-log { display: none !important; }
     body.solo #view-bots, body.solo #view-chat { display: none !important; }
     body.solo #view-profile.on, body.solo #view-log.on { display: flex !important; grid-column: 1 / -1; }
     .desktop-log { display: inline-flex; }
-    .thread { min-height: 70vh; }
   }
 </style>
 </head>
