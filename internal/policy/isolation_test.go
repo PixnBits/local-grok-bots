@@ -62,3 +62,35 @@ func TestIsolationRejectsBadValues(t *testing.T) {
 		}
 	}
 }
+
+func TestClaudeHomePerOS(t *testing.T) {
+	d := Defaults()
+	if d.CLIClaudeHome != HomeAuto || !d.ClaudeUsesUserHome("darwin") || d.ClaudeUsesUserHome("linux") {
+		t.Fatal("auto should be user on darwin, isolated on linux")
+	}
+	d.CLIClaudeHome = HomeIsolated
+	if d.ClaudeUsesUserHome("darwin") {
+		t.Fatal("isolated on darwin")
+	}
+	d.CLIClaudeHome = HomeAuto
+	d.CLIHome = HomeUser
+	if !d.ClaudeUsesUserHome("linux") {
+		t.Fatal("home=user should win")
+	}
+	dir := t.TempDir()
+	local := filepath.Join(dir, "policy.toml")
+	_ = os.WriteFile(local, []byte("[cli.isolation]\nclaude_home = \"user\"\n"), 0o644)
+	p, err := Load(Options{Path: local})
+	if err != nil || p.CLIClaudeHome != HomeAuto || len(p.Warnings) == 0 {
+		t.Fatalf("local claude_home=user: %q %v %v", p.CLIClaudeHome, p.Warnings, err)
+	}
+	_ = os.WriteFile(local, []byte("[cli.isolation]\nclaude_home = \"isolated\"\n"), 0o644)
+	if p, _ = Load(Options{Path: local}); p.CLIClaudeHome != HomeIsolated {
+		t.Fatalf("isolated: %q", p.CLIClaudeHome)
+	}
+	managed := filepath.Join(dir, "managed.json")
+	_ = os.WriteFile(managed, []byte(`{"cli":{"isolation":{"claude_home":"user"}}}`), 0o644)
+	if p, _ = Load(Options{Path: local, ManagedPath: managed}); p.CLIClaudeHome != HomeUser {
+		t.Fatalf("managed: %q", p.CLIClaudeHome)
+	}
+}

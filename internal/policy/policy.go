@@ -77,6 +77,10 @@ type Policy struct {
 	// CLIHome is isolated (a per-bot HOME and config dir under the data dir)
 	// or user (the daemon user's own CLI home). Only managed policy sets user.
 	CLIHome string
+	// CLIClaudeHome is auto (macOS: the user's HOME so the Keychain login is
+	// found; elsewhere: isolated), isolated, or user (managed policy only).
+	// CLIHome = user still wins for every backend.
+	CLIClaudeHome string
 	// CLIEnv is added to the scrubbed CLI environment. Only managed policy sets it.
 	CLIEnv map[string]string
 
@@ -121,6 +125,7 @@ func Defaults() Policy {
 		ClaudeTransport:   TransportMCP,
 		CLIOverrides:      OverridesIgnore,
 		CLIHome:           HomeIsolated,
+		CLIClaudeHome:     HomeAuto,
 		TimersEnabled:     true,
 		SandboxFailClosed: true,
 		ConflictPolicy:    "refuse",
@@ -379,6 +384,8 @@ const (
 	HomeIsolated = "isolated"
 	// HomeUser runs the CLI with the daemon user's HOME. Managed policy only.
 	HomeUser = "user"
+	// HomeAuto is the per-OS Claude default: user on darwin, isolated elsewhere.
+	HomeAuto = "auto"
 )
 
 func (p *Policy) applyIsolation(iso *cliIsoDoc, trusted bool) error {
@@ -407,6 +414,22 @@ func (p *Policy) applyIsolation(iso *cliIsoDoc, trusted bool) error {
 			return fmt.Errorf("cli.isolation.home must be isolated or user")
 		}
 	}
+	if iso.ClaudeHome != nil {
+		switch v := strings.ToLower(strings.TrimSpace(*iso.ClaudeHome)); v {
+		case "", HomeAuto:
+			p.CLIClaudeHome = HomeAuto
+		case HomeIsolated:
+			p.CLIClaudeHome = HomeIsolated
+		case HomeUser:
+			if trusted {
+				p.CLIClaudeHome = HomeUser
+			} else {
+				p.Warnings = append(p.Warnings, "cli.isolation.claude_home = \"user\" is ignored; only managed policy can share the user's Claude home")
+			}
+		default:
+			return fmt.Errorf("cli.isolation.claude_home must be auto, isolated, or user")
+		}
+	}
 	if iso.Env != nil {
 		if !trusted {
 			p.Warnings = append(p.Warnings, "cli.isolation.env is ignored; only managed policy can set CLI environment")
@@ -423,6 +446,23 @@ func (p *Policy) applyIsolation(iso *cliIsoDoc, trusted bool) error {
 		p.CLIEnv = env
 	}
 	return nil
+}
+
+// ClaudeUsesUserHome reports whether a Claude turn keeps the user's HOME and
+// default config dir on goos. auto picks the user home on darwin, where the
+// login lives in the Keychain, and an isolated home elsewhere.
+func (p Policy) ClaudeUsesUserHome(goos string) bool {
+	if p.CLIHome == HomeUser {
+		return true
+	}
+	switch p.CLIClaudeHome {
+	case HomeUser:
+		return true
+	case HomeIsolated:
+		return false
+	default:
+		return goos == "darwin"
+	}
 }
 
 // NormClaudeTransport accepts mcp, stream_control, and none.
@@ -542,9 +582,10 @@ type cliDoc struct {
 }
 
 type cliIsoDoc struct {
-	Overrides *string            `toml:"overrides" json:"overrides"`
-	Home      *string            `toml:"home" json:"home"`
-	Env       *map[string]string `toml:"env" json:"env"`
+	Overrides  *string            `toml:"overrides" json:"overrides"`
+	Home       *string            `toml:"home" json:"home"`
+	ClaudeHome *string            `toml:"claude_home" json:"claude_home"`
+	Env        *map[string]string `toml:"env" json:"env"`
 }
 
 type cliPermDoc struct {
