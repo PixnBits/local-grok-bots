@@ -154,7 +154,7 @@ Optional gate: if `AUTH_TOKEN` is set in the daemon environment, require `Author
 
 ## 4. Bot tool surface
 
-Tools the model can call. Each is logged on start and on finish. Every model call sends the whole list in Ollama's `tools` field as JSON Schema objects: each argument has a `type` and a `description` with an example. There is no discovery tool or step. A call missing a required argument, or with arguments in the wrong shape, fails with an error that names the problem and lists the tool's expected arguments. The system prompt starts with the current time in RFC 3339 and the daemon's time zone.
+Tools the model can call. Each is logged on start and on finish. Every model call sends the whole list in Ollama's `tools` field as JSON Schema objects: each argument has a `type` and a `description` with an example. There is no discovery tool or step. A call missing a required argument, or with arguments in the wrong shape, fails with an error that names the problem and lists the tool's expected arguments. The system prompt starts with the current time in RFC 3339 and the daemon's time zone. It also states that the attached tools are the current, authoritative set and override anything said earlier in the conversation or in memory about which tools exist.
 
 | Tool | Arguments | Effect |
 |---|---|---|
