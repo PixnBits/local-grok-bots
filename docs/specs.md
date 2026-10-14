@@ -65,7 +65,7 @@ An inbound DM is also represented in the receiving bot’s user thread as a syst
 | id | string (uuid) | |
 | bot_id | string | |
 | name | string | Shown on the profile. |
-| schedule | string | Interval for now: `30s`, `5m`, `2h`, `1d`. Cron is later. |
+| schedule | string | A repeating interval (`30s`, `5m`, `2h`, `1d`), or `once` for a one-shot timer: it fires at `next_fire_at`, then sets `enabled` false and keeps the row. Restoring an archived bot keeps a one-shot's time, or fires it at once if that time passed. A one-shot missed while the daemon was down is logged `timer_missed` and disabled. Cron is later. |
 | prompt | text | Injected as the turn prompt when the timer fires. |
 | enabled | bool | |
 | next_fire_at | timestamp | Computed by the daemon. |
@@ -106,9 +106,10 @@ JSON over HTTP. One SSE stream for a live turn. All routes under `/api`.
 | GET | /api/bots | | `[{id, name, label, mark, status, model}]` |
 | POST | /api/bots | `{name, label?, description, mark?, model?}` | bot |
 | GET | /api/bots/{id} | | bot including description |
-| PATCH | /api/bots/{id} | `{name?, label?, description?, mark?, model?, status?}` | bot |
-| DELETE | /api/bots/{id} | | 204 |
-| GET | /api/bots/{id}/thread | `?before=&limit=` | `{messages: [...]}` oldest-first |
+| PATCH | /api/bots/{id} | `{name?, label?, description?, mark?, model?, status?, pinned?, hidden?, archived?}` | bot. `archived: true` stamps `archived_at`, pauses the bot's enabled timers (marked `archive_paused`), and stops new runs; the thread, memory, timers, and queued messages are kept. `archived: false` clears it, re-enables only the timers archiving paused (next fire counted from now), and starts a run if messages are waiting. Bots carry `archived` and `archived_at` |
+| DELETE | /api/bots/{id} | | 204. Hard delete; API only, the page offers Archive instead |
+| GET | /bots/{id} | | the page (HTML), same as `/`; the client opens that bot. Without a token under `AUTH_TOKEN` it is served with 401 like `/` |
+| GET | /api/bots/{id}/thread | `?before=&limit=` (limit default 50, max 200; `before` is a message id) | the newest `limit` messages before `before` (or overall), oldest first, plus `has_more` (older messages remain): `{messages: [...], has_more, tools: {run_id: [{name, arguments, ok, result_or_error, created_at}]}}` oldest-first; `tools` lists, per reply run, that run's records in order: `kind: "text"` is what the model wrote in the same response as a tool call (in `result_or_error`, no name or arguments), stored before that round's calls; `kind: "call"` is a tool call (arguments redacted, result clipped to 4000 bytes) |
 | POST | /api/bots/{id}/thread/messages | `{content}` | `{message, run_id}` immediately |
 | GET | /api/bots/{id}/thread/stream | `?run_id=` | SSE |
 | POST | /api/bots/{id}/runs/{run_id}/cancel | | `{status}` |
@@ -141,7 +142,7 @@ Optional gate: if `AUTH_TOKEN` is set in the daemon environment, require `Author
 
 - `POST .../messages` always persists the user message, ordered, and returns.
 - If the bot is `idle`, the post starts a run and returns its `run_id`.
-- If the bot is `running`, the message joins that bot's queue. The running turn may observe new user messages before it finishes, or the next run starts the moment the current one ends and consumes the queue. Either is acceptable. Dropping the message or blocking the POST is not.
+- If the bot is `running`, the post returns the live `run_id` and the message is folded into that run: before each model call the run appends any turn input (user messages, scheduled prompts, inbound DMs) stored after what it has already read, records how far it has read in `runs.input_through`, and writes `run_input`. A message that lands after the run's last model call is not lost: the next run starts the moment the current one ends and consumes it. The page follows whichever run is active. Dropping the message or blocking the POST is not acceptable.
 - A run ends in exactly one of `done`, `error`, `cancelled`.
 - On daemon start, any run still marked `running` is marked `error` with reason `daemon_restart`. No resume of a half-finished Ollama model call. A CLI backend instead marks that run `interrupted`, keeps `session_id`, and the next user message or timer resumes with `--resume`.
 - Cancel sets the run to `cancelled` and stops further tool calls. Partial output already persisted stays.
@@ -150,10 +151,11 @@ Optional gate: if `AUTH_TOKEN` is set in the daemon environment, require `Author
 - A run that exceeds 8 model rounds ends `error` / `tool round limit`. The page can continue that transcript as a new run for another 8 rounds. A new message, another turn, or a restart drops the offer.
 - While a run is `running`, the stream emits `status` events so the page can show the working animation. The animation clears on `done` or `error`.
 - Text the model sends in the same response as a tool call is streamed as tokens for that run and kept in that run's in-memory transcript. It is not written to the thread. The stored reply is the response that has no tool call.
+- A model response that fails because a tool call could not be parsed is diagnosed in that run's transcript and tried once more, when a round remains. The diagnosis is not written to the thread. A second parse failure ends the run as `error`. A parse failure on the last of the 8 rounds is that error and does not become `tool round limit`. Unreachable Ollama, an HTTP error, a stream failure, and a timeout are not retried.
 
 ## 4. Bot tool surface
 
-Tools the model can call. Each is logged on start and on finish.
+Tools the model can call. Each is logged on start and on finish. Every model call sends the whole list in Ollama's `tools` field as JSON Schema objects: each argument has a `type` and a `description` with an example. There is no discovery tool or step. A call missing a required argument, or with arguments in the wrong shape, fails with an error that names the problem and lists the tool's expected arguments. The system prompt starts with the current time in RFC 3339 and the daemon's time zone.
 
 | Tool | Arguments | Effect |
 |---|---|---|
@@ -164,8 +166,9 @@ Tools the model can call. Each is logged on start and on finish.
 | update_bot | `{id or name, name?, label?, description?, model?}` | same as `PATCH`; rename requires `id` |
 | write_memory | `{key, value}` | upsert on the calling bot |
 | delete_memory | `{key}` | |
-| set_timer | `{name?, schedule, prompt}` | creates an enabled timer on the calling bot |
-| clear_timer | `{id}` | |
+| set_timer | `{prompt, in? \| at? \| every?, name?}`, exactly one of `in` (one-shot duration like `5m`), `at` (one-shot RFC 3339 time with offset, must be in the future), `every` (repeating interval) | creates an enabled timer on the calling bot and returns `{id, schedule, prompt, next_fire_at, fires_at_local}`. Also accepted: `schedule` (as `every`, or as `in` when `repeat` is false), `seconds` / `in_seconds` / `minutes` numbers, and `message` / `text` / `reminder` for `prompt` |
+| list_timers | | the calling bot's timers |
+| clear_timer | `{id}` | deletes one of the calling bot's timers |
 | read_file | `{path}` | inside the workspace directory only (Ollama mode) |
 | write_file | `{path, content}` | inside the workspace directory only (Ollama mode) |
 | run_shell | `{command}` | jailed to the workspace; stdout/stderr captured and truncated (Ollama mode) |
@@ -196,7 +199,7 @@ Named grants (`net`, `git`, `ssh`, `build`) live on the bot. The profile and the
 
 Append-only. `kind` is a closed set:
 
-`user_message`, `bot_message`, `dm_sent`, `dm_received`, `tool_start`, `tool_end`, `bot_created`, `bot_updated`, `bot_deleted`, `timer_fired`, `timer_missed`, `model_call`, `run_started`, `run_finished`, `daemon_start`, `daemon_stop`, `grant_use`, `grant_denied`, `net_request`, `sandbox_block`.
+`user_message`, `bot_message`, `dm_sent`, `dm_received`, `tool_start`, `tool_end`, `bot_created`, `bot_updated`, `bot_deleted`, `timer_fired`, `timer_missed`, `model_call`, `run_input`, `run_started`, `run_finished`, `daemon_start`, `daemon_stop`, `grant_use`, `grant_denied`, `net_request`, `sandbox_block`.
 
 `detail` holds the useful bits and stays small:
 
@@ -232,9 +235,9 @@ No catch-up of missed timers. No replay of in-flight model calls.
 
 The page is a client. Refreshing reloads from the daemon. Four surfaces. The conversation does not contain the editor.
 
-**Roster.** Mark, name, label, status. Click to open the conversation. A create control.
+**Roster.** Mark, name, label, status. Click to open the conversation. The create control sits below the list. Archived bots are not listed; an `Archived (n)` control switches the list to archived bots, and opening one shows an Unarchive action. The bot menu has Archive / Unarchive and no Delete. Opening a bot sets the URL to `/bots/{id}` (history entry; back/forward and reload restore the selection) and the title to `Name — Local Grok Bots`.
 
-**Conversation.** The thread and the composer. The composer is never disabled during a run. While a run is in progress, a status animation sits at the bottom of the message list, near the latest messages, driven by `status` events on the stream. It clears when the run ends. Inbound DMs appear as a system line in this thread. There is no description editor on this view.
+**Conversation.** The thread and the composer. Opening a bot loads the newest page and lands at the bottom; scrolling near the top loads the previous page above without moving what is on screen, until `has_more` is false. New output (tokens, tool lines, status, replies) scrolls the list only when the reader is within 80px of the bottom, including height changes from markdown and code rendering; scrolled away, the view stays put and a `New messages ↓` pill jumps back down. The composer is never disabled during a run. Enter sends; Shift+Enter inserts a newline, and the box grows with its content up to 40% of the viewport. Newlines in a message are kept when it is shown. While a run is in progress, a status animation sits inside the message list at the position of the next reply, after the latest message and any live output (in an empty thread it is the first item), driven by `status` events on the stream. It clears when the run ends. User and bot messages render markdown (headings, emphasis, inline code, fenced code blocks, GFM pipe tables, lists, quotes, links). A fenced block is a monospace block that keeps whitespace and indentation, scrolls sideways, and shows its info-string language as a label; there is no syntax highlighting. Each block has a Copy button (shown on hover, always shown on touch screens) that copies the block's raw code and says `Copied` briefly; it uses `navigator.clipboard` in a secure context and a hidden textarea with `execCommand("copy")` otherwise, since the LAN page is plain HTTP. A table needs a header row and an alignment row (`---`, `:--`, `--:`, `:-:`) with the same cell count; `\|` is a literal pipe. A header cell that is only an alignment token (a malformed model table) is shown empty, and a header row made only of such tokens is dropped in the page only; the thread, log, and API keep the original text. The renderer builds DOM nodes from text, so HTML in a message shows as text, and links keep only `http`, `https`, and `mailto`. A reply whose run called tools carries a collapsed summary (`3 tool calls: read_file, run_shell`) that opens to show each call, interleaved in order with the text the model wrote before each round's calls; tool records live in the `run_tools` table and survive reload, and the reply text is unchanged. Every message is its own bubble; while a run streams, each model round's text starts a new bubble rather than appending to the previous one. Each user and bot message has a small Copy button (on hover; always shown on touch screens) that copies the message's stored raw text, with the same clipboard fallback. Inbound DMs appear as a system line in this thread. There is no description editor on this view.
 
 **Bot menu.** Opened from the conversation header, not as a side panel. Items: View profile, Pin, Hide, Duplicate, Delete.
 

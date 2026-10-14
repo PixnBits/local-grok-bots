@@ -46,7 +46,9 @@
     padding: 10px 12px;
   }
   textarea { resize: vertical; min-height: 72px; }
-  .app { min-height: 100%; display: flex; flex-direction: column; }
+  /* The app is exactly one viewport tall so the message list, not the page,
+     is what scrolls; paging and auto-scroll depend on that. */
+  .app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
   header.top {
     display: flex; align-items: center; gap: 12px;
     padding: 14px 16px 8px;
@@ -70,7 +72,11 @@
     min-height: 0;
   }
   .view { display: none; flex: 1; min-height: 0; }
-  .view.on { display: flex; flex-direction: column; gap: 12px; }
+  .view.on { display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
+  #view-chat.on { overflow: hidden; }
+  /* In the scrolling views, panels keep their full height and the view
+     scrolls; without this, flex shrinks them and forms spill out. */
+  #view-bots > *, #view-profile > * { flex-shrink: 0; }
   .create, .profile { padding: 14px; display: grid; gap: 8px; }
   .grants { border: 1px solid var(--line); border-radius: 10px; margin: 0; padding: 8px 12px; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
   .grants legend { padding: 0 6px; color: var(--muted); }
@@ -79,7 +85,9 @@
   h2 { font-family: var(--serif); font-size: 18px; margin: 0; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; }
   .bots { display: flex; flex-direction: column; gap: 8px; }
-  .bot {
+  /* button.bot: the roster row. A bare .bot also matched reply bubbles
+     ("bubble bot") and laid the name, tool summary, and text out in a row. */
+  button.bot {
     text-align: left; padding: 12px 14px; display: flex; align-items: center; gap: 10px;
   }
   .bot-copy { min-width: 0; flex: 1; }
@@ -111,6 +119,13 @@
   .status.running .dot { background: var(--run); box-shadow: 0 0 0 4px rgba(138,78,8,.15); }
   .status.paused .dot { background: var(--paused); }
   .status.idle .dot { background: var(--accent); }
+  .thread { position: relative; }
+  .new-pill {
+    position: absolute; left: 50%; transform: translateX(-50%); bottom: 84px; z-index: 5;
+    background: var(--accent); color: #f4fbf7; border: 0; border-radius: 99px; padding: 6px 14px;
+    font-size: 13px; box-shadow: 0 2px 8px rgba(0,0,0,.18); cursor: pointer;
+  }
+  .new-pill[hidden] { display: none; }
   .thread {
     flex: 1; min-height: 240px; display: flex; flex-direction: column; overflow: hidden;
   }
@@ -136,10 +151,55 @@
   .bubble.user { background: var(--accent-2); align-self: flex-end; border-bottom-right-radius: 4px; }
   .bubble.bot { background: #fff; border: 1px solid var(--line); align-self: flex-start; border-bottom-left-radius: 4px; }
   .bubble.system { background: transparent; color: var(--muted); font-size: 13px; align-self: center; text-align: center; }
+  .bubble .md { white-space: normal; }
+  .md > :first-child { margin-top: 0; }
+  .md > :last-child { margin-bottom: 0; }
+  .md p, .md ul, .md ol, .md blockquote { margin: 0 0 8px; }
+  .md ul, .md ol { padding-left: 22px; }
+  .md h3, .md h4, .md h5, .md h6 { margin: 10px 0 6px; font-size: 1em; }
+  .md h3 { font-size: 1.1em; }
+  .md code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; background: rgba(0,0,0,.06); padding: 1px 4px; border-radius: 4px; }
+  .md .code { position: relative; margin: 0 0 8px; background: #2b2722; color: #f3eee6; border-radius: 8px; }
+  .md .code-lang { display: block; padding: 4px 10px 0; font-family: var(--mono, ui-monospace, monospace); font-size: 11px; color: #b9b0a3; }
+  .md pre { margin: 0; padding: 8px 10px; overflow-x: auto; white-space: pre; tab-size: 4; font-family: var(--mono, ui-monospace, monospace); font-size: 13px; line-height: 1.45; }
+  .md pre code { background: none; padding: 0; color: inherit; font-size: inherit; white-space: pre; }
+  .md .table-wrap { overflow-x: auto; margin: 0 0 8px; }
+  .md table { border-collapse: collapse; font-size: 13px; }
+  .md th, .md td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; }
+  .md th { background: rgba(0,0,0,.05); font-weight: 600; }
+  .md tbody tr:nth-child(even) td { background: rgba(0,0,0,.025); }
+  .md blockquote { border-left: 3px solid var(--line); padding-left: 10px; color: var(--muted); }
+  .md hr { border: 0; border-top: 1px solid var(--line); margin: 8px 0; }
+  .md a { color: var(--accent); }
+  .bubble { position: relative; }
+  .copy-btn {
+    font-size: 11px; line-height: 1; padding: 4px 7px; border-radius: 6px; min-height: 0;
+    opacity: 0; transition: opacity .12s; cursor: pointer;
+  }
+  .copy-btn.done { opacity: 1; }
+  .md .code { padding-top: 0; }
+  .md .code .code-copy {
+    position: absolute; top: 4px; right: 4px; background: #3d3832; color: #f3eee6; border: 1px solid #5a534a;
+  }
+  .md .code:hover .code-copy, .code-copy:focus-visible { opacity: 1; }
+  .msg-copy {
+    position: absolute; top: 4px; right: 6px; background: #fff; color: var(--muted); border: 1px solid var(--line);
+  }
+  .bubble:hover > .msg-copy, .msg-copy:focus-visible { opacity: 1; }
+  /* Touch screens have no hover: keep the buttons visible but quiet. */
+  @media (hover: none) {
+    .copy-btn { opacity: .7; }
+  }
+  .tools { margin: 0 0 6px; font-size: 12px; color: var(--muted); white-space: normal; }
+  .tools summary { cursor: pointer; }
+  .tools .tool { margin-top: 6px; white-space: pre-wrap; max-height: 16em; overflow: auto; }
+  .tool-text { margin-top: 6px; color: var(--ink, inherit); font-size: 13px; padding-left: 8px; border-left: 2px solid var(--line); }
+  .tool-result { color: var(--muted); margin-top: 2px; }
   .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; max-width: 100%; }
   .working {
-    display: flex; align-items: center; gap: 8px;
-    padding: 0 14px 8px; color: var(--run); font-size: 13px;
+    display: flex; align-items: center; gap: 8px; align-self: flex-start;
+    padding: 10px 12px; color: var(--run); font-size: 13px;
+    border: 1px dashed var(--line); border-radius: 14px; border-bottom-left-radius: 4px;
   }
   .working[hidden] { display: none !important; }
   .pulse {
@@ -147,7 +207,10 @@
     animation: pulse 1s ease-in-out infinite;
   }
   @keyframes pulse { 50% { opacity: .3; transform: scale(.75); } }
-  .live { padding: 0 14px 8px; display: flex; flex-direction: column; gap: 6px; }
+  /* The live run sits inside the message list; its bubbles and tool lines
+     are laid out as list items, followed by the working indicator. */
+  .live { display: contents; }
+  .live .tool { align-self: flex-start; max-width: min(78ch, 100%); }
   .tool {
     font-family: var(--mono); font-size: 12px; background: #f3eee6; border-radius: 8px; padding: 6px 8px;
     overflow-wrap: anywhere;
@@ -160,7 +223,7 @@
   .note.continue button { flex: none; }
   .note[hidden] { display: none !important; }
   .composer { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); align-items: flex-end; }
-  .composer textarea { min-height: 44px; max-height: 140px; }
+  .composer textarea { min-height: 44px; max-height: 40vh; height: 44px; resize: none; overflow-y: hidden; }
   .routine { display: grid; gap: 4px; padding: 8px 0; border-top: 1px solid var(--line); }
   .routine .meta { color: var(--muted); font-size: 12px; }
   .filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -180,13 +243,14 @@
   .desktop-log { display: none; }
   @media (min-width: 980px) {
     nav.tabs { display: none; }
-    main { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 12px; align-items: stretch; }
+    main { display: grid; grid-template-columns: 280px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 12px; align-items: stretch; }
+    #view-bots { overflow-y: auto; }
+    #view-chat { overflow: hidden; }
     #view-bots, #view-chat { display: flex !important; }
     #view-profile, #view-log { display: none !important; }
     body.solo #view-bots, body.solo #view-chat { display: none !important; }
     body.solo #view-profile.on, body.solo #view-log.on { display: flex !important; grid-column: 1 / -1; }
     .desktop-log { display: inline-flex; }
-    .thread { min-height: 70vh; }
   }
 </style>
 </head>
@@ -207,6 +271,7 @@
   </nav>
   <main>
     <section class="view on" id="view-bots">
+      <div class="bots" id="bot-list"></div>
       <form class="panel create" id="create-form">
         <h2>New bot</h2>
         <input name="name" placeholder="Name" autocomplete="off" required>
@@ -215,10 +280,10 @@
         <div class="row">
           <button class="primary" type="submit">Create bot</button>
           <button type="button" id="show-hidden" class="ghost">Show hidden</button>
+          <button type="button" id="show-archived" class="ghost">Archived</button>
         </div>
         <div class="err" id="create-err"></div>
       </form>
-      <div class="bots" id="bot-list"></div>
     </section>
     <section class="view" id="view-chat">
       <div class="panel thread" id="thread">
@@ -234,16 +299,12 @@
               <button type="button" data-act="pin" role="menuitem" id="menu-pin">Pin</button>
               <button type="button" data-act="hide" role="menuitem" id="menu-hide">Hide</button>
               <button type="button" data-act="duplicate" role="menuitem">Duplicate</button>
-              <button type="button" data-act="delete" class="danger" role="menuitem">Delete</button>
+              <button type="button" data-act="archive" role="menuitem" id="menu-archive">Archive</button>
             </div>
           </div>
         </div>
-        <div class="msgs" id="msgs"><p class="empty">Choose a bot to read its thread.</p></div>
-        <div class="working" id="working" hidden>
-          <span class="pulse" aria-hidden="true"></span>
-          <span id="working-text">working</span>
-        </div>
-        <div class="live" id="live"></div>
+        <div class="msgs" id="msgs"><p class="empty">Choose a bot to read its thread.</p><div class="live" id="live"></div><div class="working" id="working" hidden aria-live="polite"><span class="pulse" aria-hidden="true"></span><span id="working-text">working</span></div></div>
+        <button type="button" class="new-pill" id="new-pill" hidden>New messages ↓</button>
         <div class="note" id="run-note" hidden></div>
         <form class="composer" id="composer">
           <textarea id="composer-input" placeholder="Message… Enter to send, Shift+Enter for a new line"></textarea>
@@ -318,7 +379,7 @@
   </form>
 </div>
 <script>
-const KINDS = ["user_message","bot_message","dm_sent","dm_received","tool_start","tool_end","bot_created","bot_updated","bot_deleted","timer_fired","timer_missed","model_call","run_started","run_finished","daemon_start","daemon_stop","grant_use","grant_denied","net_request","sandbox_block"];
+const KINDS = ["user_message","bot_message","dm_sent","dm_received","tool_start","tool_end","bot_created","bot_updated","bot_deleted","timer_fired","timer_missed","model_call","run_input","run_started","run_finished","daemon_start","daemon_stop","grant_use","grant_denied","net_request","sandbox_block"];
 const SHAPES = ["circle","square","diamond","triangle","hex"];
 const COLORS = ["#1b654c","#8a4e08","#8d2d2d","#1d4e89","#5c4d7a","#3f6b4a","#a15c38","#2f2f2f"];
 const state = {
@@ -326,10 +387,15 @@ const state = {
   botId: null,
   bots: [],
   messages: [],
+  tools: {},
+  hasMore: false,
+  pinned: true,
+  loadingOlder: false,
   token: sessionStorage.getItem("lgb_token") || "",
   streamCtl: null,
   streaming: "",
   showHidden: false,
+  showArchived: false,
   mark: {shape: "circle", color: "#1b654c"},
   desktopLog: false
 };
@@ -397,19 +463,25 @@ function currentBot() { return state.bots.find(b => b.id === state.botId) || nul
 function renderBots() {
   const list = $("#bot-list");
   list.replaceChildren();
-  const visible = state.bots.filter(b => state.showHidden || !b.hidden);
-  const hiddenCount = state.bots.filter(b => b.hidden).length;
+  // The archived view lists only archived bots; the normal roster never does.
+  const live = state.bots.filter(b => !b.archived);
+  const archived = state.bots.filter(b => b.archived);
+  const visible = state.showArchived ? archived : live.filter(b => state.showHidden || !b.hidden);
+  const hiddenCount = live.filter(b => b.hidden).length;
   $("#show-hidden").textContent = state.showHidden ? "Hide hidden" : (hiddenCount ? "Show hidden (" + hiddenCount + ")" : "Show hidden");
+  $("#show-hidden").hidden = state.showArchived;
+  $("#show-archived").textContent = state.showArchived ? "Back to bots" : "Archived (" + archived.length + ")";
+  $("#show-archived").hidden = !state.showArchived && !archived.length;
   if (!visible.length) {
-    list.append(el("p", "empty", state.bots.length ? "Every bot is hidden." : "No bots yet. Create one to start a thread."));
+    list.append(el("p", "empty", state.showArchived ? "No archived bots." : live.length ? "Every bot is hidden." : "No bots yet. Create one to start a thread."));
   }
   for (const b of visible) {
-    const btn = el("button", "bot" + (b.hidden ? " dim" : ""));
+    const btn = el("button", "bot" + (b.hidden || b.archived ? " dim" : ""));
     btn.type = "button";
     const copy = el("span", "bot-copy");
     copy.append(el("strong", null, b.name));
     copy.append(el("small", null, b.label || ""));
-    btn.append(markEl(b.mark), copy, statusNode(b.status));
+    btn.append(markEl(b.mark), copy, b.archived ? el("span", "status", "archived") : statusNode(b.status));
     btn.addEventListener("click", () => openBot(b.id));
     list.append(btn);
   }
@@ -423,14 +495,31 @@ async function loadBots() {
   state.bots = await api("/api/bots");
   renderBots();
   const b = currentBot();
-  if (b) paintHeader(b);
+  if (b) {
+    paintHeader(b);
+    // A message sent mid-run can start a follow-up run after the stream
+    // ended; pick it up so its reply streams in.
+    if (b.active_run_id && b.active_run_id !== state.streaming) follow(b.active_run_id);
+  }
 }
 function paintHeader(b) {
   $("#thread-name").textContent = b.name;
+  setTitle();
   $("#thread-label").textContent = b.label || "";
   $("#menu-pin").textContent = b.pinned ? "Unpin" : "Pin";
   $("#menu-hide").textContent = b.hidden ? "Unhide" : "Hide";
+  $("#menu-archive").textContent = b.archived ? "Unarchive" : "Archive";
   const note = $("#run-note");
+  if (b.archived) {
+    note.hidden = false;
+    note.className = "note continue";
+    note.replaceChildren(document.createTextNode("Archived. Routines are paused and new messages wait until it is restored. "));
+    const btn = el("button", "primary", "Unarchive");
+    btn.type = "button";
+    btn.addEventListener("click", () => setArchived(b.id, false));
+    note.append(btn);
+    return;
+  }
   const offer = !state.streaming && b.status !== "running" && b.last_run_error === "tool round limit" && b.continue_run_id;
   if (offer) {
     note.hidden = false;
@@ -462,8 +551,41 @@ function closeMenu() {
   $("#bot-menu").hidden = true;
   $("#menu-btn").setAttribute("aria-expanded", "false");
 }
-async function openBot(id) {
+// The selected bot lives in the URL as {base}/bots/{id}, so reload and
+// back/forward restore it. push=false is for popstate and the first load.
+function botPath(id) { return base() + (id ? "/bots/" + encodeURIComponent(id) : "/"); }
+function botFromPath() {
+  const rest = location.pathname.slice(base().length);
+  const m = rest.match(/^\/bots\/([^/]+)\/?$/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+function setTitle() {
+  const b = state.botId && currentBot();
+  document.title = b ? b.name + " — Local Grok Bots" : "Local Grok Bots";
+}
+function goHome(push = true) {
+  state.botId = null;
+  state.loadedFor = null;
+  state.hasMore = false;
+  stopStream();
+  if (push && location.pathname !== botPath(null)) history.pushState({}, "", botPath(null));
+  $("#thread-name").textContent = "No bot selected";
+  $("#thread-label").textContent = "";
+  state.messages = [];
+  $("#msgs").replaceChildren(el("p", "empty", "Choose a bot to read its thread."), $("#live"), $("#working"));
+  setTitle();
+  setView("bots");
+}
+window.addEventListener("popstate", () => {
+  const id = botFromPath();
+  if (id && state.bots.some(b => b.id === id)) openBot(id, false);
+  else goHome(false);
+});
+async function openBot(id, push = true) {
+  if (state.botId !== id) { stopStream(); state.loadedFor = null; }
   state.botId = id;
+  if (push && location.pathname !== botPath(id)) history.pushState({bot: id}, "", botPath(id));
+  setTitle();
   closeMenu();
   setView("chat");
   await refreshBot();
@@ -490,32 +612,370 @@ function whoText(m) {
   if ((m.content || "").startsWith("Message from ") || (m.content || "").startsWith("Notice: ")) return "";
   return "Scheduled";
 }
-function renderMessages() {
-  const box = $("#msgs");
-  box.replaceChildren();
-  if (!state.messages.length && $("#working").hidden) {
-    box.append(el("p", "empty", "No messages yet. The composer stays available while a run is in progress."));
-    return;
+// md:begin
+// copyText puts text on the clipboard. navigator.clipboard needs a secure
+// context, and the page is plain HTTP on the LAN, so it falls back to a
+// hidden textarea and execCommand("copy").
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); return true; } catch {}
   }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.top = "-1000px";
+  ta.style.opacity = "0";
+  document.body.append(ta);
+  ta.select();
+  ta.setSelectionRange(0, text.length);
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch {}
+  ta.remove();
+  return ok;
+}
+// copyButton shows "Copied" (or "Copy failed") briefly after a tap.
+function copyButton(cls, label, getText) {
+  const b = el("button", "copy-btn " + cls, "Copy");
+  b.type = "button";
+  b.title = label;
+  b.setAttribute("aria-label", label);
+  b.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const ok = await copyText(getText());
+    b.textContent = ok ? "Copied" : "Copy failed";
+    b.classList.add("done");
+    clearTimeout(b._t);
+    b._t = setTimeout(() => { b.textContent = "Copy"; b.classList.remove("done"); }, 1200);
+  });
+  return b;
+}
+// toolSummary is the collapsed "N tool calls: a, b" line on a reply.
+// It opens to show each call with its arguments and result.
+function toolSummary(recs) {
+  const d = el("details", "tools");
+  const calls = recs.filter(r => (r.kind || "call") === "call");
+  const names = [...new Set(calls.map(r => r.name))];
+  d.append(el("summary", null, calls.length + (calls.length === 1 ? " tool call: " : " tool calls: ") + names.join(", ")));
+  // Records arrive in order: each round's pre-tool text, then its calls.
+  for (const r of recs) {
+    if (r.kind === "text") {
+      d.append(renderMarkdown(r.result_or_error, el("div", "md tool-text")));
+      continue;
+    }
+    const call = el("div", "tool");
+    call.append(el("div", null, r.name + " " + JSON.stringify(r.arguments || {})));
+    call.append(el("div", "tool-result", (r.ok ? "ok" : "error") + ": " + (r.result_or_error || "")));
+    d.append(call);
+  }
+  return d;
+}
+// Markdown to DOM for message bubbles. Presentation only: the stored text is
+// unchanged. Every piece of text goes in through textContent, so raw HTML in
+// a message shows as text. Links keep http, https, and mailto only.
+function mdInline(src, parent) {
+  const re = /(`+)([\s\S]*?[^`])\1(?!`)|\*\*([^*]+?)\*\*|__([^_]+?)__|\*([^*\s][^*]*?)\*|(^|[^\w])_([^_\s][^_]*?)_(?!\w)|\[([^\]]+)\]\(([^)\s]+)\)|(https?:\/\/[^\s<>()]+[^\s<>().,;:!?'"])/;
+  let rest = src;
+  while (rest) {
+    const m = re.exec(rest);
+    if (!m) { parent.append(document.createTextNode(rest)); break; }
+    let start = m.index;
+    if (m[6] !== undefined) start += m[6].length;
+    if (start > 0) parent.append(document.createTextNode(rest.slice(0, start)));
+    if (m[1]) parent.append(el("code", null, m[2].replace(/^ (.*) $/, "$1")));
+    else if (m[3] !== undefined || m[4] !== undefined) {
+      const b = el("strong"); mdInline(m[3] !== undefined ? m[3] : m[4], b); parent.append(b);
+    } else if (m[5] !== undefined || m[7] !== undefined) {
+      const i = el("em"); mdInline(m[5] !== undefined ? m[5] : m[7], i); parent.append(i);
+    } else if (m[8] !== undefined) {
+      const href = m[9];
+      if (/^(https?:|mailto:)/i.test(href)) {
+        const a = el("a"); a.href = href; a.target = "_blank"; a.rel = "noopener noreferrer";
+        mdInline(m[8], a); parent.append(a);
+      } else parent.append(document.createTextNode(m[0]));
+    } else if (m[10]) {
+      const a = el("a", null, m[10]); a.href = m[10]; a.target = "_blank"; a.rel = "noopener noreferrer";
+      parent.append(a);
+    }
+    rest = rest.slice(m.index + m[0].length);
+  }
+}
+// GFM pipe tables: a header row, an alignment row (---, :--, --:, :-:),
+// then body rows until a blank line or a line without a pipe.
+function tableCells(line) {
+  let t = line.trim();
+  if (t.startsWith("|")) t = t.slice(1);
+  if (t.endsWith("|") && !t.endsWith("\\|")) t = t.slice(0, -1);
+  const cells = [];
+  let cur = "";
+  for (let k = 0; k < t.length; k++) {
+    if (t[k] === "\\" && t[k + 1] === "|") { cur += "|"; k++; continue; }
+    if (t[k] === "|") { cells.push(cur.trim()); cur = ""; continue; }
+    cur += t[k];
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+function isTableStart(lines, i) {
+  if (i + 1 >= lines.length || !lines[i].includes("|")) return false;
+  const sep = lines[i + 1];
+  if (!/^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(sep) || !sep.includes("-")) return false;
+  if (!sep.includes("|") && tableCells(lines[i]).length < 2) return false;
+  return tableCells(lines[i]).length === tableCells(sep).length;
+}
+function mdTable(lines, i, parent) {
+  // Models sometimes put alignment tokens (":---:") in the header row where
+  // the column names belong. Such a cell is shown empty, and a header row
+  // that is all alignment tokens is dropped.
+  const isAlign = (c) => /^:?-{1,}:?$/.test(c);
+  const head = tableCells(lines[i]).map(c => isAlign(c) ? "" : c);
+  const aligns = tableCells(lines[i + 1]).map(c => c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : c.startsWith(":") ? "left" : "");
+  i += 2;
+  const wrap = el("div", "table-wrap");
+  const table = el("table");
+  const row = (cells, tag) => {
+    const tr = el("tr");
+    head.forEach((_, k) => {
+      const c = el(tag);
+      if (aligns[k]) c.style.textAlign = aligns[k];
+      mdInline(cells[k] || "", c);
+      tr.append(c);
+    });
+    return tr;
+  };
+  if (head.some(c => c)) {
+    const thead = el("thead");
+    thead.append(row(head, "th"));
+    table.append(thead);
+  }
+  const tbody = el("tbody");
+  while (i < lines.length && lines[i].trim() && lines[i].includes("|")) tbody.append(row(tableCells(lines[i++]), "td"));
+  if (tbody.children.length) table.append(tbody);
+  wrap.append(table);
+  parent.append(wrap);
+  return i;
+}
+function mdLines(lines, parent) {
+  const isList = (l) => /^\s*([-*+]|\d+[.)])\s+/.test(l);
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    const fence = line.match(/^(\s*)(`{3,}|~{3,})\s*([^`\s]*)[^`]*$/);
+    if (fence) {
+      // Body lines keep their whitespace; the fence's own indent is removed.
+      const indent = fence[1].length, mark = fence[2];
+      const close = new RegExp("^\\s*" + mark[0] + "{" + mark.length + ",}\\s*$");
+      const body = [];
+      i++;
+      while (i < lines.length && !close.test(lines[i])) {
+        body.push(lines[i].replace(new RegExp("^ {0," + indent + "}"), ""));
+        i++;
+      }
+      i++;
+      const box = el("div", "code");
+      if (fence[3]) box.append(el("span", "code-lang", fence[3]));
+      box.append(copyButton("code-copy", "Copy code", () => body.join("\n")));
+      const pre = el("pre");
+      const code = el("code", null, body.join("\n"));
+      if (fence[3]) code.dataset.lang = fence[3];
+      pre.append(code);
+      box.append(pre);
+      parent.append(box);
+      continue;
+    }
+    if (isTableStart(lines, i)) {
+      i = mdTable(lines, i, parent);
+      continue;
+    }
+    if (!line.trim()) { i++; continue; }
+    const h = line.match(/^(#{1,6})\s+(.*?)\s*#*\s*$/);
+    if (h) {
+      const n = el("h" + Math.min(6, h[1].length + 2));
+      mdInline(h[2], n); parent.append(n); i++; continue;
+    }
+    if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) { parent.append(el("hr")); i++; continue; }
+    if (/^\s*>/.test(line)) {
+      const body = [];
+      while (i < lines.length && /^\s*>/.test(lines[i])) body.push(lines[i++].replace(/^\s*>\s?/, ""));
+      const q = el("blockquote"); mdLines(body, q); parent.append(q); continue;
+    }
+    if (isList(line) && line.search(/\S/) < 2) {
+      const ordered = /^\s*\d/.test(line);
+      const list = el(ordered ? "ol" : "ul");
+      if (ordered) {
+        const s = parseInt(line.trim(), 10);
+        if (s > 1) list.start = s;
+      }
+      let item = null;
+      while (i < lines.length) {
+        const l = lines[i];
+        if (isList(l) && /^\s*\d/.test(l) === ordered && l.search(/\S/) < 2) {
+          item = [l.replace(/^\s*([-*+]|\d+[.)])\s+/, "")];
+          const li = el("li"); li._md = item; list.append(li);
+          i++;
+        } else if (item && l.trim() && /^\s+/.test(l)) {
+          item.push(l.replace(/^\s{1,4}/, "")); i++;
+        } else if (item && !l.trim() && i + 1 < lines.length && /^\s+\S/.test(lines[i + 1])) {
+          item.push(""); i++;
+        } else break;
+      }
+      for (const li of list.children) {
+        const body = li._md;
+        if (body.length === 1) mdInline(body[0], li); else mdLines(body, li);
+      }
+      parent.append(list);
+      continue;
+    }
+    // The first line always joins the paragraph, so a line no block rule
+    // took (a fence with an info string, an indented list marker) cannot
+    // stall the loop.
+    const para = [lines[i++]];
+    while (i < lines.length && lines[i].trim() && !/^\s*(```|~~~|#{1,6}\s|>)/.test(lines[i]) && !isList(lines[i]) && !isTableStart(lines, i)) {
+      para.push(lines[i++]);
+    }
+    const p = el("p");
+    para.forEach((l, k) => {
+      if (k) p.append(el("br"));
+      mdInline(l.replace(/\s+$/, ""), p);
+    });
+    parent.append(p);
+  }
+}
+function renderMarkdown(text, target) {
+  target.replaceChildren();
+  mdLines(String(text || "").replace(/\r\n?/g, "\n").split("\n"), target);
+  return target;
+}
+// md:end
+// renderMessages rebuilds the list. mode "bottom" lands at the newest
+// message; "prepend" keeps the visible messages where they were after older
+// ones are added above; "keep" leaves the scroll offset alone.
+function renderMessages(mode = "bottom") {
+  const box = $("#msgs");
+  const prevH = box.scrollHeight, prevTop = box.scrollTop;
+  const live = $("#live"), working = $("#working");
+  box.replaceChildren();
+  if (!state.messages.length && working.hidden) {
+    box.append(el("p", "empty", "No messages yet. The composer stays available while a run is in progress."));
+  }
+  const shownTools = new Set();
   for (const m of state.messages) {
     const bubble = el("div", "bubble " + (m.role || "system"));
     const who = whoText(m);
     if (who) bubble.append(el("span", "who", who));
-    bubble.append(document.createTextNode(m.content || ""));
+    if (m.role === "bot" && m.run_id && !shownTools.has(m.run_id) && (state.tools[m.run_id] || []).some(r => (r.kind || "call") === "call")) {
+      shownTools.add(m.run_id);
+      bubble.append(toolSummary(state.tools[m.run_id]));
+    }
+    if (m.role === "user" || m.role === "bot") {
+      bubble.append(renderMarkdown(m.content, el("div", "md")));
+      // Copies the stored text, not the rendered page.
+      const raw = m.content || "";
+      bubble.append(copyButton("msg-copy", "Copy message text", () => raw));
+    }
+    else bubble.append(document.createTextNode(m.content || ""));
     box.append(bubble);
   }
-  box.scrollTop = box.scrollHeight;
+  // The live run and the working indicator sit where the next reply will appear.
+  box.append(live, working);
+  if (mode === "prepend") box.scrollTop = prevTop + (box.scrollHeight - prevH);
+  else if (mode === "keep") box.scrollTop = prevTop;
+  else box.scrollTop = box.scrollHeight;
+  if (mode === "bottom") { state.pinned = true; $("#new-pill").hidden = true; }
+  // A short page (or a prepend that still leaves the top in view) loads more.
+  if (state.hasMore && box.scrollTop < 200) setTimeout(loadOlder, 0);
 }
-async function loadThread() {
+const PAGE = 50;
+// loadThread fetches the newest page. Older pages already loaded stay, so a
+// refresh after a run does not throw away what the user scrolled back to.
+async function loadThread(mode = "auto") {
   if (!state.botId) return;
-  const data = await api("/api/bots/" + state.botId + "/thread?limit=100");
-  state.messages = data.messages || [];
-  renderMessages();
+  const id = state.botId;
+  const data = await api("/api/bots/" + id + "/thread?limit=" + PAGE);
+  if (state.botId !== id) return;
+  const page = data.messages || [];
+  const fresh = state.loadedFor !== id;
+  const lastBefore = state.messages.length ? state.messages[state.messages.length - 1].id : null;
+  state.loadedFor = id;
+  if (fresh || !page.length) {
+    state.messages = page;
+    state.tools = data.tools || {};
+    state.hasMore = !!data.has_more;
+  } else {
+    const first = page[0].created_at;
+    state.messages = state.messages.filter(m => m.created_at < first).concat(page);
+    state.tools = Object.assign({}, state.tools, data.tools || {});
+    if (state.messages.length === page.length) state.hasMore = !!data.has_more;
+  }
+  const grew = !fresh && page.length && state.messages[state.messages.length - 1].id !== lastBefore;
+  renderMessages(fresh ? "bottom" : mode === "auto" ? (state.pinned ? "bottom" : "keep") : mode);
+  if (grew && !state.pinned) $("#new-pill").hidden = false;
 }
+// loadOlder prepends the page before the oldest loaded message.
+async function loadOlder() {
+  if (!state.botId || !state.hasMore || state.loadingOlder || !state.messages.length) return;
+  state.loadingOlder = true;
+  const id = state.botId;
+  try {
+    const data = await api("/api/bots/" + id + "/thread?limit=" + PAGE + "&before=" + encodeURIComponent(state.messages[0].id));
+    if (state.botId !== id) return;
+    state.messages = (data.messages || []).concat(state.messages);
+    state.tools = Object.assign({}, data.tools || {}, state.tools);
+    state.hasMore = !!data.has_more;
+    renderMessages("prepend");
+  } finally {
+    state.loadingOlder = false;
+  }
+}
+// Auto-scroll follows new output only while the reader is at the bottom
+// (within 80px). Scrolled away, new output shows the "New messages" pill.
+const PIN_PX = 80;
+function distFromBottom() {
+  const b = $("#msgs");
+  return b.scrollHeight - b.scrollTop - b.clientHeight;
+}
+function stick() {
+  const b = $("#msgs");
+  if (state.pinned) b.scrollTop = b.scrollHeight;
+  else $("#new-pill").hidden = false;
+}
+$("#msgs").addEventListener("scroll", () => {
+  const b = $("#msgs");
+  // Only a scroll that moved the view changes pinning; content growth while
+  // pinned is handled by stick() and the observers below.
+  state.pinned = distFromBottom() <= PIN_PX;
+  if (state.pinned) $("#new-pill").hidden = true;
+  if (b.scrollTop < 200) loadOlder();
+}, {passive: true});
+$("#new-pill").addEventListener("click", () => {
+  state.pinned = true;
+  $("#new-pill").hidden = true;
+  const b = $("#msgs");
+  b.scrollTo({top: b.scrollHeight, behavior: "smooth"});
+});
+// Streaming text, markdown and code re-renders, tool lines, and the working
+// line change heights; stay pinned through all of them.
+new MutationObserver((muts) => {
+  if (!state.pinned) {
+    // Growth in the live area while scrolled away gets the pill.
+    if (muts.some(m => $("#live").contains(m.target) || m.target === $("#live"))) $("#new-pill").hidden = false;
+    return;
+  }
+  const b = $("#msgs");
+  b.scrollTop = b.scrollHeight;
+}).observe($("#msgs"), {childList: true, subtree: true, characterData: true});
+new ResizeObserver(() => { if (state.pinned) { const b = $("#msgs"); b.scrollTop = b.scrollHeight; } }).observe($("#msgs"));
 function setWorking(on, text) {
   const w = $("#working");
+  const box = $("#msgs");
   w.hidden = !on;
-  if (on) $("#working-text").textContent = text || "working";
+  if (on) {
+    $("#working-text").textContent = text || "working";
+    const empty = box.querySelector(":scope > p.empty");
+    if (empty) empty.remove();
+    if (w.parentNode !== box || box.lastElementChild !== w) box.append($("#live"), w);
+    stick();
+  }
 }
 $("#create-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -532,25 +992,41 @@ $("#create-form").addEventListener("submit", async (e) => {
     openBot(bot.id);
   } catch (err) { $("#create-err").textContent = err.message; }
 });
+$("#show-archived").addEventListener("click", () => {
+  state.showArchived = !state.showArchived;
+  renderBots();
+});
 $("#show-hidden").addEventListener("click", () => {
   state.showHidden = !state.showHidden;
   renderBots();
 });
 $("#composer").addEventListener("submit", (e) => { e.preventDefault(); send(); });
+// Enter sends; Shift+Enter (or Enter while an IME is composing) inserts a
+// newline. The box grows with its content up to 40% of the viewport.
 $("#composer-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
 });
+function fitComposer() {
+  const t = $("#composer-input");
+  t.style.height = "auto";
+  const max = window.innerHeight * 0.4;
+  t.style.height = Math.min(t.scrollHeight + 2, max) + "px";
+  t.style.overflowY = t.scrollHeight + 2 > max ? "auto" : "hidden";
+}
+$("#composer-input").addEventListener("input", fitComposer);
 async function send() {
   const input = $("#composer-input");
   const content = input.value.trim();
   if (!content || !state.botId) return;
   input.value = "";
+  fitComposer();
   $("#run-note").hidden = true;
   try {
     const data = await api("/api/bots/" + state.botId + "/thread/messages", {
       method: "POST", body: JSON.stringify({content})
     });
-    await loadThread();
+    // Sending is a jump to the bottom, wherever the reader was.
+    await loadThread("bottom");
     if (data.run_id) follow(data.run_id);
     else pollActive();
   } catch (err) {
@@ -584,12 +1060,17 @@ async function follow(runId) {
   const ctl = new AbortController();
   state.streamCtl = ctl;
   const live = $("#live");
+  // Each model round's text gets its own bubble. A tool call closes the
+  // current bubble, so the next round's tokens start a new one.
   let acc = "";
-  const bubble = el("div", "bubble bot");
-  const who = el("span", "who", (currentBot() && currentBot().name) || "Bot");
-  bubble.append(who);
-  const text = el("span");
-  bubble.append(text);
+  let bubble = null, text = null;
+  const newBubble = () => {
+    acc = "";
+    bubble = el("div", "bubble bot");
+    bubble.append(el("span", "who", (currentBot() && currentBot().name) || "Bot"));
+    text = el("div", "md");
+    bubble.append(text);
+  };
   try {
     const headers = {};
     if (state.token) headers.Authorization = "Bearer " + state.token;
@@ -618,12 +1099,12 @@ async function follow(runId) {
         if (event === "status") {
           setWorking(true, payload.text || payload.state || "working");
         } else if (event === "token") {
+          if (!bubble) newBubble();
           acc += payload.text || "";
-          text.textContent = acc;
+          renderMarkdown(acc, text);
           if (!bubble.parentNode) live.append(bubble);
-          const msgs = $("#msgs");
-          msgs.scrollTop = msgs.scrollHeight;
         } else if (event === "tool_call") {
+          bubble = null;
           live.append(el("div", "tool", "tool " + (payload.name || "") + " " + JSON.stringify(payload.arguments || {})));
         } else if (event === "tool_result") {
           const ok = payload.ok ? "ok" : "error";
@@ -685,21 +1166,18 @@ $("#bot-menu").addEventListener("click", async (e) => {
       await loadBots();
       if (!(b && b.hidden)) setView("bots");
     } else if (act === "duplicate") { await duplicateBot(state.botId); }
-    else if (act === "delete") { await deleteBot(); }
+    else if (act === "archive") { await setArchived(state.botId, !(b && b.archived)); }
   } catch (err) {
     showRunError(err.message);
   }
 });
-async function deleteBot() {
-  if (!confirm("Delete this bot and its thread?")) return;
-  await api("/api/bots/" + state.botId, {method:"DELETE"});
-  state.botId = null;
-  stopStream();
-  $("#thread-name").textContent = "No bot selected";
-  $("#thread-label").textContent = "";
-  $("#msgs").replaceChildren(el("p", "empty", "Choose a bot to read its thread."));
+// Archive keeps the bot, its thread, and its routines (paused). The main UI
+// has no delete; DELETE /api/bots/{id} stays in the API.
+async function setArchived(id, archived) {
+  await api("/api/bots/" + id, {method:"PATCH", body: JSON.stringify({archived})});
   await loadBots();
-  setView("bots");
+  if (archived) { state.showArchived = false; goHome(); renderBots(); }
+  else { state.showArchived = false; renderBots(); if (state.botId === id) await refreshBot(); }
 }
 async function duplicateBot(id) {
   const full = await api("/api/bots/" + id);
@@ -899,6 +1377,9 @@ fillKinds();
     const h = await api("/api/health");
     $("#health").textContent = "daemon " + h.version;
     await loadBots();
+    const id = botFromPath();
+    if (id && state.bots.some(b => b.id === id)) await openBot(id, false);
+    else if (id) history.replaceState({}, "", botPath(null));
   } catch (err) {
     if (err.message !== "unauthorized") $("#health").textContent = err.message;
   }

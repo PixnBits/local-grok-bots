@@ -169,6 +169,8 @@ type Bot struct {
 	Mark        Mark     `json:"mark"`
 	Pinned      bool     `json:"pinned"`
 	Hidden      bool     `json:"hidden"`
+	Archived    bool     `json:"archived"`
+	ArchivedAt  *string  `json:"archived_at,omitempty"`
 	Grants      []string `json:"grants"`
 	NetAllow    []string `json:"net_allow"`
 	SSHAllow    []string `json:"ssh_allow"`
@@ -229,6 +231,20 @@ type LogEvent struct {
 	BotID  *string         `json:"bot_id"`
 	Kind   string          `json:"kind"`
 	Detail json.RawMessage `json:"detail"`
+}
+
+// ToolRecord is one tool call a run made, kept so the page can show what a
+// reply did after a reload. Arguments are redacted and the result is clipped.
+type ToolRecord struct {
+	// Kind is "call" for a tool call, or "text" for what the model wrote in
+	// the same response before its calls. Text records have no name or
+	// arguments; Result holds the text.
+	Kind      string          `json:"kind"`
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+	OK        bool            `json:"ok"`
+	Result    string          `json:"result_or_error"`
+	CreatedAt string          `json:"created_at"`
 }
 
 type DMPeer struct {
@@ -329,6 +345,17 @@ CREATE TABLE IF NOT EXISTS runs (
   error TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_bot ON runs(bot_id, started_at);
+CREATE TABLE IF NOT EXISTS run_tools (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  bot_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  arguments TEXT NOT NULL,
+  ok INTEGER NOT NULL,
+  result TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_run_tools_run ON run_tools(run_id, id);
 CREATE TABLE IF NOT EXISTS log_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -373,6 +400,10 @@ func (s *Store) evolve() error {
 		{"bots", "cli_pid", "INTEGER NOT NULL DEFAULT 0"},
 		{"timers", "name", "TEXT NOT NULL DEFAULT ''"},
 		{"timers", "source", "TEXT NOT NULL DEFAULT 'user'"},
+		{"timers", "archive_paused", "INTEGER NOT NULL DEFAULT 0"},
+		{"runs", "input_through", "TEXT"},
+		{"run_tools", "kind", "TEXT NOT NULL DEFAULT 'call'"},
+		{"bots", "archived_at", "TEXT"},
 	}
 	for _, a := range adds {
 		ok, err := s.hasColumn(a.table, a.col)
@@ -734,14 +765,15 @@ func (s *Store) attachRun(b *Bot) {
 	}
 }
 
-const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, status, model, session_id, created_at, updated_at FROM bots`
+const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, status, model, session_id, created_at, updated_at, archived_at FROM bots`
 
 func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	var b Bot
 	var model sql.NullString
 	var shape, color, grants, netAllow, sshAllow string
 	var pinned, hidden int
-	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &b.Status, &model, &b.SessionID, &b.CreatedAt, &b.UpdatedAt)
+	var archived sql.NullString
+	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &b.Status, &model, &b.SessionID, &b.CreatedAt, &b.UpdatedAt, &archived)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Bot{}, ErrNotFound
 	}
@@ -754,6 +786,11 @@ func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	}
 	b.Pinned = pinned != 0
 	b.Hidden = hidden != 0
+	if archived.Valid && archived.String != "" {
+		a := archived.String
+		b.ArchivedAt = &a
+		b.Archived = true
+	}
 	b.Grants, err = decodeList(grants)
 	if err != nil {
 		return Bot{}, err
@@ -999,6 +1036,7 @@ func (s *Store) DeleteBot(id, by string) error {
 		`DELETE FROM memory WHERE bot_id=?`,
 		`DELETE FROM messages WHERE bot_id=?`,
 		`DELETE FROM timers WHERE bot_id=?`,
+		`DELETE FROM run_tools WHERE bot_id=?`,
 		`DELETE FROM runs WHERE bot_id=?`,
 		`DELETE FROM bots WHERE id=?`,
 	} {
@@ -1225,17 +1263,15 @@ func (s *Store) NeedsRun(botID string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var started sql.NullString
-	err := s.db.QueryRow(`SELECT started_at FROM runs WHERE bot_id=? ORDER BY started_at DESC LIMIT 1`, botID).Scan(&started)
+	// A run has consumed every message up to input_through when it folded
+	// messages in mid-run, and up to started_at otherwise.
+	err := s.db.QueryRow(`SELECT COALESCE(input_through, started_at) FROM runs WHERE bot_id=? ORDER BY started_at DESC LIMIT 1`, botID).Scan(&started)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
 	var pending sql.NullString
 	// Notice lines are visible on the thread. They do not queue another turn.
-	err = s.db.QueryRow(`SELECT MAX(created_at) FROM messages WHERE bot_id=? AND (
-		(thread='user' AND role='user')
-		OR (thread='user' AND role='system' AND content NOT LIKE 'Notice: %')
-		OR (thread LIKE 'dm:%' AND role='user')
-	)`, botID).Scan(&pending)
+	err = s.db.QueryRow(`SELECT MAX(created_at) FROM messages WHERE bot_id=? AND `+turnInput, botID).Scan(&pending)
 	if err != nil {
 		return false, err
 	}
@@ -1247,6 +1283,14 @@ func (s *Store) NeedsRun(botID string) (bool, error) {
 	}
 	return pending.String > started.String, nil
 }
+
+// turnInput matches the messages that queue a turn. NeedsRun, TurnInputs,
+// and TurnInputSince share it.
+const turnInput = `(
+		(thread='user' AND role='user')
+		OR (thread='user' AND role='system' AND content NOT LIKE 'Notice: %')
+		OR (thread LIKE 'dm:%' AND role='user')
+	)`
 
 // TurnInputs returns the messages for this CLI turn: user text, scheduled
 // prompts, and inbound DMs created after the previous run started and before
@@ -1265,11 +1309,7 @@ func (s *Store) TurnInputs(botID, currentRunID string) ([]Message, error) {
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	q := `SELECT id, bot_id, thread, role, content, run_id, created_at FROM messages WHERE bot_id=? AND created_at<? AND (
-		(thread='user' AND role='user')
-		OR (thread='user' AND role='system' AND content NOT LIKE 'Notice: %')
-		OR (thread LIKE 'dm:%' AND role='user')
-	)`
+	q := `SELECT id, bot_id, thread, role, content, run_id, created_at FROM messages WHERE bot_id=? AND created_at<? AND ` + turnInput
 	args := []any{botID, current}
 	if prev.Valid && prev.String != "" {
 		q += ` AND created_at>?`
@@ -1290,6 +1330,36 @@ func (s *Store) TurnInputs(botID, currentRunID string) ([]Message, error) {
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// TurnInputSince returns turn-queuing messages created after since, oldest first.
+func (s *Store) TurnInputSince(botID, since string) ([]Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT id, bot_id, thread, role, content, run_id, created_at FROM messages
+		WHERE bot_id=? AND created_at > ? AND `+turnInput+` ORDER BY created_at ASC, id ASC`, botID, since)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Message{}
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// MarkRunInput records that a live run has read turn input through ts.
+// It only moves forward.
+func (s *Store) MarkRunInput(runID, ts string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`UPDATE runs SET input_through=? WHERE id=? AND (input_through IS NULL OR input_through < ?)`, ts, runID, ts)
+	return err
 }
 
 func (s *Store) CreateRun(botID string) (Run, error) {
@@ -1356,6 +1426,28 @@ func (s *Store) GetRun(id string) (Run, error) {
 		r.Error = &errText.String
 	}
 	return r, nil
+}
+
+// OnceSchedule marks a one-shot timer. It fires at next_fire_at, then turns
+// itself off; the row stays for history.
+const OnceSchedule = "once"
+
+// CreateTimerAt stores a one-shot timer that fires at at.
+// source is "user" or "bot". Only a user timer keeps a live CLI past idle.
+func (s *Store) CreateTimerAt(botID, name, prompt string, at time.Time, source string) (Timer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	src, err := timerSource(source)
+	if err != nil {
+		return Timer{}, err
+	}
+	t := Timer{
+		ID: id.New(), BotID: botID, Name: strings.TrimSpace(name), Schedule: OnceSchedule, Prompt: prompt,
+		Enabled: true, NextFireAt: FormatTime(at), Source: src,
+	}
+	_, err = s.db.Exec(`INSERT INTO timers(id, bot_id, name, schedule, prompt, enabled, next_fire_at, source) VALUES(?,?,?,?,?,?,?,?)`,
+		t.ID, t.BotID, t.Name, t.Schedule, t.Prompt, 1, t.NextFireAt, t.Source)
+	return t, err
 }
 
 func (s *Store) CreateTimer(botID, name, schedule, prompt string, enabled bool, source string) (Timer, error) {
@@ -1497,14 +1589,20 @@ func (s *Store) ClaimDueTimers(now time.Time) ([]Timer, error) {
 	}
 	var claimed []Timer
 	for _, t := range due {
-		d, err := ParseInterval(t.Schedule)
-		if err != nil {
-			continue
-		}
-		next := FormatTime(Now().Add(d))
 		fired := FormatTime(Now())
-		res, err := s.db.Exec(`UPDATE timers SET next_fire_at=?, last_fire_at=? WHERE id=? AND next_fire_at=?`,
-			next, fired, t.ID, t.NextFireAt)
+		var res sql.Result
+		if t.Schedule == OnceSchedule {
+			res, err = s.db.Exec(`UPDATE timers SET enabled=0, last_fire_at=? WHERE id=? AND next_fire_at=? AND enabled=1`,
+				fired, t.ID, t.NextFireAt)
+		} else {
+			d, perr := ParseInterval(t.Schedule)
+			if perr != nil {
+				continue
+			}
+			next := FormatTime(Now().Add(d))
+			res, err = s.db.Exec(`UPDATE timers SET next_fire_at=?, last_fire_at=? WHERE id=? AND next_fire_at=?`,
+				next, fired, t.ID, t.NextFireAt)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1708,4 +1806,141 @@ func (s *Store) FailRunning(reason string) error {
 	}
 	_, err = s.db.Exec(`UPDATE bots SET status='idle', updated_at=? WHERE status='running'`, now)
 	return err
+}
+
+// AddRunTool records one tool call made by a run.
+func (s *Store) AddRunTool(runID, botID string, rec ToolRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(rec.Arguments) == 0 {
+		rec.Arguments = json.RawMessage(`{}`)
+	}
+	ok := 0
+	if rec.OK {
+		ok = 1
+	}
+	if rec.Kind == "" {
+		rec.Kind = "call"
+	}
+	_, err := s.db.Exec(`INSERT INTO run_tools(run_id, bot_id, kind, name, arguments, ok, result, created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		runID, botID, rec.Kind, rec.Name, string(rec.Arguments), ok, rec.Result, FormatTime(Now()))
+	return err
+}
+
+// RunTools returns the tool calls for each listed run, in call order.
+// Runs with no calls are absent from the map.
+func (s *Store) RunTools(runIDs []string) (map[string][]ToolRecord, error) {
+	out := map[string][]ToolRecord{}
+	if len(runIDs) == 0 {
+		return out, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	q := `SELECT run_id, kind, name, arguments, ok, result, created_at FROM run_tools WHERE run_id IN (?` + strings.Repeat(",?", len(runIDs)-1) + `) ORDER BY id`
+	args := make([]any, len(runIDs))
+	for i, r := range runIDs {
+		args[i] = r
+	}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var runID, argText string
+		var ok int
+		var rec ToolRecord
+		if err := rows.Scan(&runID, &rec.Kind, &rec.Name, &argText, &ok, &rec.Result, &rec.CreatedAt); err != nil {
+			return nil, err
+		}
+		rec.Arguments = json.RawMessage(argText)
+		rec.OK = ok == 1
+		out[runID] = append(out[runID], rec)
+	}
+	return out, rows.Err()
+}
+
+// SetArchived archives or restores a bot. Archiving keeps every row, stamps
+// archived_at, and pauses the bot's enabled timers, marking them so restore
+// turns back on only those. Restore schedules them from now, so a timer that
+// came due while archived does not fire at once. Unchanged state is a no-op.
+func (s *Store) SetArchived(id string, archived bool, by string) (Bot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, err := s.getBot(id, false)
+	if err != nil {
+		return Bot{}, err
+	}
+	if b.Archived == archived {
+		s.attachRun(&b)
+		return b, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Bot{}, err
+	}
+	defer tx.Rollback()
+	now := FormatTime(Now())
+	if archived {
+		if _, err := tx.Exec(`UPDATE bots SET archived_at=?, updated_at=? WHERE id=?`, now, now, id); err != nil {
+			return Bot{}, err
+		}
+		if _, err := tx.Exec(`UPDATE timers SET enabled=0, archive_paused=1 WHERE bot_id=? AND enabled=1`, id); err != nil {
+			return Bot{}, err
+		}
+	} else {
+		if _, err := tx.Exec(`UPDATE bots SET archived_at=NULL, updated_at=? WHERE id=?`, now, id); err != nil {
+			return Bot{}, err
+		}
+		rows, err := tx.Query(`SELECT id, schedule FROM timers WHERE bot_id=? AND archive_paused=1`, id)
+		if err != nil {
+			return Bot{}, err
+		}
+		type tm struct{ id, schedule string }
+		var paused []tm
+		for rows.Next() {
+			var t tm
+			if err := rows.Scan(&t.id, &t.schedule); err != nil {
+				rows.Close()
+				return Bot{}, err
+			}
+			paused = append(paused, t)
+		}
+		rows.Close()
+		for _, t := range paused {
+			var next time.Time
+			if t.schedule == OnceSchedule {
+				// A one-shot keeps its time, or fires now if that passed.
+				var at string
+				if err := tx.QueryRow(`SELECT next_fire_at FROM timers WHERE id=?`, t.id).Scan(&at); err != nil {
+					return Bot{}, err
+				}
+				next = Now()
+				if when, err := time.Parse(timeLayout, at); err == nil && when.After(next) {
+					next = when
+				}
+			} else {
+				n, err := nextAfter(Now(), t.schedule)
+				if err != nil {
+					return Bot{}, err
+				}
+				next = n
+			}
+			if _, err := tx.Exec(`UPDATE timers SET enabled=1, archive_paused=0, next_fire_at=? WHERE id=?`, FormatTime(next), t.id); err != nil {
+				return Bot{}, err
+			}
+		}
+	}
+	field := "archived"
+	if !archived {
+		field = "unarchived"
+	}
+	if err := s.addLogTx(tx, id, "bot_updated", map[string]any{"fields": []string{field}, "by": by, "bot_id": id, "name": b.Name}); err != nil {
+		return Bot{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Bot{}, err
+	}
+	b, err = s.getBot(id, true)
+	return b, err
 }

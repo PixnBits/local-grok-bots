@@ -103,6 +103,9 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest, onToken func(string)
 			return ChatResponse{}, fmt.Errorf("ollama stream: %w", err)
 		}
 		if chunk.Error != "" {
+			if parseErr, ok := AsToolCallParseError(chunk.Error); ok {
+				return ChatResponse{}, parseErr
+			}
 			return ChatResponse{}, fmt.Errorf("ollama: %s", chunk.Error)
 		}
 		if chunk.Message.Content != "" {

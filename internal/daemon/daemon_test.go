@@ -808,3 +808,19 @@ func indexOf(names []string, want string) int {
 	}
 	return -1
 }
+
+func TestBotPageRoute(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "ok"}, nil
+	}})
+	srv := serve(t, app)
+	res, b := do(t, "GET", srv.URL+"/bots/some-id", nil, "")
+	if res.StatusCode != 200 || !strings.Contains(res.Header.Get("Content-Type"), "text/html") || !bytes.Contains(b, []byte("<title>")) {
+		t.Fatalf("GET /bots/{id} = %d %s", res.StatusCode, res.Header.Get("Content-Type"))
+	}
+	app.cfg.AuthToken = "secret"
+	res, b = do(t, "GET", srv.URL+"/bots/some-id", nil, "")
+	if res.StatusCode != 401 || !bytes.Contains(b, []byte("<title>")) {
+		t.Fatalf("unauthenticated GET /bots/{id} = %d", res.StatusCode)
+	}
+}

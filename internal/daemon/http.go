@@ -39,6 +39,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/log", a.handleLog)
 	mux.HandleFunc("GET /", a.handleIndex)
 	mux.HandleFunc("GET /index.html", a.handleIndex)
+	// A bot's page. The client reads the id from the path.
+	mux.HandleFunc("GET /bots/{id}", a.handleIndex)
 	return a.withAuth(mux)
 }
 
@@ -48,7 +50,7 @@ func (a *App) withAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/index.html") {
+		if r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/index.html" || strings.HasPrefix(r.URL.Path, "/bots/")) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -269,6 +271,15 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	var archived *bool
+	if v, ok := raw["archived"]; ok {
+		var on bool
+		if err := json.Unmarshal(v, &on); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid archived"})
+			return
+		}
+		archived = &on
+	}
 	var setIdle bool
 	if v, ok := raw["status"]; ok {
 		var status string
@@ -296,6 +307,15 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	if archived != nil {
+		if _, err := a.st.SetArchived(id, *archived, "user"); err != nil {
+			writeErr(w, err)
+			return
+		}
+		if !*archived {
+			a.kick(id)
+		}
+	}
 	if patch.Status != nil && *patch.Status == "paused" {
 		a.cancelBot(id)
 	}
@@ -322,13 +342,34 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// The newest page, oldest first. before=<message id> pages back from that
+	// message. One extra row is read to tell the client whether older
+	// messages remain.
 	limit := queryLimit(r, 50, 200)
-	msgs, err := a.st.ListMessages(r.PathValue("id"), "user", r.URL.Query().Get("before"), limit)
+	msgs, err := a.st.ListMessages(r.PathValue("id"), "user", r.URL.Query().Get("before"), limit+1)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs})
+	hasMore := len(msgs) > limit
+	if hasMore {
+		msgs = msgs[1:]
+	}
+	// tools maps each listed reply's run_id to the tool calls that run made.
+	var runIDs []string
+	seen := map[string]bool{}
+	for _, m := range msgs {
+		if m.RunID != nil && !seen[*m.RunID] {
+			seen[*m.RunID] = true
+			runIDs = append(runIDs, *m.RunID)
+		}
+	}
+	tools, err := a.st.RunTools(runIDs)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs, "tools": tools, "has_more": hasMore})
 }
 
 func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {

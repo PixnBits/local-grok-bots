@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,33 +17,171 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
-func toolDefs() []model.Tool {
-	obj := func(props map[string]any, req []string) map[string]any {
-		if req == nil {
-			req = []string{}
-		}
-		return map[string]any{"type": "object", "properties": props, "required": req}
+// prop is one JSON Schema property with a description the model reads.
+func prop(typ, desc string) map[string]any {
+	return map[string]any{"type": typ, "description": desc}
+}
+
+// schemaObj is a JSON Schema object. additionalProperties stays open so
+// documented aliases keep working.
+func schemaObj(props map[string]any, req ...string) map[string]any {
+	if req == nil {
+		req = []string{}
 	}
-	str := map[string]any{"type": "string"}
+	return map[string]any{"type": "object", "properties": props, "required": req}
+}
+
+// toolDefs is the full tool list sent to Ollama on every model call: name,
+// description, and a JSON Schema with a description (and example) for every
+// argument. The model is not asked to discover signatures; it gets them here.
+func toolDefs() []model.Tool {
+	name := func(what string) map[string]any { return prop("string", what+" Example: \"Ada\".") }
 	// File and shell tools come first. qwen3.8's default thinking only
 	// reliably notices tools near the end of this list. The bot tools
 	// stay last so create_bot is among the ones it uses. When they sit
 	// earlier, the model treats them as missing and keeps thinking past
 	// the three-minute model limit (about 8 tokens/s on this machine).
 	return []model.Tool{
-		{Name: "write_memory", Description: "Upsert a memory note on yourself.", Parameters: obj(map[string]any{"key": str, "value": str}, []string{"key", "value"})},
-		{Name: "delete_memory", Description: "Delete one of your memory notes.", Parameters: obj(map[string]any{"key": str}, []string{"key"})},
-		{Name: "set_timer", Description: "Schedule a prompt on yourself. Schedule is an interval like 30s, 5m, 2h, or 1d.", Parameters: obj(map[string]any{"name": str, "schedule": str, "prompt": str}, []string{"schedule", "prompt"})},
-		{Name: "clear_timer", Description: "Delete one of your timers by id.", Parameters: obj(map[string]any{"id": str}, []string{"id"})},
-		{Name: "read_file", Description: "Read a UTF-8 file inside the workspace.", Parameters: obj(map[string]any{"path": str}, []string{"path"})},
-		{Name: "write_file", Description: "Write a UTF-8 file inside the workspace. Creates parent directories.", Parameters: obj(map[string]any{"path": str, "content": str}, []string{"path", "content"})},
-		{Name: "run_shell", Description: "Run a shell command inside the workspace jail. Paths outside the workspace are rejected. Network, git push, and SSH fail unless the user granted them.", Parameters: obj(map[string]any{"command": str}, []string{"command"})},
-		{Name: "list_bots", Description: "List bots: id, name, label, and status.", Parameters: obj(map[string]any{}, nil)},
-		{Name: "read_bot", Description: "Read a bot's description and memory by name or id.", Parameters: obj(map[string]any{"name": str}, []string{"name"})},
-		{Name: "send_dm", Description: "Send a direct message to another bot by name or id. Returns immediately; the recipient gets its own turn.", Parameters: obj(map[string]any{"to": str, "content": str}, []string{"to", "content"})},
-		{Name: "create_bot", Description: "Create a bot. name and description are required. description is the standing prompt the new bot is given. instructions is an accepted alias for description.", Parameters: obj(map[string]any{"name": str, "label": str, "description": str, "instructions": str, "model": str}, []string{"name", "description"})},
-		{Name: "update_bot", Description: "Update another bot's name, label, description, or model. Identify it by id or name. A rename requires id. instructions is an accepted alias for description.", Parameters: obj(map[string]any{"id": str, "name": str, "label": str, "description": str, "instructions": str, "model": str}, nil)},
+		{Name: "write_memory", Description: "Save or replace a memory note on yourself. Notes appear in your system prompt on later turns.",
+			Parameters: schemaObj(map[string]any{
+				"key":   prop("string", "Short note name without slashes. Example: \"favorite_color\"."),
+				"value": prop("string", "Note text. Example: \"blue\"."),
+			}, "key", "value")},
+		{Name: "delete_memory", Description: "Delete one of your memory notes by key.",
+			Parameters: schemaObj(map[string]any{"key": prop("string", "The note's key. Example: \"favorite_color\".")}, "key")},
+		{Name: "set_timer", Description: "Schedule a prompt that is sent back to you later, for reminders and routines. " +
+			"Give prompt plus exactly one of: in (fire once after a duration), at (fire once at a time), or every (repeat). " +
+			"When it fires, the prompt arrives in this thread as a [scheduled] message and you reply to the user then. " +
+			"Example for \"remind me in 5 minutes to walk the dog\": {\"prompt\": \"Remind the user to walk the dog.\", \"in\": \"5m\"}.",
+			Parameters: schemaObj(map[string]any{
+				"prompt": prop("string", "What to do when it fires, written as an instruction to yourself. Example: \"Remind the user to walk the dog.\""),
+				"in":     prop("string", "One-shot delay as a duration: number plus s, m, h, or d. Examples: \"90s\", \"5m\", \"2h\", \"1d\"."),
+				"at":     prop("string", "One-shot absolute time in RFC 3339 with a UTC offset. Example: \"2026-10-14T17:30:00-07:00\". The current time and zone are in your system prompt."),
+				"every":  prop("string", "Repeat interval for a recurring routine: number plus s, m, h, or d. Example: \"1d\". The first run is one interval from now."),
+				"name":   prop("string", "Optional label shown to the user. Example: \"walk the dog\"."),
+			}, "prompt")},
+		{Name: "list_timers", Description: "List your timers with id, name, schedule (an interval or \"once\"), prompt, enabled, and next_fire_at (UTC).",
+			Parameters: schemaObj(map[string]any{})},
+		{Name: "clear_timer", Description: "Delete one of your timers. Get the id from list_timers or from set_timer's result.",
+			Parameters: schemaObj(map[string]any{"id": prop("string", "Timer id (a UUID). Example: \"b2af098c-57fc-4aa0-ba5d-bec6613f7a57\".")}, "id")},
+		{Name: "read_file", Description: "Read a UTF-8 text file inside the workspace.",
+			Parameters: schemaObj(map[string]any{"path": prop("string", "Path relative to the workspace. Example: \"notes/todo.md\".")}, "path")},
+		{Name: "write_file", Description: "Write a UTF-8 text file inside the workspace, replacing it if it exists. Creates parent directories.",
+			Parameters: schemaObj(map[string]any{
+				"path":    prop("string", "Path relative to the workspace. Example: \"notes/todo.md\"."),
+				"content": prop("string", "Full file contents."),
+			}, "path", "content")},
+		{Name: "run_shell", Description: "Run a shell command inside the workspace jail and return its output. Paths outside the workspace are rejected. Network, git push, and SSH fail unless the user granted them.",
+			Parameters: schemaObj(map[string]any{"command": prop("string", "A bash command line. Example: \"ls -la && go version\".")}, "command")},
+		{Name: "list_bots", Description: "List all bots with id, name, label, and status.",
+			Parameters: schemaObj(map[string]any{})},
+		{Name: "read_bot", Description: "Read one bot's description and memory.",
+			Parameters: schemaObj(map[string]any{"name": name("The bot's name or id.")}, "name")},
+		{Name: "send_dm", Description: "Send a direct message to another bot. Returns immediately; the recipient answers in its own turn.",
+			Parameters: schemaObj(map[string]any{
+				"to":      name("Recipient bot name or id."),
+				"content": prop("string", "Message text."),
+			}, "to", "content")},
+		{Name: "create_bot", Description: "Create a new bot. description is the standing prompt the new bot is given. instructions is an accepted alias for description.",
+			Parameters: schemaObj(map[string]any{
+				"name":         name("Unique bot name (case-insensitive)."),
+				"description":  prop("string", "Standing prompt for the new bot. Example: \"You summarize the news each morning.\""),
+				"label":        prop("string", "Optional short role line. Example: \"news digest\"."),
+				"instructions": prop("string", "Alias for description."),
+				"model":        prop("string", "Optional Ollama model name; omit to use the default."),
+			}, "name", "description")},
+		{Name: "update_bot", Description: "Change another bot's name, label, description, or model. Identify it by id or name; renaming requires id. instructions is an accepted alias for description.",
+			Parameters: schemaObj(map[string]any{
+				"id":           prop("string", "Target bot id. Required to rename."),
+				"name":         name("Target bot name, or the new name when id is given."),
+				"label":        prop("string", "New label."),
+				"description":  prop("string", "New standing prompt."),
+				"instructions": prop("string", "Alias for description."),
+				"model":        prop("string", "New Ollama model name; empty string resets to the default."),
+			})},
 	}
+}
+
+// toolUsage renders a tool's arguments compactly for error messages, so a
+// wrong call learns the expected shape in one round.
+func toolUsage(name string) string {
+	for _, t := range toolDefs() {
+		if t.Name != name {
+			continue
+		}
+		props, _ := t.Parameters["properties"].(map[string]any)
+		req := map[string]bool{}
+		for _, r := range t.Parameters["required"].([]string) {
+			req[r] = true
+		}
+		keys := make([]string, 0, len(props))
+		for k := range props {
+			keys = append(keys, k)
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			if req[keys[i]] != req[keys[j]] {
+				return req[keys[i]]
+			}
+			return keys[i] < keys[j]
+		})
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			p := props[k].(map[string]any)
+			opt := "?"
+			if req[k] {
+				opt = ""
+			}
+			parts = append(parts, fmt.Sprintf("%s%s: %s — %s", k, opt, p["type"], p["description"]))
+		}
+		return name + " arguments: {" + strings.Join(parts, "; ") + "}"
+	}
+	return ""
+}
+
+// argError is a bad-arguments error; execTool appends the tool's usage.
+type argError struct{ msg string }
+
+func (e argError) Error() string { return e.msg }
+
+func badArgs(format string, a ...any) error { return argError{fmt.Sprintf(format, a...)} }
+
+// checkRequired rejects a call missing a required argument before dispatch.
+func checkRequired(name string, args map[string]any) error {
+	for _, t := range toolDefs() {
+		if t.Name != name {
+			continue
+		}
+		var missing []string
+		for _, r := range t.Parameters["required"].([]string) {
+			if strings.TrimSpace(strArg(args, r)) == "" && !hasAlias(name, r, args) {
+				missing = append(missing, r)
+			}
+		}
+		if len(missing) > 0 {
+			return badArgs("missing required argument(s): %s", strings.Join(missing, ", "))
+		}
+		return nil
+	}
+	return fmt.Errorf("unknown tool %q", name)
+}
+
+// hasAlias reports whether a documented alias stands in for a required field.
+func hasAlias(tool, field string, args map[string]any) bool {
+	var alts []string
+	switch {
+	case tool == "create_bot" && field == "description":
+		alts = []string{"instructions"}
+	case tool == "set_timer" && field == "prompt":
+		alts = []string{"message", "text", "reminder"}
+	case tool == "read_bot" && field == "name":
+		alts = []string{"id"}
+	}
+	for _, k := range alts {
+		if strings.TrimSpace(strArg(args, k)) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) execTool(ctx context.Context, bot store.Bot, name string, args map[string]any) (string, error) {
@@ -49,7 +189,15 @@ func (a *App) execTool(ctx context.Context, bot store.Bot, name string, args map
 		args = map[string]any{}
 	}
 	a.log(bot.ID, "tool_start", map[string]any{"name": name, "arguments": redactValue(args)})
-	result, err := a.dispatchTool(ctx, bot, name, args)
+	err := checkRequired(name, args)
+	var result string
+	if err == nil {
+		result, err = a.dispatchTool(ctx, bot, name, args)
+	}
+	var ae argError
+	if errors.As(err, &ae) {
+		err = fmt.Errorf("%s. Expected %s", ae.msg, toolUsage(name))
+	}
 	detail := map[string]any{"name": name, "ok": err == nil}
 	if err != nil {
 		detail["error"] = clip(err.Error(), 500)
@@ -199,16 +347,13 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		}
 		return `{"ok":true}`, nil
 	case "set_timer":
-		schedule := strArg(args, "schedule")
-		prompt := strArg(args, "prompt")
-		if strings.TrimSpace(prompt) == "" {
-			return "", errors.New("prompt required")
-		}
-		t, err := a.st.CreateTimer(bot.ID, strArg(args, "name"), schedule, prompt, true, "bot")
+		return a.setTimer(bot, args)
+	case "list_timers":
+		ts, err := a.st.ListTimers(bot.ID)
 		if err != nil {
 			return "", err
 		}
-		return mustJSON(t), nil
+		return mustJSON(ts), nil
 	case "clear_timer":
 		id := strArg(args, "id")
 		if id == "" {
@@ -373,4 +518,93 @@ func cleanName(s string) (string, error) {
 		return "", errors.New("invalid name")
 	}
 	return s, nil
+}
+
+// setTimer reads prompt plus one of in, at, or every. It also accepts the
+// shapes models reach for on their own: schedule (as every, or as a one-shot
+// when repeat is false), seconds / in_seconds / minutes as numbers, and
+// message / text / reminder for prompt.
+func (a *App) setTimer(bot store.Bot, args map[string]any) (string, error) {
+	prompt := strings.TrimSpace(strArg(args, "prompt"))
+	for _, k := range []string{"message", "text", "reminder"} {
+		if prompt == "" {
+			prompt = strings.TrimSpace(strArg(args, k))
+		}
+	}
+	if prompt == "" {
+		return "", badArgs("prompt is required")
+	}
+	in := strings.TrimSpace(strArg(args, "in"))
+	at := strings.TrimSpace(strArg(args, "at"))
+	every := strings.TrimSpace(strArg(args, "every"))
+	if sched := strings.TrimSpace(strArg(args, "schedule")); sched != "" && in == "" && every == "" {
+		if isFalse(args["repeat"]) {
+			in = sched
+		} else {
+			every = sched
+		}
+	}
+	if in == "" {
+		for k, unit := range map[string]string{"seconds": "s", "in_seconds": "s", "delay_seconds": "s", "minutes": "m", "in_minutes": "m"} {
+			if v := strings.Trim(strings.TrimSpace(strArg(args, k)), `"`); v != "" {
+				if n, err := strconv.ParseFloat(v, 64); err == nil && n > 0 {
+					in = strconv.FormatFloat(n, 'f', -1, 64) + unit
+					break
+				}
+				return "", badArgs("%s must be a positive number, got %q", k, v)
+			}
+		}
+	}
+	set := 0
+	for _, v := range []string{in, at, every} {
+		if v != "" {
+			set++
+		}
+	}
+	if set != 1 {
+		return "", badArgs("give exactly one of in, at, or every (got %d)", set)
+	}
+	name := strArg(args, "name")
+	var t store.Timer
+	var err error
+	switch {
+	case in != "":
+		d, perr := store.ParseInterval(in)
+		if perr != nil || d <= 0 {
+			return "", badArgs("in must be a duration like \"90s\", \"5m\", \"2h\", or \"1d\", got %q", in)
+		}
+		t, err = a.st.CreateTimerAt(bot.ID, name, prompt, time.Now().Add(d), "bot")
+	case at != "":
+		when, perr := time.Parse(time.RFC3339, at)
+		if perr != nil {
+			return "", badArgs("at must be RFC 3339 with an offset like \"2026-10-14T17:30:00-07:00\", got %q", at)
+		}
+		if !when.After(time.Now()) {
+			return "", badArgs("at %q is in the past; the current time is %s", at, time.Now().Format(time.RFC3339))
+		}
+		t, err = a.st.CreateTimerAt(bot.ID, name, prompt, when, "bot")
+	default:
+		if _, perr := store.ParseInterval(every); perr != nil {
+			return "", badArgs("every must be an interval like \"30s\", \"5m\", \"2h\", or \"1d\", got %q", every)
+		}
+		t, err = a.st.CreateTimer(bot.ID, name, every, prompt, true, "bot")
+	}
+	if err != nil {
+		return "", err
+	}
+	out := map[string]any{"id": t.ID, "schedule": t.Schedule, "prompt": t.Prompt, "next_fire_at": t.NextFireAt}
+	if when, perr := time.Parse(time.RFC3339Nano, t.NextFireAt); perr == nil {
+		out["fires_at_local"] = when.Local().Format(time.RFC3339)
+	}
+	return mustJSON(out), nil
+}
+
+func isFalse(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return !t
+	case string:
+		return strings.EqualFold(strings.TrimSpace(t), "false") || t == "0" || strings.EqualFold(t, "no")
+	}
+	return false
 }
