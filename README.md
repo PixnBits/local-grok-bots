@@ -1,6 +1,6 @@
 # local-grok-bots
 
-One Go daemon for a personal bot roster on the Framework Desktop. It keeps bots, threads, DMs, timers, and the log in SQLite, calls a local Ollama, and serves a small web page.
+One Go daemon for a personal bot roster on the Framework Desktop. It keeps bots, threads, DMs, timers, and the log in SQLite, calls a local Ollama by default, and serves a small web page. It can also use a CLI backend (Claude Code or Grok CLI); backend selection and jail behavior come from `policy.toml` (see `policy.toml.sample`).
 
 ```bash
 go build -o local-grok-bots ./cmd/local-grok-bots
