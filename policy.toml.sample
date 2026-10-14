@@ -20,6 +20,9 @@ bind = "127.0.0.1:8787"
 #             allowlists, credential deny/mask via InfoSec-managed policy)
 #   grok   -> daemon jail OFF; Grok CLI's own sandbox is the boundary
 backend = "ollama"
+# Optional allow-list. A backend not listed fails the turn.
+# Default (empty) allows ollama, claude, and grok.
+# allow = ["ollama", "claude"]
 
 [ollama]
 # Only consulted when backend = "ollama"
@@ -36,10 +39,17 @@ idle_timeout_minutes = 30
 # Window in which a user-created timer keeps a live process from being
 # killed. Bot-created timers do not. Default 2.
 imminent_timer_minutes = 2
+# Optional hard deadline on a CLI turn (seconds or Go duration, e.g. "30m").
+# Empty keeps existing behavior (idle kill + shutdown govern).
+# turn_timeout = ""
 # Permission mode must match what InfoSec has approved for headless use.
 # "bypassPermissions" is the likely requirement for unattended timers;
 # that is an InfoSec conversation, not something the daemon invents.
 permission_mode = "bypassPermissions"
+# Optional binary pins. Prefer path + SHA-256. Empty keeps PATH launch.
+# pins = [
+#   { path = "/usr/local/bin/claude", sha256 = "..." },
+# ]
 
 [timers]
 # Daemon-owned scheduler. On fire, injects a [scheduled] prompt into
@@ -49,10 +59,20 @@ enabled = true
 [security]
 # Fail-closed: refuse to start if the sandbox cannot initialize when
 # the daemon jail is required (backend = ollama).
+# If the chosen CLI binary is missing or its own sandbox cannot start,
+# the turn fails; the daemon still serves.
 fail_closed = true
 # Log loudly (and refuse to start) when a user-level setting conflicts
 # with a managed policy.
 conflict_policy = "refuse"
+# Optional DLP. Off unless one of these is set. A match or non-zero
+# scanner exit fails the turn before the CLI starts. Prompts are not logged.
+# dlp_patterns = ["secret-pattern"]
+# dlp_file = "/etc/local-grok-bots/dlp.txt"
+# dlp_command = "/usr/local/bin/dlp-scanner"
+# Optional audit sink for CLI start/stop events: "stderr", "syslog", or absolute path.
+# Empty leaves it off.
+# audit_log = ""
 
 [managed]
 # Path where server-managed or MDM-delivered policy is read from.

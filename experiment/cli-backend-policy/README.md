@@ -23,6 +23,9 @@ The middle ground between `main` (Ollama + custom daemon jail) and
 - **Session lifetime is policy-driven**: 30-minute idle kill (configurable)
   with a 2-minute user-timer exception; process-group kill; resume on
   next event. See `docs/plans/2026-10-13-cli-session-lifetime.md`.
+- **Enterprise controls that still apply**: binary pins, DLP prompt scan,
+  audit log for CLI start/stop, turn timeout, and backend allow-list.
+  See `docs/plans/2026-10-13-cli-enterprise-controls.md`.
 
 ## Files
 
@@ -30,6 +33,8 @@ The middle ground between `main` (Ollama + custom daemon jail) and
   `policy.toml` (or the managed path) and edit.
 - `docs/plans/2026-10-13-cli-session-lifetime.md` — idle/resume decisions
   carried forward and made policy-configurable.
+- `docs/plans/2026-10-13-cli-enterprise-controls.md` — pins, DLP, audit,
+  turn timeout, and allow-list carried forward.
 
 ## Open questions
 
