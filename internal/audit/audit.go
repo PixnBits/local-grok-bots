@@ -24,8 +24,10 @@ type Logger struct {
 }
 
 var (
-	userinfo = regexp.MustCompile(`://[^/\s:]+:[^/\s@]+@`)
-	secretKV = regexp.MustCompile(`(?i)\b(XAI_API_KEY|ANTHROPIC_API_KEY|SSH_AUTH_SOCK|AUTHORIZATION|PROXY_AUTHORIZATION)=([^\s]+)`)
+	userinfo    = regexp.MustCompile(`://[^/\s:]+:[^/\s@]+@`)
+	secretKV    = regexp.MustCompile(`(?i)\b(XAI_API_KEY|ANTHROPIC_API_KEY|SSH_AUTH_SOCK|AUTHORIZATION|PROXY_AUTHORIZATION)=([^\s]+)`)
+	secretKeyRe = regexp.MustCompile(`(?i)(token|secret|password|passwd|api[_-]?key|authorization|credential|bearer)`)
+	secretValRe = regexp.MustCompile(`(?i)\b(?:sk-[a-z0-9]{8,}|ghp_[a-zA-Z0-9]{8,}|github_pat_[a-zA-Z0-9_]{8,}|bearer\s+[a-z0-9\-._~+/]+=*)`)
 )
 
 // Open selects the sink. dest is empty, "stderr", "syslog", or an absolute path.
@@ -99,4 +101,43 @@ func (l *Logger) Close() error {
 func Redact(s string) string {
 	s = userinfo.ReplaceAllString(s, "://redacted@")
 	return secretKV.ReplaceAllString(s, "$1=redacted")
+}
+
+// RedactText hides proxy passwords, known assignments, and token-shaped values.
+func RedactText(s string) string {
+	return secretValRe.ReplaceAllString(Redact(s), "[redacted]")
+}
+
+// RedactValue walks a JSON-like value and redacts secret keys and token-shaped
+// strings. String leaves are clipped.
+func RedactValue(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, val := range t {
+			if secretKeyRe.MatchString(k) {
+				out[k] = "[redacted]"
+				continue
+			}
+			out[k] = RedactValue(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i := range t {
+			out[i] = RedactValue(t[i])
+		}
+		return out
+	case string:
+		return clipText(RedactText(t), 500)
+	default:
+		return clipText(fmt.Sprint(t), 500)
+	}
+}
+
+func clipText(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…(truncated)"
 }

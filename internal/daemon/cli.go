@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/dlp"
 	"github.com/PixnBits/local-grok-bots/internal/id"
@@ -119,7 +120,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 			if name == "" {
 				name = "tool"
 			}
-			body := clip(secretValRe.ReplaceAllString(ev.Text, "[redacted]"), 4000)
+			body := clip(audit.RedactText(ev.Text), 4000)
 			a.bus.Publish(runID, "tool_result", map[string]any{"name": name, "ok": true, "result_or_error": body})
 			a.log(bot.ID, "tool_end", map[string]any{"name": name, "ok": true})
 		}
