@@ -26,16 +26,16 @@ func TestMarkdownRenderer(t *testing.T) {
 		t.Fatal("markdown markers missing from index.html")
 	}
 	harness := `
-class N { constructor(t){this.tag=t;this.kids=[];this.dataset={};this.attrs={}}
+class N { constructor(t){this.tag=t;this.kids=[];this.dataset={};this.attrs={};this.style={}}
   append(...k){this.kids.push(...k)} replaceChildren(){this.kids=[]}
   get children(){return this.kids.filter(k=>k.tag)}
   set textContent(v){this.kids=[{text:v}]} set href(v){this.attrs.href=v}
-  set target(v){} set rel(v){} set className(v){} set start(v){} }
+  set target(v){} set rel(v){} set className(v){this.attrs.cls=v} set start(v){} }
 const document={createElement:t=>new N(t),createTextNode:t=>({text:t})};
-const el=(tag,cls,text)=>{const n=new N(tag); if(text!=null) n.textContent=text; return n};
+const el=(tag,cls,text)=>{const n=new N(tag); if(cls) n.className=cls; if(text!=null) n.textContent=text; return n};
 ` + src[i:j] + `
 const esc=s=>s.replace(/&/g,"&amp;").replace(/</g,"&lt;");
-const h=n=>n.tag?"<"+n.tag+(n.attrs.href?" href=\""+n.attrs.href+"\"":"")+">"+n.kids.map(h).join("")+"</"+n.tag+">":esc(n.text);
+const h=n=>n.tag?"<"+n.tag+(n.attrs.cls&&n.tag!=="div"||n.attrs.cls&&n.attrs.cls!=="md"&&n.tag==="div"?"."+n.attrs.cls:"")+(n.style.textAlign?" align="+n.style.textAlign:"")+(n.attrs.href?" href=\""+n.attrs.href+"\"":"")+">"+n.kids.map(h).join("")+"</"+n.tag+">":esc(n.text);
 const cases=JSON.parse(require("fs").readFileSync(0,"utf8"));
 console.log(JSON.stringify(cases.map(c=>h(renderMarkdown(c,new N("div"))))));
 `
@@ -48,13 +48,21 @@ console.log(JSON.stringify(cases.map(c=>h(renderMarkdown(c,new N("div"))))));
 		{"# Hi\n**b** *i* `c`", "<div><h3>Hi</h3><p><strong>b</strong> <em>i</em> <code>c</code></p></div>"},
 		{"<img src=x onerror=alert(1)>", "<div><p>&lt;img src=x onerror=alert(1)></p></div>"},
 		{"- a\n- b\n\n1. x", "<div><ul><li>a</li><li>b</li></ul><ol><li>x</li></ol></div>"},
-		{"```\n<b>\n```", "<div><pre><code>&lt;b></code></pre></div>"},
+		{"```\n<b>\n```", "<div><div.code><pre><code>&lt;b></code></pre></div></div>"},
+		// Fenced code keeps indentation and shows the language label.
+		{"```go\nfunc main() {\n\tif x {\n\t\ty()\n\t}\n}\n```", "<div><div.code><span.code-lang>go</span><pre><code>func main() {\n\tif x {\n\t\ty()\n\t}\n}</code></pre></div></div>"},
+		{"  ```\n    two\n  ```", "<div><div.code><pre><code>  two</code></pre></div></div>"},
+		{"````md\n```\ninner\n```\n````", "<div><div.code><span.code-lang>md</span><pre><code>```\ninner\n```</code></pre></div></div>"},
+		// GFM tables: header, alignment, inline markdown, escaped pipes.
+		{"| a | b | c |\n|:--|:-:|--:|\n| **x** | y\\|z | 3 |\n| 1 | 2 |", "<div><div.table-wrap><table><thead><tr><th align=left>a</th><th align=center>b</th><th align=right>c</th></tr></thead><tbody><tr><td align=left><strong>x</strong></td><td align=center>y|z</td><td align=right>3</td></tr><tr><td align=left>1</td><td align=center>2</td><td align=right></td></tr></tbody></table></div></div>"},
+		{"intro\na | b\n--- | ---\n1 | 2\n\nafter", "<div><p>intro</p><div.table-wrap><table><thead><tr><th>a</th><th>b</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table></div><p>after</p></div>"},
+		{"a | b\n--- | --- | ---", "<div><p>a | b<br></br>--- | --- | ---</p></div>"},
 		{"[x](javascript:alert(1)) [y](https://e.com)", "<div><p>[x](javascript:alert(1)) <a href=\"https://e.com\">y</a></p></div>"},
 		{"snake_case_name", "<div><p>snake_case_name</p></div>"},
 		// Lines no block rule takes must not stall the renderer.
-		{"```bash title\nx", "<div><p>```bash title<br></br>x</p></div>"},
+		{"```bash title\nx", "<div><div.code><span.code-lang>bash</span><pre><code>x</code></pre></div></div>"},
 		{"   - deep", "<div><p>   - deep</p></div>"},
-		{"a\n```", "<div><p>a</p><pre><code></code></pre></div>"},
+		{"a\n```", "<div><p>a</p><div.code><pre><code></code></pre></div></div>"},
 	}
 	inputs := make([]string, len(cases))
 	for k, c := range cases {

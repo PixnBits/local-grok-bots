@@ -141,13 +141,20 @@
   .bubble .md { white-space: normal; }
   .md > :first-child { margin-top: 0; }
   .md > :last-child { margin-bottom: 0; }
-  .md p, .md ul, .md ol, .md pre, .md blockquote { margin: 0 0 8px; }
+  .md p, .md ul, .md ol, .md blockquote { margin: 0 0 8px; }
   .md ul, .md ol { padding-left: 22px; }
   .md h3, .md h4, .md h5, .md h6 { margin: 10px 0 6px; font-size: 1em; }
   .md h3 { font-size: 1.1em; }
   .md code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; background: rgba(0,0,0,.06); padding: 1px 4px; border-radius: 4px; }
-  .md pre { background: rgba(0,0,0,.06); padding: 8px 10px; border-radius: 8px; overflow-x: auto; white-space: pre; }
-  .md pre code { background: none; padding: 0; }
+  .md .code { position: relative; margin: 0 0 8px; background: #2b2722; color: #f3eee6; border-radius: 8px; }
+  .md .code-lang { display: block; padding: 4px 10px 0; font-family: var(--mono, ui-monospace, monospace); font-size: 11px; color: #b9b0a3; }
+  .md pre { margin: 0; padding: 8px 10px; overflow-x: auto; white-space: pre; tab-size: 4; font-family: var(--mono, ui-monospace, monospace); font-size: 13px; line-height: 1.45; }
+  .md pre code { background: none; padding: 0; color: inherit; font-size: inherit; white-space: pre; }
+  .md .table-wrap { overflow-x: auto; margin: 0 0 8px; }
+  .md table { border-collapse: collapse; font-size: 13px; }
+  .md th, .md td { border: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; }
+  .md th { background: rgba(0,0,0,.05); font-weight: 600; }
+  .md tbody tr:nth-child(even) td { background: rgba(0,0,0,.025); }
   .md blockquote { border-left: 3px solid var(--line); padding-left: 10px; color: var(--muted); }
   .md hr { border: 0; border-top: 1px solid var(--line); margin: 8px 0; }
   .md a { color: var(--accent); }
@@ -566,22 +573,84 @@ function mdInline(src, parent) {
     rest = rest.slice(m.index + m[0].length);
   }
 }
+// GFM pipe tables: a header row, an alignment row (---, :--, --:, :-:),
+// then body rows until a blank line or a line without a pipe.
+function tableCells(line) {
+  let t = line.trim();
+  if (t.startsWith("|")) t = t.slice(1);
+  if (t.endsWith("|") && !t.endsWith("\\|")) t = t.slice(0, -1);
+  const cells = [];
+  let cur = "";
+  for (let k = 0; k < t.length; k++) {
+    if (t[k] === "\\" && t[k + 1] === "|") { cur += "|"; k++; continue; }
+    if (t[k] === "|") { cells.push(cur.trim()); cur = ""; continue; }
+    cur += t[k];
+  }
+  cells.push(cur.trim());
+  return cells;
+}
+function isTableStart(lines, i) {
+  if (i + 1 >= lines.length || !lines[i].includes("|")) return false;
+  const sep = lines[i + 1];
+  if (!/^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/.test(sep) || !sep.includes("-")) return false;
+  if (!sep.includes("|") && tableCells(lines[i]).length < 2) return false;
+  return tableCells(lines[i]).length === tableCells(sep).length;
+}
+function mdTable(lines, i, parent) {
+  const head = tableCells(lines[i]);
+  const aligns = tableCells(lines[i + 1]).map(c => c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : c.startsWith(":") ? "left" : "");
+  i += 2;
+  const wrap = el("div", "table-wrap");
+  const table = el("table");
+  const row = (cells, tag) => {
+    const tr = el("tr");
+    head.forEach((_, k) => {
+      const c = el(tag);
+      if (aligns[k]) c.style.textAlign = aligns[k];
+      mdInline(cells[k] || "", c);
+      tr.append(c);
+    });
+    return tr;
+  };
+  const thead = el("thead");
+  thead.append(row(head, "th"));
+  table.append(thead);
+  const tbody = el("tbody");
+  while (i < lines.length && lines[i].trim() && lines[i].includes("|")) tbody.append(row(tableCells(lines[i++]), "td"));
+  if (tbody.children.length) table.append(tbody);
+  wrap.append(table);
+  parent.append(wrap);
+  return i;
+}
 function mdLines(lines, parent) {
   const isList = (l) => /^\s*([-*+]|\d+[.)])\s+/.test(l);
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
-    const fence = line.match(/^\s*(```|~~~)\s*([\w+-]*)\s*$/);
+    const fence = line.match(/^(\s*)(`{3,}|~{3,})\s*([^`\s]*)[^`]*$/);
     if (fence) {
+      // Body lines keep their whitespace; the fence's own indent is removed.
+      const indent = fence[1].length, mark = fence[2];
+      const close = new RegExp("^\\s*" + mark[0] + "{" + mark.length + ",}\\s*$");
       const body = [];
       i++;
-      while (i < lines.length && !lines[i].trim().startsWith(fence[1])) body.push(lines[i++]);
+      while (i < lines.length && !close.test(lines[i])) {
+        body.push(lines[i].replace(new RegExp("^ {0," + indent + "}"), ""));
+        i++;
+      }
       i++;
+      const box = el("div", "code");
+      if (fence[3]) box.append(el("span", "code-lang", fence[3]));
       const pre = el("pre");
       const code = el("code", null, body.join("\n"));
-      if (fence[2]) code.dataset.lang = fence[2];
+      if (fence[3]) code.dataset.lang = fence[3];
       pre.append(code);
-      parent.append(pre);
+      box.append(pre);
+      parent.append(box);
+      continue;
+    }
+    if (isTableStart(lines, i)) {
+      i = mdTable(lines, i, parent);
       continue;
     }
     if (!line.trim()) { i++; continue; }
@@ -627,7 +696,7 @@ function mdLines(lines, parent) {
     // took (a fence with an info string, an indented list marker) cannot
     // stall the loop.
     const para = [lines[i++]];
-    while (i < lines.length && lines[i].trim() && !/^\s*(```|~~~|#{1,6}\s|>)/.test(lines[i]) && !isList(lines[i])) {
+    while (i < lines.length && lines[i].trim() && !/^\s*(```|~~~|#{1,6}\s|>)/.test(lines[i]) && !isList(lines[i]) && !isTableStart(lines, i)) {
       para.push(lines[i++]);
     }
     const p = el("p");
