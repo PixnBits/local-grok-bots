@@ -35,6 +35,20 @@ Optional `turn_timeout` (seconds or Go duration). When set, a CLI turn ends at t
 
 Policy can list the backends that are permitted. A backend not on the list fails the turn. Default allows `ollama`, `claude`, and `grok` so existing installs keep working.
 
+## Ollama model allow-list
+
+Optional companion to the backend allow-list. Under `[ollama]`, a `models` list restricts which model names the daemon will request from the local Ollama. A model not on the list fails the turn. Empty (default) allows any model the local Ollama serves. Useful when the enterprise wants to limit which weights can run, independent of the CLI path.
+
+Example:
+```toml
+[ollama]
+host = "http://127.0.0.1:11434"
+model = "llama3.1"
+models = ["llama3.1", "qwen2.5-coder:7b", "gemma2"]
+```
+
+A bot-level model override is still checked against the same list. The list is names only; it does not pull or hash model blobs.
+
 ## Fail-closed
 
 If the chosen CLI binary is missing, or its own sandbox cannot start, the turn fails. The daemon still serves. This is unchanged from the prior experiment and remains the rule when daemon jail is off.

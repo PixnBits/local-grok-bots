@@ -28,6 +28,10 @@ backend = "ollama"
 # Only consulted when backend = "ollama"
 host = "http://127.0.0.1:11434"
 model = "llama3.1"
+# Optional model allow-list. A model not listed fails the turn.
+# Empty (default) allows any model the local Ollama serves.
+# Useful when the enterprise wants to restrict which weights can run.
+# models = ["llama3.1", "qwen2.5-coder:7b", "gemma2"]
 
 [cli]
 # Only consulted when backend = "claude" or "grok"
