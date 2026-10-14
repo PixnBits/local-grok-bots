@@ -275,3 +275,80 @@ ui_prompts = false
 		t.Fatal("bypass classification")
 	}
 }
+
+func TestClaudeTransportSelection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.toml")
+	base := "[backend]\nbackend = \"claude\"\n[cli.permission]\nui_prompts = true\n"
+	if err := os.WriteFile(path, []byte(base), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load(Options{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ClaudeTransport != TransportMCP || !p.CLIPermitted || p.DaemonJail {
+		t.Fatalf("default transport %#v", p)
+	}
+	for _, want := range []string{TransportMCP, TransportStreamControl, TransportNone} {
+		body := base + "claude_transport = \"" + want + "\"\n"
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		p, err = Load(Options{Path: path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.ClaudeTransport != want || !p.CLIPermitted || !p.UIPrompts {
+			t.Fatalf("transport %q got %#v", want, p.ClaudeTransport)
+		}
+	}
+	if err := os.WriteFile(path, []byte(base+"claude_transport = \"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err = Load(Options{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ClaudeTransport != TransportMCP {
+		t.Fatalf("empty transport %q", p.ClaudeTransport)
+	}
+}
+
+func TestUnknownClaudeTransportFailClosed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.toml")
+	body := "[backend]\nbackend = \"claude\"\n[cli.permission]\nclaude_transport = \"websocket\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load(Options{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.CLIPermitted || p.Loaded || !p.DaemonJail || p.EffectiveBackend() != "ollama" {
+		t.Fatalf("unknown transport did not fail closed: %#v", p)
+	}
+	if len(p.Warnings) == 0 || !strings.Contains(p.Warnings[0], "unparseable") || !strings.Contains(p.Warnings[0], "claude_transport") {
+		t.Fatalf("warnings %#v", p.Warnings)
+	}
+
+	managed := filepath.Join(dir, "managed.json")
+	local := filepath.Join(dir, "local.toml")
+	if err := os.WriteFile(local, []byte("[backend]\nbackend = \"claude\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"backend":{"backend":"claude"},"cli":{"permission":{"claude_transport":"stdio"}}}`
+	if err := os.WriteFile(managed, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err = Load(Options{Path: local, ManagedPath: managed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.CLIPermitted || !p.DaemonJail || p.EffectiveBackend() != "ollama" {
+		t.Fatalf("managed unknown transport did not fail closed: %#v", p)
+	}
+	if len(p.Warnings) == 0 || !strings.Contains(strings.Join(p.Warnings, " "), "claude_transport") {
+		t.Fatalf("managed warnings %#v", p.Warnings)
+	}
+}

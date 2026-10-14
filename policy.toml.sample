@@ -69,6 +69,12 @@ imminent_timer_minutes = 2
 # ui_prompts = false
 # prompt_timeout = "60s"
 # allow_session_grants = false
+# claude_transport is mcp (default), stream_control, or none.
+# mcp attaches the HTTP permission tool when ui_prompts is on and the
+# daemon has an HTTP base. stream_control asks on stdin with
+# --permission-prompt-tool stdio and does not pass --mcp-config.
+# none always passes --permission-prompts none.
+# claude_transport = "mcp"
 # Optional binary pins. Prefer path + SHA-256. Empty keeps PATH launch.
 # pins = [
 #   { path = "/usr/local/bin/claude", sha256 = "..." },

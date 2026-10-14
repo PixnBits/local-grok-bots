@@ -63,6 +63,11 @@ type Policy struct {
 	PromptTimeout time.Duration
 	// AllowSessionGrants is true only when managed policy set it.
 	AllowSessionGrants bool
+	// ClaudeTransport is how Claude asks this daemon about a tool.
+	// mcp (default) uses the HTTP permission tool. stream_control speaks
+	// the stream-json control protocol on stdin. none passes
+	// --permission-prompts none and attaches no prompt host.
+	ClaudeTransport string
 	// ManagedBypass is true only when managed policy set an always-allow mode.
 	ManagedBypass bool
 	Pins          []Pin
@@ -105,6 +110,7 @@ func Defaults() Policy {
 		Idle:              30 * time.Minute,
 		Imminent:          2 * time.Minute,
 		PromptTimeout:     60 * time.Second,
+		ClaudeTransport:   TransportMCP,
 		TimersEnabled:     true,
 		SandboxFailClosed: true,
 		ConflictPolicy:    "refuse",
@@ -345,6 +351,28 @@ func (p Policy) Permission() Permission {
 	}
 }
 
+const (
+	// TransportMCP is Claude's HTTP permission-prompt tool. It is the default.
+	TransportMCP = "mcp"
+	// TransportStreamControl speaks can_use_tool on the CLI's stdin/stdout.
+	TransportStreamControl = "stream_control"
+	// TransportNone passes --permission-prompts none and attaches no host.
+	TransportNone = "none"
+)
+
+// NormClaudeTransport accepts mcp, stream_control, and none.
+// An empty value is mcp. Anything else is a config error.
+func NormClaudeTransport(v string) (string, error) {
+	switch strings.TrimSpace(v) {
+	case "", TransportMCP:
+		return TransportMCP, nil
+	case TransportStreamControl, TransportNone:
+		return strings.TrimSpace(v), nil
+	default:
+		return "", fmt.Errorf("cli.permission.claude_transport must be mcp, stream_control, or none")
+	}
+}
+
 // IsBypassMode reports an always-allow mode. Those modes are honored only
 // when managed policy set them.
 func IsBypassMode(mode string) bool {
@@ -455,6 +483,7 @@ type cliPermDoc struct {
 	UIPrompts          *bool     `toml:"ui_prompts" json:"ui_prompts"`
 	PromptTimeout      flexText  `toml:"prompt_timeout" json:"prompt_timeout"`
 	AllowSessionGrants *bool     `toml:"allow_session_grants" json:"allow_session_grants"`
+	ClaudeTransport    *string   `toml:"claude_transport" json:"claude_transport"`
 }
 
 type timersDoc struct {
@@ -634,6 +663,13 @@ func (p *Policy) apply(doc document, trusted bool) error {
 			} else if *perm.AllowSessionGrants {
 				p.Warnings = append(p.Warnings, "allow_session_grants is ignored; only managed policy can enable session grants")
 			}
+		}
+		if perm.ClaudeTransport != nil {
+			v, err := NormClaudeTransport(*perm.ClaudeTransport)
+			if err != nil {
+				return err
+			}
+			p.ClaudeTransport = v
 		}
 	}
 	if doc.CLI.Pins != nil {
