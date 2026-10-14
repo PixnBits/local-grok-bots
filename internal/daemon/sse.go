@@ -11,6 +11,12 @@ type frame struct {
 	data  []byte
 }
 
+// sub is one stream client. prompts is true when the client declared it
+// can answer a permission card, via ?prompts=1.
+type sub struct {
+	prompts bool
+}
+
 func (f frame) bytes() []byte {
 	return []byte(fmt.Sprintf("event: %s\ndata: %s\n\n", f.event, f.data))
 }
@@ -21,13 +27,13 @@ func (f frame) bytes() []byte {
 type Bus struct {
 	mu   sync.Mutex
 	hist map[string][]frame
-	subs map[string]map[chan frame]struct{}
+	subs map[string]map[chan frame]sub
 }
 
 func NewBus() *Bus {
 	return &Bus{
 		hist: map[string][]frame{},
-		subs: map[string]map[chan frame]struct{}{},
+		subs: map[string]map[chan frame]sub{},
 	}
 }
 
@@ -53,25 +59,49 @@ func (b *Bus) Publish(runID, event string, payload any) {
 }
 
 func (b *Bus) Subscribe(runID string) ([]frame, chan frame) {
+	return b.subscribe(runID, false)
+}
+
+// SubscribePrompts registers a client that declared it can answer prompts.
+func (b *Bus) SubscribePrompts(runID string) ([]frame, chan frame) {
+	return b.subscribe(runID, true)
+}
+
+func (b *Bus) subscribe(runID string, prompts bool) ([]frame, chan frame) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	hist := append([]frame(nil), b.hist[runID]...)
 	ch := make(chan frame, 64)
 	if b.subs[runID] == nil {
-		b.subs[runID] = map[chan frame]struct{}{}
+		b.subs[runID] = map[chan frame]sub{}
 	}
-	b.subs[runID][ch] = struct{}{}
+	b.subs[runID][ch] = sub{prompts: prompts}
 	return hist, ch
 }
 
-// Subscribed reports whether a UI stream is attached to the run.
+// Subscribed reports whether any stream client is attached to the run.
 func (b *Bus) Subscribed(runID string) bool {
+	return b.count(runID, false) > 0
+}
+
+// PromptSubscribed reports whether a client that can answer prompts is attached.
+func (b *Bus) PromptSubscribed(runID string) bool {
+	return b.count(runID, true) > 0
+}
+
+func (b *Bus) count(runID string, promptsOnly bool) int {
 	if b == nil {
-		return false
+		return 0
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return len(b.subs[runID]) > 0
+	n := 0
+	for _, s := range b.subs[runID] {
+		if !promptsOnly || s.prompts {
+			n++
+		}
+	}
+	return n
 }
 
 func (b *Bus) Unsubscribe(runID string, ch chan frame) {

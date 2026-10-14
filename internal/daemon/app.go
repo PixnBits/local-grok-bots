@@ -135,7 +135,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 			a.bus.Publish(runID, event, payload)
 		},
 		UIPresent: func(runID string) bool {
-			return a.bus.Subscribed(runID)
+			return a.bus.PromptSubscribed(runID)
 		},
 		Audit: func(fields map[string]any) {
 			if a.audit != nil && a.audit.Enabled() {

@@ -56,7 +56,7 @@ func TestMCPRoundTrip(t *testing.T) {
 		t.Fatalf("bad token %d %s", res.StatusCode, body)
 	}
 
-	_, frames := app.bus.Subscribe("run-1")
+	_, frames := app.bus.SubscribePrompts("run-1")
 	secret := "sk-supersecretvalue12"
 	type got struct {
 		code int
@@ -198,9 +198,11 @@ printf '%s\n' '{"type":"result","result":"continued","session_id":"s","permissio
 	app.audit = lg
 	app.cliTTY = func() bool { return false }
 	app.rtMu.Lock()
-	app.policy = policy.Policy{Backend: "claude", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute}
+	app.policy = policy.Policy{Backend: "claude", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute, UIPrompts: true}
 	app.rtMu.Unlock()
 	srv := serve(t, app)
+	// A host is attached, so a denial Claude reports itself stays source cli.
+	app.permBase = srv.URL
 	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Ada", "description": "d"}, "")
 	if res.StatusCode != 201 && res.StatusCode != 200 {
 		t.Fatalf("create %d %s", res.StatusCode, b)
@@ -352,7 +354,17 @@ func TestFakeClaudePermissionRoundTrip(t *testing.T) {
 
 func startSSE(t *testing.T, base, botID, runID string) <-chan string {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodGet, base+"/api/bots/"+botID+"/thread/stream?run_id="+runID, nil)
+	_, events := openSSE(t, base, botID, runID, true)
+	return events
+}
+
+func openSSE(t *testing.T, base, botID, runID string, prompts bool) (*http.Response, <-chan string) {
+	t.Helper()
+	u := base + "/api/bots/" + botID + "/thread/stream?run_id=" + runID
+	if prompts {
+		u += "&prompts=1"
+	}
+	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,19 +398,166 @@ func startSSE(t *testing.T, base, botID, runID string) <-chan string {
 			}
 		}
 	}()
-	return events
+	return res, events
 }
 
 func waitSubscribed(t *testing.T, app *App, runID string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if app.bus.Subscribed(runID) {
+		if app.bus.PromptSubscribed(runID) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("sse subscriber was not registered")
+	t.Fatal("prompt subscriber was not registered")
+}
+
+func TestPlainStreamIsNotAPromptUI(t *testing.T) {
+	dir := t.TempDir()
+	installFakeClaude(t, dir)
+	gate := filepath.Join(dir, "gate")
+	t.Setenv("LGB_FAKE_GATE", gate)
+	app := newApp(t, dir, nil)
+	app.cliTTY = func() bool { return false }
+	app.rtMu.Lock()
+	app.policy = policy.Policy{
+		Backend: "claude", CLIPermitted: true, TimersEnabled: true,
+		Idle: time.Hour, Imminent: time.Minute,
+		UIPrompts: true, PromptTimeout: 20 * time.Second,
+	}
+	app.rtMu.Unlock()
+	srv := serve(t, app)
+	app.permBase = srv.URL
+	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Ada", "description": "p"}, "")
+	if res.StatusCode != 201 && res.StatusCode != 200 {
+		t.Fatalf("create %d %s", res.StatusCode, b)
+	}
+	var bot store.Bot
+	decodeJSON(t, b, &bot)
+	res, b = do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "go"}, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("post %d %s", res.StatusCode, b)
+	}
+	var posted struct {
+		RunID string `json:"run_id"`
+	}
+	decodeJSON(t, b, &posted)
+	plainRes, events := openSSE(t, srv.URL, bot.ID, posted.RunID, false)
+	waitBus(t, func() bool { return app.bus.Subscribed(posted.RunID) && !app.bus.PromptSubscribed(posted.RunID) })
+	promptRes, _ := openSSE(t, srv.URL, bot.ID, posted.RunID, true)
+	waitBus(t, func() bool { return app.bus.PromptSubscribed(posted.RunID) })
+	promptRes.Body.Close()
+	waitBus(t, func() bool { return !app.bus.PromptSubscribed(posted.RunID) && app.bus.Subscribed(posted.RunID) })
+	if err := os.WriteFile(gate, []byte("go\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	sawRequest := false
+	sawNoUI := false
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) && !sawNoUI {
+		select {
+		case ev := <-events:
+			if strings.HasPrefix(ev, "permission_request\n") {
+				sawRequest = true
+			}
+			if strings.HasPrefix(ev, "permission_decision\n") && strings.Contains(ev, `"source":"no_ui"`) {
+				sawNoUI = true
+			}
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	plainRes.Body.Close()
+	if sawRequest {
+		t.Fatal("plain stream received a permission_request")
+	}
+	if !sawNoUI {
+		t.Fatal("plain stream did not fail closed with source no_ui")
+	}
+	waitIdle(t, srv.URL, bot.ID, "")
+}
+
+func TestClaudeResidualAsksAreDenied(t *testing.T) {
+	t.Run("prompts off", func(t *testing.T) {
+		assertResidualDenied(t, false, true, "no_ui")
+	})
+	t.Run("no host", func(t *testing.T) {
+		assertResidualDenied(t, true, false, "policy")
+	})
+}
+
+func assertResidualDenied(t *testing.T, uiPrompts, withHost bool, source string) {
+	t.Helper()
+	dir := t.TempDir()
+	installFakeClaude(t, dir)
+	logPath := filepath.Join(dir, "argv.log")
+	auditPath := filepath.Join(dir, "audit.log")
+	t.Setenv("LGB_ARGV_LOG", logPath)
+	app := newApp(t, dir, nil)
+	lg, err := audit.Open(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.audit = lg
+	app.cliTTY = func() bool { return false }
+	app.rtMu.Lock()
+	app.policy = policy.Policy{
+		Backend: "claude", CLIPermitted: true, TimersEnabled: true,
+		Idle: time.Hour, Imminent: time.Minute,
+		UIPrompts: uiPrompts,
+	}
+	app.rtMu.Unlock()
+	srv := serve(t, app)
+	if withHost {
+		app.permBase = srv.URL
+	}
+	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Ada", "description": "p"}, "")
+	if res.StatusCode != 201 && res.StatusCode != 200 {
+		t.Fatalf("create %d %s", res.StatusCode, b)
+	}
+	var bot store.Bot
+	decodeJSON(t, b, &bot)
+	res, b = do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "go"}, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("post %d %s", res.StatusCode, b)
+	}
+	waitIdle(t, srv.URL, bot.ID, "")
+	got, err := app.st.GetBot(bot.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LastRunStatus != "done" || got.LastRunError != "" {
+		t.Fatalf("run %s %s", got.LastRunStatus, got.LastRunError)
+	}
+	argv := readArgv(t, logPath)
+	if !strings.Contains(argv, "--permission-prompts\nnone") {
+		t.Fatalf("argv missing --permission-prompts none:\n%s", argv)
+	}
+	if strings.Contains(argv, "--permission-prompt-tool") || strings.Contains(argv, "--mcp-config") {
+		t.Fatalf("prompts none still attached a host:\n%s", argv)
+	}
+	if err := lg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"source":"`+source+`"`) || !strings.Contains(string(raw), `"tool":"Bash"`) || !strings.Contains(string(raw), `"decision":"deny"`) {
+		t.Fatalf("audit %s", raw)
+	}
+}
+
+func waitBus(t *testing.T, ok func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if ok() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("stream subscriber state did not settle")
 }
 
 func installFakeClaude(t *testing.T, dir string) {

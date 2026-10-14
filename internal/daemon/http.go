@@ -433,7 +433,15 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
-	hist, ch := a.bus.Subscribe(runID)
+	// prompts=1 is the page that can answer a card. Any other stream client
+	// stays attached for tokens and does not count as a UI.
+	var hist []frame
+	var ch chan frame
+	if r.URL.Query().Get("prompts") == "1" {
+		hist, ch = a.bus.SubscribePrompts(runID)
+	} else {
+		hist, ch = a.bus.Subscribe(runID)
+	}
 	defer a.bus.Unsubscribe(runID, ch)
 	// Flush headers so a permission client counts as present before the next event.
 	w.WriteHeader(http.StatusOK)

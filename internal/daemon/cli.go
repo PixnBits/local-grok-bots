@@ -102,11 +102,24 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	if bot.Model != nil {
 		spec.Model = strings.TrimSpace(*bot.Model)
 	}
-	if strings.EqualFold(backend, "claude") && a.policy.UIPrompts && strings.TrimSpace(a.permBase) != "" {
+	// The MCP prompt tool is the host. It is attached only when policy
+	// allows a UI and the daemon has an HTTP base Claude can call.
+	// Otherwise residual asks must not block: --permission-prompts none
+	// denies them inside Claude, and the daemon audits that denial.
+	cliDenySource := "cli"
+	host := strings.TrimSpace(a.permBase) != ""
+	if strings.EqualFold(backend, "claude") && a.policy.UIPrompts && host {
 		tok := a.registerPerm(bot.ID, runID, sessionID)
 		defer a.unregisterPerm(tok)
 		spec.MCPConfig = permissionMCPConfig(a.permBase, tok)
 		spec.PermissionTool = permissionToolName
+	} else if strings.EqualFold(backend, "claude") {
+		spec.PermissionPrompts = "none"
+		if !a.policy.UIPrompts {
+			cliDenySource = "no_ui"
+		} else {
+			cliDenySource = "policy"
+		}
 	}
 	res, err := runner.Run(turnCtx, spec, func(ev clisession.Event) {
 		switch ev.Kind {
@@ -138,10 +151,10 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 			a.bus.Publish(runID, "tool_result", map[string]any{"name": name, "ok": true, "result_or_error": body})
 			a.log(bot.ID, "tool_end", map[string]any{"name": name, "ok": true})
 		case "permission_decision":
-			a.noteCLIPermission(bot.ID, runID, ev.ToolName, ev.ToolArgs)
+			a.noteCLIPermission(bot.ID, runID, ev.ToolName, ev.ToolArgs, cliDenySource)
 		case "end":
 			for _, d := range ev.Denials {
-				a.noteCLIPermission(bot.ID, runID, d.Tool, d.Args)
+				a.noteCLIPermission(bot.ID, runID, d.Tool, d.Args, cliDenySource)
 			}
 		}
 	})
@@ -234,13 +247,16 @@ func (a *App) screenDLP(ctx context.Context, botID, runID, backend, content stri
 	return err
 }
 
-func (a *App) noteCLIPermission(botID, runID, tool string, args map[string]any) {
+func (a *App) noteCLIPermission(botID, runID, tool string, args map[string]any, source string) {
 	if a.perm == nil {
 		return
 	}
+	if source == "" {
+		source = "cli"
+	}
 	a.perm.Record(permission.Request{
 		RunID: runID, BotID: botID, Tool: tool, Args: args,
-	}, permission.Deny, "cli", "")
+	}, permission.Deny, source, "")
 }
 
 func (a *App) auditCLI(event, backend, sessionID string, pid int, result string) {
