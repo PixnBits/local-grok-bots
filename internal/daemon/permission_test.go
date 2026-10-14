@@ -597,6 +597,10 @@ func fakeClaudeMain() {
 			f.Close()
 		}
 	}
+	if os.Getenv("LGB_FAKE_ASKS") != "" {
+		fakeMulti(args)
+		return
+	}
 	if streamControlArgs(args) {
 		fakeStreamClaude(args)
 		return
