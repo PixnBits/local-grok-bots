@@ -47,7 +47,9 @@ imminent_timer_minutes = 2
 # Empty keeps existing behavior (idle kill + shutdown govern).
 # turn_timeout = ""
 # Permission mode is a policy setting.
-# Unspecified (empty): prompt the user for approval (interactive behavior).
+# Unspecified (empty): the CLI prompts when a person can answer on a TTY.
+# If it prompts and there is no controlling terminal, the turn fails instead
+# of hanging: "permission prompt requires a TTY or an explicit permission_mode".
 # Set an explicit value (including an always-allow mode) only when InfoSec
 # has approved it for unattended timers.
 # permission_mode = "default"

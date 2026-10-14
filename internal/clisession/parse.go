@@ -18,6 +18,14 @@ func Parse(line string) (Event, bool) {
 	}
 	typ, _ := raw["type"].(string)
 	session := firstString(raw, "sessionId", "session_id")
+	if session == "" {
+		if params := asMap(raw["params"]); params != nil {
+			session = firstString(params, "sessionId", "session_id")
+		}
+	}
+	if isPermissionPrompt(raw) {
+		return Event{Kind: "permission", SessionID: session}, true
+	}
 	stop := firstString(raw, "stopReason", "stop_reason")
 	switch typ {
 	case "result", "end":
@@ -226,6 +234,26 @@ func firstString(raw map[string]any, keys ...string) string {
 func truthy(v any) bool {
 	b, ok := v.(bool)
 	return ok && b
+}
+
+func isPermissionPrompt(raw map[string]any) bool {
+	if strings.EqualFold(firstString(raw, "method"), "session/request_permission") {
+		return true
+	}
+	typ := strings.ToLower(firstString(raw, "type"))
+	sub := strings.ToLower(firstString(raw, "subtype"))
+	if sub == "" {
+		if req := asMap(raw["request"]); req != nil {
+			sub = strings.ToLower(firstString(req, "subtype"))
+		}
+	}
+	switch typ {
+	case "permission_request", "permission_prompt":
+		return true
+	case "control_request", "system":
+		return sub == "can_use_tool" || sub == "permission_prompt" || sub == "permission_request"
+	}
+	return sub == "can_use_tool" || sub == "permission_prompt" || sub == "permission_request"
 }
 
 func needsInput(stop, subtype string) bool {

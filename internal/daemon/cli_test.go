@@ -216,6 +216,39 @@ func TestCLITruncatedStreamIsInterrupted(t *testing.T) {
 	}
 }
 
+func TestCLIPermissionPromptNeedsTTY(t *testing.T) {
+	dir := t.TempDir()
+	installCLIStub(t, dir, "claude")
+	t.Setenv("LGB_CLI_MODE", "prompt")
+	app := newApp(t, dir, nil)
+	app.cliTTY = func() bool { return false }
+	app.rtMu.Lock()
+	app.policy = policy.Policy{Backend: "claude", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute}
+	app.rtMu.Unlock()
+	srv := serve(t, app)
+	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Dee", "description": "p"}, "")
+	if res.StatusCode != 201 && res.StatusCode != 200 {
+		t.Fatalf("create %d %s", res.StatusCode, b)
+	}
+	var bot store.Bot
+	decodeJSON(t, b, &bot)
+	res, b = do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "go"}, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("post %d %s", res.StatusCode, b)
+	}
+	waitIdle(t, srv.URL, bot.ID, "")
+	got, err := app.st.GetBot(bot.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LastRunStatus != "error" || got.LastRunError != "permission prompt requires a TTY or an explicit permission_mode" {
+		t.Fatalf("run %s %s", got.LastRunStatus, got.LastRunError)
+	}
+	if got.SessionID != "sess-prompt" {
+		t.Fatalf("session %q", got.SessionID)
+	}
+}
+
 func TestOllamaModelAllowList(t *testing.T) {
 	dir := t.TempDir()
 	var calls int
@@ -275,6 +308,11 @@ if [ "$mode" = "sleep" ]; then
 fi
 if [ "$mode" = "trunc" ]; then
   printf '%s\n' '{"type":"stream_event","session_id":"live","event":{"delta":{"type":"text_delta","text":"partial"}}}'
+  exit 0
+fi
+if [ "$mode" = "prompt" ]; then
+  printf '%s\n' '{"type":"control_request","request":{"subtype":"can_use_tool","tool_name":"Bash"},"session_id":"sess-prompt"}'
+  sleep 120
   exit 0
 fi
 sid=""

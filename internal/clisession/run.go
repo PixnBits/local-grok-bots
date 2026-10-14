@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -28,6 +29,9 @@ type ExecRunner struct {
 	Policy policy.Policy
 	// PinLog receives a pin result when that backend is pinned.
 	PinLog func(backend, path, result string)
+	// HasTTY overrides controlling-terminal detection. Nil opens /dev/tty.
+	// Tests set it so a developer terminal does not change the result.
+	HasTTY func() bool
 }
 
 func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Result, error) {
@@ -64,8 +68,26 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 	if err != nil {
 		return Result{}, err
 	}
+	// Empty permission_mode lets the CLI prompt. With no controlling terminal,
+	// a prompt fails the turn. An explicit mode is passed through and is not
+	// treated as a prompt, even if the stream mentions one.
+	failPrompt := strings.TrimSpace(spec.PermissionMode) == "" && !e.interactive()
+	if e.interactive() && strings.TrimSpace(spec.PermissionMode) == "" {
+		cmd.Stdin = os.Stdin
+	}
 	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	promptCh := make(chan struct{}, 1)
+	if failPrompt {
+		watch := &lineWatch{onLine: func(string) {
+			select {
+			case promptCh <- struct{}{}:
+			default:
+			}
+		}}
+		cmd.Stderr = io.MultiWriter(&stderr, watch)
+	} else {
+		cmd.Stderr = &stderr
+	}
 	if err := cmd.Start(); err != nil {
 		return Result{}, err
 	}
@@ -81,8 +103,11 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 		case <-done:
 		}
 	}()
-	res, parseErr := readEvents(stdout, onEvent)
+	res, parseErr := readTurn(stdout, onEvent, failPrompt, promptCh, cmd)
 	waitErr := cmd.Wait()
+	if errors.Is(parseErr, ErrPermissionPrompt) {
+		return res, ErrPermissionPrompt
+	}
 	if ctx.Err() != nil {
 		res.Interrupted = true
 		return res, ctx.Err()
@@ -118,7 +143,39 @@ func (e ExecRunner) notePin(ctx context.Context, backend, path string) error {
 	return err
 }
 
-func readEvents(r io.Reader, onEvent func(Event)) (Result, error) {
+func readTurn(stdout io.Reader, onEvent func(Event), failPrompt bool, promptCh <-chan struct{}, cmd *exec.Cmd) (Result, error) {
+	if !failPrompt {
+		return readEvents(stdout, onEvent, false)
+	}
+	type readOut struct {
+		res Result
+		err error
+	}
+	readCh := make(chan readOut, 1)
+	go func() {
+		res, err := readEvents(stdout, onEvent, true)
+		readCh <- readOut{res, err}
+	}()
+	select {
+	case <-promptCh:
+		killGroup(cmd.Process)
+		out := <-readCh
+		return out.res, ErrPermissionPrompt
+	case out := <-readCh:
+		err := out.err
+		select {
+		case <-promptCh:
+			err = ErrPermissionPrompt
+		default:
+		}
+		if errors.Is(err, ErrPermissionPrompt) {
+			killGroup(cmd.Process)
+		}
+		return out.res, err
+	}
+}
+
+func readEvents(r io.Reader, onEvent func(Event), failPrompt bool) (Result, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	var b strings.Builder
@@ -127,7 +184,14 @@ func readEvents(r io.Reader, onEvent func(Event)) (Result, error) {
 	var out Result
 	var errMsg string
 	for sc.Scan() {
-		ev, ok := Parse(sc.Text())
+		line := sc.Text()
+		if failPrompt && permissionText(line) {
+			if ev, ok := Parse(line); ok && ev.SessionID != "" {
+				out.SessionID = ev.SessionID
+			}
+			return out, ErrPermissionPrompt
+		}
+		ev, ok := Parse(line)
 		if !ok {
 			continue
 		}
@@ -158,6 +222,10 @@ func readEvents(r io.Reader, onEvent func(Event)) (Result, error) {
 			}
 			if onEvent != nil {
 				onEvent(ev)
+			}
+		case "permission":
+			if failPrompt {
+				return out, ErrPermissionPrompt
 			}
 		case "error":
 			errMsg = ev.Text

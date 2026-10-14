@@ -44,6 +44,8 @@ type App struct {
 	policy policy.Policy
 	// runner, when set, replaces the real CLI exec. Tests use it.
 	runner clisession.Runner
+	// cliTTY, when set, overrides /dev/tty detection for permission prompts.
+	cliTTY func() bool
 	audit  *audit.Logger
 	// shellDial, when set, is the sandbox proxy's outbound dial. Tests use it.
 	shellDial func(context.Context, string, string) (net.Conn, error)

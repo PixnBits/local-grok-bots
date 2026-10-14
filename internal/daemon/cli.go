@@ -68,6 +68,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "working"})
 	var runner clisession.Runner = clisession.ExecRunner{
 		Policy: a.policy,
+		HasTTY: a.cliTTY,
 		PinLog: func(backend, path, result string) {
 			a.log(bot.ID, "cli_pin", map[string]any{"backend": backend, "path": path, "result": result})
 		},
