@@ -1,0 +1,57 @@
+# local-grok-bots policy file
+# Declarative config: backend choice + daemon jail behavior.
+# Precedence (highest wins): managed settings > this file > built-in defaults.
+# Fail-closed: if this file is missing or unparseable, the daemon defaults to
+# the strictest mode (daemon jail ON, CLI backends OFF) and logs loudly.
+
+[daemon]
+# Bind address for the web portal. Loopback only by default.
+bind = "127.0.0.1:8787"
+
+# systemd unit should run as a non-root system user.
+# user = "local-grok-bots"
+
+[backend]
+# Which model backend the daemon uses. One of: ollama | claude | grok
+# Jail behavior follows automatically from this choice:
+#   ollama -> daemon workspace jail ON  (bwrap/unshare around shell tools)
+#   claude -> daemon jail OFF; Claude Code's own sandbox + managed settings
+#             are the isolation boundary (Seatbelt/bubblewrap, domain
+#             allowlists, credential deny/mask via InfoSec-managed policy)
+#   grok   -> daemon jail OFF; Grok CLI's own sandbox is the boundary
+backend = "ollama"
+
+[ollama]
+# Only consulted when backend = "ollama"
+host = "http://127.0.0.1:11434"
+model = "llama3.1"
+
+[cli]
+# Only consulted when backend = "claude" or "grok"
+# The daemon spawns the CLI headless and resumes sessions; it never
+# re-jails the CLI process. Timer ticks are injected as text into the
+# existing session (append-only channel), and Claude/Grok's own tools
+# execute them inside their sandbox.
+idle_timeout_minutes = 30
+# Permission mode must match what InfoSec has approved for headless use.
+# "bypassPermissions" is the likely requirement for unattended timers;
+# that is an InfoSec conversation, not something the daemon invents.
+permission_mode = "bypassPermissions"
+
+[timers]
+# Daemon-owned scheduler. On fire, injects a [scheduled] prompt into
+# the bot's active CLI session (or starts a new one if idle).
+enabled = true
+
+[security]
+# Fail-closed: refuse to start if the sandbox cannot initialize when
+# the daemon jail is required (backend = ollama).
+fail_closed = true
+# Log loudly (and refuse to start) when a user-level setting conflicts
+# with a managed policy.
+conflict_policy = "refuse"
+
+[managed]
+# Path where server-managed or MDM-delivered policy is read from.
+# Managed settings always override this file.
+# managed_path = "/etc/local-grok-bots/managed.json"
