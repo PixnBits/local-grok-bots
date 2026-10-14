@@ -133,3 +133,14 @@ func sawRoleContent(msgs []model.Message, role, content string) bool {
 	}
 	return false
 }
+
+func TestZoneLabelUsesTZName(t *testing.T) {
+	t.Setenv("TZ", "America/Phoenix")
+	loc, err := time.LoadLocation("America/Phoenix")
+	if err != nil {
+		t.Skip("no tzdata")
+	}
+	if got := zoneLabel(time.Now().In(loc)); got != "America/Phoenix, MST" {
+		t.Fatalf("zoneLabel = %q", got)
+	}
+}

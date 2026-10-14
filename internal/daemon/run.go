@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -242,11 +243,7 @@ func (a *App) buildMessagesHist(bot store.Bot) ([]model.Message, []store.Message
 	}
 	var b strings.Builder
 	now := time.Now()
-	zone := now.Location().String()
-	if zone == "Local" {
-		zone, _ = now.Zone()
-	}
-	fmt.Fprintf(&b, "Current time: %s (%s).\n\n", now.Format(time.RFC3339), zone)
+	fmt.Fprintf(&b, "Current time: %s (%s).\n\n", now.Format(time.RFC3339), zoneLabel(now))
 	b.WriteString("You are ")
 	b.WriteString(bot.Name)
 	b.WriteString(", a bot running on a local daemon.\n\nDescription:\n")
@@ -298,4 +295,18 @@ func mapHist(m store.Message, names map[string]string) model.Message {
 	default:
 		return model.Message{Role: "user", Content: m.Content}
 	}
+}
+
+// zoneLabel names the daemon's zone for the model: the IANA name from TZ
+// when set (Go reports time.Local as "Local"), with the abbreviation.
+func zoneLabel(now time.Time) string {
+	abbr, _ := now.Zone()
+	name := now.Location().String()
+	if name == "Local" {
+		name = strings.TrimPrefix(os.Getenv("TZ"), ":")
+	}
+	if name == "" || name == abbr {
+		return abbr
+	}
+	return name + ", " + abbr
 }
