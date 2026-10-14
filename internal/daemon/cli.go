@@ -26,6 +26,12 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		a.failCLI(bot.ID, runID, backend, fmt.Errorf("cli backend %q is not allowed by policy", backend))
 		return
 	}
+	// Empty is mcp. An unknown value is the same config error Load fail-closes on.
+	transport, err := policy.NormClaudeTransport(a.policy.ClaudeTransport)
+	if err != nil {
+		a.failCLI(bot.ID, runID, backend, err)
+		return
+	}
 	inputs, err := a.st.TurnInputs(bot.ID, runID)
 	if err != nil {
 		a.failCLI(bot.ID, runID, backend, err)
@@ -102,24 +108,41 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	if bot.Model != nil {
 		spec.Model = strings.TrimSpace(*bot.Model)
 	}
-	// The MCP prompt tool is the host. It is attached only when policy
-	// allows a UI and the daemon has an HTTP base Claude can call.
-	// Otherwise residual asks must not block: --permission-prompts none
-	// denies them inside Claude, and the daemon audits that denial.
+	// mcp attaches the HTTP prompt tool only when a UI is allowed and the
+	// daemon has an HTTP base. stream_control is the host on stdin even
+	// when that UI is absent; the broker still denies residual asks.
+	// none, and mcp with no host, pass --permission-prompts none.
 	cliDenySource := "cli"
+	eventTransport := ""
 	host := strings.TrimSpace(a.permBase) != ""
-	if strings.EqualFold(backend, "claude") && a.policy.UIPrompts && host {
+	switch {
+	case !strings.EqualFold(backend, "claude"):
+	case transport == policy.TransportStreamControl:
+		eventTransport = policy.TransportStreamControl
+		spec.StreamControl = true
+		botID := bot.ID
+		spec.Control = &clisession.ControlHooks{
+			Decide: func(ctx context.Context, ask clisession.ControlAsk) clisession.ControlDecision {
+				return a.decideStreamControl(ctx, botID, runID, sessionID, ask)
+			},
+			Deny: func(tool string, args map[string]any, rule string) {
+				a.recordControlDeny(botID, runID, tool, args, rule)
+			},
+		}
+	case transport == policy.TransportNone:
+		spec.PermissionPrompts = "none"
+		eventTransport = policy.TransportNone
+		cliDenySource = cliNoHostSource(a.policy.UIPrompts)
+	case a.policy.UIPrompts && host:
 		tok := a.registerPerm(bot.ID, runID, sessionID)
 		defer a.unregisterPerm(tok)
 		spec.MCPConfig = permissionMCPConfig(a.permBase, tok)
 		spec.PermissionTool = permissionToolName
-	} else if strings.EqualFold(backend, "claude") {
+		eventTransport = policy.TransportMCP
+	default:
 		spec.PermissionPrompts = "none"
-		if !a.policy.UIPrompts {
-			cliDenySource = "no_ui"
-		} else {
-			cliDenySource = "policy"
-		}
+		eventTransport = policy.TransportNone
+		cliDenySource = cliNoHostSource(a.policy.UIPrompts)
 	}
 	res, err := runner.Run(turnCtx, spec, func(ev clisession.Event) {
 		switch ev.Kind {
@@ -151,10 +174,10 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 			a.bus.Publish(runID, "tool_result", map[string]any{"name": name, "ok": true, "result_or_error": body})
 			a.log(bot.ID, "tool_end", map[string]any{"name": name, "ok": true})
 		case "permission_decision":
-			a.noteCLIPermission(bot.ID, runID, ev.ToolName, ev.ToolArgs, cliDenySource)
+			a.noteCLIPermission(bot.ID, runID, ev.ToolName, ev.ToolArgs, cliDenySource, eventTransport)
 		case "end":
 			for _, d := range ev.Denials {
-				a.noteCLIPermission(bot.ID, runID, d.Tool, d.Args, cliDenySource)
+				a.noteCLIPermission(bot.ID, runID, d.Tool, d.Args, cliDenySource, eventTransport)
 			}
 		}
 	})
@@ -247,7 +270,55 @@ func (a *App) screenDLP(ctx context.Context, botID, runID, backend, content stri
 	return err
 }
 
-func (a *App) noteCLIPermission(botID, runID, tool string, args map[string]any, source string) {
+func cliNoHostSource(ui bool) string {
+	if !ui {
+		return "no_ui"
+	}
+	return "policy"
+}
+
+func (a *App) decideStreamControl(ctx context.Context, botID, runID, sessionID string, ask clisession.ControlAsk) clisession.ControlDecision {
+	req := permission.Request{
+		RunID: runID, BotID: botID, SessionID: sessionID,
+		Tool: ask.Tool, Args: ask.Args, ToolUseID: ask.ToolUseID,
+		Transport: policy.TransportStreamControl,
+	}
+	if a.perm == nil {
+		return clisession.ControlDecision{Behavior: permission.Deny, Message: "denied"}
+	}
+	// A cancel that won before the ask was registered must not open a card.
+	if ctx.Err() != nil {
+		a.perm.Record(req, permission.Deny, "cancel", "")
+		return clisession.ControlDecision{Silent: true}
+	}
+	out := a.perm.Evaluate(ctx, a.policy.Permission(), req)
+	if out.Source == "cancel" {
+		return clisession.ControlDecision{Silent: true}
+	}
+	if out.Behavior == permission.Allow {
+		return clisession.ControlDecision{Behavior: permission.Allow, RawInput: ask.RawInput}
+	}
+	msg := out.Message
+	if msg == "" {
+		msg = "denied"
+	}
+	return clisession.ControlDecision{Behavior: permission.Deny, Message: msg}
+}
+
+func (a *App) recordControlDeny(botID, runID, tool string, args map[string]any, rule string) {
+	if a.perm == nil {
+		return
+	}
+	if args == nil {
+		args = map[string]any{}
+	}
+	a.perm.Record(permission.Request{
+		RunID: runID, BotID: botID, Tool: tool, Args: args,
+		Transport: policy.TransportStreamControl,
+	}, permission.Deny, "cli", rule)
+}
+
+func (a *App) noteCLIPermission(botID, runID, tool string, args map[string]any, source, transport string) {
 	if a.perm == nil {
 		return
 	}
@@ -255,7 +326,7 @@ func (a *App) noteCLIPermission(botID, runID, tool string, args map[string]any, 
 		source = "cli"
 	}
 	a.perm.Record(permission.Request{
-		RunID: runID, BotID: botID, Tool: tool, Args: args,
+		RunID: runID, BotID: botID, Tool: tool, Args: args, Transport: transport,
 	}, permission.Deny, source, "")
 }
 

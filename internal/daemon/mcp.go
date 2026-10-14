@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/PixnBits/local-grok-bots/internal/permission"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
 
 const permissionToolName = "mcp__lgbperm__approve"
@@ -217,6 +218,7 @@ func (a *App) callApprove(w http.ResponseWriter, r *http.Request, id json.RawMes
 		Tool:      args.ToolName,
 		Args:      args.Input,
 		ToolUseID: args.ToolUseID,
+		Transport: policy.TransportMCP,
 	})
 	var text []byte
 	if out.Behavior == "allow" {

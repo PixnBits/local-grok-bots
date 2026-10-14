@@ -104,6 +104,9 @@ func TestMCPRoundTrip(t *testing.T) {
 			if payload.Tool != "Bash" || payload.SessionAllowed {
 				t.Fatalf("payload %+v", payload)
 			}
+			if !strings.Contains(string(f.data), `"transport":"mcp"`) {
+				t.Fatalf("request missing transport: %s", f.data)
+			}
 			reqId = payload.ID
 		case <-time.After(50 * time.Millisecond):
 		}
@@ -228,7 +231,7 @@ printf '%s\n' '{"type":"result","result":"continued","session_id":"s","permissio
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), `"source":"cli"`) || !strings.Contains(string(raw), `"tool":"Bash"`) || strings.Contains(string(raw), "sk-supersecretvalue12") {
+	if !strings.Contains(string(raw), `"source":"cli"`) || !strings.Contains(string(raw), `"tool":"Bash"`) || !strings.Contains(string(raw), `"transport":"mcp"`) || strings.Contains(string(raw), "sk-supersecretvalue12") {
 		t.Fatalf("audit %s", raw)
 	}
 }
@@ -347,7 +350,7 @@ func TestFakeClaudePermissionRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), `"source":"ui"`) || !strings.Contains(string(raw), `"decision":"allow_once"`) || strings.Contains(string(raw), "sk-supersecretvalue12") {
+	if !strings.Contains(string(raw), `"source":"ui"`) || !strings.Contains(string(raw), `"decision":"allow_once"`) || !strings.Contains(string(raw), `"transport":"mcp"`) || strings.Contains(string(raw), "sk-supersecretvalue12") {
 		t.Fatalf("audit %s", raw)
 	}
 }
@@ -462,6 +465,9 @@ func TestPlainStreamIsNotAPromptUI(t *testing.T) {
 				sawRequest = true
 			}
 			if strings.HasPrefix(ev, "permission_decision\n") && strings.Contains(ev, `"source":"no_ui"`) {
+				if !strings.Contains(ev, `"transport":"mcp"`) {
+					t.Fatalf("decision %s", ev)
+				}
 				sawNoUI = true
 			}
 		case <-time.After(20 * time.Millisecond):
@@ -543,7 +549,7 @@ func assertResidualDenied(t *testing.T, uiPrompts, withHost bool, source string)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), `"source":"`+source+`"`) || !strings.Contains(string(raw), `"tool":"Bash"`) || !strings.Contains(string(raw), `"decision":"deny"`) {
+	if !strings.Contains(string(raw), `"source":"`+source+`"`) || !strings.Contains(string(raw), `"tool":"Bash"`) || !strings.Contains(string(raw), `"decision":"deny"`) || !strings.Contains(string(raw), `"transport":"none"`) {
 		t.Fatalf("audit %s", raw)
 	}
 }
@@ -591,15 +597,11 @@ func fakeClaudeMain() {
 			f.Close()
 		}
 	}
-	if gate := os.Getenv("LGB_FAKE_GATE"); gate != "" {
-		deadline := time.Now().Add(20 * time.Second)
-		for time.Now().Before(deadline) {
-			if _, err := os.Stat(gate); err == nil {
-				break
-			}
-			time.Sleep(15 * time.Millisecond)
-		}
+	if streamControlArgs(args) {
+		fakeStreamClaude(args)
+		return
 	}
+	waitFakeGate()
 	sid := flagValue(args, "--session-id")
 	if sid == "" {
 		sid = flagValue(args, "--resume")
@@ -621,6 +623,209 @@ func fakeClaudeMain() {
 	fmt.Printf("{\"type\":\"system\",\"subtype\":\"permission_denied\",\"session_id\":%q,\"tool\":\"Bash\"}\n", sid)
 	fmt.Printf("{\"type\":\"result\",\"result\":%q,\"session_id\":%q}\n", detail, sid)
 	os.Exit(0)
+}
+
+func waitFakeGate() {
+	waitFakeFile(os.Getenv("LGB_FAKE_GATE"), false)
+}
+
+func waitFakeFile(path string, required bool) {
+	if path == "" {
+		if required {
+			fmt.Fprintf(os.Stderr, "fake claude gate is unset\n")
+			os.Exit(1)
+		}
+		return
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if required {
+		fmt.Fprintf(os.Stderr, "fake claude gate timeout\n")
+		os.Exit(1)
+	}
+}
+
+func streamControlArgs(args []string) bool {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "--input-format" && args[i+1] == "stream-json" {
+			return true
+		}
+		if args[i] == "--permission-prompt-tool" && args[i+1] == "stdio" {
+			return true
+		}
+	}
+	return false
+}
+
+func fakeOut(line string) {
+	if !strings.HasSuffix(line, "\n") {
+		line += "\n"
+	}
+	_, _ = os.Stdout.WriteString(line)
+}
+
+func fakeStreamClaude(args []string) {
+	// The gate is the same one MCP tests use: the daemon's initialize
+	// request sits in the pipe until a subscriber is ready.
+	waitFakeGate()
+	log := stdinLogger()
+	lines := make(chan string, 32)
+	go func() {
+		sc := bufio.NewScanner(os.Stdin)
+		sc.Buffer(make([]byte, 64*1024), 8*1024*1024)
+		for sc.Scan() {
+			line := sc.Text()
+			log(line)
+			lines <- line
+		}
+		close(lines)
+	}()
+	first := mustStdin(lines)
+	id := controlRequestID(first)
+	if id == "" {
+		fmt.Fprintf(os.Stderr, "missing initialize: %s\n", first)
+		os.Exit(1)
+	}
+	if os.Getenv("LGB_FAKE_MODE") == "init_error" {
+		fakeOut(fmt.Sprintf(`{"type":"control_response","response":{"subtype":"error","request_id":%q,"error":"init failed"}}`, id))
+		os.Exit(0)
+	}
+	fakeOut(fmt.Sprintf(`{"type":"control_response","response":{"subtype":"success","request_id":%q,"response":{}}}`, id))
+	if _, ok := readStdin(lines); !ok {
+		os.Exit(1)
+	}
+	sid := flagValue(args, "--session-id")
+	if sid == "" {
+		sid = flagValue(args, "--resume")
+	}
+	switch os.Getenv("LGB_FAKE_MODE") {
+	case "deny":
+		fakeToolAsk("req_deny_1", `{"command":"rm -rf /tmp/x"}`)
+		_ = mustStdin(lines)
+		fakeResult(sid, "denied")
+	case "timeout":
+		fakeToolAsk("req_to_1", `{"command":"echo hi"}`)
+		_ = mustStdin(lines)
+		fakeResult(sid, "timed-out")
+	case "noui":
+		fakeToolAsk("req_noui_1", `{"command":"echo hi"}`)
+		_ = mustStdin(lines)
+		fakeResult(sid, "no-ui")
+	case "malformed":
+		fakeMalformed(lines, sid)
+	case "cancel":
+		fakeToolAsk("req_cancel_1", `{"command":"echo hello"}`)
+		waitFakeFile(os.Getenv("LGB_FAKE_CANCEL_GATE"), true)
+		fakeOut(`{"type":"control_cancel_request","request_id":"req_cancel_1"}`)
+		time.Sleep(300 * time.Millisecond)
+		fakeOut(fmt.Sprintf(`{"type":"stream_event","session_id":%q,"event":{"delta":{"type":"text_delta","text":"after-cancel"}}}`, sid))
+		fakeResult(sid, "cancelled")
+	default:
+		// The tool ask is in flight while ordinary stream events are written,
+		// so the daemon has to parse both on the same stdout.
+		fakeToolAsk("req_tool_1", `{"command":"echo sk-supersecretvalue12","api_key":"sk-supersecretvalue12"}`)
+		fakeOut(fmt.Sprintf(`{"type":"stream_event","session_id":%q,"event":{"delta":{"type":"text_delta","text":"mid"}}}`, sid))
+		fakeOut(fmt.Sprintf(`{"type":"assistant","session_id":%q,"message":{"role":"assistant","content":[{"type":"text","text":"thinking"}]}}`, sid))
+		fakeOut(fmt.Sprintf(`{"type":"system","subtype":"init","session_id":%q}`, sid))
+		_ = mustStdin(lines)
+		fakeResult(sid, "approved")
+	}
+	waitStdinClosed(lines)
+	os.Exit(0)
+}
+
+func fakeMalformed(lines <-chan string, sid string) {
+	fakeOut(`{"type":"control_request","request_id":"hk_1","request":{"subtype":"hook_callback","callback_id":"c"}}`)
+	_ = mustStdin(lines)
+	fakeOut(`{"type":"control_request","request_id":"mcp_1","request":{"subtype":"mcp_message","server_name":"x","message":{}}}`)
+	_ = mustStdin(lines)
+	fakeOut(`{"type":"control_request","request_id":"unk_1","request":{"subtype":"nope_subtype"}}`)
+	_ = mustStdin(lines)
+	fakeOut(`{"type":"control_request","request_id":"bad_1","request":"nope"}`)
+	_ = mustStdin(lines)
+	fakeOut(`{"type":"control_request","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{}}}`)
+	fakeOut(`this is not json`)
+	fakeOut(fmt.Sprintf(`{"type":"stream_event","session_id":%q,"event":{"delta":{"type":"text_delta","text":"still-going"}}}`, sid))
+	fakeResult(sid, "continued")
+}
+
+func fakeToolAsk(id, input string) {
+	fakeOut(`{"type":"control_request","request_id":"` + id + `","request":{"subtype":"can_use_tool","tool_name":"Bash","input":` + input + `,"tool_use_id":"tu_1","permission_suggestions":[],"blocked_path":null,"decision_reason":null}}`)
+}
+
+func fakeResult(sid, text string) {
+	fakeOut(fmt.Sprintf(`{"type":"result","result":%q,"session_id":%q}`, text, sid))
+}
+
+func controlRequestID(line string) string {
+	var msg struct {
+		Type      string `json:"type"`
+		RequestID string `json:"request_id"`
+		Request   struct {
+			Subtype string `json:"subtype"`
+		} `json:"request"`
+	}
+	if json.Unmarshal([]byte(line), &msg) != nil {
+		return ""
+	}
+	if msg.Type != "control_request" || msg.Request.Subtype != "initialize" || msg.RequestID == "" {
+		return ""
+	}
+	return msg.RequestID
+}
+
+func stdinLogger() func(string) {
+	p := os.Getenv("LGB_STDIN_LOG")
+	if p == "" {
+		return func(string) {}
+	}
+	f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return func(string) {}
+	}
+	return func(line string) {
+		_, _ = f.WriteString(line + "\n")
+		_ = f.Sync()
+	}
+}
+
+func readStdin(lines <-chan string) (string, bool) {
+	select {
+	case line, ok := <-lines:
+		return line, ok
+	case <-time.After(15 * time.Second):
+		fmt.Fprintf(os.Stderr, "fake claude stdin timeout\n")
+		os.Exit(1)
+		return "", false
+	}
+}
+
+func mustStdin(lines <-chan string) string {
+	line, ok := readStdin(lines)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "fake claude stdin closed\n")
+		os.Exit(1)
+	}
+	return line
+}
+
+func waitStdinClosed(lines <-chan string) {
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case _, ok := <-lines:
+			if !ok {
+				return
+			}
+		case <-deadline:
+			return
+		}
+	}
 }
 
 func callPermissionTool(url string) (string, error) {
