@@ -107,7 +107,7 @@ JSON over HTTP. One SSE stream for a live turn. All routes under `/api`.
 | GET | /api/bots/{id} | | bot including description |
 | PATCH | /api/bots/{id} | `{name?, label?, description?, mark?, model?, status?}` | bot |
 | DELETE | /api/bots/{id} | | 204 |
-| GET | /api/bots/{id}/thread | `?before=&limit=` | `{messages: [...]}` oldest-first |
+| GET | /api/bots/{id}/thread | `?before=&limit=` | `{messages: [...], tools: {run_id: [{name, arguments, ok, result_or_error, created_at}]}}` oldest-first; `tools` lists, per reply run, the tool calls that run made (arguments redacted, result clipped to 4000 bytes) |
 | POST | /api/bots/{id}/thread/messages | `{content}` | `{message, run_id}` immediately |
 | GET | /api/bots/{id}/thread/stream | `?run_id=` | SSE |
 | POST | /api/bots/{id}/runs/{run_id}/cancel | | `{status}` |
@@ -232,7 +232,7 @@ The page is a client. Refreshing reloads from the daemon. Four surfaces. The con
 
 **Roster.** Mark, name, label, status. Click to open the conversation. A create control.
 
-**Conversation.** The thread and the composer. The composer is never disabled during a run. While a run is in progress, a status animation sits inside the message list at the position of the next reply, after the latest message and any live output (in an empty thread it is the first item), driven by `status` events on the stream. It clears when the run ends. User and bot messages render markdown (headings, emphasis, inline and fenced code, lists, quotes, links) in the page only; the thread, log, and API keep the original text. The renderer builds DOM nodes from text, so HTML in a message shows as text, and links keep only `http`, `https`, and `mailto`. Inbound DMs appear as a system line in this thread. There is no description editor on this view.
+**Conversation.** The thread and the composer. The composer is never disabled during a run. While a run is in progress, a status animation sits inside the message list at the position of the next reply, after the latest message and any live output (in an empty thread it is the first item), driven by `status` events on the stream. It clears when the run ends. User and bot messages render markdown (headings, emphasis, inline and fenced code, lists, quotes, links) in the page only; the thread, log, and API keep the original text. The renderer builds DOM nodes from text, so HTML in a message shows as text, and links keep only `http`, `https`, and `mailto`. A reply whose run called tools carries a collapsed summary (`3 tool calls: read_file, run_shell`) that opens to show each call; tool records live in the `run_tools` table and survive reload, and the reply text is unchanged. Inbound DMs appear as a system line in this thread. There is no description editor on this view.
 
 **Bot menu.** Opened from the conversation header, not as a side panel. Items: View profile, Pin, Hide, Duplicate, Delete.
 

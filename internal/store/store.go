@@ -227,6 +227,16 @@ type LogEvent struct {
 	Detail json.RawMessage `json:"detail"`
 }
 
+// ToolRecord is one tool call a run made, kept so the page can show what a
+// reply did after a reload. Arguments are redacted and the result is clipped.
+type ToolRecord struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
+	OK        bool            `json:"ok"`
+	Result    string          `json:"result_or_error"`
+	CreatedAt string          `json:"created_at"`
+}
+
 type DMPeer struct {
 	BotID  string `json:"bot_id"`
 	Name   string `json:"name"`
@@ -322,6 +332,17 @@ CREATE TABLE IF NOT EXISTS runs (
   error TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_runs_bot ON runs(bot_id, started_at);
+CREATE TABLE IF NOT EXISTS run_tools (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id TEXT NOT NULL,
+  bot_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  arguments TEXT NOT NULL,
+  ok INTEGER NOT NULL,
+  result TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_run_tools_run ON run_tools(run_id, id);
 CREATE TABLE IF NOT EXISTS log_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts TEXT NOT NULL,
@@ -922,6 +943,7 @@ func (s *Store) DeleteBot(id, by string) error {
 		`DELETE FROM memory WHERE bot_id=?`,
 		`DELETE FROM messages WHERE bot_id=?`,
 		`DELETE FROM timers WHERE bot_id=?`,
+		`DELETE FROM run_tools WHERE bot_id=?`,
 		`DELETE FROM runs WHERE bot_id=?`,
 		`DELETE FROM bots WHERE id=?`,
 	} {
@@ -1605,4 +1627,53 @@ func (s *Store) FailRunning(reason string) error {
 	}
 	_, err = s.db.Exec(`UPDATE bots SET status='idle', updated_at=? WHERE status='running'`, now)
 	return err
+}
+
+// AddRunTool records one tool call made by a run.
+func (s *Store) AddRunTool(runID, botID string, rec ToolRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(rec.Arguments) == 0 {
+		rec.Arguments = json.RawMessage(`{}`)
+	}
+	ok := 0
+	if rec.OK {
+		ok = 1
+	}
+	_, err := s.db.Exec(`INSERT INTO run_tools(run_id, bot_id, name, arguments, ok, result, created_at) VALUES(?,?,?,?,?,?,?)`,
+		runID, botID, rec.Name, string(rec.Arguments), ok, rec.Result, FormatTime(Now()))
+	return err
+}
+
+// RunTools returns the tool calls for each listed run, in call order.
+// Runs with no calls are absent from the map.
+func (s *Store) RunTools(runIDs []string) (map[string][]ToolRecord, error) {
+	out := map[string][]ToolRecord{}
+	if len(runIDs) == 0 {
+		return out, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	q := `SELECT run_id, name, arguments, ok, result, created_at FROM run_tools WHERE run_id IN (?` + strings.Repeat(",?", len(runIDs)-1) + `) ORDER BY id`
+	args := make([]any, len(runIDs))
+	for i, r := range runIDs {
+		args[i] = r
+	}
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var runID, argText string
+		var ok int
+		var rec ToolRecord
+		if err := rows.Scan(&runID, &rec.Name, &argText, &ok, &rec.Result, &rec.CreatedAt); err != nil {
+			return nil, err
+		}
+		rec.Arguments = json.RawMessage(argText)
+		rec.OK = ok == 1
+		out[runID] = append(out[runID], rec)
+	}
+	return out, rows.Err()
 }

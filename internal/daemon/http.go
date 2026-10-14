@@ -328,7 +328,21 @@ func (a *App) handleThread(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs})
+	// tools maps each listed reply's run_id to the tool calls that run made.
+	var runIDs []string
+	seen := map[string]bool{}
+	for _, m := range msgs {
+		if m.RunID != nil && !seen[*m.RunID] {
+			seen[*m.RunID] = true
+			runIDs = append(runIDs, *m.RunID)
+		}
+	}
+	tools, err := a.st.RunTools(runIDs)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"messages": msgs, "tools": tools})
 }
 
 func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {

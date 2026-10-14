@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -129,8 +130,9 @@ func (a *App) execute(botID, runID string) {
 				return
 			}
 			a.bus.Publish(runID, "status", map[string]any{"state": tc.Name, "text": tc.Name})
+			redacted := redactValue(tc.Arguments)
 			a.bus.Publish(runID, "tool_call", map[string]any{
-				"name": tc.Name, "arguments": redactValue(tc.Arguments),
+				"name": tc.Name, "arguments": redacted,
 			})
 			result, terr := a.execTool(ctx, bot, tc.Name, tc.Arguments)
 			payload := map[string]any{"name": tc.Name, "ok": terr == nil}
@@ -142,6 +144,10 @@ func (a *App) execute(botID, runID string) {
 			payload["result_or_error"] = clip(body, 4000)
 			msgs = append(msgs, model.Message{Role: "tool", ToolName: tc.Name, Content: body})
 			a.bus.Publish(runID, "tool_result", payload)
+			argJSON, _ := json.Marshal(redacted)
+			_ = a.st.AddRunTool(runID, bot.ID, store.ToolRecord{
+				Name: tc.Name, Arguments: argJSON, OK: terr == nil, Result: clip(body, 4000),
+			})
 		}
 	}
 	msg := "tool round limit"

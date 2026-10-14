@@ -149,6 +149,10 @@
   .md blockquote { border-left: 3px solid var(--line); padding-left: 10px; color: var(--muted); }
   .md hr { border: 0; border-top: 1px solid var(--line); margin: 8px 0; }
   .md a { color: var(--accent); }
+  .tools { margin: 0 0 6px; font-size: 12px; color: var(--muted); white-space: normal; }
+  .tools summary { cursor: pointer; }
+  .tools .tool { margin-top: 6px; white-space: pre-wrap; max-height: 16em; overflow: auto; }
+  .tool-result { color: var(--muted); margin-top: 2px; }
   .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; max-width: 100%; }
   .working {
     display: flex; align-items: center; gap: 8px; align-self: flex-start;
@@ -338,6 +342,7 @@ const state = {
   botId: null,
   bots: [],
   messages: [],
+  tools: {},
   token: sessionStorage.getItem("lgb_token") || "",
   streamCtl: null,
   streaming: "",
@@ -507,6 +512,20 @@ function whoText(m) {
   if ((m.content || "").startsWith("Message from ") || (m.content || "").startsWith("Notice: ")) return "";
   return "Scheduled";
 }
+// toolSummary is the collapsed "N tool calls: a, b" line on a reply.
+// It opens to show each call with its arguments and result.
+function toolSummary(recs) {
+  const d = el("details", "tools");
+  const names = [...new Set(recs.map(r => r.name))];
+  d.append(el("summary", null, recs.length + (recs.length === 1 ? " tool call: " : " tool calls: ") + names.join(", ")));
+  for (const r of recs) {
+    const call = el("div", "tool");
+    call.append(el("div", null, r.name + " " + JSON.stringify(r.arguments || {})));
+    call.append(el("div", "tool-result", (r.ok ? "ok" : "error") + ": " + (r.result_or_error || "")));
+    d.append(call);
+  }
+  return d;
+}
 // md:begin
 // Markdown to DOM for message bubbles. Presentation only: the stored text is
 // unchanged. Every piece of text goes in through textContent, so raw HTML in
@@ -620,10 +639,15 @@ function renderMessages() {
   if (!state.messages.length && working.hidden) {
     box.append(el("p", "empty", "No messages yet. The composer stays available while a run is in progress."));
   }
+  const shownTools = new Set();
   for (const m of state.messages) {
     const bubble = el("div", "bubble " + (m.role || "system"));
     const who = whoText(m);
     if (who) bubble.append(el("span", "who", who));
+    if (m.role === "bot" && m.run_id && !shownTools.has(m.run_id) && (state.tools[m.run_id] || []).length) {
+      shownTools.add(m.run_id);
+      bubble.append(toolSummary(state.tools[m.run_id]));
+    }
     if (m.role === "user" || m.role === "bot") bubble.append(renderMarkdown(m.content, el("div", "md")));
     else bubble.append(document.createTextNode(m.content || ""));
     box.append(bubble);
@@ -636,6 +660,7 @@ async function loadThread() {
   if (!state.botId) return;
   const data = await api("/api/bots/" + state.botId + "/thread?limit=100");
   state.messages = data.messages || [];
+  state.tools = data.tools || {};
   renderMessages();
 }
 function setWorking(on, text) {
