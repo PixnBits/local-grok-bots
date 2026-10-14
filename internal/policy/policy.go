@@ -71,6 +71,14 @@ type Policy struct {
 	// ManagedBypass is true only when managed policy set an always-allow mode.
 	ManagedBypass bool
 	Pins          []Pin
+	// CLIOverrides is ignore (the CLI is told not to load workspace config)
+	// or refuse (a workspace override file fails the turn).
+	CLIOverrides string
+	// CLIHome is isolated (a per-bot HOME and config dir under the data dir)
+	// or user (the daemon user's own CLI home). Only managed policy sets user.
+	CLIHome string
+	// CLIEnv is added to the scrubbed CLI environment. Only managed policy sets it.
+	CLIEnv map[string]string
 
 	TimersEnabled     bool
 	SandboxFailClosed bool
@@ -111,6 +119,8 @@ func Defaults() Policy {
 		Imminent:          2 * time.Minute,
 		PromptTimeout:     60 * time.Second,
 		ClaudeTransport:   TransportMCP,
+		CLIOverrides:      OverridesIgnore,
+		CLIHome:           HomeIsolated,
 		TimersEnabled:     true,
 		SandboxFailClosed: true,
 		ConflictPolicy:    "refuse",
@@ -360,6 +370,61 @@ const (
 	TransportNone = "none"
 )
 
+const (
+	// OverridesIgnore tells the CLI not to load workspace config. It is the default.
+	OverridesIgnore = "ignore"
+	// OverridesRefuse fails the turn when a workspace override file is present.
+	OverridesRefuse = "refuse"
+	// HomeIsolated gives each bot its own CLI HOME under the data dir. Default.
+	HomeIsolated = "isolated"
+	// HomeUser runs the CLI with the daemon user's HOME. Managed policy only.
+	HomeUser = "user"
+)
+
+func (p *Policy) applyIsolation(iso *cliIsoDoc, trusted bool) error {
+	if iso.Overrides != nil {
+		switch v := strings.ToLower(strings.TrimSpace(*iso.Overrides)); v {
+		case "", OverridesIgnore:
+			p.CLIOverrides = OverridesIgnore
+		case OverridesRefuse:
+			p.CLIOverrides = OverridesRefuse
+		default:
+			return fmt.Errorf("cli.isolation.overrides must be ignore or refuse")
+		}
+	}
+	if iso.Home != nil {
+		v := strings.ToLower(strings.TrimSpace(*iso.Home))
+		switch v {
+		case "", HomeIsolated:
+			p.CLIHome = HomeIsolated
+		case HomeUser:
+			if trusted {
+				p.CLIHome = HomeUser
+			} else {
+				p.Warnings = append(p.Warnings, "cli.isolation.home = \"user\" is ignored; only managed policy can share the user's CLI home")
+			}
+		default:
+			return fmt.Errorf("cli.isolation.home must be isolated or user")
+		}
+	}
+	if iso.Env != nil {
+		if !trusted {
+			p.Warnings = append(p.Warnings, "cli.isolation.env is ignored; only managed policy can set CLI environment")
+			return nil
+		}
+		env := map[string]string{}
+		for k, v := range *iso.Env {
+			k = strings.TrimSpace(k)
+			if k == "" || strings.ContainsAny(k, "=\x00") || strings.ContainsRune(v, 0) {
+				return fmt.Errorf("cli.isolation.env has an invalid entry %q", k)
+			}
+			env[k] = v
+		}
+		p.CLIEnv = env
+	}
+	return nil
+}
+
 // NormClaudeTransport accepts mcp, stream_control, and none.
 // An empty value is mcp. Anything else is a config error.
 func NormClaudeTransport(v string) (string, error) {
@@ -473,6 +538,13 @@ type cliDoc struct {
 	PermissionMode *string     `toml:"permission_mode" json:"permission_mode"`
 	Permission     *cliPermDoc `toml:"permission" json:"permission"`
 	Pins           *[]Pin      `toml:"pins" json:"pins"`
+	Isolation      *cliIsoDoc  `toml:"isolation" json:"isolation"`
+}
+
+type cliIsoDoc struct {
+	Overrides *string            `toml:"overrides" json:"overrides"`
+	Home      *string            `toml:"home" json:"home"`
+	Env       *map[string]string `toml:"env" json:"env"`
 }
 
 type cliPermDoc struct {
@@ -670,6 +742,11 @@ func (p *Policy) apply(doc document, trusted bool) error {
 				return err
 			}
 			p.ClaudeTransport = v
+		}
+	}
+	if iso := doc.CLI.Isolation; iso != nil {
+		if err := p.applyIsolation(iso, trusted); err != nil {
+			return err
 		}
 	}
 	if doc.CLI.Pins != nil {
