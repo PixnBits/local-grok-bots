@@ -30,12 +30,12 @@ class N { constructor(t){this.tag=t;this.kids=[];this.dataset={};this.attrs={};t
   append(...k){this.kids.push(...k)} replaceChildren(){this.kids=[]}
   get children(){return this.kids.filter(k=>k.tag)}
   set textContent(v){this.kids=[{text:v}]} set href(v){this.attrs.href=v}
-  set target(v){} set rel(v){} set className(v){this.attrs.cls=v} set start(v){} }
+  set target(v){} set rel(v){} set type(v){} set title(v){} setAttribute(){} addEventListener(){} set className(v){this.attrs.cls=v} set start(v){} }
 const document={createElement:t=>new N(t),createTextNode:t=>({text:t})};
 const el=(tag,cls,text)=>{const n=new N(tag); if(cls) n.className=cls; if(text!=null) n.textContent=text; return n};
 ` + src[i:j] + `
 const esc=s=>s.replace(/&/g,"&amp;").replace(/</g,"&lt;");
-const h=n=>n.tag?"<"+n.tag+(n.attrs.cls&&n.tag!=="div"||n.attrs.cls&&n.attrs.cls!=="md"&&n.tag==="div"?"."+n.attrs.cls:"")+(n.style.textAlign?" align="+n.style.textAlign:"")+(n.attrs.href?" href=\""+n.attrs.href+"\"":"")+">"+n.kids.map(h).join("")+"</"+n.tag+">":esc(n.text);
+const h=n=>n.tag==="button"?"":n.tag?"<"+n.tag+(n.attrs.cls&&n.tag!=="div"||n.attrs.cls&&n.attrs.cls!=="md"&&n.tag==="div"?"."+n.attrs.cls:"")+(n.style.textAlign?" align="+n.style.textAlign:"")+(n.attrs.href?" href=\""+n.attrs.href+"\"":"")+">"+n.kids.map(h).join("")+"</"+n.tag+">":esc(n.text);
 const cases=JSON.parse(require("fs").readFileSync(0,"utf8"));
 console.log(JSON.stringify(cases.map(c=>h(renderMarkdown(c,new N("div"))))));
 `

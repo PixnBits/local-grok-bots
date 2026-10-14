@@ -158,6 +158,20 @@
   .md blockquote { border-left: 3px solid var(--line); padding-left: 10px; color: var(--muted); }
   .md hr { border: 0; border-top: 1px solid var(--line); margin: 8px 0; }
   .md a { color: var(--accent); }
+  .copy-btn {
+    font-size: 11px; line-height: 1; padding: 4px 7px; border-radius: 6px; min-height: 0;
+    opacity: 0; transition: opacity .12s; cursor: pointer;
+  }
+  .copy-btn.done { opacity: 1; }
+  .md .code { padding-top: 0; }
+  .md .code .code-copy {
+    position: absolute; top: 4px; right: 4px; background: #3d3832; color: #f3eee6; border: 1px solid #5a534a;
+  }
+  .md .code:hover .code-copy, .code-copy:focus-visible { opacity: 1; }
+  /* Touch screens have no hover: keep the buttons visible but quiet. */
+  @media (hover: none) {
+    .copy-btn { opacity: .7; }
+  }
   .tools { margin: 0 0 6px; font-size: 12px; color: var(--muted); white-space: normal; }
   .tools summary { cursor: pointer; }
   .tools .tool { margin-top: 6px; white-space: pre-wrap; max-height: 16em; overflow: auto; }
@@ -573,6 +587,44 @@ function whoText(m) {
   if ((m.content || "").startsWith("Message from ") || (m.content || "").startsWith("Notice: ")) return "";
   return "Scheduled";
 }
+// md:begin
+// copyText puts text on the clipboard. navigator.clipboard needs a secure
+// context, and the page is plain HTTP on the LAN, so it falls back to a
+// hidden textarea and execCommand("copy").
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try { await navigator.clipboard.writeText(text); return true; } catch {}
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.top = "-1000px";
+  ta.style.opacity = "0";
+  document.body.append(ta);
+  ta.select();
+  ta.setSelectionRange(0, text.length);
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch {}
+  ta.remove();
+  return ok;
+}
+// copyButton shows "Copied" (or "Copy failed") briefly after a tap.
+function copyButton(cls, label, getText) {
+  const b = el("button", "copy-btn " + cls, "Copy");
+  b.type = "button";
+  b.title = label;
+  b.setAttribute("aria-label", label);
+  b.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const ok = await copyText(getText());
+    b.textContent = ok ? "Copied" : "Copy failed";
+    b.classList.add("done");
+    clearTimeout(b._t);
+    b._t = setTimeout(() => { b.textContent = "Copy"; b.classList.remove("done"); }, 1200);
+  });
+  return b;
+}
 // toolSummary is the collapsed "N tool calls: a, b" line on a reply.
 // It opens to show each call with its arguments and result.
 function toolSummary(recs) {
@@ -593,7 +645,6 @@ function toolSummary(recs) {
   }
   return d;
 }
-// md:begin
 // Markdown to DOM for message bubbles. Presentation only: the stored text is
 // unchanged. Every piece of text goes in through textContent, so raw HTML in
 // a message shows as text. Links keep http, https, and mailto only.
@@ -698,6 +749,7 @@ function mdLines(lines, parent) {
       i++;
       const box = el("div", "code");
       if (fence[3]) box.append(el("span", "code-lang", fence[3]));
+      box.append(copyButton("code-copy", "Copy code", () => body.join("\n")));
       const pre = el("pre");
       const code = el("code", null, body.join("\n"));
       if (fence[3]) code.dataset.lang = fence[3];
