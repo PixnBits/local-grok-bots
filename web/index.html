@@ -79,7 +79,9 @@
   h2 { font-family: var(--serif); font-size: 18px; margin: 0; }
   .row { display: flex; gap: 8px; flex-wrap: wrap; }
   .bots { display: flex; flex-direction: column; gap: 8px; }
-  .bot {
+  /* button.bot: the roster row. A bare .bot also matched reply bubbles
+     ("bubble bot") and laid the name, tool summary, and text out in a row. */
+  button.bot {
     text-align: left; padding: 12px 14px; display: flex; align-items: center; gap: 10px;
   }
   .bot-copy { min-width: 0; flex: 1; }
