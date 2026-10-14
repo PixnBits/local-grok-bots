@@ -53,6 +53,7 @@ func (a *App) execute(botID, runID string) {
 	}
 
 	a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "working"})
+	parseRetried := false
 	for round := 0; round < maxToolRounds; round++ {
 		if ctx.Err() != nil {
 			a.finishInterrupted(bot.ID, runID, ctx)
@@ -72,6 +73,20 @@ func (a *App) execute(botID, runID string) {
 			if ctx.Err() != nil {
 				a.finishInterrupted(bot.ID, runID, ctx)
 				return
+			}
+			var parseErr *model.ToolCallParseError
+			// One more call, and only when a round remains. The failed call still counts toward the cap.
+			if errors.As(err, &parseErr) && !parseRetried && round+1 < maxToolRounds {
+				parseRetried = true
+				a.log(bot.ID, "model_call", map[string]any{
+					"model": modelName, "ok": false, "error": err.Error(), "retry": true,
+				})
+				a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "retrying"})
+				msgs = append(msgs, model.Message{
+					Role:    "user",
+					Content: "The tool call could not be parsed: " + clip(parseErr.Detail, 500) + ". Call the tool again with valid arguments, or reply in text.",
+				})
+				continue
 			}
 			a.log(bot.ID, "model_call", map[string]any{"model": modelName, "ok": false, "error": err.Error()})
 			_, _ = a.st.FinishRun(runID, "error", err.Error())

@@ -149,6 +149,7 @@ Optional gate: if `AUTH_TOKEN` is set in the daemon environment, require `Author
 - A run that exceeds 8 model rounds ends `error` / `tool round limit`. The page can continue that transcript as a new run for another 8 rounds. A new message, another turn, or a restart drops the offer.
 - While a run is `running`, the stream emits `status` events so the page can show the working animation. The animation clears on `done` or `error`.
 - Text the model sends in the same response as a tool call is streamed as tokens for that run and kept in that run's in-memory transcript. It is not written to the thread. The stored reply is the response that has no tool call.
+- A model response that fails because a tool call could not be parsed is diagnosed in that run's transcript and tried once more, when a round remains. The diagnosis is not written to the thread. A second parse failure ends the run as `error`. A parse failure on the last of the 8 rounds is that error and does not become `tool round limit`. Unreachable Ollama, an HTTP error, a stream failure, and a timeout are not retried.
 
 ## 4. Bot tool surface
 
