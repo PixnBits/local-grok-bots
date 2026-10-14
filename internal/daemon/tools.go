@@ -332,7 +332,11 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		if strings.TrimSpace(key) == "" || strings.Contains(key, "/") {
 			return "", errors.New("invalid memory key")
 		}
-		m, err := a.st.UpsertMemory(bot.ID, key, strArg(args, "value"))
+		val := strArg(args, "value")
+		if memoryClaimsTools(key, val) {
+			return "", errors.New("do not store notes about which tools you have or lack; tools are attached fresh on every call and override earlier claims. Use the attached list, not memory.")
+		}
+		m, err := a.st.UpsertMemory(bot.ID, key, val)
 		if err != nil {
 			return "", err
 		}

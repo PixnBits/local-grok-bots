@@ -162,15 +162,17 @@ func decodeList(s string) ([]string, error) {
 }
 
 type Bot struct {
-	ID            string   `json:"id"`
-	Name          string   `json:"name"`
-	Label         string   `json:"label"`
-	Description   string   `json:"description,omitempty"`
-	Mark          Mark     `json:"mark"`
-	Pinned        bool     `json:"pinned"`
-	Hidden        bool     `json:"hidden"`
-	Archived      bool     `json:"archived"`
-	ArchivedAt    *string  `json:"archived_at,omitempty"`
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	Label       string  `json:"label"`
+	Description string  `json:"description,omitempty"`
+	Mark        Mark    `json:"mark"`
+	Pinned      bool    `json:"pinned"`
+	Hidden      bool    `json:"hidden"`
+	Archived    bool    `json:"archived"`
+	ArchivedAt  *string `json:"archived_at,omitempty"`
+	// Warnings are advisory notes the daemon computes on read; not stored.
+	Warnings      []string `json:"warnings,omitempty"`
 	Grants        []string `json:"grants"`
 	NetAllow      []string `json:"net_allow"`
 	SSHAllow      []string `json:"ssh_allow"`

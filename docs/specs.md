@@ -158,6 +158,8 @@ Tools the model can call. Each is logged on start and on finish. Every model cal
 
 Tool-change notices: each bot stores the SHA-256 and a JSON snapshot of the tool list (names, descriptions, schemas) it last saw, in `bots.tool_hash` and `bots.tool_snapshot`. At the start of every run that is not a continuation, if the current list differs, the daemon posts a thread line `Notice: Tools updated: added X; changed Y (now takes a/b/c); removed Z.` and saves the new snapshot. A bot with no snapshot (one that existed before this) that has replied before gets a one-time `Notice: Tools available now: <names>. ...`; a brand-new bot just records its snapshot. Notice lines reach the model as user messages, show in the thread, do not queue a turn, and are logged as `tools_changed`.
 
+Belief lint: `write_memory` rejects notes whose key or value claim tool availability or absence (phrases like "only have", "no access", "cannot", "don't have" near a tool name or the word "tool"), returning an error that tools are attached per call and must not be stored. Description warnings: on create/update and on GET bot, the daemon computes advisory `warnings` for standing prompts that name a `Something CLI` or a backticked command not on PATH in the jail, or a tool-like name not in `toolDefs`. Warnings appear on the profile page; they do not block saves.
+
 | Tool | Arguments | Effect |
 |---|---|---|
 | list_bots | | `[{id, name, label, status}]` |

@@ -312,6 +312,7 @@ func (a *App) decorateBot(b store.Bot) store.Bot {
 	if h, ok := a.resume[b.ID]; ok {
 		b.ContinueRunID = h.runID
 	}
+	b.Warnings = descriptionWarnings(b.Description)
 	return b
 }
 
