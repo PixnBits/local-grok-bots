@@ -9,9 +9,9 @@ import (
 )
 
 type threadPage struct {
-	Messages []store.Message              `json:"messages"`
+	Messages []store.Message               `json:"messages"`
 	Tools    map[string][]store.ToolRecord `json:"tools"`
-	HasMore  bool                         `json:"has_more"`
+	HasMore  bool                          `json:"has_more"`
 }
 
 // The thread API returns the newest page first (oldest-first within it),

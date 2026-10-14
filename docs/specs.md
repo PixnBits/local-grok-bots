@@ -154,7 +154,7 @@ Optional gate: if `AUTH_TOKEN` is set in the daemon environment, require `Author
 
 ## 4. Bot tool surface
 
-Tools the model can call. Each is logged on start and on finish.
+Tools the model can call. Each is logged on start and on finish. Every model call sends the whole list in Ollama's `tools` field as JSON Schema objects: each argument has a `type` and a `description` with an example. There is no discovery tool or step. A call missing a required argument, or with arguments in the wrong shape, fails with an error that names the problem and lists the tool's expected arguments. The system prompt starts with the current time in RFC 3339 and the daemon's time zone.
 
 | Tool | Arguments | Effect |
 |---|---|---|
@@ -165,8 +165,9 @@ Tools the model can call. Each is logged on start and on finish.
 | update_bot | `{id or name, name?, label?, description?, model?}` | same as `PATCH`; rename requires `id` |
 | write_memory | `{key, value}` | upsert on the calling bot |
 | delete_memory | `{key}` | |
-| set_timer | `{name?, schedule, prompt}` | creates an enabled timer on the calling bot |
-| clear_timer | `{id}` | |
+| set_timer | `{prompt, in? \| at? \| every?, name?}`, exactly one of `in` (one-shot duration like `5m`), `at` (one-shot RFC 3339 time with offset, must be in the future), `every` (repeating interval) | creates an enabled timer on the calling bot and returns `{id, schedule, prompt, next_fire_at, fires_at_local}`. Also accepted: `schedule` (as `every`, or as `in` when `repeat` is false), `seconds` / `in_seconds` / `minutes` numbers, and `message` / `text` / `reminder` for `prompt` |
+| list_timers | | the calling bot's timers |
+| clear_timer | `{id}` | deletes one of the calling bot's timers |
 | read_file | `{path}` | inside the workspace directory only |
 | write_file | `{path, content}` | inside the workspace directory only |
 | run_shell | `{command}` | jailed to the workspace; stdout/stderr captured and truncated |
