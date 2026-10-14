@@ -742,12 +742,17 @@ async function follow(runId) {
   const ctl = new AbortController();
   state.streamCtl = ctl;
   const live = $("#live");
+  // Each model round's text gets its own bubble. A tool call closes the
+  // current bubble, so the next round's tokens start a new one.
   let acc = "";
-  const bubble = el("div", "bubble bot");
-  const who = el("span", "who", (currentBot() && currentBot().name) || "Bot");
-  bubble.append(who);
-  const text = el("div", "md");
-  bubble.append(text);
+  let bubble = null, text = null;
+  const newBubble = () => {
+    acc = "";
+    bubble = el("div", "bubble bot");
+    bubble.append(el("span", "who", (currentBot() && currentBot().name) || "Bot"));
+    text = el("div", "md");
+    bubble.append(text);
+  };
   try {
     const headers = {};
     if (state.token) headers.Authorization = "Bearer " + state.token;
@@ -776,12 +781,14 @@ async function follow(runId) {
         if (event === "status") {
           setWorking(true, payload.text || payload.state || "working");
         } else if (event === "token") {
+          if (!bubble) newBubble();
           acc += payload.text || "";
           renderMarkdown(acc, text);
           if (!bubble.parentNode) live.append(bubble);
           const msgs = $("#msgs");
           msgs.scrollTop = msgs.scrollHeight;
         } else if (event === "tool_call") {
+          bubble = null;
           live.append(el("div", "tool", "tool " + (payload.name || "") + " " + JSON.stringify(payload.arguments || {})));
         } else if (event === "tool_result") {
           const ok = payload.ok ? "ok" : "error";
