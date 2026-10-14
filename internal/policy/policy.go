@@ -51,7 +51,21 @@ type Policy struct {
 	Imminent       time.Duration
 	TurnTimeout    time.Duration
 	PermissionMode string
-	Pins           []Pin
+	// ToolAllow, ToolDeny, and ToolAsk are Claude-style tool rules
+	// such as "Bash(git status*)".
+	ToolAllow []string
+	ToolDeny  []string
+	ToolAsk   []string
+	// UIPrompts lets a connected UI answer a tool check. Off denies
+	// the check when no earlier rule resolves it.
+	UIPrompts bool
+	// PromptTimeout is how long a UI answer may take. Zero means 60s.
+	PromptTimeout time.Duration
+	// AllowSessionGrants is true only when managed policy set it.
+	AllowSessionGrants bool
+	// ManagedBypass is true only when managed policy set an always-allow mode.
+	ManagedBypass bool
+	Pins          []Pin
 
 	TimersEnabled     bool
 	SandboxFailClosed bool
@@ -90,6 +104,7 @@ func Defaults() Policy {
 		DaemonJail:        true,
 		Idle:              30 * time.Minute,
 		Imminent:          2 * time.Minute,
+		PromptTimeout:     60 * time.Second,
 		TimersEnabled:     true,
 		SandboxFailClosed: true,
 		ConflictPolicy:    "refuse",
@@ -131,7 +146,7 @@ func Load(opts Options) (Policy, error) {
 	p := Defaults()
 	p.Loaded = true
 	p.CLIPermitted = true
-	if err := p.apply(doc); err != nil {
+	if err := p.apply(doc, false); err != nil {
 		p = fallback(fmt.Sprintf("policy file %s is unparseable (%s); fail-closed: daemon jail ON, CLI backends OFF", path, err.Error()))
 		return overlayManaged(p, opts, false)
 	}
@@ -172,7 +187,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 		base.Loaded = true
 		base.Warnings = []string{"local policy was not applied; managed policy is in effect"}
 	}
-	if err := base.apply(doc); err != nil {
+	if err := base.apply(doc, true); err != nil {
 		fb := Defaults()
 		fb.CLIPermitted = false
 		fb.DaemonJail = true
@@ -301,6 +316,47 @@ func (p Policy) DLPEnabled() bool {
 	return len(p.DLPPatterns) > 0 || strings.TrimSpace(p.DLPFile) != "" || strings.TrimSpace(p.DLPCommand) != ""
 }
 
+// Permission is the tool-approval view of a policy.
+type Permission struct {
+	Mode               string
+	Allow              []string
+	Deny               []string
+	Ask                []string
+	UIPrompts          bool
+	PromptTimeout      time.Duration
+	AllowSessionGrants bool
+}
+
+// Permission returns tool-approval settings. A non-positive prompt timeout
+// is reported as 60s.
+func (p Policy) Permission() Permission {
+	d := p.PromptTimeout
+	if d <= 0 {
+		d = 60 * time.Second
+	}
+	return Permission{
+		Mode:               p.PermissionMode,
+		Allow:              append([]string(nil), p.ToolAllow...),
+		Deny:               append([]string(nil), p.ToolDeny...),
+		Ask:                append([]string(nil), p.ToolAsk...),
+		UIPrompts:          p.UIPrompts,
+		PromptTimeout:      d,
+		AllowSessionGrants: p.AllowSessionGrants,
+	}
+}
+
+// IsBypassMode reports an always-allow mode. Those modes are honored only
+// when managed policy set them.
+func IsBypassMode(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "always", "always-allow", "always_allow", "always-approve",
+		"bypass", "bypasspermissions", "dontask", "dont-ask":
+		return true
+	default:
+		return false
+	}
+}
+
 // CLIPinFor returns the pin that applies to backend, if one was set.
 func (p Policy) CLIPinFor(backend string) (Pin, bool) {
 	backend = strings.ToLower(strings.TrimSpace(backend))
@@ -383,11 +439,22 @@ type ollamaDoc struct {
 }
 
 type cliDoc struct {
-	Idle           *int64   `toml:"idle_timeout_minutes" json:"idle_timeout_minutes"`
-	Imminent       *int64   `toml:"imminent_timer_minutes" json:"imminent_timer_minutes"`
-	TurnTimeout    flexText `toml:"turn_timeout" json:"turn_timeout"`
-	PermissionMode *string  `toml:"permission_mode" json:"permission_mode"`
-	Pins           *[]Pin   `toml:"pins" json:"pins"`
+	Idle           *int64      `toml:"idle_timeout_minutes" json:"idle_timeout_minutes"`
+	Imminent       *int64      `toml:"imminent_timer_minutes" json:"imminent_timer_minutes"`
+	TurnTimeout    flexText    `toml:"turn_timeout" json:"turn_timeout"`
+	PermissionMode *string     `toml:"permission_mode" json:"permission_mode"`
+	Permission     *cliPermDoc `toml:"permission" json:"permission"`
+	Pins           *[]Pin      `toml:"pins" json:"pins"`
+}
+
+type cliPermDoc struct {
+	Mode               *string   `toml:"mode" json:"mode"`
+	Allow              *[]string `toml:"allow" json:"allow"`
+	Deny               *[]string `toml:"deny" json:"deny"`
+	Ask                *[]string `toml:"ask" json:"ask"`
+	UIPrompts          *bool     `toml:"ui_prompts" json:"ui_prompts"`
+	PromptTimeout      flexText  `toml:"prompt_timeout" json:"prompt_timeout"`
+	AllowSessionGrants *bool     `toml:"allow_session_grants" json:"allow_session_grants"`
 }
 
 type timersDoc struct {
@@ -452,7 +519,7 @@ func (f *flexText) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-func (p *Policy) apply(doc document) error {
+func (p *Policy) apply(doc document, trusted bool) error {
 	if doc.Daemon.Bind != nil {
 		v := strings.TrimSpace(*doc.Daemon.Bind)
 		if v == "" {
@@ -524,7 +591,50 @@ func (p *Policy) apply(doc document) error {
 		p.TurnTimeout = d
 	}
 	if doc.CLI.PermissionMode != nil {
-		p.PermissionMode = strings.TrimSpace(*doc.CLI.PermissionMode)
+		p.setMode(*doc.CLI.PermissionMode, trusted)
+	}
+	if perm := doc.CLI.Permission; perm != nil {
+		if perm.Mode != nil {
+			p.setMode(*perm.Mode, trusted)
+		}
+		if perm.Allow != nil {
+			rules, err := normRules(*perm.Allow)
+			if err != nil {
+				return err
+			}
+			p.ToolAllow = rules
+		}
+		if perm.Deny != nil {
+			rules, err := normRules(*perm.Deny)
+			if err != nil {
+				return err
+			}
+			p.ToolDeny = rules
+		}
+		if perm.Ask != nil {
+			rules, err := normRules(*perm.Ask)
+			if err != nil {
+				return err
+			}
+			p.ToolAsk = rules
+		}
+		if perm.UIPrompts != nil {
+			p.UIPrompts = *perm.UIPrompts
+		}
+		if perm.PromptTimeout.Set {
+			d, err := parseTurnTimeout(perm.PromptTimeout.Value)
+			if err != nil {
+				return fmt.Errorf("prompt_timeout: %w", err)
+			}
+			p.PromptTimeout = d
+		}
+		if perm.AllowSessionGrants != nil {
+			if trusted {
+				p.AllowSessionGrants = *perm.AllowSessionGrants
+			} else if *perm.AllowSessionGrants {
+				p.Warnings = append(p.Warnings, "allow_session_grants is ignored; only managed policy can enable session grants")
+			}
+		}
 	}
 	if doc.CLI.Pins != nil {
 		pins, err := normPins(*doc.CLI.Pins)
@@ -594,6 +704,28 @@ func (p *Policy) apply(doc document) error {
 
 // markManaged records which identity fields the managed document set.
 // apply clears the flags when a value is copied; the caller sets them after.
+func (p *Policy) setMode(mode string, trusted bool) {
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		p.PermissionMode = ""
+		if trusted {
+			p.ManagedBypass = false
+		}
+		return
+	}
+	if IsBypassMode(mode) {
+		if !trusted {
+			p.Warnings = append(p.Warnings, fmt.Sprintf("permission mode %q is ignored; only managed policy can set an always-allow mode", mode))
+			return
+		}
+		p.PermissionMode = mode
+		p.ManagedBypass = true
+		return
+	}
+	p.PermissionMode = mode
+	p.ManagedBypass = false
+}
+
 func (p *Policy) markManaged(doc document) {
 	if doc.Daemon.Bind != nil {
 		p.managedBind = true
@@ -624,6 +756,21 @@ func normBackends(in []string) ([]string, error) {
 	}
 	if out == nil {
 		out = []string{}
+	}
+	return out, nil
+}
+
+func normRules(in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	for _, rule := range in {
+		rule = strings.TrimSpace(rule)
+		if rule == "" {
+			return nil, fmt.Errorf("permission rule is empty")
+		}
+		if strings.ContainsAny(rule, "\r\n\x00") {
+			return nil, fmt.Errorf("permission rule contains a newline")
+		}
+		out = append(out, rule)
 	}
 	return out, nil
 }
