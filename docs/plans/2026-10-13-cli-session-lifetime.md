@@ -18,7 +18,7 @@ A live CLI process is killed after `idle_timeout_minutes` of no user message and
 
 - Default: 30 minutes idle, 2 minutes imminent window.
 - Only user-created timers keep the process alive. Bot-created timers do not.
-- Kill is a process-group kill.
+- Kill is a process-group kill. Linux sends `SIGKILL` to the group created with `setpgid`, then signals the leader. macOS uses the same POSIX group signal. If that signal is rejected, macOS falls back to `SIGKILL` of the leader only. Seatbelt is not a kill API. The behavior is the same call from the daemon on both platforms.
 - `session_id` remains stored. The next user message, DM, or timer resumes with `--resume`.
 - CLI turns are not under the Ollama round cap. They stop on daemon shutdown, cancel, or idle kill.
 

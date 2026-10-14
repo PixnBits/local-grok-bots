@@ -44,7 +44,7 @@ The first vertical slice is on this branch:
 - `backend = ollama` keeps the existing model loop and workspace jail. `claude` or `grok` turns that jail off for the turn and spawns the CLI directly. There is no outer jail around the CLI.
 - Each bot stores `session_id`. The first turn passes `--session-id`. Later turns, including timers, pass `--resume`. Timer text is the routine prompt prefixed with `[scheduled]`.
 - The daemon parses `stream-json` / `streaming-json` into SSE tokens, tool events, and the stored reply. A stream with no final result is `error` / `interrupted`. The web thread is the daemon store. CLI transcript files are not read.
-- A live CLI is process-group killed after `idle_timeout_minutes` (default 30) unless a user-created timer is due within `imminent_timer_minutes` (default 2). The session id is kept.
+- A live CLI is process-group killed after `idle_timeout_minutes` (default 30) unless a user-created timer is due within `imminent_timer_minutes` (default 2). Linux signals the `setpgid` group. macOS uses the same group signal and, if that is rejected, signals the leader only. The session id is kept.
 - `permission_mode` is passed through only when policy sets it. Empty means the CLI prompts. It is not defaulted to always-allow.
 - Binary pins, DLP prompt scan, CLI start/stop audit, turn timeout, the backend allow-list, and the Ollama model allow-list are enforced when the policy sets them. Unset, they stay off (allow-lists default to ollama, claude, and grok).
 

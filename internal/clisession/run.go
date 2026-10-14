@@ -7,10 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 
 	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
@@ -55,8 +53,9 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 	if spec.Workspace != "" {
 		cmd.Dir = spec.Workspace
 	}
-	// A new process group so idle kill can signal the CLI and its children.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Linux kills this process group. macOS uses the same group signal,
+	// with a leader-only fallback if the group signal is rejected.
+	prepareProc(cmd)
 	cmd.Cancel = func() error {
 		killGroup(cmd.Process)
 		return nil
@@ -191,14 +190,6 @@ func readEvents(r io.Reader, onEvent func(Event)) (Result, error) {
 		return out, fmt.Errorf("%s", errMsg)
 	}
 	return out, nil
-}
-
-func killGroup(p *os.Process) {
-	if p == nil {
-		return
-	}
-	_ = syscall.Kill(-p.Pid, syscall.SIGKILL)
-	_ = p.Kill()
 }
 
 func clip(s string, n int) string {
