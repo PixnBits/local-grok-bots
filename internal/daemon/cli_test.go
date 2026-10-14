@@ -523,6 +523,10 @@ fi
 if [ -n "$LGB_ENV_LOG" ]; then
   env > "$LGB_ENV_LOG"
 fi
+if [ -n "$LGB_FIXTURE" ]; then
+  cat "$LGB_FIXTURE"
+  exit 0
+fi
 mode=${LGB_CLI_MODE:-ok}
 if [ "$mode" = "sleep" ]; then
   sleep 60 &

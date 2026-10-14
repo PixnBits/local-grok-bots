@@ -132,6 +132,9 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	}
 	a.perm = permission.New(permission.Options{
 		Publish: func(runID, event string, payload any) {
+			if event == "permission_decision" {
+				a.recordPermission(payload)
+			}
 			a.bus.Publish(runID, event, payload)
 		},
 		UIPresent: func(runID string) bool {

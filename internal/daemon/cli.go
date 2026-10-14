@@ -153,6 +153,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		eventTransport = policy.TransportNone
 		cliDenySource = cliNoHostSource(a.policy.UIPrompts)
 	}
+	trace := &cliTrace{a: a, botID: bot.ID, runID: runID}
 	res, err := runner.Run(turnCtx, spec, func(ev clisession.Event) {
 		switch ev.Kind {
 		case "token":
@@ -160,6 +161,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 				return
 			}
 			streamed = true
+			trace.token(ev.Text)
 			a.bus.Publish(runID, "token", map[string]string{"text": ev.Text})
 		case "tool":
 			name := ev.ToolName
@@ -171,6 +173,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 				args = map[string]any{}
 			}
 			redacted := redactValue(args)
+			trace.tool(name, redacted)
 			a.bus.Publish(runID, "status", map[string]any{"state": name, "text": name})
 			a.bus.Publish(runID, "tool_call", map[string]any{"name": name, "arguments": redacted})
 			a.log(bot.ID, "tool_start", map[string]any{"name": name, "arguments": redacted})
@@ -180,6 +183,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 				name = "tool"
 			}
 			body := clip(audit.RedactText(ev.Text), 4000)
+			trace.result(name, ev.Text)
 			a.bus.Publish(runID, "tool_result", map[string]any{"name": name, "ok": true, "result_or_error": body})
 			a.log(bot.ID, "tool_end", map[string]any{"name": name, "ok": true})
 		case "permission_decision":
@@ -207,7 +211,8 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		_ = a.st.SetBotSession(bot.ID, res.SessionID)
 		sessionID = res.SessionID
 	}
-	text := strings.TrimSpace(res.Text)
+	trace.finish()
+	text := strings.TrimSpace(trace.reply(strings.TrimSpace(res.Text)))
 	if text != "" && !streamed {
 		a.bus.Publish(runID, "token", map[string]string{"text": text})
 	}
