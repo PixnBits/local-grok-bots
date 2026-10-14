@@ -33,6 +33,8 @@ File tools resolve against `workspace/` and reject `..`, absolute host paths, an
 
 `run_shell` uses bubblewrap when `bwrap` is installed, and otherwise `unshare` with a chroot. The workspace is bind-mounted at `/work`. The host filesystem outside it is not visible, and the shell starts with no network. If it reports its workspace as `/work`, that is the jail path, not the host path. If neither `bwrap` nor `unshare` can build the jail, the shell fails closed and the daemon still serves.
 
+On macOS, `run_shell` runs under `/usr/bin/sandbox-exec` with a generated Seatbelt profile. It denies by default, reads system paths and the workspace, writes only the workspace and a private temp dir, never writes `.git/hooks`, and has no network. There is no `/work` mount, so the shell starts in the real workspace path. `net` and `ssh` grants are denied on macOS because the connect proxy needs `LD_PRELOAD`. A missing `sandbox-exec` fails closed. Apple marks `sandbox-exec` deprecated; it still ships, but this path has only been compile-checked, not run on a Mac.
+
 Grants on the bot (`net`, `git`, `ssh`, `build`) are set from the profile. A missing grant fails closed. `git push` returns a diff and does not push. The model is `docs/sandbox.md`.
 
 To give a bot material, copy or mount it into `workspace/`. The shell PATH includes `/usr/bin`, `/bin`, and toolchain directories already on the read-only `/usr` mount, such as `/usr/local/go/bin` and `/usr/local/bin` when they exist. Home directories and `/snap` are not added.
@@ -54,6 +56,20 @@ Set `OLLAMA_MODEL` in the installed unit to a model `ollama list` actually shows
 For a user unit, change `WantedBy` to `default.target`, put the unit in `~/.config/systemd/user/`, and run `systemctl --user enable --now local-grok-bots`.
 
 The page is plain HTTP on the LAN. The browser warning is expected. Do not port-forward it.
+
+## launchd (macOS)
+
+`deploy/org.pixnbits.local-grok-bots.plist` is a LaunchAgent. It binds `127.0.0.1:8080` and keeps data in `~/Library/Application Support/local-grok-bots`. Replace `USERNAME` first; launchd does not expand `~`.
+
+```bash
+GOOS=darwin GOARCH=arm64 go build -o local-grok-bots ./cmd/local-grok-bots   # amd64 for Intel
+sudo install -m 755 local-grok-bots /usr/local/bin/local-grok-bots
+mkdir -p ~/Library/"Application Support"/local-grok-bots ~/Library/LaunchAgents
+sed "s/USERNAME/$USER/g" deploy/org.pixnbits.local-grok-bots.plist > ~/Library/LaunchAgents/org.pixnbits.local-grok-bots.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.pixnbits.local-grok-bots.plist
+```
+
+Stop it with `launchctl bootout gui/$(id -u)/org.pixnbits.local-grok-bots`. Logs go to `~/Library/Logs/local-grok-bots.log`. The SQLite driver is pure Go, so the binary cross-compiles without cgo. A binary copied from another machine may need `xattr -d com.apple.quarantine` or signing before Gatekeeper runs it.
 
 ## What the page does today
 
