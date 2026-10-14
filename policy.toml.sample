@@ -50,9 +50,23 @@ imminent_timer_minutes = 2
 # Unspecified (empty): the CLI prompts when a person can answer on a TTY.
 # If it prompts and there is no controlling terminal, the turn fails instead
 # of hanging: "permission prompt requires a TTY or an explicit permission_mode".
-# Set an explicit value (including an always-allow mode) only when InfoSec
-# has approved it for unattended timers.
+# An always-allow mode in this file is ignored. Only the managed policy can
+# set one, after InfoSec has approved it for unattended timers.
 # permission_mode = "default"
+#
+# [cli.permission]
+# mode is the same knob as permission_mode above. The table wins when both
+# are set. always-allow / bypass / dontAsk, and allow_session_grants, are
+# ignored in this file. Only the managed policy can enable them.
+# mode = "default"
+# allow = ["Read", "Bash(git status*)"]
+# deny = ["Bash(rm *)"]
+# ask = ["Bash(git push*)"]
+# ui_prompts asks a connected UI. The stock page ignores the event, so
+# leave this false unless a client posts a decision. Default false.
+# ui_prompts = false
+# prompt_timeout = "60s"
+# allow_session_grants = false
 # Optional binary pins. Prefer path + SHA-256. Empty keeps PATH launch.
 # pins = [
 #   { path = "/usr/local/bin/claude", sha256 = "..." },

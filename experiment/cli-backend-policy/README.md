@@ -46,7 +46,7 @@ The first vertical slice is on this branch:
 - The daemon parses `stream-json` / `streaming-json` into SSE tokens, tool events, and the stored reply. A stream with no final result is `error` / `interrupted`. The web thread is the daemon store. CLI transcript files are not read.
 - A live CLI is process-group killed after `idle_timeout_minutes` (default 30) unless a user-created timer is due within `imminent_timer_minutes` (default 2). Linux signals the `setpgid` group. macOS uses the same group signal and, if that is rejected, signals the leader only. The session id is kept.
 - A restart mid-turn marks the run `interrupted` and keeps `session_id`. A graceful stop kills the process group first. A crash stores the pid; the next boot kills that group if it is still `claude` or `grok`. The next user message or timer passes `--resume`. An Ollama restart stays `daemon_restart`.
-- `permission_mode` is passed through only when policy sets it. Empty means the CLI prompts when a TTY is available. A permission prompt with no TTY fails the turn with `permission prompt requires a TTY or an explicit permission_mode` and does not hang. It is not defaulted to always-allow.
+- Tool approval is in `docs/cli-permissions.md`. Claude can ask the daemon over MCP when `ui_prompts` is on. Grok stays on `--allow`, `--deny`, and `--permission-mode`. A raw permission prompt with no host still fails the turn with `permission prompt requires a TTY or an explicit permission_mode`. Always-allow modes and session grants come only from the managed policy.
 - Binary pins, DLP prompt scan, CLI start/stop audit, turn timeout, the backend allow-list, and the Ollama model allow-list are enforced when the policy sets them. Unset, they stay off (allow-lists default to ollama, claude, and grok).
 
 ## Live smoke
@@ -61,7 +61,7 @@ LGB_LIVE_CLI=1 POLICY_PATH="$PWD/policy.toml" go test -count=1 -timeout 4m -run 
 
 `POLICY_PATH` is optional. When it is unset, the test reads `policy.toml` from the package directory `go test` uses, which is not the repo root. Set it from the repo root as shown.
 
-A headless machine has no controlling terminal. If `permission_mode` is empty and the CLI asks for approval, the turn fails with `permission prompt requires a TTY or an explicit permission_mode` instead of hanging. Set `permission_mode` in the policy when this smoke should run unattended.
+A headless machine has no controlling terminal. If the CLI prints a permission prompt and no permission host is attached, the turn fails with `permission prompt requires a TTY or an explicit permission_mode` instead of hanging. Set a non-bypass `permission_mode`, or allow rules, in the policy when this smoke should run unattended. Always-allow modes are honored only from the managed policy.
 
 Linux and macOS both kill a live CLI by process group (`setpgid`, then `SIGKILL` to the group). macOS falls back to the leader only if the group signal is rejected.
 
