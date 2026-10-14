@@ -1828,3 +1828,47 @@ func (s *Store) SetToolSnapshot(botID, hash, snapshot string) error {
 	_, err := s.db.Exec(`UPDATE bots SET tool_hash=?, tool_snapshot=? WHERE id=?`, hash, snapshot, botID)
 	return err
 }
+
+// RecentRuns returns the bot's latest runs, newest first.
+func (s *Store) RecentRuns(botID string, limit int) ([]Run, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT id, bot_id, status, started_at, finished_at, error FROM runs WHERE bot_id=? ORDER BY started_at DESC LIMIT ?`, botID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Run{}
+	for rows.Next() {
+		var r Run
+		var fin, errText sql.NullString
+		if err := rows.Scan(&r.ID, &r.BotID, &r.Status, &r.StartedAt, &fin, &errText); err != nil {
+			return nil, err
+		}
+		if fin.Valid {
+			r.FinishedAt = &fin.String
+		}
+		if errText.Valid {
+			r.Error = &errText.String
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// LastToolNotice returns the newest "Notice: Tools …" line on the bot's
+// thread, or nil.
+func (s *Store) LastToolNotice(botID string) (*Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row := s.db.QueryRow(`SELECT id, bot_id, thread, role, content, run_id, created_at FROM messages
+		WHERE bot_id=? AND role='system' AND content LIKE 'Notice: Tools %' ORDER BY created_at DESC, id DESC LIMIT 1`, botID)
+	m, err := scanMessage(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &m, nil
+}

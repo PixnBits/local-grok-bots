@@ -117,6 +117,7 @@ JSON over HTTP. One SSE stream for a live turn. All routes under `/api`.
 | POST | /api/bots/{id}/memory | `{key, value}` | memory row |
 | DELETE | /api/bots/{id}/memory/{key} | | 204 |
 | GET | /api/bots/{id}/timers | | `[timer]` |
+| GET | /api/bots/{id}/state | | `{timers, memory, grants, net_allow, ssh_allow, tools: {current, seen, up_to_date, last_notice}, runs (latest 5), warnings?}` read-only summary for the state panel |
 | POST | /api/bots/{id}/timers | `{name?, schedule, prompt, enabled?}` | timer |
 | PATCH | /api/timers/{id} | `{name?, schedule?, prompt?, enabled?}` | timer |
 | DELETE | /api/timers/{id} | | 204 |

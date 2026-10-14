@@ -31,6 +31,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /api/bots/{id}/memory", a.handlePutMemory)
 	mux.HandleFunc("DELETE /api/bots/{id}/memory/{key}", a.handleDeleteMemory)
 	mux.HandleFunc("GET /api/bots/{id}/timers", a.handleListTimers)
+	mux.HandleFunc("GET /api/bots/{id}/state", a.handleBotState)
 	mux.HandleFunc("POST /api/bots/{id}/timers", a.handleCreateTimer)
 	mux.HandleFunc("PATCH /api/timers/{id}", a.handlePatchTimer)
 	mux.HandleFunc("DELETE /api/timers/{id}", a.handleDeleteTimer)
