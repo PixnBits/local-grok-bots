@@ -49,6 +49,22 @@ The first vertical slice is on this branch:
 - `permission_mode` is passed through only when policy sets it. Empty means the CLI prompts when a TTY is available. A permission prompt with no TTY fails the turn with `permission prompt requires a TTY or an explicit permission_mode` and does not hang. It is not defaulted to always-allow.
 - Binary pins, DLP prompt scan, CLI start/stop audit, turn timeout, the backend allow-list, and the Ollama model allow-list are enforced when the policy sets them. Unset, they stay off (allow-lists default to ollama, claude, and grok).
 
+## Live smoke
+
+The same command runs on the Framework Desktop (Linux) and on macOS, from the repo root. It sends one short prompt through the daemon, reads the CLI stream into the bot thread, and checks that `session_id` was stored. It does not wrap the CLI in the daemon jail.
+
+It skips when `policy.toml` does not select `claude` or `grok`, and it skips when that binary is not on `PATH`. `LGB_LIVE_CLI=1` keeps an ordinary `go test ./...` from calling a live CLI.
+
+```
+LGB_LIVE_CLI=1 POLICY_PATH="$PWD/policy.toml" go test -count=1 -timeout 4m -run '^TestLiveCLISmoke$' ./internal/daemon
+```
+
+`POLICY_PATH` is optional. When it is unset, the test reads `policy.toml` from the package directory `go test` uses, which is not the repo root. Set it from the repo root as shown.
+
+A headless machine has no controlling terminal. If `permission_mode` is empty and the CLI asks for approval, the turn fails with `permission prompt requires a TTY or an explicit permission_mode` instead of hanging. Set `permission_mode` in the policy when this smoke should run unattended.
+
+Linux and macOS both kill a live CLI by process group (`setpgid`, then `SIGKILL` to the group). macOS falls back to the leader only if the group signal is rejected.
+
 ## Open questions
 
 The stream format, history source of truth, timer injection channel, and
