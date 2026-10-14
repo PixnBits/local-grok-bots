@@ -1310,6 +1310,23 @@ func (s *Store) GetRun(id string) (Run, error) {
 	return r, nil
 }
 
+// OnceSchedule marks a one-shot timer. It fires at next_fire_at, then turns
+// itself off; the row stays for history.
+const OnceSchedule = "once"
+
+// CreateTimerAt stores a one-shot timer that fires at at.
+func (s *Store) CreateTimerAt(botID, name, prompt string, at time.Time) (Timer, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := Timer{
+		ID: id.New(), BotID: botID, Name: strings.TrimSpace(name), Schedule: OnceSchedule, Prompt: prompt,
+		Enabled: true, NextFireAt: FormatTime(at),
+	}
+	_, err := s.db.Exec(`INSERT INTO timers(id, bot_id, name, schedule, prompt, enabled, next_fire_at) VALUES(?,?,?,?,?,?,?)`,
+		t.ID, t.BotID, t.Name, t.Schedule, t.Prompt, 1, t.NextFireAt)
+	return t, err
+}
+
 func (s *Store) CreateTimer(botID, name, schedule, prompt string, enabled bool) (Timer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1434,14 +1451,20 @@ func (s *Store) ClaimDueTimers(now time.Time) ([]Timer, error) {
 	}
 	var claimed []Timer
 	for _, t := range due {
-		d, err := ParseInterval(t.Schedule)
-		if err != nil {
-			continue
-		}
-		next := FormatTime(Now().Add(d))
 		fired := FormatTime(Now())
-		res, err := s.db.Exec(`UPDATE timers SET next_fire_at=?, last_fire_at=? WHERE id=? AND next_fire_at=?`,
-			next, fired, t.ID, t.NextFireAt)
+		var res sql.Result
+		if t.Schedule == OnceSchedule {
+			res, err = s.db.Exec(`UPDATE timers SET enabled=0, last_fire_at=? WHERE id=? AND next_fire_at=? AND enabled=1`,
+				fired, t.ID, t.NextFireAt)
+		} else {
+			d, perr := ParseInterval(t.Schedule)
+			if perr != nil {
+				continue
+			}
+			next := FormatTime(Now().Add(d))
+			res, err = s.db.Exec(`UPDATE timers SET next_fire_at=?, last_fire_at=? WHERE id=? AND next_fire_at=?`,
+				next, fired, t.ID, t.NextFireAt)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -1744,9 +1767,23 @@ func (s *Store) SetArchived(id string, archived bool, by string) (Bot, error) {
 		}
 		rows.Close()
 		for _, t := range paused {
-			next, err := nextAfter(Now(), t.schedule)
-			if err != nil {
-				return Bot{}, err
+			var next time.Time
+			if t.schedule == OnceSchedule {
+				// A one-shot keeps its time, or fires now if that passed.
+				var at string
+				if err := tx.QueryRow(`SELECT next_fire_at FROM timers WHERE id=?`, t.id).Scan(&at); err != nil {
+					return Bot{}, err
+				}
+				next = Now()
+				if when, err := time.Parse(timeLayout, at); err == nil && when.After(next) {
+					next = when
+				}
+			} else {
+				n, err := nextAfter(Now(), t.schedule)
+				if err != nil {
+					return Bot{}, err
+				}
+				next = n
 			}
 			if _, err := tx.Exec(`UPDATE timers SET enabled=1, archive_paused=0, next_fire_at=? WHERE id=?`, FormatTime(next), t.id); err != nil {
 				return Bot{}, err

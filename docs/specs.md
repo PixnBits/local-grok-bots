@@ -64,7 +64,7 @@ An inbound DM is also represented in the receiving bot’s user thread as a syst
 | id | string (uuid) | |
 | bot_id | string | |
 | name | string | Shown on the profile. |
-| schedule | string | Interval for now: `30s`, `5m`, `2h`, `1d`. Cron is later. |
+| schedule | string | A repeating interval (`30s`, `5m`, `2h`, `1d`), or `once` for a one-shot timer: it fires at `next_fire_at`, then sets `enabled` false and keeps the row. Restoring an archived bot keeps a one-shot's time, or fires it at once if that time passed. A one-shot missed while the daemon was down is logged `timer_missed` and disabled. Cron is later. |
 | prompt | text | Injected as the turn prompt when the timer fires. |
 | enabled | bool | |
 | next_fire_at | timestamp | Computed by the daemon. |
