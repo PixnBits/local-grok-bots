@@ -154,6 +154,7 @@
   .tools { margin: 0 0 6px; font-size: 12px; color: var(--muted); white-space: normal; }
   .tools summary { cursor: pointer; }
   .tools .tool { margin-top: 6px; white-space: pre-wrap; max-height: 16em; overflow: auto; }
+  .tool-text { margin-top: 6px; color: var(--ink, inherit); font-size: 13px; padding-left: 8px; border-left: 2px solid var(--line); }
   .tool-result { color: var(--muted); margin-top: 2px; }
   .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; max-width: 100%; }
   .working {
@@ -518,9 +519,15 @@ function whoText(m) {
 // It opens to show each call with its arguments and result.
 function toolSummary(recs) {
   const d = el("details", "tools");
-  const names = [...new Set(recs.map(r => r.name))];
-  d.append(el("summary", null, recs.length + (recs.length === 1 ? " tool call: " : " tool calls: ") + names.join(", ")));
+  const calls = recs.filter(r => (r.kind || "call") === "call");
+  const names = [...new Set(calls.map(r => r.name))];
+  d.append(el("summary", null, calls.length + (calls.length === 1 ? " tool call: " : " tool calls: ") + names.join(", ")));
+  // Records arrive in order: each round's pre-tool text, then its calls.
   for (const r of recs) {
+    if (r.kind === "text") {
+      d.append(renderMarkdown(r.result_or_error, el("div", "md tool-text")));
+      continue;
+    }
     const call = el("div", "tool");
     call.append(el("div", null, r.name + " " + JSON.stringify(r.arguments || {})));
     call.append(el("div", "tool-result", (r.ok ? "ok" : "error") + ": " + (r.result_or_error || "")));
@@ -649,7 +656,7 @@ function renderMessages() {
     const bubble = el("div", "bubble " + (m.role || "system"));
     const who = whoText(m);
     if (who) bubble.append(el("span", "who", who));
-    if (m.role === "bot" && m.run_id && !shownTools.has(m.run_id) && (state.tools[m.run_id] || []).length) {
+    if (m.role === "bot" && m.run_id && !shownTools.has(m.run_id) && (state.tools[m.run_id] || []).some(r => (r.kind || "call") === "call")) {
       shownTools.add(m.run_id);
       bubble.append(toolSummary(state.tools[m.run_id]));
     }

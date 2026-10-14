@@ -124,6 +124,13 @@ func (a *App) execute(botID, runID string) {
 		// It is not a thread message: stored announcements teach the next
 		// turn to stop after "Let me check" without calling a tool.
 		msgs = append(msgs, model.Message{Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls})
+		// Kept with the run's tool records so the page can show it in the
+		// expanded tool view, in order with the calls.
+		if strings.TrimSpace(resp.Content) != "" {
+			_ = a.st.AddRunTool(runID, bot.ID, store.ToolRecord{
+				Kind: "text", OK: true, Result: clip(resp.Content, maxReplyBytes),
+			})
+		}
 		for _, tc := range resp.ToolCalls {
 			if ctx.Err() != nil {
 				a.finishInterrupted(bot.ID, runID, ctx)

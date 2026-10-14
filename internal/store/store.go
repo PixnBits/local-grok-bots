@@ -230,6 +230,10 @@ type LogEvent struct {
 // ToolRecord is one tool call a run made, kept so the page can show what a
 // reply did after a reload. Arguments are redacted and the result is clipped.
 type ToolRecord struct {
+	// Kind is "call" for a tool call, or "text" for what the model wrote in
+	// the same response before its calls. Text records have no name or
+	// arguments; Result holds the text.
+	Kind      string          `json:"kind"`
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
 	OK        bool            `json:"ok"`
@@ -385,6 +389,7 @@ func (s *Store) evolve() error {
 		{"bots", "ssh_allow", "TEXT NOT NULL DEFAULT '[]'"},
 		{"timers", "name", "TEXT NOT NULL DEFAULT ''"},
 		{"runs", "input_through", "TEXT"},
+		{"run_tools", "kind", "TEXT NOT NULL DEFAULT 'call'"},
 	}
 	for _, a := range adds {
 		ok, err := s.hasColumn(a.table, a.col)
@@ -1640,8 +1645,11 @@ func (s *Store) AddRunTool(runID, botID string, rec ToolRecord) error {
 	if rec.OK {
 		ok = 1
 	}
-	_, err := s.db.Exec(`INSERT INTO run_tools(run_id, bot_id, name, arguments, ok, result, created_at) VALUES(?,?,?,?,?,?,?)`,
-		runID, botID, rec.Name, string(rec.Arguments), ok, rec.Result, FormatTime(Now()))
+	if rec.Kind == "" {
+		rec.Kind = "call"
+	}
+	_, err := s.db.Exec(`INSERT INTO run_tools(run_id, bot_id, kind, name, arguments, ok, result, created_at) VALUES(?,?,?,?,?,?,?,?)`,
+		runID, botID, rec.Kind, rec.Name, string(rec.Arguments), ok, rec.Result, FormatTime(Now()))
 	return err
 }
 
@@ -1654,7 +1662,7 @@ func (s *Store) RunTools(runIDs []string) (map[string][]ToolRecord, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	q := `SELECT run_id, name, arguments, ok, result, created_at FROM run_tools WHERE run_id IN (?` + strings.Repeat(",?", len(runIDs)-1) + `) ORDER BY id`
+	q := `SELECT run_id, kind, name, arguments, ok, result, created_at FROM run_tools WHERE run_id IN (?` + strings.Repeat(",?", len(runIDs)-1) + `) ORDER BY id`
 	args := make([]any, len(runIDs))
 	for i, r := range runIDs {
 		args[i] = r
@@ -1668,7 +1676,7 @@ func (s *Store) RunTools(runIDs []string) (map[string][]ToolRecord, error) {
 		var runID, argText string
 		var ok int
 		var rec ToolRecord
-		if err := rows.Scan(&runID, &rec.Name, &argText, &ok, &rec.Result, &rec.CreatedAt); err != nil {
+		if err := rows.Scan(&runID, &rec.Kind, &rec.Name, &argText, &ok, &rec.Result, &rec.CreatedAt); err != nil {
 			return nil, err
 		}
 		rec.Arguments = json.RawMessage(argText)
