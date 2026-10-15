@@ -82,9 +82,16 @@ func TestGeneratedSettingsDenyDaemonSecrets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{admin, policyPath, cliDir} {
+	// DATA_DIR/cli is denied around this bot's GROK_HOME: another bot's
+	// state is denied, the path down to grok-home is not.
+	for _, p := range []string{admin, policyPath, filepath.Join(cliDir, "bot")} {
 		if !strings.Contains(string(toml), strconv.Quote(p)) {
 			t.Fatalf("grok deny lacks %s:\n%s", p, toml)
+		}
+	}
+	for _, p := range []string{cliDir, filepath.Join(cliDir, "gbot"), filepath.Join(cliDir, "gbot", "grok-home")} {
+		if strings.Contains(string(toml), strconv.Quote(p)) {
+			t.Fatalf("grok deny covers its own home via %s:\n%s", p, toml)
 		}
 	}
 }
