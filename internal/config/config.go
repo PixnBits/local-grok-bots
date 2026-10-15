@@ -29,23 +29,27 @@ type Config struct {
 	// PolicyPath is the policy.toml to load. Empty skips the file and keeps
 	// built-in defaults. The daemon sets this to "policy.toml" unless POLICY_PATH is set.
 	PolicyPath string
+	// PermCallbackAddr is the loopback-only plain-HTTP listener for the
+	// Claude CLI's MCP permission callback when TLS is on. Default 127.0.0.1:0.
+	PermCallbackAddr string
 }
 
 func FromEnv() Config {
 	return Config{
-		DataDir:       getenv("DATA_DIR", "./data"),
-		BindAddr:      getenv("BIND_ADDR", "0.0.0.0:8080"),
-		OllamaURL:     getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
-		Model:         getenv("OLLAMA_MODEL", "llama3.2"),
-		AuthToken:     os.Getenv("AUTH_TOKEN"),
-		Version:       Version,
-		BuildBinds:    splitList(os.Getenv("SANDBOX_BUILD_BINDS")),
-		TLSCert:       os.Getenv("TLS_CERT"),
-		TLSKey:        os.Getenv("TLS_KEY"),
-		TLSSelfSigned: os.Getenv("TLS_SELF_SIGNED") == "1",
-		WhisperBin:    os.Getenv("WHISPER_BIN"),
-		WhisperModel:  os.Getenv("WHISPER_MODEL"),
-		PolicyPath:    getenv("POLICY_PATH", "policy.toml"),
+		DataDir:          getenv("DATA_DIR", "./data"),
+		BindAddr:         getenv("BIND_ADDR", "0.0.0.0:8080"),
+		OllamaURL:        getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
+		Model:            getenv("OLLAMA_MODEL", "llama3.2"),
+		AuthToken:        os.Getenv("AUTH_TOKEN"),
+		Version:          Version,
+		BuildBinds:       splitList(os.Getenv("SANDBOX_BUILD_BINDS")),
+		TLSCert:          os.Getenv("TLS_CERT"),
+		TLSKey:           os.Getenv("TLS_KEY"),
+		TLSSelfSigned:    os.Getenv("TLS_SELF_SIGNED") == "1",
+		WhisperBin:       os.Getenv("WHISPER_BIN"),
+		WhisperModel:     os.Getenv("WHISPER_MODEL"),
+		PermCallbackAddr: os.Getenv("PERM_CALLBACK_ADDR"),
+		PolicyPath:       getenv("POLICY_PATH", "policy.toml"),
 	}
 }
 

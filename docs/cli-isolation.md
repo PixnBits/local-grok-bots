@@ -504,3 +504,13 @@ Under `overrides = "refuse"` every hit fails the turn with
   Also check whether `claude_home = "isolated"` on macOS loses the Keychain
   login, as expected, and whether `claude auth status` JSON has the
   `configDirectory` field (CLI v2.1.268 or later).
+
+### Permission callback under TLS
+
+With `TLS_CERT`/`TLS_KEY` or `TLS_SELF_SIGNED=1` the main listener speaks HTTPS with a certificate the CLI would not trust, so the daemon opens a separate plain-HTTP listener for the Claude MCP permission tool:
+
+- Bound to `PERM_CALLBACK_ADDR`, default `127.0.0.1:0` (ephemeral). Only loopback IPs are accepted (`127.0.0.0/8`, `::1`); `localhost`, `0.0.0.0`, `::` and LAN addresses fail startup.
+- Serves only `POST /api/mcp/permission` and `POST /api/mcp/permission/{token}`, through the same handler, so the per-run MCP token, the token file and the `headersHelper` script are unchanged. No UI, API, `/login`, STT or decision route; everything else is 404.
+- `mcp.json` points at `http://127.0.0.1:<port>/api/mcp/permission`. The start is recorded as `perm_callback_listen` (event log and audit sink).
+- Without TLS nothing changes: no extra listener, the CLI calls the main listener as before.
+- Claude sandbox network rules are not changed. The MCP HTTP call is made by the `claude` process itself, which is outside the Bash sandbox, so no loopback port is added to `sandbox.network.allowedDomains`. Bash commands in the sandbox therefore cannot reach the callback port. Grok does not use the MCP permission tool, so it is unaffected.

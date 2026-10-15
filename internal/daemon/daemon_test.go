@@ -71,6 +71,16 @@ func newApp(t *testing.T, dir string, m model.Client) *App {
 	return app
 }
 
+func newAppCfg(t *testing.T, cfg config.Config) *App {
+	t.Helper()
+	app, err := New(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Shutdown)
+	return app
+}
+
 func serve(t *testing.T, app *App) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(app.Handler())

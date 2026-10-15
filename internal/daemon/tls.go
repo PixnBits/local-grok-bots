@@ -22,9 +22,9 @@ func tlsConfigured(c config.Config) bool {
 	return c.TLSSelfSigned || c.TLSCert != "" || c.TLSKey != ""
 }
 
-// permBaseFor is the origin the Claude CLI's MCP permission tool calls back.
-// The callback is plain HTTP, so under TLS there is no usable base: the CLI
-// then runs with prompts off and the broker denies residual asks (fail closed).
+// permBaseFor is the origin the Claude CLI's MCP permission tool calls back
+// before any loopback listener exists. Under TLS the main listener is not
+// plain HTTP, so this is empty until startPermCallback sets the loopback base.
 func permBaseFor(c config.Config) string {
 	if tlsConfigured(c) {
 		return ""

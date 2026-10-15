@@ -49,7 +49,9 @@ type App struct {
 	perm   *permission.Broker
 	// permBase is the HTTP origin the CLI calls back, such as http://127.0.0.1:8787.
 	// Empty means there is no permission host. A headless prompt still fails closed.
-	permBase   string
+	permBase string
+	// permSrv is the loopback-only permission callback listener (TLS only).
+	permSrv    *http.Server
 	permMu     sync.Mutex
 	permTokens map[string]permBind
 	// lgbLive holds per-run lgb tokens until that run's spool stops.
@@ -187,6 +189,14 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		cancel()
 		return nil, err
 	}
+	if tlsConfigured(cfg) {
+		if err := a.startPermCallback(); err != nil {
+			st.Close()
+			_ = aud.Close()
+			cancel()
+			return nil, err
+		}
+	}
 	a.wg.Add(1)
 	go a.timerLoop()
 	bots, err := st.ListBots()
@@ -217,6 +227,7 @@ func (a *App) Shutdown() {
 	a.rtMu.Unlock()
 	a.cancel()
 	a.wg.Wait()
+	a.stopPermCallback()
 	_ = a.st.FailRunning("shutdown")
 	_ = a.st.AddLog("", "daemon_stop", map[string]any{})
 	_ = a.st.Close()

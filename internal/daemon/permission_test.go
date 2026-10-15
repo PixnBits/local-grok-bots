@@ -5,8 +5,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/PixnBits/local-grok-bots/internal/config"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -249,7 +251,13 @@ printf '%s\n' '{"type":"result","result":"continued","session_id":"s","permissio
 	}
 }
 
-func TestFakeClaudePermissionRoundTrip(t *testing.T) {
+func TestFakeClaudePermissionRoundTrip(t *testing.T) { fakeClaudeRoundTrip(t, false) }
+
+// With TLS on, the CLI calls back on the loopback-only plain-HTTP listener
+// while the UI decides over HTTPS.
+func TestFakeClaudePermissionRoundTripTLS(t *testing.T) { fakeClaudeRoundTrip(t, true) }
+
+func fakeClaudeRoundTrip(t *testing.T, useTLS bool) {
 	dir := t.TempDir()
 	installFakeClaude(t, dir)
 	logPath := filepath.Join(dir, "argv.log")
@@ -257,7 +265,15 @@ func TestFakeClaudePermissionRoundTrip(t *testing.T) {
 	gate := filepath.Join(dir, "gate")
 	t.Setenv("LGB_ARGV_LOG", logPath)
 	t.Setenv("LGB_FAKE_GATE", gate)
-	app := newApp(t, dir, nil)
+	var app *App
+	if useTLS {
+		app = newAppCfg(t, config.Config{DataDir: dir, BindAddr: "127.0.0.1:0", OllamaURL: "http://127.0.0.1:9", Model: "test-model", Version: "0.1.0", TLSSelfSigned: true})
+		if !strings.HasPrefix(app.permBase, "http://127.0.0.1:") {
+			t.Fatalf("permBase under TLS = %q", app.permBase)
+		}
+	} else {
+		app = newApp(t, dir, nil)
+	}
 	lg, err := audit.Open(auditPath)
 	if err != nil {
 		t.Fatal(err)
@@ -272,8 +288,17 @@ func TestFakeClaudePermissionRoundTrip(t *testing.T) {
 		ToolAllow: []string{"Read"}, ToolDeny: []string{"Bash(rm *)"},
 	}
 	app.rtMu.Unlock()
-	srv := serve(t, app)
-	app.permBase = srv.URL
+	var srv *httptest.Server
+	if useTLS {
+		srv = httptest.NewTLSServer(app.Handler())
+		t.Cleanup(srv.Close)
+		old := http.DefaultClient
+		http.DefaultClient = srv.Client()
+		t.Cleanup(func() { http.DefaultClient = old })
+	} else {
+		srv = serve(t, app)
+		app.permBase = srv.URL
+	}
 	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Ada", "description": "p"}, "")
 	if res.StatusCode != 201 && res.StatusCode != 200 {
 		t.Fatalf("create %d %s", res.StatusCode, b)
