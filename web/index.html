@@ -261,8 +261,15 @@
   }
   .note.continue button { flex: none; }
   .note[hidden] { display: none !important; }
-  .composer { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); align-items: flex-end; }
-  .composer textarea { min-height: 44px; max-height: 40vh; height: 44px; resize: none; overflow-y: hidden; }
+  .composer { display: flex; gap: 6px; margin: 8px 12px 12px; padding: 6px 6px 6px 14px; border: 1px solid var(--line); border-radius: 26px; background: var(--panel, #fff); align-items: flex-end; }
+  .composer textarea { flex: 1; min-height: 36px; max-height: 40vh; height: 36px; resize: none; overflow-y: hidden; border: 0; padding: 8px 0; background: transparent; box-shadow: none; }
+  .composer textarea:focus { outline: none; }
+  .composer .ibtn { width: 36px; height: 36px; flex: none; border-radius: 50%; border: 0; background: transparent; color: var(--ink); font-size: 16px; padding: 0; }
+  .composer .ibtn.on { background: var(--err-bg); color: var(--err); }
+  .composer .round { width: 36px; height: 36px; flex: none; border-radius: 50%; border: 0; background: var(--ink); color: var(--panel, #fff); padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+  .composer .round svg { display: block; }
+  .composer.has-text #voice-cfg, .composer.has-text #mic-btn, .composer.has-text #voice-btn { display: none; }
+  .composer:not(.has-text) #send-btn { display: none; }
   .routine { display: grid; gap: 4px; padding: 8px 0; border-top: 1px solid var(--line); }
   .routine .meta { color: var(--muted); font-size: 12px; }
   .filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
@@ -373,11 +380,11 @@
         <div class="voice-preview" id="voice-preview" hidden aria-live="polite"><span class="final" id="vp-final"></span> <span class="interim" id="vp-interim"></span></div>
         <div class="voice-msg" id="voice-msg" aria-live="polite"></div>
         <form class="composer" id="composer">
-          <textarea id="composer-input" placeholder="Message… Enter to send, Shift+Enter for a new line"></textarea>
-          <button type="button" id="mic-btn" aria-label="Dictate" title="Dictate (on-device speech recognition)">🎤</button>
-          <button type="button" id="voice-btn" title="Voice conversation mode">Voice</button>
-          <button type="button" id="voice-cfg" class="ghost" aria-label="Voice settings" title="Voice settings">⚙</button>
-          <button class="primary" type="submit" id="send-btn">Send</button>
+          <textarea id="composer-input" rows="1" placeholder="Message…"></textarea>
+          <button type="button" class="ibtn" id="voice-cfg" aria-label="Voice settings" title="Voice settings">⚙</button>
+          <button type="button" class="ibtn" id="mic-btn" aria-label="Dictate" title="Dictate">🎤</button>
+          <button type="button" class="round" id="voice-btn" aria-label="Voice conversation" title="Voice conversation"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 10v4M7 7v10M11 4v16M15 8v8M19 11v2M23 10v4"/></svg></button>
+          <button type="submit" class="round" id="send-btn" aria-label="Send" title="Send"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 4l-1.4 1.4 5.6 5.6H4v2h12.2l-5.6 5.6L12 20l8-8z"/></svg></button>
         </form>
       </div>
     </section>
@@ -637,6 +644,8 @@ function botFromPath() {
 function setTitle() {
   const b = state.botId && currentBot();
   document.title = b ? b.name + " — Local Grok Bots" : "Local Grok Bots";
+  const ci = document.getElementById("composer-input");
+  if (ci) ci.placeholder = b ? "Message " + b.name : "Message…";
 }
 function goHome(push = true) {
   closeState();
@@ -1089,8 +1098,9 @@ function fitComposer() {
   const t = $("#composer-input");
   t.style.height = "auto";
   const max = window.innerHeight * 0.4;
-  t.style.height = Math.min(t.scrollHeight + 2, max) + "px";
-  t.style.overflowY = t.scrollHeight + 2 > max ? "auto" : "hidden";
+  t.style.height = Math.min(t.scrollHeight, max) + "px";
+  t.style.overflowY = t.scrollHeight > max ? "auto" : "hidden";
+  $("#composer").classList.toggle("has-text", t.value.trim() !== "");
 }
 $("#composer-input").addEventListener("input", fitComposer);
 async function send(override) {
@@ -1703,6 +1713,8 @@ function voiceDeviceProfile(nav) {
   const save = () => localStorage.setItem(KEY, JSON.stringify(cfg));
   const v = {rec: null, listening: false, finals: "", mode: false, turns: [], awaiting: false, speaking: false, localOK: null, summarizing: false};
   const msg = (t) => { $("#voice-msg").textContent = t || ""; };
+  v.engine = "checking…";
+  v.statusP = fetch(base() + "/api/stt/status", {headers: state.token ? {Authorization: "Bearer " + state.token} : {}}).then(r => r.json()).then(j => { v.daemonSTT = j; if (v.engine === "checking…") v.engine = j.available ? "Framework speech recognition (" + j.engine + "), ready" : "Framework speech recognition not configured"; }).catch(() => { v.engine = "Framework speech recognition unreachable"; });
   const preview = (fin, interim) => {
     $("#vp-final").textContent = fin; $("#vp-interim").textContent = interim;
     $("#voice-preview").hidden = !(fin || interim);
@@ -1715,10 +1727,11 @@ function voiceDeviceProfile(nav) {
     if (!window.isSecureContext) {
       throw new Error("Microphone needs HTTPS or localhost. Open this page via https:// (TLS_SELF_SIGNED=1) or http://localhost.");
     }
-    if (!SR) throw new Error("This browser has no speech recognition. Use Chrome or Edge 139+.");
-    if (v.localOK) return;
+    await v.statusP;
+    if (v.localOK || v.useDaemon) return;
+    if (!SR) { v.useDaemon = true; return; }
     if (!("processLocally" in SR.prototype) || typeof SR.available !== "function") {
-      throw new Error("This browser can't recognize speech on-device (needs Chrome/Edge 139+). Refusing cloud recognition.");
+      v.useDaemon = true; return;
     }
     const opts = {langs: [cfg.lang], processLocally: true};
     let a = await SR.available(opts);
@@ -1728,11 +1741,95 @@ function voiceDeviceProfile(nav) {
       if (!ok) throw new Error("Language pack install failed for " + cfg.lang + ".");
       a = await SR.available(opts);
     }
-    if (a !== "available") throw new Error("On-device recognition unavailable for " + cfg.lang + " (" + a + ").");
-    v.localOK = true;
+    if (a !== "available") { v.useDaemon = true; return; }
+    v.localOK = true; v.engine = "on-device Web Speech (" + cfg.lang + ")";
     msg("");
   }
 
+  // ---- Daemon STT fallback: capture PCM here, transcribe on the Framework. ----
+  // Audio goes only to this daemon (same origin), never to a third party.
+  function authHeaders(extra) { const h = Object.assign({}, extra || {}); if (state.token) h.Authorization = "Bearer " + state.token; return h; }
+  async function daemonTranscribe(pcm, partial) {
+    const res = await fetch(base() + "/api/stt", {method: "POST", body: pcm, headers: authHeaders(Object.assign({"Content-Type": "application/octet-stream"}, partial ? {"X-STT-Partial": "1"} : {}))});
+    if (res.status === 429) return null;
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(j.error || ("speech recognition failed (" + res.status + ")"));
+    return j.text || "";
+  }
+  function joinPCM(chunks) {
+    let n = 0; for (const c of chunks) n += c.length;
+    const out = new Int16Array(n); let o = 0;
+    for (const c of chunks) { out.set(c, o); o += c.length; }
+    return out;
+  }
+  async function startCapture(voiceMode) {
+    if (!v.daemonSTT || !v.daemonSTT.available) throw new Error("Speech recognition unavailable: this browser has no on-device engine and the daemon has no Whisper configured.");
+    v.engine = "Framework speech recognition (" + v.daemonSTT.engine + ")";
+    const stream = await navigator.mediaDevices.getUserMedia({audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true}});
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(stream);
+    const proc = ctx.createScriptProcessor(4096, 1, 1);
+    const ratio = ctx.sampleRate / 16000;
+    const cap = {stream, ctx, src, proc, chunks: [], speech: false, lastVoice: 0, floor: 0.003, voiceMode, busy: false, gen: 0, partialText: ""};
+    v.cap = cap;
+    proc.onaudioprocess = (e) => {
+      if (v.cap !== cap) return;
+      const inp = e.inputBuffer.getChannelData(0);
+      let sum = 0; for (let i = 0; i < inp.length; i++) sum += inp[i] * inp[i];
+      const rms = Math.sqrt(sum / inp.length);
+      const now = performance.now();
+      const loud = rms > Math.max(0.012, cap.floor * 3);
+      if (!loud) cap.floor = cap.floor * 0.95 + rms * 0.05;
+      if (loud) {
+        cap.lastVoice = now;
+        if (!cap.speech) { cap.speech = true; if (v.speaking && synth) { synth.cancel(); v.speaking = false; } }
+      }
+      // Keep a little lead-in before speech, drop long leading silence.
+      const n = Math.floor(inp.length / ratio), out = new Int16Array(n);
+      for (let i = 0; i < n; i++) { const s = Math.max(-1, Math.min(1, inp[Math.floor(i * ratio)])); out[i] = s < 0 ? s * 0x8000 : s * 0x7fff; }
+      cap.chunks.push(out);
+      if (!cap.speech && cap.chunks.length > 4) cap.chunks.shift();
+      if (cap.speech && voiceMode && now - cap.lastVoice > 1000) stopCapture(true);
+    };
+    src.connect(proc); proc.connect(ctx.destination);
+    preview("", "listening…");
+    cap.timer = setInterval(async () => {
+      if (v.cap !== cap || !cap.speech || cap.busy) return;
+      cap.busy = true;
+      try {
+        const t = await daemonTranscribe(joinPCM(cap.chunks).buffer, true);
+        if (v.cap === cap && t !== null) { cap.partialText = t; preview("", t || "…"); }
+      } catch {} finally { cap.busy = false; }
+    }, 1500);
+  }
+  async function stopCapture(transcribe) {
+    const cap = v.cap; if (!cap) return;
+    v.cap = null;
+    clearInterval(cap.timer);
+    try { cap.proc.disconnect(); cap.src.disconnect(); } catch {}
+    cap.stream.getTracks().forEach(t => t.stop());
+    cap.ctx.close().catch(() => {});
+    if (!transcribe || !cap.speech) {
+      preview("", "");
+      if (!cap.voiceMode) $("#mic-btn").classList.remove("on");
+      if (cap.voiceMode && v.mode && transcribe) resumeListening();
+      return;
+    }
+    preview(cap.partialText, " transcribing…");
+    const t0 = performance.now();
+    let text = "";
+    try { text = await daemonTranscribe(joinPCM(cap.chunks).buffer, false); }
+    catch (err) { msg(err.message); }
+    v.lastSTTms = Math.round(performance.now() - t0);
+    text = (text || "").replace(/\[(BLANK_AUDIO|MUSIC|NOISE)[^\]]*\]/gi, "").trim();
+    if (cap.voiceMode) {
+      if (!v.mode) { preview("", ""); return; }
+      if (!text) { preview("", ""); resumeListening(); return; }
+      v.finals = text; endUtterance();
+    } else {
+      v.finals = text; flushDictation();
+    }
+  }
   function startRec() {
     const r = new SR();
     r.lang = cfg.lang; r.continuous = true; r.interimResults = true; r.processLocally = true;
@@ -1776,11 +1873,11 @@ function voiceDeviceProfile(nav) {
 
   async function toggleMic() {
     if (v.mode) return;
-    if (v.rec) { stopRec(); return; }   // onend flushes
+    if (v.rec || v.cap) { v.cap ? stopCapture(true) : stopRec(); return; }
     if (synth) synth.cancel();
     try { await ensureLocal(); } catch (err) { msg(err.message); return; }
     $("#mic-btn").classList.add("on");
-    try { startRec(); } catch (err) { msg(err.message); $("#mic-btn").classList.remove("on"); }
+    try { v.useDaemon ? await startCapture(false) : startRec(); } catch (err) { msg(err.message); $("#mic-btn").classList.remove("on"); }
   }
 
   async function endUtterance() {
@@ -1794,9 +1891,10 @@ function voiceDeviceProfile(nav) {
     if (!ok) { v.awaiting = false; resumeListening(); }
   }
   function resumeListening() {
-    if (!v.mode || v.awaiting || v.rec) return;
+    if (!v.mode || v.awaiting || v.rec || v.cap) return;
     setVoiceState("listening");
-    try { startRec(); } catch (err) { msg(err.message); }
+    if (v.useDaemon) startCapture(true).catch(err => msg(err.message));
+    else { try { startRec(); } catch (err) { msg(err.message); } }
   }
 
   function pickVoice() {
@@ -1841,13 +1939,14 @@ function voiceDeviceProfile(nav) {
     if (!state.botId) { msg("Choose a bot first."); return; }
     if (v.rec) stopRec();
     try { await ensureLocal(); } catch (err) { msg(err.message); return; }
+    if (v.useDaemon && !v.daemonSTT) { msg("Speech recognition is not available: no on-device engine here and the daemon has none."); return; }
     v.mode = true; v.turns = []; v.awaiting = false;
     $("#voice-btn").classList.add("on"); $("#voice-bar").hidden = false; $("#mic-btn").disabled = true;
     resumeListening();
   }
   function stopAll() {
     v.mode = false; clearTimeout(v.endT);
-    stopRec(); if (synth) synth.cancel();
+    stopRec(); stopCapture(false); if (synth) synth.cancel();
     preview("", ""); v.finals = "";
     $("#voice-btn").classList.remove("on"); $("#voice-bar").hidden = true; $("#mic-btn").disabled = false;
     $("#mic-btn").classList.remove("on");
@@ -1871,9 +1970,8 @@ function voiceDeviceProfile(nav) {
     sel.value = cfg.voice;
     const d = voiceDeviceProfile(navigator);
     $("#vs-device").textContent = "Device: " + (d.cores || "?") + " cores, " + (d.mem ? d.mem + " GB" : "memory unknown") + ", WebGPU " + (d.gpu ? "yes" : "no") +
-      ". STT: Web Speech on-device. " + (d.heavyOK ? "Heavier WASM models (Moonshine/Whisper) would fit here but are not in this build." : "Staying light: WASM models disabled.");
-    $("#vs-stt").textContent = window.isSecureContext ? (SR ? (SR.available ? "Recognition: on-device check runs when you press the mic." : "Recognition: this browser lacks on-device mode; mic disabled.") : "Recognition: not supported in this browser.")
-      : "Not a secure context: mic is blocked. Use https:// or localhost.";
+      ". " + (d.heavyOK ? "Heavier in-browser models would fit here but are not in this build." : "Staying light: in-browser models disabled.");
+    $("#vs-stt").textContent = "Speech recognition: " + (v.engine || "checking…");
   }
   const bind = (id, k, prop) => $(id).addEventListener("change", (e) => { cfg[k] = e.target[prop]; if (k === "lang") v.localOK = null; save(); });
   bind("#vs-tts", "tts", "checked"); bind("#vs-autosend", "autosend", "checked"); bind("#vs-bargein", "bargein", "checked");
