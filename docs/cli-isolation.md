@@ -160,12 +160,18 @@ The `--settings` file adds:
   and `@anthropic-ai/claude-agent-sdk` 0.3.300 `sdk.d.ts`
   (`SandboxCredentialsConfigSchema`). That package is not vendored; the check
   was the published type definitions. The daemon writes `deny` only.
+  Tests check that the generated settings file carries these entries; that
+  Claude actually enforces them was not verified against a real `claude`
+  binary in this repo's tests.
 
 Claude's sandbox needs `bwrap` and `socat` on Linux (Seatbelt is built into
 macOS). Before launch the daemon checks for both; if one is missing, or Claude
 exits with a sandbox error, the turn fails with a notice naming what is
 missing and a `cli_sandbox_unavailable` entry in the bot log and audit. A
 managed policy can set `claude_sandbox = "off"`; a local one can't (warning).
+`"off"` only stops the daemon from writing its own sandbox block. It does
+not turn off a sandbox the user or managed settings already enable: those
+keys are still copied (see below).
 
 How this combines with sandbox settings a user already has (from Claude's
 settings and sandboxing docs, Claude Code v2.1.285+):
