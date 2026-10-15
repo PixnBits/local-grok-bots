@@ -32,7 +32,7 @@ func setIn(t *testing.T, app *App, bot store.Bot, in string) error {
 func TestCLIRepeatingTimerMinimum(t *testing.T) {
 	app, bot := cliTimerApp(t)
 	err := setEvery(t, app, bot, "1s")
-	if err == nil || !strings.Contains(err.Error(), "interval must be at least 1m") {
+	if err == nil || !strings.Contains(err.Error(), "shorter than the minimum 5m") || !strings.Contains(err.Error(), "cli.lgb.min_timer_interval") {
 		t.Fatalf("err = %v", err)
 	}
 	err = setEvery(t, app, bot, "2m")
@@ -99,14 +99,11 @@ func TestCLIScheduledTurnCap(t *testing.T) {
 
 func TestOllamaTimerUnchangedUnlessPolicy(t *testing.T) {
 	app, bot := timerApp(t)
-	if err := setEvery(t, app, bot, "1s"); err == nil || !strings.Contains(err.Error(), "interval must be at least 1m") {
-		t.Fatalf("hard floor: %v", err)
-	}
-	if err := setEvery(t, app, bot, "1m"); err != nil {
-		t.Fatal(err)
+	if err := setEvery(t, app, bot, "1s"); err != nil {
+		t.Fatalf("ollama every 1s: %v", err)
 	}
 	timers, _ := app.st.ListTimers(bot.ID)
-	if len(timers) != 1 || timers[0].Schedule != "1m" {
+	if len(timers) != 1 || timers[0].Schedule != "1s" {
 		t.Fatalf("timers %+v", timers)
 	}
 	_, _, help, err := app.lgbParse(bot, []string{"help"})
@@ -122,7 +119,7 @@ func TestOllamaTimerUnchangedUnlessPolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setEvery(t, app, other, "90s"); err == nil || !strings.Contains(err.Error(), "minimum 2m") {
+	if err := setEvery(t, app, other, "30s"); err == nil || !strings.Contains(err.Error(), "minimum 2m") {
 		t.Fatalf("policy floor: %v", err)
 	}
 	if err := setEvery(t, app, other, "20m"); err != nil {
@@ -134,10 +131,7 @@ func TestOllamaTimerUnchangedUnlessPolicy(t *testing.T) {
 	app.policy.LGBMinTimer = 0
 	app.policy.LGBMaxSchedSet = true
 	app.policy.LGBMaxSchedPerHour = 0
-	if err := setEvery(t, app, bot, "1s"); err == nil || !strings.Contains(err.Error(), "interval must be at least 1m") {
-		t.Fatalf("hard floor still applies when policy opts out: %v", err)
-	}
-	if err := setEvery(t, app, bot, "1m"); err != nil {
-		t.Fatalf("cli opt-out above the hard floor: %v", err)
+	if err := setEvery(t, app, bot, "1s"); err != nil {
+		t.Fatalf("cli opt-out: %v", err)
 	}
 }

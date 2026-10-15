@@ -599,11 +599,6 @@ func (a *App) setTimer(bot store.Bot, args map[string]any) (string, error) {
 		if perr != nil {
 			return "", badArgs("every must be an interval like \"30s\", \"5m\", \"2h\", or \"1d\", got %q", every)
 		}
-		// Hard floor for every bot-created repeat. Policy may raise it
-		// (guardBotTimer) and cannot lower it, including a zero opt-out.
-		if d < minBotTimerInterval {
-			return "", badArgs("interval must be at least 1m")
-		}
 		if err = a.guardBotTimer(bot.ID, d, time.Time{}, false); err != nil {
 			return "", err
 		}
