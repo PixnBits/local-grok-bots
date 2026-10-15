@@ -18,17 +18,25 @@ type Config struct {
 	AuthToken  string
 	Version    string
 	BuildBinds []string
+	// TLS: either TLSCert+TLSKey files, or TLSSelfSigned to generate a
+	// LAN cert under DATA_DIR/tls. Needed for browser mic access off localhost.
+	TLSCert       string
+	TLSKey        string
+	TLSSelfSigned bool
 }
 
 func FromEnv() Config {
 	return Config{
-		DataDir:    getenv("DATA_DIR", "./data"),
-		BindAddr:   getenv("BIND_ADDR", "0.0.0.0:8080"),
-		OllamaURL:  getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
-		Model:      getenv("OLLAMA_MODEL", "llama3.2"),
-		AuthToken:  os.Getenv("AUTH_TOKEN"),
-		Version:    Version,
-		BuildBinds: splitList(os.Getenv("SANDBOX_BUILD_BINDS")),
+		DataDir:       getenv("DATA_DIR", "./data"),
+		BindAddr:      getenv("BIND_ADDR", "0.0.0.0:8080"),
+		OllamaURL:     getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
+		Model:         getenv("OLLAMA_MODEL", "llama3.2"),
+		AuthToken:     os.Getenv("AUTH_TOKEN"),
+		Version:       Version,
+		BuildBinds:    splitList(os.Getenv("SANDBOX_BUILD_BINDS")),
+		TLSCert:       os.Getenv("TLS_CERT"),
+		TLSKey:        os.Getenv("TLS_KEY"),
+		TLSSelfSigned: os.Getenv("TLS_SELF_SIGNED") == "1",
 	}
 }
 

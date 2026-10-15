@@ -117,7 +117,17 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		err := srv.ListenAndServe()
+		cert, key, terr := a.tlsFiles()
+		if terr != nil {
+			errCh <- terr
+			return
+		}
+		var err error
+		if cert != "" {
+			err = srv.ListenAndServeTLS(cert, key)
+		} else {
+			err = srv.ListenAndServe()
+		}
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
