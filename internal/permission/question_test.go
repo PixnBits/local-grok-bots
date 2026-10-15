@@ -37,7 +37,7 @@ func TestAskUserQuestionIsNeverAutoAllowed(t *testing.T) {
 		pol := bypass
 		pol.Deny = []string{"AskUserQuestion"}
 		out := b.Evaluate(context.Background(), pol, req)
-		if out.Decision != Deny || out.Source != "policy" || out.Rule != "AskUserQuestion" || out.UpdatedInput != nil {
+		if out.Decision != Deny || out.Source != "policy" || out.Rule != "AskUserQuestion" || out.UpdatedInput != nil || out.Message != "denied by policy rule AskUserQuestion" {
 			t.Fatalf("%+v", out)
 		}
 	})
@@ -45,7 +45,7 @@ func TestAskUserQuestionIsNeverAutoAllowed(t *testing.T) {
 		b := New(Options{})
 		b.AddHook(func(Request) HookResult { return HookResult{Decision: "deny", Rule: "stop"} })
 		out := b.Evaluate(context.Background(), bypass, req)
-		if out.Source != "hook" || out.Decision != Deny {
+		if out.Source != "hook" || out.Decision != Deny || out.Message != "denied by hook stop" {
 			t.Fatalf("%+v", out)
 		}
 	})
@@ -345,4 +345,22 @@ func TestFreeTextAnswerCap(t *testing.T) {
 	}
 	b.DecideFor("bot", "run", "multi", Deny)
 	<-done
+}
+
+func TestQuestionSkipSaysSkipped(t *testing.T) {
+	b := New(Options{UIPresent: func(string) bool { return true }})
+	done := make(chan Outcome, 1)
+	go func() {
+		done <- b.Evaluate(context.Background(), policy.Permission{UIPrompts: true, PromptTimeout: time.Second}, Request{
+			ID: "skip", RunID: "run", BotID: "bot", Tool: "AskUserQuestion", Args: sampleQuestion(false),
+		})
+	}()
+	waitForPending(t, b, "skip")
+	if err := b.DecideFor("bot", "run", "skip", Deny); err != nil {
+		t.Fatal(err)
+	}
+	out := <-done
+	if out.Decision != Deny || out.Source != "ui" || out.Behavior != "deny" || out.UpdatedInput != nil || out.Message != "The user did not answer the question (skipped)." {
+		t.Fatalf("%+v", out)
+	}
 }

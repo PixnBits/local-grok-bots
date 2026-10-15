@@ -325,7 +325,7 @@ Question text is redacted with the usual redactor; `multiSelect` stays a
 boolean. The page shows a header chip, the question, radios or checkboxes
 with their descriptions, an Other text field, Submit, Skip, and the countdown.
 Submit posts `{"decision":"answer","answers":{<question text>: <value>}}`.
-Skip posts `{"decision":"deny"}`. Text is set with `textContent`.
+Skip posts `{"decision":"deny"}`. The decision stays a UI deny; Claude's message uses the reason word `skipped`. Text is set with `textContent`.
 
 Answer keys Claude receives are the original question text. The page may send
 the redacted text it was shown; the broker maps that back to the original and

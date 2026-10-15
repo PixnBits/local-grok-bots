@@ -306,7 +306,7 @@ func questionDenyMessage(tool, behavior, source, rule string) string {
 		case "timeout", "no_ui", "cancel":
 			return "The user did not answer the question (" + source + ")."
 		case "ui":
-			return "The user did not answer the question (deny)."
+			return "The user did not answer the question (skipped)."
 		}
 	}
 	return denyMessage(behavior, source, rule)

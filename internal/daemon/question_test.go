@@ -623,6 +623,32 @@ func questionSSE(t *testing.T, base, botID, runID, token string) <-chan string {
 	return events
 }
 
+func TestQuestionSkipSaysSkipped(t *testing.T) {
+	const want = `{"behavior":"deny","message":"The user did not answer the question (skipped)."}`
+	for _, transport := range []string{policy.TransportMCP, policy.TransportStreamControl} {
+		t.Run(transport, func(t *testing.T) {
+			f := startQuestion(t, transport, "question", qSingleIn, 20*time.Second)
+			f.openGate()
+			id, raw := f.waitRequest()
+			if !strings.Contains(raw, `"kind":"question"`) {
+				t.Fatalf("request %s", raw)
+			}
+			res, b := do(t, "POST", f.decide(id), map[string]any{"decision": "deny"}, "sekrit")
+			if res.StatusCode != http.StatusOK {
+				t.Fatalf("skip %d %s", res.StatusCode, b)
+			}
+			got := f.waitDone()
+			if got.LastRunStatus != "done" || got.LastRunError != "" {
+				t.Fatalf("run %s %s", got.LastRunStatus, got.LastRunError)
+			}
+			if body := f.responseBody(); body != want {
+				t.Fatalf("response\n%s\nwant\n%s", body, want)
+			}
+			f.assertQuestionRecord(0, "ui", "deny", false)
+		})
+	}
+}
+
 func TestFreeTextAnswerIs400(t *testing.T) {
 	app := newApp(t, t.TempDir(), nil)
 	app.cfg.AuthToken = "sekrit"
