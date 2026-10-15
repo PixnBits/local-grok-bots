@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -53,6 +54,13 @@ type Request struct {
 	ToolUseID string
 	// Transport is mcp, stream_control, or none. Empty omits the field.
 	Transport string
+	// Kind is "question" for an interactive question, empty otherwise.
+	Kind string
+	// Answered is how many questions the user answered. It is recorded
+	// only when Kind is question.
+	Answered int
+	// AuditAnswers is the accepted answer map. Emit redacts it.
+	AuditAnswers map[string]string
 }
 
 // Outcome is the broker's decision. Behavior is allow or deny, which is the
@@ -64,6 +72,8 @@ type Outcome struct {
 	Source   string
 	Rule     string
 	Message  string
+	// UpdatedInput replaces the tool input on allow. Nil keeps the original.
+	UpdatedInput map[string]any
 }
 
 // PublishFunc emits a permission_request or permission_decision event.
@@ -109,6 +119,10 @@ type wait struct {
 	sessionID string
 	tool      string
 	sessionOK bool
+	kind      string
+	questions []Question
+	answers   map[string]string
+	notes     map[string]map[string]any
 	ch        chan string
 	once      sync.Once
 }
@@ -184,8 +198,18 @@ func (b *Broker) Evaluate(ctx context.Context, pol policy.Permission, req Reques
 	if rule := matchRules(pol.Ask, req.Tool, text); rule != "" && askRule == "" {
 		askRule = rule
 	}
+	if isInteractiveQuestion(req.Tool) {
+		qs, err := parseQuestions(req.Args)
+		if err != nil {
+			req.Kind = "question"
+			out := b.complete(req, Deny, "policy", "malformed")
+			out.Message = "AskUserQuestion input is malformed"
+			return out
+		}
+		return b.canUseTool(ctx, pol, req, askRule, qs)
+	}
 	if askRule != "" {
-		return b.canUseTool(ctx, pol, req, askRule)
+		return b.canUseTool(ctx, pol, req, askRule, nil)
 	}
 	if sawAllow {
 		rule := allowHook.Rule
@@ -203,7 +227,7 @@ func (b *Broker) Evaluate(ctx context.Context, pol policy.Permission, req Reques
 	if b.granted(req) {
 		return b.complete(req, Allow, "ui", "session")
 	}
-	return b.canUseTool(ctx, pol, req, "")
+	return b.canUseTool(ctx, pol, req, "", nil)
 }
 
 // DecideFor records a UI answer. allow_session is refused when the request
@@ -231,6 +255,9 @@ func (b *Broker) DecideFor(botID, runID, reqID, decision string) error {
 	if w.botID != botID || w.runID != runID {
 		return ErrMismatch
 	}
+	if w.kind == "question" && decision != Deny {
+		return fmt.Errorf("%w: a question accepts answer or deny", ErrAnswer)
+	}
 	if decision == AllowSession && !w.sessionOK {
 		return ErrSessionGrant
 	}
@@ -241,6 +268,40 @@ func (b *Broker) DecideFor(botID, runID, reqID, decision string) error {
 	if decision == AllowSession {
 		b.rememberLocked(w)
 	}
+	return nil
+}
+
+// Answer records the user's choices for a question request.
+// A non-question, a bad answer, or allow_once on a question leaves it pending.
+func (b *Broker) Answer(botID, runID, reqID string, answers map[string]string, notes map[string]Note) error {
+	if b == nil {
+		return ErrNotFound
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	w := b.pending[reqID]
+	if w == nil {
+		if d, ok := b.decided[reqID]; ok && d.botID == botID && d.runID == runID {
+			return ErrDecided
+		}
+		return ErrNotFound
+	}
+	if w.botID != botID || w.runID != runID {
+		return ErrMismatch
+	}
+	if w.kind != "question" {
+		return fmt.Errorf("%w: not a question", ErrAnswer)
+	}
+	canon, ann, err := validateAnswers(w.questions, answers, notes)
+	if err != nil {
+		return err
+	}
+	w.answers = canon
+	w.notes = ann
+	if !w.resolve(Answer) {
+		return ErrDecided
+	}
+	b.markDecidedLocked(w)
 	return nil
 }
 
@@ -259,7 +320,11 @@ func (b *Broker) Record(req Request, decision, source, rule string) {
 	b.emit(req, decision, source, rule)
 }
 
-func (b *Broker) canUseTool(ctx context.Context, pol policy.Permission, req Request, rule string) Outcome {
+func (b *Broker) canUseTool(ctx context.Context, pol policy.Permission, req Request, rule string, qs []Question) Outcome {
+	question := qs != nil
+	if question {
+		req.Kind = "question"
+	}
 	timeout := pol.PromptTimeout
 	if timeout <= 0 {
 		timeout = 60 * time.Second
@@ -267,13 +332,16 @@ func (b *Broker) canUseTool(ctx context.Context, pol policy.Permission, req Requ
 	if !pol.UIPrompts || b.uiPresent == nil || !b.uiPresent(req.RunID) {
 		return b.complete(req, Deny, "no_ui", rule)
 	}
+	sessionOK := pol.AllowSessionGrants && !question
 	w := &wait{
 		id:        req.ID,
 		botID:     req.BotID,
 		runID:     req.RunID,
 		sessionID: req.SessionID,
 		tool:      req.Tool,
-		sessionOK: pol.AllowSessionGrants,
+		sessionOK: sessionOK,
+		kind:      req.Kind,
+		questions: qs,
 		ch:        make(chan string, 1),
 	}
 	b.mu.Lock()
@@ -281,15 +349,20 @@ func (b *Broker) canUseTool(ctx context.Context, pol policy.Permission, req Requ
 	b.mu.Unlock()
 
 	deadline := b.now().Add(timeout)
-	b.publish(req.RunID, "permission_request", withTransport(map[string]any{
+	fields := map[string]any{
 		"id":              req.ID,
 		"run_id":          req.RunID,
 		"bot_id":          req.BotID,
 		"tool":            req.Tool,
 		"arguments":       audit.RedactValue(req.Args),
 		"deadline":        deadline.UTC().Format(time.RFC3339Nano),
-		"session_allowed": pol.AllowSessionGrants,
-	}, req.Transport))
+		"session_allowed": sessionOK,
+	}
+	if question {
+		fields["kind"] = "question"
+		fields["questions"] = publicQuestions(qs)
+	}
+	b.publish(req.RunID, "permission_request", withTransport(fields, req.Transport))
 
 	waitCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -313,7 +386,15 @@ func (b *Broker) canUseTool(ctx context.Context, pol policy.Permission, req Requ
 	case "timeout":
 		decision, source = Deny, "timeout"
 	}
-	return b.complete(req, decision, source, rule)
+	if question && decision == Answer {
+		req.Answered = len(w.answers)
+		req.AuditAnswers = w.answers
+	}
+	out := b.complete(req, decision, source, rule)
+	if decision == Answer {
+		out.UpdatedInput = withAnswers(req.Args, w.answers, w.notes)
+	}
+	return out
 }
 
 func (b *Broker) finishWait(w *wait, kind string) {
@@ -348,7 +429,7 @@ func (w *wait) resolve(decision string) bool {
 
 func (b *Broker) complete(req Request, decision, source, rule string) Outcome {
 	behavior := Deny
-	if decision == Allow || decision == AllowOnce || decision == AllowSession {
+	if decision == Allow || decision == AllowOnce || decision == AllowSession || decision == Answer {
 		behavior = "allow"
 	} else {
 		decision = Deny
@@ -360,7 +441,7 @@ func (b *Broker) complete(req Request, decision, source, rule string) Outcome {
 		Decision: decision,
 		Source:   source,
 		Rule:     rule,
-		Message:  denyMessage(behavior, source, rule),
+		Message:  questionDenyMessage(req.Tool, behavior, source, rule),
 	}
 }
 
@@ -381,6 +462,10 @@ func (b *Broker) emit(req Request, decision, source, rule string) {
 	if req.ToolUseID != "" {
 		payload["tool_use_id"] = req.ToolUseID
 	}
+	if req.Kind == "question" {
+		payload["kind"] = "question"
+		payload["answered"] = req.Answered
+	}
 	b.publish(req.RunID, "permission_decision", payload)
 	if b.audit == nil {
 		return
@@ -389,7 +474,7 @@ func (b *Broker) emit(req Request, decision, source, rule string) {
 	if err != nil {
 		raw = []byte(`{}`)
 	}
-	b.audit(withTransport(map[string]any{
+	rec := map[string]any{
 		"event":      "permission_decision",
 		"source":     source,
 		"rule":       rule,
@@ -400,7 +485,15 @@ func (b *Broker) emit(req Request, decision, source, rule string) {
 		"time":       when,
 		"decision":   decision,
 		"request_id": req.ID,
-	}, req.Transport))
+	}
+	if req.Kind == "question" {
+		rec["kind"] = "question"
+		rec["answered"] = req.Answered
+		if req.AuditAnswers != nil {
+			rec["answers"] = redactAnswers(req.AuditAnswers)
+		}
+	}
+	b.audit(withTransport(rec, req.Transport))
 }
 
 func withTransport(fields map[string]any, transport string) map[string]any {
