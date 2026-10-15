@@ -85,8 +85,8 @@ func (a *App) consumeIdleKill(botID string) bool {
 	return true
 }
 
-// killIdle stops a live CLI after idle_timeout_minutes with no user message
-// and no turn start, unless a user-created timer is due inside
+// killIdle stops a live CLI after idle_timeout_minutes with no user message,
+// no turn start, and no CLI output (tokens, tool calls, results, decisions), unless a user-created timer is due inside
 // imminent_timer_minutes. Bot-created timers do not keep the process.
 // The kill is a process-group kill. The stored session_id is kept.
 func (a *App) killIdle() {
@@ -109,8 +109,14 @@ func (a *App) killIdle() {
 		cands = append(cands, cand{id: id, last: a.activity[id], cancel: st.cancel})
 	}
 	a.rtMu.Unlock()
+	waiting := a.perm.PendingCounts()
 	for _, c := range cands {
 		if c.last.IsZero() || now.Sub(c.last) < idle {
+			continue
+		}
+		// A turn blocked on the user's approval is not idle. The prompt
+		// timeout governs it.
+		if waiting[c.id] > 0 {
 			continue
 		}
 		if a.timerSoon(c.id, now) {

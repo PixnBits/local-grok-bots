@@ -30,6 +30,54 @@ lgb_manage_bots = false
 # env = { ANTHROPIC_BASE_URL = "https://gateway.corp.example" }
 ```
 
+## Timeouts
+
+Every limit on a run is a policy key. Precedence is the same as other keys:
+managed settings, then `policy.toml`, then the default. Managed policy can
+also set a ceiling (`max_*`); the effective value is the smaller of the
+setting (or default) and the ceiling. A `max_*` key in `policy.toml` is
+ignored with a warning. Values are seconds or a Go duration, at most 24h.
+A bad value fail-closes like any other parse error.
+
+```toml
+[cli]
+# Wall clock for one CLI turn (claude or grok). Default 2h. On expiry the
+# turn ends with error turn_timeout.
+turn_timeout = "2h"
+# Kill a CLI turn that produced no output (tokens, tool calls, results,
+# decisions) and got no user message for this long. A turn waiting on a
+# permission card is never idle-killed; prompt_timeout governs it.
+idle_timeout_minutes = 30
+# max_turn_timeout = "4h"          # managed only
+
+[cli.permission]
+# How long a permission or AskUserQuestion card waits, with or without a
+# page open. Expiry denies (source timeout). Default 10m. With the mcp
+# transport the daemon sets MCP_TOOL_TIMEOUT for Claude to this plus 1m.
+prompt_timeout = "10m"
+# max_prompt_timeout = "30m"       # managed only
+
+[ollama]
+# Whole Ollama run, all tool rounds. Default 10m.
+run_timeout = "10m"
+# One model call inside a run. Default 3m.
+model_timeout = "3m"
+# max_run_timeout = "1h"           # managed only
+# max_model_timeout = "10m"        # managed only
+```
+
+Before this, a CLI turn also ran under a fixed 10-minute run deadline that
+was not configurable, and the idle kill counted only from the turn start, so
+a busy turn was cut at `idle_timeout_minutes`.
+
+A run that fails, times out, is interrupted, or is cancelled keeps what it
+did. Text streamed after the last tool call is stored as the bot's reply,
+earlier text and every tool call with its result and every permission or
+question decision stay in the run's tool records, and a `Notice: Run ...`
+thread message tied to the run carries the error. The page shows the run's
+tool summary on that notice when there is no reply. Notices are not turn
+input and do not start a run. This holds for claude, grok, and Ollama.
+
 ## Launch
 
 Every CLI turn gets a fresh environment. Nothing is inherited except

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -72,8 +73,9 @@ func TestEvaluateOrder(t *testing.T) {
 		push.Args = map[string]any{"command": "git push origin"}
 		pol := bypass
 		pol.Allow = append(pol.Allow, "Bash(git push*)")
+		pol.PromptTimeout = 20 * time.Millisecond
 		out := b.Evaluate(context.Background(), pol, push)
-		if out.Decision != Deny || out.Source != "no_ui" || out.Rule != "Bash(git push*)" || out.Behavior != "deny" {
+		if out.Decision != Deny || out.Source != "timeout" || out.Rule != "Bash(git push*)" || out.Behavior != "deny" {
 			t.Fatalf("ask fell through to allow: %+v", out)
 		}
 	})
@@ -108,30 +110,71 @@ func TestEvaluateOrder(t *testing.T) {
 
 	t.Run("canUseTool is last", func(t *testing.T) {
 		b := New(Options{UIPresent: func(string) bool { return false }})
-		pol := policy.Permission{Mode: "default", Allow: []string{"Read"}, UIPrompts: true}
+		pol := policy.Permission{Mode: "default", Allow: []string{"Read"}, UIPrompts: true, PromptTimeout: 20 * time.Millisecond}
 		out := b.Evaluate(context.Background(), pol, req)
-		if out.Decision != Deny || out.Source != "no_ui" || out.Behavior != "deny" {
+		if out.Decision != Deny || out.Source != "timeout" || out.Behavior != "deny" {
 			t.Fatalf("%+v", out)
 		}
 	})
 }
 
-func TestAbsentUIDenies(t *testing.T) {
+// A request waits for an answer whether or not a page is attached right
+// now. Pending lists it for a page that opens later. Only ui_prompts = false
+// denies at once.
+func TestNoPageStaysPending(t *testing.T) {
 	req := Request{RunID: "run", BotID: "bot", Tool: "Bash", Args: map[string]any{"command": "ls"}}
+	var mu sync.Mutex
 	var events []string
 	b := New(Options{
 		UIPresent: func(string) bool { return false },
-		Publish:   func(_, event string, _ any) { events = append(events, event) },
+		Publish: func(_, event string, _ any) {
+			mu.Lock()
+			events = append(events, event)
+			mu.Unlock()
+		},
 	})
-	out := b.Evaluate(context.Background(), policy.Permission{UIPrompts: true, PromptTimeout: time.Second}, req)
-	if out.Source != "no_ui" || out.Decision != Deny {
+	done := make(chan Outcome, 1)
+	go func() {
+		done <- b.Evaluate(context.Background(), policy.Permission{UIPrompts: true, PromptTimeout: 10 * time.Second}, req)
+	}()
+	var list []map[string]any
+	for i := 0; i < 200 && len(list) == 0; i++ {
+		list = b.Pending("bot")
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(list) != 1 || list[0]["tool"] != "Bash" || list[0]["run_id"] != "run" || list[0]["deadline"] == "" {
+		t.Fatalf("pending %v", list)
+	}
+	if len(b.Pending("other")) != 0 || b.PendingCounts()["bot"] != 1 {
+		t.Fatalf("counts %v", b.PendingCounts())
+	}
+	id, _ := list[0]["id"].(string)
+	select {
+	case out := <-done:
+		t.Fatalf("resolved without an answer: %+v", out)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := b.DecideFor("bot", "run", id, AllowOnce); err != nil {
+		t.Fatal(err)
+	}
+	out := <-done
+	if out.Decision != AllowOnce || out.Source != "ui" || out.Behavior != "allow" {
 		t.Fatalf("%+v", out)
 	}
-	if len(events) != 1 || events[0] != "permission_decision" {
-		t.Fatalf("events %v", events)
+	if err := b.DecideFor("bot", "run", id, Deny); err != ErrDecided {
+		t.Fatalf("second answer %v", err)
+	}
+	if len(b.Pending("")) != 0 {
+		t.Fatal("still pending")
+	}
+	mu.Lock()
+	got := strings.Join(events, ",")
+	mu.Unlock()
+	if got != "permission_request,permission_decision" {
+		t.Fatalf("events %s", got)
 	}
 	off := b.Evaluate(context.Background(), policy.Permission{UIPrompts: false}, req)
-	if off.Source != "no_ui" {
+	if off.Source != "no_ui" || off.Decision != Deny {
 		t.Fatalf("prompts off: %+v", off)
 	}
 }

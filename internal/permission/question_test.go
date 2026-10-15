@@ -52,8 +52,10 @@ func TestAskUserQuestionIsNeverAutoAllowed(t *testing.T) {
 	t.Run("bypass and allow do not answer", func(t *testing.T) {
 		b := New(Options{UIPresent: func(string) bool { return false }})
 		b.AddHook(func(Request) HookResult { return HookResult{Decision: "allow", Rule: "hook-allow"} })
-		out := b.Evaluate(context.Background(), bypass, req)
-		if out.Source != "no_ui" || out.Decision != Deny || out.Message != "The user did not answer the question (no_ui)." {
+		pol := bypass
+		pol.PromptTimeout = 20 * time.Millisecond
+		out := b.Evaluate(context.Background(), pol, req)
+		if out.Source != "timeout" || out.Decision != Deny || out.Message != "The user did not answer the question (timeout)." {
 			t.Fatalf("%+v", out)
 		}
 	})

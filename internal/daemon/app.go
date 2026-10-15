@@ -164,9 +164,6 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 			}
 			a.bus.Publish(runID, event, payload)
 		},
-		UIPresent: func(runID string) bool {
-			return a.bus.PromptSubscribed(runID)
-		},
 		Audit: func(fields map[string]any) {
 			if a.audit != nil && a.audit.Enabled() {
 				a.audit.Write(fields)
@@ -426,6 +423,7 @@ func cloneMsgs(in []model.Message) []model.Message {
 }
 
 func (a *App) decorateBot(b store.Bot) store.Bot {
+	b.PendingPermissions = a.perm.PendingCounts()[b.ID]
 	a.rtMu.Lock()
 	defer a.rtMu.Unlock()
 	if h, ok := a.resume[b.ID]; ok {
@@ -436,9 +434,11 @@ func (a *App) decorateBot(b store.Bot) store.Bot {
 }
 
 func (a *App) decorateBots(bots []store.Bot) []store.Bot {
+	counts := a.perm.PendingCounts()
 	a.rtMu.Lock()
 	defer a.rtMu.Unlock()
 	for i := range bots {
+		bots[i].PendingPermissions = counts[bots[i].ID]
 		if h, ok := a.resume[bots[i].ID]; ok {
 			bots[i].ContinueRunID = h.runID
 		}

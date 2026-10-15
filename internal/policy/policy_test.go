@@ -178,7 +178,7 @@ func TestExplicitPermissionMode(t *testing.T) {
 	if p.PermissionMode != "acceptEdits" || p.ManagedBypass || !p.UsesCLI() {
 		t.Fatalf("mode %q bypass %v backend %s", p.PermissionMode, p.ManagedBypass, p.Backend)
 	}
-	if p.PromptTimeout != 60*time.Second || p.AllowSessionGrants || p.UIPrompts {
+	if p.PromptTimeout != DefaultPromptTimeout || p.AllowSessionGrants || p.UIPrompts {
 		t.Fatalf("defaults timeout %s grants %v ui %v", p.PromptTimeout, p.AllowSessionGrants, p.UIPrompts)
 	}
 }

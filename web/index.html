@@ -119,6 +119,7 @@
   .status.running .dot { background: var(--run); box-shadow: 0 0 0 4px rgba(138,78,8,.15); }
   .status.paused .dot { background: var(--paused); }
   .status.idle .dot { background: var(--accent); }
+  .perm-badge { flex: none; font-size: 11px; font-weight: 600; color: #fff; background: var(--run); border-radius: 999px; padding: 2px 7px; white-space: nowrap; }
   .thread { position: relative; }
   .new-pill {
     position: absolute; left: 50%; transform: translateX(-50%); bottom: 84px; z-index: 5;
@@ -558,7 +559,17 @@ function renderBots() {
     const copy = el("span", "bot-copy");
     copy.append(el("strong", null, b.name));
     copy.append(el("small", null, b.label || ""));
-    btn.append(markEl(b.mark), copy, b.archived ? el("span", "status", "archived") : statusNode(b.status));
+    btn.append(markEl(b.mark), copy);
+    // A bot waiting on an approval or a question says so from the list, so
+    // the request is not missed while another bot is open.
+    if (b.pending_permissions > 0) {
+      const n = b.pending_permissions;
+      const badge = el("span", "perm-badge", n === 1 ? "needs approval" : n + " approvals");
+      badge.title = n + " pending permission request" + (n === 1 ? "" : "s");
+      btn.append(badge);
+      btn.title = "Waiting for your approval";
+    }
+    btn.append(b.archived ? el("span", "status", "archived") : statusNode(b.status));
     btn.addEventListener("click", () => openBot(b.id));
     list.append(btn);
   }
@@ -577,6 +588,7 @@ async function loadBots() {
     // A message sent mid-run can start a follow-up run after the stream
     // ended; pick it up so its reply streams in.
     if (b.active_run_id && b.active_run_id !== state.streaming) follow(b.active_run_id);
+    else if (b.pending_permissions > 0 && state.streaming) loadPendingPermissions(state.streaming).catch(() => {});
   }
 }
 function paintHeader(b) {
@@ -981,7 +993,7 @@ function renderMessages(mode = "bottom") {
     const bubble = el("div", "bubble " + (m.role || "system"));
     const who = whoText(m);
     if (who) bubble.append(el("span", "who", who));
-    if (m.role === "bot" && m.run_id && !shownTools.has(m.run_id) && hasToolRecords(state.tools[m.run_id])) {
+    if ((m.role === "bot" || m.role === "system") && m.run_id && !shownTools.has(m.run_id) && hasToolRecords(state.tools[m.run_id])) {
       shownTools.add(m.run_id);
       bubble.append(toolSummary(state.tools[m.run_id]));
     }
@@ -1242,7 +1254,7 @@ function showPermissionRequest(payload, runId) {
       return;
     }
     const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
-    cur.count.textContent = left + "s";
+    cur.count.textContent = left >= 60 ? Math.floor(left / 60) + "m " + (left % 60) + "s" : left + "s";
     if (maySettle && left <= 0) settlePermission(id, "deny", "timeout", false);
   };
   paint(false);
@@ -1415,6 +1427,16 @@ function stopStream() {
   $("#live").replaceChildren();
   setWorking(false);
 }
+// loadPendingPermissions shows open requests the stream did not replay
+// (the page opened later, or the run's event history was trimmed).
+async function loadPendingPermissions(runId) {
+  if (!state.botId || !runId) return;
+  const data = await api("/api/bots/" + state.botId + "/permissions");
+  if (state.streaming !== runId) return;
+  for (const p of (data && data.pending) || []) {
+    if (p && p.run_id === runId) showPermissionRequest(p, runId);
+  }
+}
 async function follow(runId) {
   if (!runId || state.streaming === runId) return;
   stopStream();
@@ -1440,6 +1462,7 @@ async function follow(runId) {
     const res = await fetch(base() + "/api/bots/" + state.botId + "/thread/stream?run_id=" + encodeURIComponent(runId) + "&prompts=1", {headers, signal: ctl.signal});
     if (res.status === 401) { showAuth(); return; }
     if (!res.ok || !res.body) throw new Error("stream failed");
+    loadPendingPermissions(runId).catch(() => {});
     const reader = res.body.getReader();
     const dec = new TextDecoder();
     let buf = "";

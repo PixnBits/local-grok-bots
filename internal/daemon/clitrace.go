@@ -84,6 +84,12 @@ func (t *cliTrace) reply(final string) string {
 	return final
 }
 
+// tail is the text streamed after the last tool call. A failed turn has no
+// final result text, so this is the partial reply kept in the thread.
+func (t *cliTrace) tail() string {
+	return strings.TrimSpace(t.buf.String())
+}
+
 func (t *cliTrace) add(rec store.ToolRecord) {
 	t.wrote = true
 	_ = t.a.st.AddRunTool(t.runID, t.botID, rec)

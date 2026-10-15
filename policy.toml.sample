@@ -32,6 +32,9 @@ model = "llama3.1"
 # Empty (default) allows any model the local Ollama serves.
 # Useful when the enterprise wants to restrict which weights can run.
 # models = ["llama3.1", "qwen2.5-coder:7b", "gemma2"]
+# Whole run and one model call. Defaults 10m and 3m.
+# run_timeout = "10m"
+# model_timeout = "3m"
 
 [cli]
 # Only consulted when backend = "claude" or "grok"
@@ -43,9 +46,10 @@ idle_timeout_minutes = 30
 # Window in which a user-created timer keeps a live process from being
 # killed. Bot-created timers do not. Default 2.
 imminent_timer_minutes = 2
-# Optional hard deadline on a CLI turn (seconds or Go duration, e.g. "30m").
-# Empty keeps existing behavior (idle kill + shutdown govern).
-# turn_timeout = ""
+# Wall clock for one CLI turn (seconds or Go duration). Default 2h.
+# Managed policy can cap it with max_turn_timeout. See docs/cli-isolation.md
+# (Timeouts) for every run limit.
+# turn_timeout = "2h"
 # Permission mode is a policy setting.
 # Unspecified (empty): the CLI prompts when a person can answer on a TTY.
 # If it prompts and there is no controlling terminal, the turn fails instead
@@ -80,12 +84,12 @@ imminent_timer_minutes = 2
 # allow = ["Read", "Bash(git status*)"]
 # deny = ["Bash(rm *)"]
 # ask = ["Bash(git push*)"]
-# ui_prompts asks a page that subscribed with ?prompts=1. A stream
-# without that flag does not count, and the check is denied at once.
+# ui_prompts sends a residual ask to the page. It waits until answered
+# (from any tab, or after the page is opened) or prompt_timeout denies it.
 # Off (the default) passes Claude --permission-prompts none, so a
 # residual ask is denied instead of waiting.
 # ui_prompts = false
-# prompt_timeout = "60s"
+# prompt_timeout = "10m"
 # allow_session_grants = false
 # claude_transport is mcp (default), stream_control, or none.
 # mcp attaches the HTTP permission tool when ui_prompts is on and the

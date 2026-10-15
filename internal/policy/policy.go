@@ -59,8 +59,19 @@ type Policy struct {
 	// UIPrompts lets a connected UI answer a tool check. Off denies
 	// the check when no earlier rule resolves it.
 	UIPrompts bool
-	// PromptTimeout is how long a UI answer may take. Zero means 60s.
+	// PromptTimeout is how long a UI answer may take. Zero means
+	// DefaultPromptTimeout.
 	PromptTimeout time.Duration
+	// OllamaRunTimeout bounds a whole Ollama run. OllamaModelTimeout bounds
+	// one model call inside it. Zero means the defaults.
+	OllamaRunTimeout   time.Duration
+	OllamaModelTimeout time.Duration
+	// Max* are ceilings only managed policy sets. Zero means no ceiling.
+	// The effective timeout is min(setting or default, ceiling).
+	MaxTurnTimeout        time.Duration
+	MaxPromptTimeout      time.Duration
+	MaxOllamaRunTimeout   time.Duration
+	MaxOllamaModelTimeout time.Duration
 	// AllowSessionGrants is true only when managed policy set it.
 	AllowSessionGrants bool
 	// ClaudeTransport is how Claude asks this daemon about a tool.
@@ -139,7 +150,7 @@ func Defaults() Policy {
 		DaemonJail:        true,
 		Idle:              30 * time.Minute,
 		Imminent:          2 * time.Minute,
-		PromptTimeout:     60 * time.Second,
+		PromptTimeout:     DefaultPromptTimeout,
 		ClaudeTransport:   TransportMCP,
 		CLIOverrides:      OverridesIgnore,
 		CLIHome:           HomeIsolated,
@@ -387,13 +398,49 @@ type Permission struct {
 	AllowSessionGrants bool
 }
 
-// Permission returns tool-approval settings. A non-positive prompt timeout
-// is reported as 60s.
-func (p Policy) Permission() Permission {
-	d := p.PromptTimeout
-	if d <= 0 {
-		d = 60 * time.Second
+// Default timeouts. Each one is a policy key; see docs/cli-isolation.md.
+const (
+	DefaultTurnTimeout        = 2 * time.Hour
+	DefaultPromptTimeout      = 10 * time.Minute
+	DefaultOllamaRunTimeout   = 10 * time.Minute
+	DefaultOllamaModelTimeout = 3 * time.Minute
+)
+
+func capped(v, def, ceiling time.Duration) time.Duration {
+	if v <= 0 {
+		v = def
 	}
+	if ceiling > 0 && v > ceiling {
+		v = ceiling
+	}
+	return v
+}
+
+// EffectiveTurnTimeout is the wall clock for one CLI turn: cli.turn_timeout,
+// else DefaultTurnTimeout, capped by managed cli.max_turn_timeout.
+func (p Policy) EffectiveTurnTimeout() time.Duration {
+	return capped(p.TurnTimeout, DefaultTurnTimeout, p.MaxTurnTimeout)
+}
+
+// EffectivePromptTimeout is how long a permission or question card waits.
+func (p Policy) EffectivePromptTimeout() time.Duration {
+	return capped(p.PromptTimeout, DefaultPromptTimeout, p.MaxPromptTimeout)
+}
+
+// EffectiveOllamaRunTimeout bounds a whole Ollama run.
+func (p Policy) EffectiveOllamaRunTimeout() time.Duration {
+	return capped(p.OllamaRunTimeout, DefaultOllamaRunTimeout, p.MaxOllamaRunTimeout)
+}
+
+// EffectiveOllamaModelTimeout bounds one Ollama model call.
+func (p Policy) EffectiveOllamaModelTimeout() time.Duration {
+	return capped(p.OllamaModelTimeout, DefaultOllamaModelTimeout, p.MaxOllamaModelTimeout)
+}
+
+// Permission returns tool-approval settings. A non-positive prompt timeout
+// is reported as DefaultPromptTimeout; a managed ceiling applies.
+func (p Policy) Permission() Permission {
+	d := p.EffectivePromptTimeout()
 	return Permission{
 		Mode:               p.PermissionMode,
 		Allow:              append([]string(nil), p.ToolAllow...),
@@ -684,15 +731,20 @@ type backendDoc struct {
 }
 
 type ollamaDoc struct {
-	Host   *string   `toml:"host" json:"host"`
-	Model  *string   `toml:"model" json:"model"`
-	Models *[]string `toml:"models" json:"models"`
+	Host            *string   `toml:"host" json:"host"`
+	Model           *string   `toml:"model" json:"model"`
+	Models          *[]string `toml:"models" json:"models"`
+	RunTimeout      flexText  `toml:"run_timeout" json:"run_timeout"`
+	ModelTimeout    flexText  `toml:"model_timeout" json:"model_timeout"`
+	MaxRunTimeout   flexText  `toml:"max_run_timeout" json:"max_run_timeout"`
+	MaxModelTimeout flexText  `toml:"max_model_timeout" json:"max_model_timeout"`
 }
 
 type cliDoc struct {
 	Idle           *int64      `toml:"idle_timeout_minutes" json:"idle_timeout_minutes"`
 	Imminent       *int64      `toml:"imminent_timer_minutes" json:"imminent_timer_minutes"`
 	TurnTimeout    flexText    `toml:"turn_timeout" json:"turn_timeout"`
+	MaxTurnTimeout flexText    `toml:"max_turn_timeout" json:"max_turn_timeout"`
 	PermissionMode *string     `toml:"permission_mode" json:"permission_mode"`
 	Permission     *cliPermDoc `toml:"permission" json:"permission"`
 	Pins           *[]Pin      `toml:"pins" json:"pins"`
@@ -723,6 +775,7 @@ type cliPermDoc struct {
 	Ask                *[]string `toml:"ask" json:"ask"`
 	UIPrompts          *bool     `toml:"ui_prompts" json:"ui_prompts"`
 	PromptTimeout      flexText  `toml:"prompt_timeout" json:"prompt_timeout"`
+	MaxPromptTimeout   flexText  `toml:"max_prompt_timeout" json:"max_prompt_timeout"`
 	AllowSessionGrants *bool     `toml:"allow_session_grants" json:"allow_session_grants"`
 	ClaudeTransport    *string   `toml:"claude_transport" json:"claude_transport"`
 }
@@ -859,6 +912,40 @@ func (p *Policy) apply(doc document, trusted bool) error {
 			return err
 		}
 		p.TurnTimeout = d
+	}
+	timeouts := []struct {
+		key     string
+		f       flexText
+		dst     *time.Duration
+		managed bool
+	}{
+		{"ollama.run_timeout", doc.Ollama.RunTimeout, &p.OllamaRunTimeout, false},
+		{"ollama.model_timeout", doc.Ollama.ModelTimeout, &p.OllamaModelTimeout, false},
+		{"ollama.max_run_timeout", doc.Ollama.MaxRunTimeout, &p.MaxOllamaRunTimeout, true},
+		{"ollama.max_model_timeout", doc.Ollama.MaxModelTimeout, &p.MaxOllamaModelTimeout, true},
+		{"cli.max_turn_timeout", doc.CLI.MaxTurnTimeout, &p.MaxTurnTimeout, true},
+	}
+	if doc.CLI.Permission != nil {
+		timeouts = append(timeouts, struct {
+			key     string
+			f       flexText
+			dst     *time.Duration
+			managed bool
+		}{"cli.permission.max_prompt_timeout", doc.CLI.Permission.MaxPromptTimeout, &p.MaxPromptTimeout, true})
+	}
+	for _, t := range timeouts {
+		if !t.f.Set {
+			continue
+		}
+		d, err := parseTurnTimeout(t.f.Value)
+		if err != nil {
+			return fmt.Errorf("%s: %w", t.key, err)
+		}
+		if t.managed && !trusted {
+			p.Warnings = append(p.Warnings, t.key+" is ignored; only managed policy can set a timeout ceiling")
+			continue
+		}
+		*t.dst = d
 	}
 	if doc.CLI.PermissionMode != nil {
 		p.setMode(*doc.CLI.PermissionMode, trusted)
