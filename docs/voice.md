@@ -113,4 +113,16 @@ Implemented (pure browser path, no new API endpoints):
 
 Secure context: the daemon can now serve HTTPS itself. `TLS_CERT` + `TLS_KEY` use an existing pair; `TLS_SELF_SIGNED=1` generates (once) an ECDSA cert under `DATA_DIR/tls/` for localhost, the host name, and all interface IPs. Setting only one of `TLS_CERT`/`TLS_KEY` is a startup error. TLS mode is recorded in the event log (`tls_enabled`). Accept the browser's certificate warning once per device, or import `DATA_DIR/tls/cert.pem` as trusted.
 
-Not yet: WASM Moonshine/Whisper fallback, daemon `/api/stt/stream`, Piper/Kokoro, streaming LLM tokens into TTS (Phase 2 latency work), archiving raw voice turns after summary.
+Not yet: WASM Moonshine/Whisper fallback, true streaming `/api/stt/stream`, Piper/Kokoro, streaming LLM tokens into TTS (Phase 2 latency work), archiving raw voice turns after summary.
+
+### Daemon speech recognition (fallback for Android Chrome and other browsers without on-device Web Speech)
+
+- `GET /api/stt/status` → `{"available", "engine"}`. `POST /api/stt` with a raw body of 16 kHz mono s16le PCM → `{"text", "took_ms"}`. Same bearer auth as the rest of the API.
+- Configure with `WHISPER_BIN` (whisper.cpp `whisper-cli`) and `WHISPER_MODEL` (ggml model). Neither set: endpoint returns 503 "not available" and the UI says so. Only one set: daemon refuses to start.
+- Caps: 8 MB body (about 4 min), 60 s transcription timeout, one transcription at a time. Requests with `X-STT-Partial: 1` (live preview) get 429 instead of queueing.
+- Audio is written to a temp dir only for whisper-cli and deleted right after; nothing is kept. Each request is audited as event kind `stt` with byte count, duration, latency, character count and outcome, never the audio or text.
+- Language is fixed to English (`-l en`) for now.
+- Browser side: if `SpeechRecognition` is missing or on-device mode is unavailable, the mic and voice mode capture audio with `getUserMedia` (echo cancellation and noise suppression on), downsample to 16 kHz, and send it to the daemon. While you talk, the whole buffer so far is re-sent every 1.5 s as a partial for a live preview; on stop the final pass fills the composer. Voice mode ends an utterance after 1 s below an adaptive energy threshold. ⚙ shows the active engine.
+- Setup on the Framework (user space, Vulkan GPU): clone `ggml-org/whisper.cpp`, `cmake -B build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release && cmake --build build -j --target whisper-cli`, download `ggml-large-v3-turbo-q5_0.bin` from `huggingface.co/ggerganov/whisper.cpp`.
+
+Composer: a single pill. Empty: ⚙, 🎤 (dictation) and a round waveform button (voice mode). With text: only a round send arrow. Placeholder is "Message <bot name>".
