@@ -102,8 +102,11 @@
   .bot-copy small { color: var(--muted); }
   .bot.dim { opacity: .55; }
   .mark {
+    display: inline-block; vertical-align: middle;
     width: 28px; height: 28px; flex: none;
     background: var(--c, var(--accent));
+    /* A thin inner edge keeps light colours visible on the paper background. */
+    box-shadow: inset 0 0 0 1px rgba(0,0,0,.22);
   }
   .mark[data-shape="circle"] { border-radius: 99px; }
   .mark[data-shape="square"] { border-radius: 4px; }
@@ -112,6 +115,15 @@
   .mark[data-shape="hex"] { clip-path: polygon(25% 6%, 75% 6%, 100% 50%, 75% 94%, 25% 94%, 0 50%); }
   .swatches, .shapes { display: flex; gap: 8px; flex-wrap: wrap; }
   .swatch, .shape-btn { width: 32px; height: 32px; padding: 0; border-radius: 8px; }
+  .mark[hidden] { display: none; }
+  .shape-btn { display: inline-flex; align-items: center; justify-content: center; }
+  .swatch { box-shadow: inset 0 0 0 1px rgba(0,0,0,.22); }
+  .color-custom { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+  .color-custom input { width: 32px; height: 32px; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: none; }
+  .profile-head { display: flex; align-items: center; gap: 10px; min-width: 0; margin: 0; }
+  .profile-head .name { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .thread-bar > .mark { flex: none; }
+  .bot-copy .bot-attn { color: var(--run); font-weight: 600; }
   .swatch[aria-pressed="true"], .shape-btn[aria-pressed="true"] { outline: 2px solid var(--ink); outline-offset: 2px; }
   .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); text-transform: lowercase; flex: none; }
   .dot { width: 8px; height: 8px; border-radius: 99px; background: #b7b1a6; display: inline-block; }
@@ -119,7 +131,8 @@
   .status.running .dot { background: var(--run); box-shadow: 0 0 0 4px rgba(138,78,8,.15); }
   .status.paused .dot { background: var(--paused); }
   .status.idle .dot { background: var(--accent); }
-  .perm-badge { flex: none; font-size: 11px; font-weight: 600; color: #fff; background: var(--run); border-radius: 999px; padding: 2px 7px; white-space: nowrap; }
+  /* Compact: a count pill in place of the status. The words go under the label. */
+  .perm-badge { flex: none; min-width: 20px; text-align: center; font-size: 11px; font-weight: 700; color: #fff; background: var(--run); border-radius: 999px; padding: 2px 6px; white-space: nowrap; }
   .thread { position: relative; }
   .new-pill {
     position: absolute; left: 50%; transform: translateX(-50%); bottom: 84px; z-index: 5;
@@ -358,6 +371,7 @@
     <section class="view" id="view-chat">
       <div class="panel thread" id="thread">
         <div class="thread-bar">
+          <span class="mark" id="thread-mark" hidden aria-hidden="true"></span>
           <div class="thread-id">
             <h2 id="thread-name">No bot selected</h2>
             <div class="role" id="thread-label"></div>
@@ -387,15 +401,16 @@
     <section class="view" id="view-profile">
       <form class="panel profile" id="profile-form">
         <div class="row" style="justify-content:space-between;align-items:center">
-          <h2>Profile</h2>
+          <h2 class="profile-head" aria-label="Profile"><span class="mark" id="profile-head-mark" aria-hidden="true"></span><span class="name" id="profile-head-name">Profile</span></h2>
           <button type="button" id="profile-back" class="ghost">Back</button>
         </div>
         <div class="row" style="align-items:center">
           <span class="mark" id="profile-mark" data-shape="circle" style="--c:#1b654c"></span>
-          <span class="empty" style="padding:0">Mark</span>
+          <strong>Mark</strong>
         </div>
-        <div class="shapes" id="shape-picker"></div>
-        <div class="swatches" id="color-picker"></div>
+        <div class="shapes" id="shape-picker" role="group" aria-label="Mark shape"></div>
+        <div class="swatches" id="color-picker" role="group" aria-label="Mark colour"></div>
+        <label class="color-custom">Custom colour<input type="color" id="color-custom" value="#1b654c"></label>
         <label>Name<input id="profile-name" autocomplete="off"></label>
         <label>Label<input id="profile-label" placeholder="Short role line" autocomplete="off"></label>
         <label>Description<textarea id="profile-description" placeholder="Standing prompt. This is what the model is given."></textarea></label>
@@ -460,6 +475,8 @@
 const KINDS = ["user_message","bot_message","dm_sent","dm_received","tool_start","tool_end","bot_created","bot_updated","bot_deleted","timer_fired","timer_missed","model_call","run_input","run_started","run_finished","daemon_start","daemon_stop","grant_use","grant_denied","net_request","sandbox_block"];
 const SHAPES = ["circle","square","diamond","triangle","hex"];
 const COLORS = ["#1b654c","#8a4e08","#8d2d2d","#1d4e89","#5c4d7a","#3f6b4a","#a15c38","#2f2f2f"];
+const COLOR_NAMES = {"#1b654c": "Green", "#8a4e08": "Amber", "#8d2d2d": "Red", "#1d4e89": "Blue", "#5c4d7a": "Purple", "#3f6b4a": "Moss", "#a15c38": "Rust", "#2f2f2f": "Charcoal"};
+const SHAPE_NAMES = {circle: "Circle", square: "Square", diamond: "Diamond", triangle: "Triangle", hex: "Hexagon"};
 const state = {
   view: "bots",
   botId: null,
@@ -502,12 +519,14 @@ function el(tag, cls, text) {
   if (text != null) n.textContent = text;
   return n;
 }
-function markEl(mark) {
+function paintMark(n, mark) {
   const m = mark || {shape: "circle", color: "#1b654c"};
-  const n = el("span", "mark");
   n.dataset.shape = m.shape || "circle";
   n.style.setProperty("--c", m.color || "#1b654c");
   return n;
+}
+function markEl(mark) {
+  return paintMark(el("span", "mark"), mark);
 }
 function setView(name) {
   state.view = name;
@@ -561,15 +580,21 @@ function renderBots() {
     copy.append(el("small", null, b.label || ""));
     btn.append(markEl(b.mark), copy);
     // A bot waiting on an approval or a question says so from the list, so
-    // the request is not missed while another bot is open.
-    if (b.pending_permissions > 0) {
+    // the request is not missed while another bot is open. The words go on
+    // their own line under the label and a count pill replaces the status,
+    // so the name keeps its width.
+    if (b.pending_permissions > 0 && !b.archived) {
       const n = b.pending_permissions;
-      const badge = el("span", "perm-badge", n === 1 ? "needs approval" : n + " approvals");
+      const words = n === 1 ? "Needs approval" : n + " approvals waiting";
+      copy.append(el("small", "bot-attn", words));
+      const badge = el("span", "perm-badge", String(n));
       badge.title = n + " pending permission request" + (n === 1 ? "" : "s");
+      badge.setAttribute("aria-label", words);
       btn.append(badge);
       btn.title = "Waiting for your approval";
+    } else {
+      btn.append(b.archived ? el("span", "status", "archived") : statusNode(b.status));
     }
-    btn.append(b.archived ? el("span", "status", "archived") : statusNode(b.status));
     btn.addEventListener("click", () => openBot(b.id));
     list.append(btn);
   }
@@ -593,6 +618,8 @@ async function loadBots() {
 }
 function paintHeader(b) {
   $("#thread-name").textContent = b.name;
+  paintMark($("#thread-mark"), b.mark);
+  $("#thread-mark").hidden = false;
   setTitle();
   $("#thread-label").textContent = b.label || "";
   $("#menu-pin").textContent = b.pinned ? "Unpin" : "Pin";
@@ -662,6 +689,7 @@ function goHome(push = true) {
   stopStream();
   if (push && location.pathname !== botPath(null)) history.pushState({}, "", botPath(null) + location.search);
   $("#thread-name").textContent = "No bot selected";
+  $("#thread-mark").hidden = true;
   $("#thread-label").textContent = "";
   state.messages = [];
   $("#msgs").replaceChildren(el("p", "empty", "Choose a bot to read its thread."), $("#live"), $("#working"));
@@ -1604,6 +1632,8 @@ function paintMarkPicker() {
   for (const shape of SHAPES) {
     const b = el("button", "shape-btn");
     b.type = "button";
+    b.setAttribute("aria-label", SHAPE_NAMES[shape] || shape);
+    b.title = SHAPE_NAMES[shape] || shape;
     b.setAttribute("aria-pressed", shape === state.mark.shape ? "true" : "false");
     b.append(markEl({shape, color: state.mark.color}));
     b.addEventListener("click", () => { state.mark.shape = shape; paintMarkPicker(); });
@@ -1611,19 +1641,28 @@ function paintMarkPicker() {
   }
   const colors = $("#color-picker");
   colors.replaceChildren();
-  for (const color of COLORS) {
+  // A colour set outside the palette (API or the custom input) is shown as
+  // one more swatch, selected, so the current colour is never hidden.
+  const list = COLORS.includes(state.mark.color) ? COLORS : COLORS.concat([state.mark.color]);
+  for (const color of list) {
     const b = el("button", "swatch");
     b.type = "button";
     b.style.background = color;
-    b.setAttribute("aria-label", color);
+    const name = COLOR_NAMES[color] ? COLOR_NAMES[color] : "Custom " + color;
+    b.setAttribute("aria-label", name);
+    b.title = name;
     b.setAttribute("aria-pressed", color === state.mark.color ? "true" : "false");
     b.addEventListener("click", () => { state.mark.color = color; paintMarkPicker(); });
     colors.append(b);
   }
-  const preview = $("#profile-mark");
-  preview.dataset.shape = state.mark.shape;
-  preview.style.setProperty("--c", state.mark.color);
+  paintMark($("#profile-mark"), state.mark);
+  paintMark($("#profile-head-mark"), state.mark);
+  $("#color-custom").value = state.mark.color;
 }
+$("#color-custom").addEventListener("input", (e) => {
+  const v = String(e.target.value || "").toLowerCase();
+  if (/^#[0-9a-f]{6}$/.test(v)) { state.mark.color = v; paintMarkPicker(); }
+});
 async function openProfile(id) {
   state.botId = id;
   closeMenu();
@@ -1632,6 +1671,7 @@ async function openProfile(id) {
   if (i >= 0) state.bots[i] = b; else state.bots.push(b);
   state.mark = {shape: (b.mark && b.mark.shape) || "circle", color: (b.mark && b.mark.color) || "#1b654c"};
   $("#profile-name").value = b.name || "";
+  $("#profile-head-name").textContent = b.name || "Profile";
   $("#profile-label").value = b.label || "";
   $("#profile-description").value = b.description || "";
   $("#profile-model").value = b.model || "";
