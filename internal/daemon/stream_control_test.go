@@ -253,30 +253,24 @@ func TestStreamControlCancelWritesNoResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 	deadline = time.Now().Add(8 * time.Second)
-	var sawToken bool
-	for !sawToken && time.Now().Before(deadline) {
+	for tokenCompletes(saw, "after-cancel") < 0 && time.Now().Before(deadline) {
 		select {
 		case ev := <-f.events:
 			saw = append(saw, ev)
-			if strings.HasPrefix(ev, "token\n") && strings.Contains(ev, "after-cancel") {
-				sawToken = true
-			}
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
-	if !sawToken {
+	tokAt := tokenCompletes(saw, "after-cancel")
+	if tokAt < 0 {
 		t.Fatalf("events %#v", saw)
 	}
-	decAt, tokAt := -1, -1
+	decAt := -1
 	for i, ev := range saw {
 		if decAt < 0 && strings.HasPrefix(ev, "permission_decision\n") && strings.Contains(ev, `"source":"cancel"`) && strings.Contains(ev, `"transport":"stream_control"`) {
 			decAt = i
 		}
-		if strings.HasPrefix(ev, "token\n") && strings.Contains(ev, "after-cancel") {
-			tokAt = i
-		}
 	}
-	if decAt < 0 || tokAt < 0 || decAt > tokAt {
+	if decAt < 0 || decAt > tokAt {
 		t.Fatalf("order decision %d token %d events %#v", decAt, tokAt, saw)
 	}
 	got := f.waitDone()
@@ -587,6 +581,29 @@ func argvHas(argv, flag string) bool {
 		}
 	}
 	return false
+}
+
+// tokenCompletes is the event index where concatenated token text first
+// contains needle. The redactor holds a trailing letter that could start a
+// key, so one word can arrive as two frames.
+func tokenCompletes(events []string, needle string) int {
+	var b strings.Builder
+	for i, ev := range events {
+		if !strings.HasPrefix(ev, "token\n") {
+			continue
+		}
+		var payload struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal([]byte(strings.TrimPrefix(ev, "token\n")), &payload) != nil {
+			continue
+		}
+		b.WriteString(payload.Text)
+		if strings.Contains(b.String(), needle) {
+			return i
+		}
+	}
+	return -1
 }
 
 func eventHas(events []string, prefix, needle string) bool {

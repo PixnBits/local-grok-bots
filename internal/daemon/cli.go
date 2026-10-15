@@ -107,6 +107,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		runner = a.runner
 	}
 	var streamed bool
+	var redactStream audit.Stream
 	var pid int
 	mode := a.policy.PermissionMode
 	if policy.IsBypassMode(mode) && !a.policy.ManagedBypass {
@@ -173,9 +174,13 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 			if ev.Text == "" {
 				return
 			}
+			safe := redactStream.Push(ev.Text)
+			if safe == "" {
+				return
+			}
 			streamed = true
-			trace.token(ev.Text)
-			a.bus.Publish(runID, "token", map[string]string{"text": ev.Text})
+			trace.token(safe)
+			a.bus.Publish(runID, "token", map[string]string{"text": safe})
 		case "tool":
 			name := ev.ToolName
 			if name == "" {
@@ -207,6 +212,11 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 			}
 		}
 	})
+	if tail := redactStream.Flush(); tail != "" {
+		streamed = true
+		trace.token(tail)
+		a.bus.Publish(runID, "token", map[string]string{"text": tail})
+	}
 	if pid > 0 {
 		result := "ok"
 		if err != nil {
@@ -225,7 +235,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		sessionID = res.SessionID
 	}
 	trace.finish()
-	text := strings.TrimSpace(trace.reply(strings.TrimSpace(res.Text)))
+	text := strings.TrimSpace(trace.reply(audit.RedactText(strings.TrimSpace(res.Text))))
 	if text != "" && !streamed {
 		a.bus.Publish(runID, "token", map[string]string{"text": text})
 	}
@@ -258,7 +268,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		// failIfUnavailable exits at startup. Grok does the same for a custom
 		// profile, and a built-in profile is refused before the process starts.
 		if iso != nil && strings.TrimSpace(res.Text) == "" && cliSandboxFailed(backend, iso, err) {
-			why := err.Error()
+			why := audit.RedactText(err.Error())
 			a.recordSandboxRefusal(bot.ID, backend, why)
 			if strings.EqualFold(backend, "grok") {
 				err = fmt.Errorf("Grok's sandbox is required but can't run here (%s), so the turn was refused", why)
@@ -673,9 +683,10 @@ func (a *App) auditCLI(event, backend, sessionID string, pid int, result string)
 }
 
 func (a *App) failCLI(botID, runID, backend string, err error) {
-	a.log(botID, "model_call", map[string]any{"model": backend, "ok": false, "error": err.Error()})
-	_, _ = a.st.FinishRun(runID, "error", err.Error())
-	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+	msg := audit.RedactText(err.Error())
+	a.log(botID, "model_call", map[string]any{"model": backend, "ok": false, "error": msg})
+	_, _ = a.st.FinishRun(runID, "error", msg)
+	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": msg})
 }
 
 func (a *App) cliPrompt(bot store.Bot, fresh bool, inputs []store.Message) (string, error) {

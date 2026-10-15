@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
 
@@ -145,7 +146,8 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 		if msg == "" {
 			msg = waitErr.Error()
 		}
-		return res, fmt.Errorf("%s: %s", argv[0], clip(msg, 2000))
+		// Redact before clipping so a key is not cut in half and then kept.
+		return res, fmt.Errorf("%s: %s", argv[0], clip(audit.RedactText(msg), 2000))
 	}
 	return res, nil
 }
