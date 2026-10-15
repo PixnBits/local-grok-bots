@@ -111,6 +111,50 @@ func TestPrepareIsolationGrok(t *testing.T) {
 	}
 }
 
+func TestPrepareIsolationDropsInheritedLGB(t *testing.T) {
+	state := t.TempDir()
+	base := []string{
+		"PATH=/usr/bin",
+		"LGB_CLI_MODE=ok",
+		"LGB_ARGV_LOG=/tmp/argv",
+		"LGB_SPOOL=/tmp/evil-spool",
+		"LGB_TOKEN=lgbr_inherited",
+		"LGB_SECRET=nope",
+	}
+	extra := map[string]string{"LGB_SPOOL": "/ws/.lgb", "LGB_TOKEN": "lgbr_run"}
+	check := func(t *testing.T, passOther bool) {
+		t.Helper()
+		iso, err := PrepareIsolation(IsolationOptions{
+			Backend: "claude", StateDir: state, UserHome: "/home/u",
+			Base: base, Extra: extra,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		env := envMap(iso.Env)
+		if env["LGB_SPOOL"] != "/ws/.lgb" || env["LGB_TOKEN"] != "lgbr_run" {
+			t.Fatalf("run token env: %v", iso.Env)
+		}
+		if env["PATH"] != "/usr/bin" {
+			t.Fatalf("PATH: %v", iso.Env)
+		}
+		for _, k := range []string{"LGB_CLI_MODE", "LGB_ARGV_LOG", "LGB_SECRET"} {
+			_, ok := env[k]
+			if ok != passOther {
+				t.Fatalf("%s present=%v, want %v; env %v", k, ok, passOther, iso.Env)
+			}
+		}
+	}
+	if !passInheritedLGB {
+		t.Fatal("test binary did not enable LGB passthrough")
+	}
+	check(t, true)
+	prev := passInheritedLGB
+	passInheritedLGB = false
+	t.Cleanup(func() { passInheritedLGB = prev })
+	check(t, false)
+}
+
 func TestPrepareIsolationUserHome(t *testing.T) {
 	state := t.TempDir()
 	iso, err := PrepareIsolation(IsolationOptions{Backend: "claude", StateDir: state, UserHome: "/home/u", Base: []string{"CLAUDE_CONFIG_DIR=/x"}})

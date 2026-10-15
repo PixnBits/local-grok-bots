@@ -52,6 +52,24 @@ type IsolationOptions struct {
 	Protect []string
 }
 
+// passInheritedLGB is false in a production build. Test binaries and the
+// lgbtest tag turn it on so fakes can read LGB_CLI_MODE and the other
+// LGB_* names they use. LGB_SPOOL and LGB_TOKEN stay out either way.
+var passInheritedLGB bool
+
+// EnableTestLGBPassthrough lets a test binary copy LGB_* from the daemon
+// environment into the CLI, except LGB_SPOOL and LGB_TOKEN.
+func EnableTestLGBPassthrough() { passInheritedLGB = true }
+
+// keepInheritedLGB reports whether one daemon-environment variable may be
+// copied into the CLI. The daemon adds LGB_SPOOL and LGB_TOKEN itself.
+func keepInheritedLGB(name string) bool {
+	if !passInheritedLGB || !strings.HasPrefix(name, "LGB_") {
+		return false
+	}
+	return name != "LGB_SPOOL" && name != "LGB_TOKEN"
+}
+
 // passEnv names variables kept from the daemon environment.
 var passEnv = map[string]bool{
 	"PATH": true, "LANG": true, "TERM": true, "TZ": true, "USER": true,
@@ -155,8 +173,9 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 		if !ok {
 			continue
 		}
-		// LGB_ is the daemon's own namespace; test doubles read it too.
-		if passEnv[k] || strings.HasPrefix(k, "LC_") || strings.HasPrefix(k, "LGB_") {
+		// LGB_SPOOL and LGB_TOKEN are set by the daemon for one run. Other
+		// LGB_* names are not inherited. Tests and the lgbtest tag opt in.
+		if passEnv[k] || strings.HasPrefix(k, "LC_") || keepInheritedLGB(k) {
 			env[k] = v
 		}
 		for _, c := range credEnv[backend] {
