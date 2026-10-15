@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,77 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
+
+func TestGeneratedSettingsDenyDaemonSecrets(t *testing.T) {
+	dir := t.TempDir()
+	policyPath := writeCLIPolicy(t, dir)
+	app := newCLIApp(t, dir, policyPath)
+	secrets := app.daemonSecrets()
+	admin := filepath.Join(dir, adminTokenFile)
+	cliDir := filepath.Join(dir, "cli")
+	for _, want := range []string{admin, policyPath, cliDir} {
+		if !strings.Contains("\n"+strings.Join(secrets, "\n")+"\n", "\n"+want+"\n") {
+			t.Fatalf("secrets %v lack %s", secrets, want)
+		}
+	}
+	if strings.Contains("\n"+strings.Join(secrets, "\n")+"\n", "\n"+filepath.Join(dir, "workspace")+"\n") {
+		t.Fatalf("workspace is denied: %v", secrets)
+	}
+	if st, err := os.Stat(cliDir); err != nil || !st.IsDir() || st.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("cli dir %v %v", st, err)
+	}
+	home := t.TempDir()
+	iso, err := clisession.PrepareIsolation(clisession.IsolationOptions{
+		Backend: "claude", StateDir: filepath.Join(cliDir, "bot"),
+		UserHome: home, ClaudeSandbox: true, Protect: secrets,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(iso.SettingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	perms := doc["permissions"].(map[string]any)
+	var deny []string
+	for _, r := range perms["deny"].([]any) {
+		deny = append(deny, r.(string))
+	}
+	files := doc["sandbox"].(map[string]any)["credentials"].(map[string]any)["files"].([]any)
+	modes := map[string]string{}
+	for _, f := range files {
+		m := f.(map[string]any)
+		modes[m["path"].(string)] = m["mode"].(string)
+	}
+	for _, p := range []string{admin, policyPath, cliDir} {
+		if !strings.Contains("\n"+strings.Join(deny, "\n")+"\n", "\nRead(/"+p+")\n") {
+			t.Fatalf("deny lacks %s: %v", p, deny)
+		}
+		if modes[p] != "deny" {
+			t.Fatalf("credentials %s mode %q", p, modes[p])
+		}
+	}
+	if _, err := clisession.PrepareIsolation(clisession.IsolationOptions{
+		Backend: "grok", StateDir: filepath.Join(cliDir, "gbot"),
+		UserHome: home, Protect: secrets,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// GROK_HOME is StateDir/grok-home when Home is empty.
+	toml, err := os.ReadFile(filepath.Join(cliDir, "gbot", "grok-home", "sandbox.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{admin, policyPath, cliDir} {
+		if !strings.Contains(string(toml), strconv.Quote(p)) {
+			t.Fatalf("grok deny lacks %s:\n%s", p, toml)
+		}
+	}
+}
 
 func TestClaudeSandboxUnavailableFailsClosed(t *testing.T) {
 	old := claudeSandboxMissing

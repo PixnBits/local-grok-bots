@@ -141,15 +141,22 @@ The `--settings` file adds:
   `sftp`, `rsync` unless `ssh`; `Read`/`Edit` of credential paths under the real
   HOME (`.ssh`, `.aws`, `.gnupg`, `.config/gh`, `.netrc`, `.docker/config.json`,
   `.kube`, `.config/gcloud`, `.azure`, both CLIs' login files) and of the
-  daemon's `admin-token` and `state.db*`. Paths are written `//abs/path`
-  because `~` would name the per-bot HOME.
+  daemon's `admin-token`, `state.db*`, `policy.toml`, and `DATA_DIR/cli`
+  (MCP tokens and per-bot CLI state). The workspace is not on this list.
+  Paths are written `//abs/path` because `~` would name the per-bot HOME.
 - `permissions.blockReadsOutsideWorkingDirectories: true`.
 - With `claude_sandbox = "required"` (default), a `sandbox` block:
   `enabled: true`, `failIfUnavailable: true`, `allowUnsandboxedCommands: false`,
   `autoAllowBashIfSandboxed: false` (Bash still asks through the daemon),
   `network.strictAllowlist: true` with `allowedDomains` = the bot's `net` hosts
   (empty without `net`), and `credentials.files` deny entries for the same
-  paths.
+  paths. `sandbox.credentials.files` is a real Claude Code setting. Each entry
+  is `{path, mode}` where `mode` is `deny` or `mask`. `deny` blocks reads the
+  same way as `filesystem.denyRead` (Claude Code v2.1.187+). Checked against
+  the [settings reference](https://code.claude.com/docs/en/settings-reference)
+  and `@anthropic-ai/claude-agent-sdk` 0.3.300 `sdk.d.ts`
+  (`SandboxCredentialsConfigSchema`). That package is not vendored; the check
+  was the published type definitions. The daemon writes `deny` only.
 
 Claude's sandbox needs `bwrap` and `socat` on Linux (Seatbelt is built into
 macOS). Before launch the daemon checks for both; if one is missing, or Claude
@@ -202,7 +209,7 @@ The daemon writes this into the turn's `GROK_HOME` (`<home>/.grok`, or
 [profiles.lgb]
 extends = "strict"           # reads: workspace, system paths, GROK_HOME
 restrict_network = true      # false with a net grant
-deny = ["/home/u/.ssh", ...]  # existing credential paths, admin-token, state.db*
+deny = ["/home/u/.ssh", ...]  # existing credential paths, admin-token, state.db*, policy.toml, DATA_DIR/cli
 ```
 
 and passes `--sandbox lgb` plus `--disallowed-tools web_fetch,web_search`

@@ -430,17 +430,29 @@ func botGrants(bot store.Bot) clisession.Grants {
 	return g
 }
 
-// daemonSecrets are files no CLI tool or shell may read: the admin token and
-// the database. They sit beside the workspace in DATA_DIR.
+// daemonSecrets are paths no CLI tool or shell may read: the admin token,
+// the database, policy.toml, and DATA_DIR/cli (MCP tokens and CLI state).
+// The workspace is not included. DATA_DIR/cli is created so Grok, which only
+// denies paths that exist, still binds the directory.
 func (a *App) daemonSecrets() []string {
 	dir, err := filepath.Abs(a.cfg.DataDir)
 	if err != nil {
 		return nil
 	}
-	return []string{
+	cliDir := filepath.Join(dir, "cli")
+	_ = os.MkdirAll(cliDir, 0o700)
+	out := []string{
 		filepath.Join(dir, adminTokenFile),
 		filepath.Join(dir, "state.db"), filepath.Join(dir, "state.db-wal"), filepath.Join(dir, "state.db-shm"),
+		cliDir,
 	}
+	if p := strings.TrimSpace(a.cfg.PolicyPath); p != "" {
+		abs, err := filepath.Abs(p)
+		if err == nil {
+			out = append(out, abs)
+		}
+	}
+	return out
 }
 
 // claudeSandboxMissing lists what Claude's sandbox needs and this host lacks.
