@@ -106,11 +106,14 @@ func grokFlags(spec Spec) []string {
 	args = append(args, sessionFlags(spec)...)
 	args = append(args,
 		"-p", spec.Prompt,
-		"--sandbox", "workspace",
+		"--sandbox", grokSandbox(spec),
 		"--cwd", spec.Workspace,
 		"--output-format", "streaming-json",
 		"--no-auto-update",
 	)
+	if spec.Isolate != nil && len(spec.Isolate.GrokDisallow) > 0 {
+		args = append(args, "--disallowed-tools", strings.Join(spec.Isolate.GrokDisallow, ","))
+	}
 	for _, rule := range spec.AllowRules {
 		args = append(args, "--allow", rule)
 	}
@@ -125,6 +128,14 @@ func grokFlags(spec Spec) []string {
 		args = append(args, "--permission-mode", spec.PermissionMode)
 	}
 	return args
+}
+
+// grokSandbox is the daemon's profile, or built-in workspace without isolation.
+func grokSandbox(spec Spec) string {
+	if spec.Isolate != nil && spec.Isolate.GrokSandbox != "" {
+		return spec.Isolate.GrokSandbox
+	}
+	return "workspace"
 }
 
 func claudeFlags(spec Spec) []string {

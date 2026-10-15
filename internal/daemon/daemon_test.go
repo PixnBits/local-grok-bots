@@ -31,6 +31,8 @@ func TestMain(m *testing.M) {
 	if sandbox.HandleArgs(os.Args[1:]) {
 		return
 	}
+	// Fake CLIs don't need bubblewrap and socat; sandbox tests set their own.
+	claudeSandboxMissing = func() []string { return nil }
 	os.Exit(m.Run())
 }
 

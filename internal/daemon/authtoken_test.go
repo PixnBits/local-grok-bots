@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
 func TestOllamaOnlyNeedsNoToken(t *testing.T) {
@@ -107,7 +109,7 @@ func TestCLIEnvNeverCarriesAdminToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, backend := range []string{"claude", "grok"} {
-		iso, err := app.cliIsolation("bot1", backend, ws)
+		iso, err := app.cliIsolation(store.Bot{ID: "bot1"}, backend, ws)
 		if err != nil {
 			t.Fatal(err)
 		}

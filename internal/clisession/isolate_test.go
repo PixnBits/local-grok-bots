@@ -64,7 +64,7 @@ func TestPrepareIsolationClaudeScrubsEnv(t *testing.T) {
 		t.Fatal("user settings copied into the isolated home")
 	}
 	b, err := os.ReadFile(iso.SettingsPath)
-	if err != nil || !strings.Contains(string(b), `"disableAllHooks":true`) {
+	if err != nil || !strings.Contains(string(b), `"disableAllHooks": true`) {
 		t.Fatalf("settings file: %s %v", b, err)
 	}
 }

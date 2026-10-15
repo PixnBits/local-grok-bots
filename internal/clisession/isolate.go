@@ -20,6 +20,12 @@ type Isolation struct {
 	SettingsPath string
 	// Env is the full child environment.
 	Env []string
+	// GrokSandbox is the --sandbox profile for Grok.
+	GrokSandbox string
+	// GrokDisallow are built-in Grok tools passed to --disallowed-tools.
+	GrokDisallow []string
+	// ClaudeSandbox is whether the settings file turns Claude's sandbox on.
+	ClaudeSandbox bool
 }
 
 // IsolationOptions builds an Isolation.
@@ -38,6 +44,12 @@ type IsolationOptions struct {
 	// Secrets are daemon values (the admin token) that must never reach the
 	// CLI. A variable whose value contains one is dropped, whatever its name.
 	Secrets []string
+	// Grants map the bot's daemon grants onto CLI settings.
+	Grants Grants
+	// ClaudeSandbox turns on Claude's Bash sandbox, fail closed.
+	ClaudeSandbox bool
+	// Protect are extra absolute paths both CLIs are denied (daemon secrets).
+	Protect []string
 }
 
 // passEnv names variables kept from the daemon environment.
@@ -69,10 +81,6 @@ var grokCompatOff = []string{
 	"GROK_CURSOR_AGENTS_ENABLED", "GROK_CURSOR_HOOKS_ENABLED", "GROK_CURSOR_MCPS_ENABLED",
 	"GROK_CURSOR_RULES_ENABLED", "GROK_CURSOR_SKILLS_ENABLED",
 }
-
-// claudeSettings is the daemon's --settings file. Setting sources are empty,
-// so this and managed settings are the only Claude settings that apply.
-const claudeSettings = `{"disableAllHooks":true,"enableAllProjectMcpServers":false}`
 
 // PrepareIsolation creates the per-bot home, links credentials, writes the
 // Claude settings file, and builds the scrubbed environment.
@@ -130,9 +138,14 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 			return Isolation{}, err
 		}
 		iso.SettingsPath = filepath.Join(o.StateDir, "claude-settings.json")
-		if err := os.WriteFile(iso.SettingsPath, []byte(claudeSettings), 0o600); err != nil {
+		body, err := claudeSettingsJSON(o)
+		if err != nil {
 			return Isolation{}, err
 		}
+		if err := os.WriteFile(iso.SettingsPath, body, 0o600); err != nil {
+			return Isolation{}, err
+		}
+		iso.ClaudeSandbox = o.ClaudeSandbox
 	case "grok":
 		if o.Home != "" {
 			env["GROK_HOME"] = filepath.Join(o.Home, ".grok")
@@ -141,6 +154,18 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 			env[k] = "false"
 		}
 		env["GROK_DISABLE_AUTOUPDATER"] = "1"
+		iso.GrokDisallow = grokDisallowed(o.Grants)
+		// The custom profile lives in the per-bot GROK_HOME. With the user's
+		// own home the daemon does not write there, and uses built-in strict,
+		// which Grok runs unenforced (with a warning) if it can't apply.
+		iso.GrokSandbox = "strict"
+		if o.Home != "" {
+			path := filepath.Join(o.Home, ".grok", "sandbox.toml")
+			if err := os.WriteFile(path, []byte(grokSandboxTOML(o)), 0o600); err != nil {
+				return Isolation{}, err
+			}
+			iso.GrokSandbox = GrokProfile
+		}
 	}
 	for k, v := range o.Extra {
 		env[k] = v

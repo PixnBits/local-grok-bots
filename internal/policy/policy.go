@@ -81,6 +81,9 @@ type Policy struct {
 	// found; elsewhere: isolated), isolated, or user (managed policy only).
 	// CLIHome = user still wins for every backend.
 	CLIClaudeHome string
+	// CLIClaudeSandbox is required (default: Claude's Bash sandbox on, fail
+	// closed) or off (managed policy only; the daemon adds no sandbox block).
+	CLIClaudeSandbox string
 	// CLIEnv is added to the scrubbed CLI environment. Only managed policy sets it.
 	CLIEnv map[string]string
 
@@ -126,6 +129,7 @@ func Defaults() Policy {
 		CLIOverrides:      OverridesIgnore,
 		CLIHome:           HomeIsolated,
 		CLIClaudeHome:     HomeAuto,
+		CLIClaudeSandbox:  SandboxRequired,
 		TimersEnabled:     true,
 		SandboxFailClosed: true,
 		ConflictPolicy:    "refuse",
@@ -386,6 +390,10 @@ const (
 	HomeUser = "user"
 	// HomeAuto is the per-OS Claude default: user on darwin, isolated elsewhere.
 	HomeAuto = "auto"
+	// SandboxRequired turns on Claude's sandbox and fails the turn if it can't run.
+	SandboxRequired = "required"
+	// SandboxOff leaves Claude's sandbox to the user's managed settings.
+	SandboxOff = "off"
 )
 
 func (p *Policy) applyIsolation(iso *cliIsoDoc, trusted bool) error {
@@ -428,6 +436,20 @@ func (p *Policy) applyIsolation(iso *cliIsoDoc, trusted bool) error {
 			}
 		default:
 			return fmt.Errorf("cli.isolation.claude_home must be auto, isolated, or user")
+		}
+	}
+	if iso.ClaudeSandbox != nil {
+		switch v := strings.ToLower(strings.TrimSpace(*iso.ClaudeSandbox)); v {
+		case "", SandboxRequired:
+			p.CLIClaudeSandbox = SandboxRequired
+		case SandboxOff:
+			if trusted {
+				p.CLIClaudeSandbox = SandboxOff
+			} else {
+				p.Warnings = append(p.Warnings, "cli.isolation.claude_sandbox = \"off\" is ignored; only managed policy can turn off Claude's sandbox")
+			}
+		default:
+			return fmt.Errorf("cli.isolation.claude_sandbox must be required or off")
 		}
 	}
 	if iso.Env != nil {
@@ -582,10 +604,11 @@ type cliDoc struct {
 }
 
 type cliIsoDoc struct {
-	Overrides  *string            `toml:"overrides" json:"overrides"`
-	Home       *string            `toml:"home" json:"home"`
-	ClaudeHome *string            `toml:"claude_home" json:"claude_home"`
-	Env        *map[string]string `toml:"env" json:"env"`
+	Overrides     *string            `toml:"overrides" json:"overrides"`
+	Home          *string            `toml:"home" json:"home"`
+	ClaudeHome    *string            `toml:"claude_home" json:"claude_home"`
+	ClaudeSandbox *string            `toml:"claude_sandbox" json:"claude_sandbox"`
+	Env           *map[string]string `toml:"env" json:"env"`
 }
 
 type cliPermDoc struct {

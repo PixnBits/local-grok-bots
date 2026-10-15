@@ -73,7 +73,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		a.failCLI(bot.ID, runID, backend, err)
 		return
 	}
-	iso, err := a.cliIsolation(bot.ID, backend, ws)
+	iso, err := a.cliIsolation(bot, backend, ws)
 	if err != nil {
 		if fresh {
 			_ = a.st.SetBotSession(bot.ID, "")
@@ -246,6 +246,10 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		if fresh && strings.TrimSpace(res.SessionID) == "" {
 			_ = a.st.SetBotSession(bot.ID, "")
 		}
+		// failIfUnavailable makes Claude exit at startup; say why.
+		if iso != nil && iso.ClaudeSandbox && strings.TrimSpace(res.Text) == "" && strings.Contains(strings.ToLower(err.Error()), "sandbox") {
+			err = a.sandboxUnavailable(bot.ID, err.Error())
+		}
 		a.failCLI(bot.ID, runID, backend, err)
 	default:
 		if text != "" {
@@ -268,7 +272,8 @@ func (a *App) finishCLIInterrupted(botID, runID, text string) {
 // daemon-owned CLI environment. A file the launch cannot neutralize, or any
 // file under overrides = "refuse", fails the turn closed. Each detection is
 // audited.
-func (a *App) cliIsolation(botID, backend, ws string) (*clisession.Isolation, error) {
+func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isolation, error) {
+	botID := bot.ID
 	isolated := a.policy.CLIHome != policy.HomeUser
 	found := clisession.ScanOverrides(ws)
 	if len(found) > 0 {
@@ -305,6 +310,14 @@ func (a *App) cliIsolation(botID, backend, ws string) (*clisession.Isolation, er
 		Base:     os.Environ(),
 		Extra:    a.policy.CLIEnv,
 		Secrets:  []string{a.cfg.AuthToken},
+		Grants:   botGrants(bot),
+		Protect:  a.daemonSecrets(),
+	}
+	if strings.EqualFold(backend, "claude") && a.policy.CLIClaudeSandbox != policy.SandboxOff {
+		if missing := claudeSandboxMissing(); len(missing) > 0 {
+			return nil, a.sandboxUnavailable(botID, "missing "+strings.Join(missing, ", "))
+		}
+		opts.ClaudeSandbox = true
 	}
 	opts.UserHome, _ = os.UserHomeDir()
 	ownHome := isolated
@@ -326,6 +339,68 @@ func (a *App) cliIsolation(botID, backend, ws string) (*clisession.Isolation, er
 		}
 	}
 	return &iso, nil
+}
+
+// botGrants maps the bot's daemon grants onto the CLI's own controls.
+func botGrants(bot store.Bot) clisession.Grants {
+	var g clisession.Grants
+	for _, name := range bot.Grants {
+		switch name {
+		case "net":
+			g.Net = true
+		case "git":
+			g.Git = true
+		case "ssh":
+			g.SSH = true
+		}
+	}
+	if g.Net {
+		g.NetAllow = append([]string(nil), bot.NetAllow...)
+	}
+	return g
+}
+
+// daemonSecrets are files no CLI tool or shell may read: the admin token and
+// the database. They sit beside the workspace in DATA_DIR.
+func (a *App) daemonSecrets() []string {
+	dir, err := filepath.Abs(a.cfg.DataDir)
+	if err != nil {
+		return nil
+	}
+	return []string{
+		filepath.Join(dir, adminTokenFile),
+		filepath.Join(dir, "state.db"), filepath.Join(dir, "state.db-wal"), filepath.Join(dir, "state.db-shm"),
+	}
+}
+
+// claudeSandboxMissing lists what Claude's sandbox needs and this host lacks.
+// macOS uses the built-in Seatbelt. Tests replace it.
+var claudeSandboxMissing = func() []string {
+	if cliGOOS != "linux" {
+		return nil
+	}
+	var missing []string
+	for _, bin := range []string{"bwrap", "socat"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			missing = append(missing, bin)
+		}
+	}
+	return missing
+}
+
+// sandboxUnavailable records that Claude's required sandbox can't run and
+// returns the error the turn fails with.
+func (a *App) sandboxUnavailable(botID, why string) error {
+	fields := map[string]any{"backend": "claude", "reason": clip(why, 500)}
+	a.log(botID, "cli_sandbox_unavailable", fields)
+	if a.audit != nil && a.audit.Enabled() {
+		rec := map[string]any{"event": "cli_sandbox_unavailable", "bot_id": botID}
+		for k, v := range fields {
+			rec[k] = v
+		}
+		a.audit.Write(rec)
+	}
+	return fmt.Errorf("Claude's sandbox is required but can't run here (%s), so the turn was refused. Install bubblewrap and socat on Linux, or a managed policy can set [cli.isolation] claude_sandbox = \"off\"", why)
 }
 
 // cliGOOS is the OS the Claude home default is chosen for. Tests set it.

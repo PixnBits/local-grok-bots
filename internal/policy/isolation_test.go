@@ -94,3 +94,32 @@ func TestClaudeHomePerOS(t *testing.T) {
 		t.Fatalf("managed: %q", p.CLIClaudeHome)
 	}
 }
+
+func TestClaudeSandboxOffIsManagedOnly(t *testing.T) {
+	if Defaults().CLIClaudeSandbox != SandboxRequired {
+		t.Fatalf("default %q", Defaults().CLIClaudeSandbox)
+	}
+	dir := t.TempDir()
+	local := filepath.Join(dir, "policy.toml")
+	_ = os.WriteFile(local, []byte("[cli.isolation]\nclaude_sandbox = \"off\"\n"), 0o644)
+	p, err := Load(Options{Path: local})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.CLIClaudeSandbox != SandboxRequired || !strings.Contains(strings.Join(p.Warnings, "\n"), "claude_sandbox") {
+		t.Fatalf("local off applied: %q %v", p.CLIClaudeSandbox, p.Warnings)
+	}
+	managed := filepath.Join(dir, "managed.json")
+	_ = os.WriteFile(managed, []byte(`{"cli":{"isolation":{"claude_sandbox":"off"}}}`), 0o644)
+	p, err = Load(Options{Path: local, ManagedPath: managed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.CLIClaudeSandbox != SandboxOff {
+		t.Fatalf("managed off not applied: %q", p.CLIClaudeSandbox)
+	}
+	_ = os.WriteFile(local, []byte("[cli.isolation]\nclaude_sandbox = \"sometimes\"\n"), 0o644)
+	if p, err := Load(Options{Path: local}); err == nil && len(p.Warnings) == 0 {
+		t.Fatal("bad value accepted")
+	}
+}
