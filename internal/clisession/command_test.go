@@ -1,6 +1,7 @@
 package clisession
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -42,8 +43,15 @@ func TestResumeAndExplicitPermission(t *testing.T) {
 	}
 }
 
+func grokSpec(spec Spec) Spec {
+	if spec.Isolate == nil {
+		spec.Isolate = &Isolation{GrokSandbox: GrokProfile}
+	}
+	return spec
+}
+
 func TestGrokDoesNotAlwaysApproveUnlessPolicySaysSo(t *testing.T) {
-	plain, err := Args(Spec{Backend: "grok", SessionID: "s", Fresh: true, Prompt: "hi", Workspace: "/w"})
+	plain, err := Args(grokSpec(Spec{Backend: "grok", SessionID: "s", Fresh: true, Prompt: "hi", Workspace: "/w"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +61,7 @@ func TestGrokDoesNotAlwaysApproveUnlessPolicySaysSo(t *testing.T) {
 	if !strings.Contains(strings.Join(plain, "\n"), "--output-format\nstreaming-json") {
 		t.Fatalf("format %v", plain)
 	}
-	allow, err := Args(Spec{Backend: "grok", SessionID: "s", Fresh: false, Prompt: "hi", Workspace: "/w", PermissionMode: "always-allow"})
+	allow, err := Args(grokSpec(Spec{Backend: "grok", SessionID: "s", Fresh: false, Prompt: "hi", Workspace: "/w", PermissionMode: "always-allow"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,10 +75,10 @@ func TestGrokDoesNotAlwaysApproveUnlessPolicySaysSo(t *testing.T) {
 }
 
 func TestPermissionRulesArePassedThrough(t *testing.T) {
-	grok, err := Args(Spec{
+	grok, err := Args(grokSpec(Spec{
 		Backend: "grok", Prompt: "hi", Workspace: "/w", PermissionMode: "ask",
 		AllowRules: []string{"Bash(git status*)"}, DenyRules: []string{"Bash(rm *)"},
-	})
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,6 +106,32 @@ func TestPermissionRulesArePassedThrough(t *testing.T) {
 	}
 	if !strings.Contains(joined, "--mcp-config\n{\"mcpServers\"") {
 		t.Fatalf("mcp config %v", claude)
+	}
+}
+
+func TestGrokBuiltinSandboxRefuses(t *testing.T) {
+	for _, name := range []string{"", "workspace", "strict", "off", "devbox", "read-only"} {
+		spec := Spec{Backend: "grok", Prompt: "hi", Workspace: t.TempDir()}
+		if name != "" {
+			spec.Isolate = &Isolation{GrokSandbox: name}
+		}
+		args, err := Args(spec)
+		if err == nil || !strings.Contains(err.Error(), "unenforced") || !strings.Contains(err.Error(), "refused") {
+			t.Fatalf("profile %q: args %v err %v", name, args, err)
+		}
+		if strings.Contains(strings.Join(args, " "), "--sandbox") {
+			t.Fatalf("profile %q still launched: %v", name, args)
+		}
+	}
+	args, err := Args(Spec{Backend: "grok", Prompt: "hi", Workspace: t.TempDir(), Isolate: &Isolation{GrokSandbox: GrokProfile}})
+	if err != nil || !strings.Contains(strings.Join(args, " "), "--sandbox "+GrokProfile) {
+		t.Fatalf("custom profile: %v %v", args, err)
+	}
+	_, err = (ExecRunner{HasTTY: func() bool { return false }}).Run(context.Background(), Spec{
+		Backend: "grok", Prompt: "hi", Workspace: t.TempDir(),
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "unenforced") {
+		t.Fatalf("runner started a built-in sandbox: %v", err)
 	}
 }
 

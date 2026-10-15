@@ -74,6 +74,7 @@ sleep 120
 	var pid int
 	_, err := (ExecRunner{HasTTY: func() bool { return false }}).Run(ctx, Spec{
 		Backend: "grok", Bin: bin, Fresh: true, Prompt: "hi", Workspace: dir,
+		Isolate: &Isolation{GrokSandbox: GrokProfile},
 		OnStart: func(p int) { pid = p },
 	}, nil)
 	if !errors.Is(err, ErrPermissionPrompt) {

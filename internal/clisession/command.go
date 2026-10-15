@@ -86,7 +86,11 @@ func Args(spec Spec) ([]string, error) {
 		if bin == "" {
 			bin = "grok"
 		}
-		return append([]string{bin}, grokFlags(spec)...), nil
+		flags, err := grokFlags(spec)
+		if err != nil {
+			return nil, err
+		}
+		return append([]string{bin}, flags...), nil
 	case "claude":
 		bin := spec.Bin
 		if bin == "" {
@@ -98,7 +102,11 @@ func Args(spec Spec) ([]string, error) {
 	}
 }
 
-func grokFlags(spec Spec) []string {
+func grokFlags(spec Spec) ([]string, error) {
+	profile, err := grokSandbox(spec)
+	if err != nil {
+		return nil, err
+	}
 	var args []string
 	if spec.Model != "" {
 		args = append(args, "-m", spec.Model)
@@ -106,7 +114,7 @@ func grokFlags(spec Spec) []string {
 	args = append(args, sessionFlags(spec)...)
 	args = append(args,
 		"-p", spec.Prompt,
-		"--sandbox", grokSandbox(spec),
+		"--sandbox", profile,
 		"--cwd", spec.Workspace,
 		"--output-format", "streaming-json",
 		"--no-auto-update",
@@ -127,15 +135,22 @@ func grokFlags(spec Spec) []string {
 	} else if strings.TrimSpace(spec.PermissionMode) != "" {
 		args = append(args, "--permission-mode", spec.PermissionMode)
 	}
-	return args
+	return args, nil
 }
 
-// grokSandbox is the daemon's profile, or built-in workspace without isolation.
-func grokSandbox(spec Spec) string {
-	if spec.Isolate != nil && spec.Isolate.GrokSandbox != "" {
-		return spec.Isolate.GrokSandbox
+// grokSandbox is the daemon's custom profile. Built-in names (and an empty
+// one) are refused: Grok runs those unenforced, with a warning, when it
+// cannot apply them. A custom profile makes Grok refuse to start instead.
+func grokSandbox(spec Spec) (string, error) {
+	name := ""
+	if spec.Isolate != nil {
+		name = strings.TrimSpace(spec.Isolate.GrokSandbox)
 	}
-	return "workspace"
+	switch name {
+	case "", "off", "workspace", "devbox", "read-only", "strict":
+		return "", fmt.Errorf("grok sandbox profile %q is built-in and can run unenforced, so the turn was refused", name)
+	}
+	return name, nil
 }
 
 func claudeFlags(spec Spec) []string {

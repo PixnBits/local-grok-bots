@@ -82,6 +82,44 @@ var grokCompatOff = []string{
 	"GROK_CURSOR_RULES_ENABLED", "GROK_CURSOR_SKILLS_ENABLED",
 }
 
+// SandboxError is a fail-closed sandbox refusal. The daemon audits it as
+// cli_sandbox_unavailable, the same event as a missing Claude sandbox.
+type SandboxError struct {
+	Backend string
+	Path    string
+	Err     error
+}
+
+func (e *SandboxError) Error() string {
+	if e == nil || e.Err == nil {
+		return "sandbox refused the turn"
+	}
+	return e.Err.Error()
+}
+
+func (e *SandboxError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+// grokProfileHome is the directory whose sandbox.toml holds the custom
+// profile. With the user's HOME it is a daemon directory, never ~/.grok.
+func grokProfileHome(o IsolationOptions) (string, error) {
+	if o.Home != "" {
+		return filepath.Join(o.Home, ".grok"), nil
+	}
+	if !filepath.IsAbs(o.StateDir) {
+		return "", &SandboxError{Backend: "grok", Err: fmt.Errorf("Grok's sandbox profile needs an absolute state dir, so the turn was refused")}
+	}
+	dir := filepath.Join(o.StateDir, "grok-home")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", &SandboxError{Backend: "grok", Err: fmt.Errorf("Grok's sandbox profile could not be written (%v), so the turn was refused", err)}
+	}
+	return dir, nil
+}
+
 // PrepareIsolation creates the per-bot home, links credentials, writes the
 // Claude settings file, and builds the scrubbed environment.
 func PrepareIsolation(o IsolationOptions) (Isolation, error) {
@@ -151,25 +189,27 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 		}
 		iso.ClaudeSandbox = o.ClaudeSandbox
 	case "grok":
-		if o.Home != "" {
-			env["GROK_HOME"] = filepath.Join(o.Home, ".grok")
-		}
 		for _, k := range grokCompatOff {
 			env[k] = "false"
 		}
 		env["GROK_DISABLE_AUTOUPDATER"] = "1"
 		iso.GrokDisallow = grokDisallowed(o.Grants)
-		// The custom profile lives in the per-bot GROK_HOME. With the user's
-		// own home the daemon does not write there, and uses built-in strict,
-		// which Grok runs unenforced (with a warning) if it can't apply.
-		iso.GrokSandbox = "strict"
-		if o.Home != "" {
-			path := filepath.Join(o.Home, ".grok", "sandbox.toml")
-			if err := os.WriteFile(path, []byte(grokSandboxTOML(o)), 0o600); err != nil {
-				return Isolation{}, err
-			}
-			iso.GrokSandbox = GrokProfile
+		// Built-in profiles fail open. The custom profile lives in GROK_HOME:
+		// the per-bot home, or a daemon directory when HOME is the user's
+		// (that directory is not ~/.grok, so the user's sandbox.toml is untouched).
+		grokHome, err := grokProfileHome(o)
+		if err != nil {
+			return Isolation{}, err
 		}
+		env["GROK_HOME"] = grokHome
+		if o.UserHome != "" && grokHome != filepath.Join(o.UserHome, ".grok") {
+			// Login is ~/.grok/auth.json. A separate GROK_HOME would miss it.
+			hardlinkCred(filepath.Join(o.UserHome, ".grok", "auth.json"), filepath.Join(grokHome, "auth.json"))
+		}
+		if err := os.WriteFile(filepath.Join(grokHome, "sandbox.toml"), []byte(grokSandboxTOML(o)), 0o600); err != nil {
+			return Isolation{}, &SandboxError{Backend: "grok", Err: fmt.Errorf("Grok's sandbox profile could not be written (%v), so the turn was refused", err)}
+		}
+		iso.GrokSandbox = GrokProfile
 	}
 	for k, v := range o.Extra {
 		env[k] = v

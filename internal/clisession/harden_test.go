@@ -144,16 +144,35 @@ func TestGrokProfileAndFlags(t *testing.T) {
 		t.Fatalf("net grant still disallows web tools: %s", argv)
 	}
 
-	// The user's own GROK_HOME is never written; built-in strict is used.
-	iso, err = PrepareIsolation(IsolationOptions{Backend: "grok", StateDir: t.TempDir(), UserHome: user})
+	// home = "user" does not write ~/.grok/sandbox.toml. The custom profile
+	// lives in a daemon GROK_HOME, because a built-in profile can run unenforced.
+	state := t.TempDir()
+	iso, err = PrepareIsolation(IsolationOptions{Backend: "grok", StateDir: state, UserHome: user})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(user, ".grok", "sandbox.toml")); err == nil {
 		t.Fatalf("wrote the user's sandbox.toml")
 	}
-	if iso.GrokSandbox != "strict" {
+	if iso.GrokSandbox != GrokProfile {
 		t.Fatalf("user-home profile %q", iso.GrokSandbox)
+	}
+	env := envMap(iso.Env)
+	grokHome := filepath.Join(state, "grok-home")
+	if env["HOME"] != user || env["GROK_HOME"] != grokHome {
+		t.Fatalf("user-home env: %v", iso.Env)
+	}
+	b, err = os.ReadFile(filepath.Join(grokHome, "sandbox.toml"))
+	if err != nil || !strings.Contains(string(b), "[profiles.lgb]") || !strings.Contains(string(b), `extends = "strict"`) {
+		t.Fatalf("daemon profile: %s %v", b, err)
+	}
+	src, _ := os.Stat(filepath.Join(user, ".grok", "auth.json"))
+	dst, err := os.Lstat(filepath.Join(grokHome, "auth.json"))
+	if err != nil || !dst.Mode().IsRegular() || !os.SameFile(src, dst) {
+		t.Fatalf("user-home auth not hard linked: %v %v", dst, err)
+	}
+	if _, err := PrepareIsolation(IsolationOptions{Backend: "grok", StateDir: "relative", UserHome: user}); err == nil {
+		t.Fatal("relative state dir wrote a profile")
 	}
 }
 

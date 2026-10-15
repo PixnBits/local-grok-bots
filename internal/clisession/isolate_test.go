@@ -144,7 +144,10 @@ func TestClaudeIsolationFlags(t *testing.T) {
 	if slices.Contains(argv, "--strict-mcp-config") {
 		t.Fatal("isolation flags without Isolate")
 	}
-	argv, _ = Args(Spec{Backend: "grok", Prompt: "hi", Isolate: iso})
+	argv, err := Args(Spec{Backend: "grok", Prompt: "hi", Isolate: &Isolation{GrokSandbox: GrokProfile}})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if slices.Contains(argv, "--trust") || slices.Contains(argv, "--settings") {
 		t.Fatalf("grok argv: %v", argv)
 	}

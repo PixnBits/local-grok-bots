@@ -254,9 +254,17 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		if fresh && strings.TrimSpace(res.SessionID) == "" {
 			_ = a.st.SetBotSession(bot.ID, "")
 		}
-		// failIfUnavailable makes Claude exit at startup; say why.
-		if iso != nil && iso.ClaudeSandbox && strings.TrimSpace(res.Text) == "" && strings.Contains(strings.ToLower(err.Error()), "sandbox") {
-			err = a.sandboxUnavailable(bot.ID, err.Error())
+		// A sandbox that cannot be applied must not continue. Claude's
+		// failIfUnavailable exits at startup. Grok does the same for a custom
+		// profile, and a built-in profile is refused before the process starts.
+		if iso != nil && strings.TrimSpace(res.Text) == "" && cliSandboxFailed(backend, iso, err) {
+			why := err.Error()
+			a.recordSandboxRefusal(bot.ID, backend, why)
+			if strings.EqualFold(backend, "grok") {
+				err = fmt.Errorf("Grok's sandbox is required but can't run here (%s), so the turn was refused", why)
+			} else {
+				err = fmt.Errorf("Claude's sandbox is required but can't run here (%s), so the turn was refused. Install bubblewrap and socat on Linux, or a managed policy can set [cli.isolation] claude_sandbox = \"off\"", why)
+			}
 		}
 		a.failCLI(bot.ID, runID, backend, err)
 	default:
@@ -339,6 +347,10 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isola
 	}
 	iso, err := clisession.PrepareIsolation(opts)
 	if err != nil {
+		var se *clisession.SandboxError
+		if errors.As(err, &se) {
+			a.recordSandboxRefusal(botID, se.Backend, se.Error())
+		}
 		return nil, err
 	}
 	if strings.EqualFold(backend, "claude") {
@@ -428,10 +440,31 @@ var claudeSandboxMissing = func() []string {
 	return missing
 }
 
+// cliSandboxFailed reports a CLI exit that means the sandbox was not applied.
+// Assistant text means the turn ran; a later tool error that mentions the
+// word is not a startup refusal.
+func cliSandboxFailed(backend string, iso *clisession.Isolation, err error) bool {
+	if err == nil || iso == nil || !strings.Contains(strings.ToLower(err.Error()), "sandbox") {
+		return false
+	}
+	if strings.EqualFold(backend, "grok") {
+		return true
+	}
+	return iso.ClaudeSandbox
+}
+
 // sandboxUnavailable records that Claude's required sandbox can't run and
 // returns the error the turn fails with.
 func (a *App) sandboxUnavailable(botID, why string) error {
-	fields := map[string]any{"backend": "claude", "reason": clip(why, 500)}
+	a.recordSandboxRefusal(botID, "claude", why)
+	return fmt.Errorf("Claude's sandbox is required but can't run here (%s), so the turn was refused. Install bubblewrap and socat on Linux, or a managed policy can set [cli.isolation] claude_sandbox = \"off\"", why)
+}
+
+// recordSandboxRefusal writes the bot log and the audit sink. Callers keep
+// their own user-facing error so a settings failure is not described as a
+// missing bubblewrap.
+func (a *App) recordSandboxRefusal(botID, backend, why string) {
+	fields := map[string]any{"backend": backend, "reason": clip(why, 500)}
 	a.log(botID, "cli_sandbox_unavailable", fields)
 	if a.audit != nil && a.audit.Enabled() {
 		rec := map[string]any{"event": "cli_sandbox_unavailable", "bot_id": botID}
@@ -440,7 +473,6 @@ func (a *App) sandboxUnavailable(botID, why string) error {
 		}
 		a.audit.Write(rec)
 	}
-	return fmt.Errorf("Claude's sandbox is required but can't run here (%s), so the turn was refused. Install bubblewrap and socat on Linux, or a managed policy can set [cli.isolation] claude_sandbox = \"off\"", why)
 }
 
 // cliGOOS is the OS the Claude home default is chosen for. Tests set it.

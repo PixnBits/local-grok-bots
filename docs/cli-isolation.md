@@ -101,11 +101,17 @@ Grok has no flag to skip setting sources. The daemon:
 - never passes `--trust`; with an isolated `GROK_HOME` there is no prior folder
   grant, so project `.grok/config.toml`, `.claude/settings*.json`, `AGENTS.md`,
   `CLAUDE.md`, project skills, and project hooks are not loaded;
-- sets `GROK_HOME=<home>/.grok`, so `~/.grok/config.toml`, `~/.grok/rules`,
-  user hooks and plugins do not load;
-- runs `--sandbox lgb`, a custom profile it writes to `<home>/.grok/sandbox.toml`
-  (see [Sandbox and tools](#sandbox-and-tools));
-- hard links `~/.grok/auth.json` into the isolated home (Grok 1.0.52 says
+- sets `GROK_HOME` to a daemon-owned directory, so `~/.grok/config.toml`,
+  `~/.grok/rules`, user hooks and plugins do not load. With the default
+  isolated home that directory is `<home>/.grok`. With managed `home = "user"`
+  it is `DATA_DIR/cli/<bot>/grok-home`, and `HOME` stays the user's home;
+- runs `--sandbox lgb`, a custom profile it writes into that `GROK_HOME` as
+  `sandbox.toml` (see [Sandbox and tools](#sandbox-and-tools)). It does not
+  write the user's `~/.grok/sandbox.toml`. A launch with no profile, or with
+  a built-in name (`off`, `workspace`, `devbox`, `read-only`, `strict`), is
+  refused before the process starts: those profiles run unenforced, with a
+  warning, when Grok cannot apply them;
+- hard links `~/.grok/auth.json` into that `GROK_HOME` (Grok 1.0.52 says
   "Not signed in" when it is a symlink); it relinks when the user's file is
   replaced, and falls back to a symlink across filesystems, so keep DATA_DIR
   on the same filesystem as HOME;
@@ -168,7 +174,8 @@ settings and sandboxing docs, Claude Code v2.1.285+):
 
 ### Grok
 
-With an isolated home (default) the daemon writes:
+The daemon writes this into the turn's `GROK_HOME` (`<home>/.grok`, or
+`DATA_DIR/cli/<bot>/grok-home` when managed `home = "user"`):
 
 ```toml
 [profiles.lgb]
@@ -190,9 +197,13 @@ A profile pinned in `requirements.toml` (`/etc/grok` or signed) outranks
 under the isolated home; the daemon's profile extends `strict`, the strictest
 built-in.
 
-Under managed `home = "user"` the daemon does not write the user's
-`~/.grok/sandbox.toml`. It passes built-in `--sandbox strict`, which Grok runs
-unenforced, with a warning, if it can't apply.
+Under managed `home = "user"` the daemon still does not write the user's
+`~/.grok/sandbox.toml`. `GROK_HOME` points at the per-bot `grok-home`
+directory, which holds the same `lgb` profile, and the turn passes
+`--sandbox lgb`. `HOME` stays the user's. A profile pinned in
+`requirements.toml` still outranks `--sandbox`. If Grok cannot apply `lgb`,
+it refuses to start and the daemon audits `cli_sandbox_unavailable`, the same
+event as Claude's missing sandbox.
 
 ### lgb: daemon state tools without MCP
 
