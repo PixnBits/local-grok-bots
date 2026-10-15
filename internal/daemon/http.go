@@ -38,6 +38,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/bots/{id}/dms", a.handleDMs)
 	mux.HandleFunc("GET /api/dms/{bot_a}/{bot_b}", a.handleDMThread)
 	mux.HandleFunc("GET /api/log", a.handleLog)
+	mux.HandleFunc("GET /api/stt/status", a.handleSTTStatus)
+	mux.HandleFunc("POST /api/stt", a.handleSTT)
 	mux.HandleFunc("GET /", a.handleIndex)
 	mux.HandleFunc("GET /index.html", a.handleIndex)
 	// A bot's page. The client reads the id from the path.

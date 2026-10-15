@@ -45,6 +45,8 @@ type App struct {
 	pending map[string][]model.Message
 	closing bool
 	wg      sync.WaitGroup
+
+	stt STT
 }
 
 func New(cfg config.Config, m model.Client) (*App, error) {
@@ -59,11 +61,17 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	if m == nil {
 		m = model.NewOllama(cfg.OllamaURL)
 	}
+	stt, err := sttFromConfig(cfg.WhisperBin, cfg.WhisperModel)
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{
 		cfg:     cfg,
 		st:      st,
 		model:   m,
+		stt:     stt,
 		ws:      cfg.Workspace(),
 		bus:     NewBus(),
 		ctx:     ctx,

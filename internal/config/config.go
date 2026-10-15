@@ -23,6 +23,9 @@ type Config struct {
 	TLSCert       string
 	TLSKey        string
 	TLSSelfSigned bool
+	// Local speech-to-text via whisper.cpp's whisper-cli. Both or neither.
+	WhisperBin   string
+	WhisperModel string
 }
 
 func FromEnv() Config {
@@ -37,6 +40,8 @@ func FromEnv() Config {
 		TLSCert:       os.Getenv("TLS_CERT"),
 		TLSKey:        os.Getenv("TLS_KEY"),
 		TLSSelfSigned: os.Getenv("TLS_SELF_SIGNED") == "1",
+		WhisperBin:    os.Getenv("WHISPER_BIN"),
+		WhisperModel:  os.Getenv("WHISPER_MODEL"),
 	}
 }
 
