@@ -2,6 +2,7 @@ package clisession
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -82,9 +83,9 @@ func TestClaudeSettingsNetGrant(t *testing.T) {
 	}
 }
 
-// With claude_sandbox off (managed: the org's own Claude settings run the
-// sandbox) the daemon writes no sandbox block at all, so it can't override
-// or weaken the user's; it never writes enabled:false in any mode.
+// With claude_sandbox off and no user sandbox settings, the daemon writes no
+// sandbox block, so it can't override a managed sandbox. It never writes
+// enabled:false on its own.
 func TestClaudeSettingsSandboxOffLeavesManagedSandbox(t *testing.T) {
 	doc := claudeDoc(t, IsolationOptions{UserHome: "/home/u"})
 	if _, ok := doc["sandbox"]; ok {
@@ -98,6 +99,145 @@ func TestClaudeSettingsSandboxOffLeavesManagedSandbox(t *testing.T) {
 		if strings.Contains(mustJSON(d), `"enabled":false`) {
 			t.Fatalf("settings disable the sandbox")
 		}
+	}
+}
+
+func writeUserSettings(t *testing.T, home, body string) {
+	t.Helper()
+	dir := filepath.Join(home, ".claude")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUserSandboxEnabledSurvivesSandboxOff(t *testing.T) {
+	home := t.TempDir()
+	writeUserSettings(t, home, `{
+		"env": {"ANTHROPIC_API_KEY": "sk-user-secret"},
+		"hooks": {"PreToolUse": [{"matcher": "Bash"}]},
+		"permissions": {"allow": ["Bash(danger)"], "deny": ["Bash(curl *)"]},
+		"sandbox": {
+			"enabled": true,
+			"failIfUnavailable": true,
+			"allowUnsandboxedCommands": false,
+			"excludedCommands": ["docker"],
+			"network": {"allowedDomains": ["corp.example"], "strictAllowlist": false},
+			"filesystem": {"allowWrite": ["/tmp/user-scratch"], "denyRead": ["/srv/hidden"]},
+			"credentials": {"files": [{"path": "/only-user", "mode": "deny"}]}
+		}
+	}`)
+	doc := claudeDoc(t, IsolationOptions{UserHome: home})
+	sb := doc["sandbox"].(map[string]any)
+	if sb["enabled"] != true || sb["failIfUnavailable"] != true || sb["allowUnsandboxedCommands"] != false {
+		t.Fatalf("user sandbox not kept: %v", sb)
+	}
+	raw := mustJSON(doc)
+	for _, want := range []string{"Bash(curl *)", "corp.example", "docker", "/tmp/user-scratch", "/srv/hidden", "/only-user", "WebFetch"} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("missing %s in %s", want, raw)
+		}
+	}
+	for _, banned := range []string{"Bash(danger)", "PreToolUse", "sk-user-secret", `"enabled":false`} {
+		if strings.Contains(raw, banned) {
+			t.Fatalf("copied or loosened %s in %s", banned, raw)
+		}
+	}
+	net := sb["network"].(map[string]any)
+	if net["strictAllowlist"] != false || mustJSON(net["allowedDomains"]) != `["corp.example"]` {
+		t.Fatalf("network %v", net)
+	}
+}
+
+func TestUserDenyAndCredentialsAreUnioned(t *testing.T) {
+	home := t.TempDir()
+	ssh := filepath.Join(home, ".ssh")
+	writeUserSettings(t, home, `{
+		"permissions": {"deny": ["Bash(curl *)", "WebFetch"]},
+		"sandbox": {
+			"enabled": true,
+			"allowUnsandboxedCommands": true,
+			"network": {"allowedDomains": ["corp.example"], "strictAllowlist": false},
+			"credentials": {"files": [
+				{"path": "/only-user", "mode": "deny"},
+				{"path": "`+ssh+`", "mode": "allow"}
+			]}
+		}
+	}`)
+	doc := claudeDoc(t, IsolationOptions{
+		UserHome: home, ClaudeSandbox: true,
+		Grants:  Grants{Net: true, NetAllow: []string{"pypi.org"}},
+		Protect: []string{"/data/admin-token"},
+	})
+	deny := denyList(doc)
+	if !strings.Contains(deny, "\nBash(curl *)\n") || !strings.Contains(deny, "\nWebFetch\n") || !strings.Contains(deny, "\nSkill\n") {
+		t.Fatalf("deny union:%s", deny)
+	}
+	if strings.Count(deny, "\nWebFetch\n") != 1 {
+		t.Fatalf("duplicate deny:%s", deny)
+	}
+	sb := doc["sandbox"].(map[string]any)
+	if sb["enabled"] != true || sb["allowUnsandboxedCommands"] != false {
+		t.Fatalf("bool merge loosened the daemon sandbox: %v", sb)
+	}
+	net := sb["network"].(map[string]any)
+	if net["strictAllowlist"] != true || mustJSON(net["allowedDomains"]) != `["corp.example"]` {
+		t.Fatalf("allowlist changed: %v", net)
+	}
+	if strings.Contains(mustJSON(net), "pypi.org") {
+		t.Fatalf("daemon host added to the user allowlist: %v", net)
+	}
+	files := sb["credentials"].(map[string]any)["files"].([]any)
+	raw := mustJSON(files)
+	if !strings.Contains(raw, "/only-user") || !strings.Contains(raw, "/data/admin-token") || !strings.Contains(raw, ssh) {
+		t.Fatalf("credentials union: %s", raw)
+	}
+	for _, f := range files {
+		m := f.(map[string]any)
+		if m["path"] == ssh && m["mode"] != "deny" {
+			t.Fatalf("credential mode loosened: %v", m)
+		}
+	}
+}
+
+func TestDaemonDomainsUsedWhenUserSetsNone(t *testing.T) {
+	home := t.TempDir()
+	writeUserSettings(t, home, `{"sandbox":{"enabled":true}}`)
+	doc := claudeDoc(t, IsolationOptions{
+		UserHome: home, ClaudeSandbox: true,
+		Grants: Grants{Net: true, NetAllow: []string{"pypi.org"}},
+	})
+	net := doc["sandbox"].(map[string]any)["network"].(map[string]any)
+	if mustJSON(net["allowedDomains"]) != `["pypi.org"]` || net["strictAllowlist"] != true {
+		t.Fatalf("network %v", net)
+	}
+	if doc["sandbox"].(map[string]any)["enabled"] != true {
+		t.Fatal("enabled dropped")
+	}
+}
+
+func TestUnparseableUserSettingsRefuses(t *testing.T) {
+	for _, body := range []string{"{", "", "null", "[]", `{"sandbox":[]}`, `{"permissions":{"deny":"Bash"}}`} {
+		home := t.TempDir()
+		writeUserSettings(t, home, body)
+		_, err := PrepareIsolation(IsolationOptions{Backend: "claude", StateDir: t.TempDir(), UserHome: home, ClaudeSandbox: true})
+		var se *SandboxError
+		if err == nil || !errors.As(err, &se) || se.Backend != "claude" || !strings.Contains(err.Error(), "refused") {
+			t.Fatalf("body %q: %v", body, err)
+		}
+		if strings.Contains(err.Error(), `claude_sandbox = "off"`) {
+			t.Fatalf("unparseable settings offered a bypass: %v", err)
+		}
+	}
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".claude", "settings.json"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_, err := PrepareIsolation(IsolationOptions{Backend: "claude", StateDir: t.TempDir(), UserHome: home})
+	if err == nil || !strings.Contains(err.Error(), "refused") {
+		t.Fatalf("directory settings: %v", err)
 	}
 }
 

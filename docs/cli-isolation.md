@@ -84,7 +84,10 @@ On each bot's first Claude turn after the daemon starts, the daemon writes a
 
 - `--setting-sources=`: no user, project, or local settings, and so no
   `CLAUDE.md`, hooks, or `settings*.json` from them. This is the form the Agent
-  SDK passes for `setting_sources=[]`.
+  SDK passes for `setting_sources=[]`. The daemon still reads the real user
+  home's `~/.claude/settings.json` and copies that file's sandbox keys into
+  the `--settings` file, as described under [Sandbox and tools](#sandbox-and-tools).
+  Allow rules, hooks, and the rest of the user file are not copied.
 - `--settings DATA_DIR/cli/<bot>/claude-settings.json`: daemon-written,
   `disableAllHooks`, `enableAllProjectMcpServers: false`, and the restrictions
   under [Sandbox and tools](#sandbox-and-tools).
@@ -157,20 +160,36 @@ settings and sandboxing docs, Claude Code v2.1.285+):
 
 - Managed settings: highest precedence. A managed boolean (`enabled`,
   `failIfUnavailable`, `allowUnsandboxedCommands`) wins over the daemon's
-  value, and arrays merge. The daemon never writes `enabled: false`, so a
-  managed sandbox stays on. If managed sets `allowUnsandboxedCommands: true`,
-  managed wins; the daemon can't tighten that key. Deny rules from every scope
-  are evaluated first, so the daemon's deny rules can't be undone by an allow
-  elsewhere, and managed deny rules still apply.
-- User `~/.claude/settings.json`: not loaded (`--setting-sources=`), except
-  that Claude still applies its `sandbox.credentials` deny entries. A user's own
-  `allowedDomains`, `excludedCommands`, or `allowWrite` therefore don't carry
-  over. That narrows, never widens, and can break a workflow that relied on
-  them: ask the admin for a policy host grant instead.
+  value, and arrays merge. The daemon's own sandbox block never sets
+  `enabled: false`. A user's `enabled: false` is copied only when the daemon
+  is not writing its own block (`claude_sandbox = "off"`). Managed settings
+  still win, so a managed sandbox stays on. If managed sets
+  `allowUnsandboxedCommands: true`, managed wins; the daemon can't tighten
+  that key. Deny rules from every scope are evaluated first, so the daemon's
+  deny rules can't be undone by an allow elsewhere, and managed deny rules
+  still apply.
+- User `~/.claude/settings.json` is not loaded by Claude (`--setting-sources=`).
+  The daemon reads it from the real user home and copies its `sandbox` keys
+  into the `--settings` file. `permissions.deny` and `sandbox.credentials.files`
+  are unions, so a user deny is kept and the daemon's denies are added. On one
+  credential path, `deny` wins over `allow`. Other user sandbox keys are kept,
+  including `allowedDomains`, `excludedCommands`, and `allowWrite`. The daemon
+  does not add entries to those allowlists. Where the daemon also sets a
+  boolean, the stricter value is written: `enabled`, `failIfUnavailable`, and
+  `network.strictAllowlist` are true if either side says true;
+  `allowUnsandboxedCommands` and `autoAllowBashIfSandboxed` are false if
+  either side says false. If the user did not set `allowedDomains`, the
+  daemon's grant list is used when the daemon writes a sandbox block. Allow
+  rules, hooks, and the rest of the user file are not copied. A missing file
+  means there is nothing to carry. If the file exists and cannot be read or
+  parsed, the turn is refused and audited as `cli_sandbox_unavailable`,
+  because a sandbox may be configured there.
 - `--settings` with `allowUnsandboxedCommands: false` makes the sandbox
   "admin-required", so a repository's settings can't loosen it either.
-- Orgs that already run the sandbox through managed settings and want only
-  theirs: managed `claude_sandbox = "off"`. Deny rules and the read block stay.
+- Orgs that already run the sandbox through managed settings and want the
+  daemon to add no sandbox block of its own: managed `claude_sandbox = "off"`.
+  The daemon's deny rules and the read block stay, the user's sandbox keys
+  are still copied, and managed settings still win.
 
 ### Grok
 
@@ -387,9 +406,10 @@ Under `overrides = "refuse"` every hit fails the turn with
 - Earlier, with an isolated `GROK_HOME`, a headless `-p` turn authenticated, reported the folder
   untrusted, and ignored an `AGENTS.md` instruction. `grok inspect` still lists
   a workspace `.mcp.json` with every compat cell off, which is why it is refused.
-- Claude's sandbox block, deny rules, the bwrap/socat check, and the merge
-  with managed settings are tested only against the settings JSON and a fake
-  CLI. The merge rules are from Claude's docs. A real run should confirm that
+- Claude's sandbox block, deny rules, the bwrap/socat check, the copy of
+  the user's `sandbox` keys, and the merge with managed settings are tested
+  only against the settings JSON and a fake CLI. The merge rules are from
+  Claude's docs. A real run should confirm that
   `failIfUnavailable` exits as expected, that `//abs` Read/Edit rules match,
   and that a managed sandbox still applies alongside `--settings`.
 - Claude was not installed on the test machine. The flags come from the CLI

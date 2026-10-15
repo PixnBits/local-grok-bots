@@ -46,6 +46,7 @@ func TestClaudeSandboxManagedOffSkipsCheckAndBlock(t *testing.T) {
 	claudeSandboxMissing = func() []string { return []string{"bwrap", "socat"} }
 	t.Cleanup(func() { claudeSandboxMissing = old })
 	dir := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
 	managed := filepath.Join(dir, "managed.json")
 	_ = os.WriteFile(managed, []byte(`{"cli":{"isolation":{"claude_sandbox":"off"}}}`), 0o644)
 	t.Setenv("MANAGED_POLICY", managed)
@@ -67,6 +68,86 @@ func TestClaudeSandboxManagedOffSkipsCheckAndBlock(t *testing.T) {
 	}
 	if !strings.Contains(string(b), filepath.Join(dir, adminTokenFile)) {
 		t.Fatalf("admin token not denied to Claude tools: %s", b)
+	}
+}
+
+func TestUserSandboxSurvivesManagedOff(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	_ = os.MkdirAll(filepath.Join(home, ".claude"), 0o700)
+	body := `{
+		"hooks": {"PreToolUse": []},
+		"permissions": {"allow": ["Bash(danger)"], "deny": ["Bash(curl *)"]},
+		"sandbox": {
+			"enabled": true,
+			"credentials": {"files": [{"path": "/only-user", "mode": "deny"}]}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	managed := filepath.Join(dir, "managed.json")
+	_ = os.WriteFile(managed, []byte(`{"cli":{"isolation":{"claude_sandbox":"off"}}}`), 0o644)
+	t.Setenv("MANAGED_POLICY", managed)
+	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))
+	ws := filepath.Join(dir, "ws")
+	_ = os.MkdirAll(ws, 0o755)
+	iso, err := app.cliIsolation(store.Bot{ID: "b1"}, "claude", ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if iso.ClaudeSandbox {
+		t.Fatal("managed off still marked the daemon sandbox on")
+	}
+	b, err := os.ReadFile(iso.SettingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw := string(b)
+	for _, want := range []string{`"enabled": true`, "Bash(curl *)", "/only-user", "Skill"} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("missing %s in %s", want, raw)
+		}
+	}
+	for _, banned := range []string{"Bash(danger)", "PreToolUse", `"enabled": false`} {
+		if strings.Contains(raw, banned) {
+			t.Fatalf("copied or loosened %s in %s", banned, raw)
+		}
+	}
+}
+
+func TestUnparseableUserSettingsRefusesAndAudits(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	_ = os.MkdirAll(filepath.Join(home, ".claude"), 0o700)
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))
+	logPath := filepath.Join(dir, "audit.log")
+	lg, err := audit.Open(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.audit = lg
+	ws := filepath.Join(dir, "ws")
+	_ = os.MkdirAll(ws, 0o755)
+	_, err = app.cliIsolation(store.Bot{ID: "b1"}, "claude", ws)
+	if err == nil || !strings.Contains(err.Error(), "refused") || strings.Contains(err.Error(), "claude_sandbox") {
+		t.Fatalf("err %v", err)
+	}
+	evs, lerr := app.st.ListLog("b1", "cli_sandbox_unavailable", "", 10)
+	if lerr != nil || len(evs) != 1 || !strings.Contains(string(evs[0].Detail), `"backend":"claude"`) {
+		t.Fatalf("log %v %v", evs, lerr)
+	}
+	if err := lg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil || !strings.Contains(string(raw), `"event":"cli_sandbox_unavailable"`) || !strings.Contains(string(raw), `"backend":"claude"`) {
+		t.Fatalf("audit %s %v", raw, err)
 	}
 }
 
