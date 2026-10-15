@@ -116,21 +116,23 @@ func TestAnswerQuestion(t *testing.T) {
 			},
 		},
 	}
-	var request map[string]any
-	var decision map[string]any
-	var recorded map[string]any
+	// Evaluate publishes on its own goroutine, and pending is set before
+	// publish, so waitForPending does not synchronize these captures.
+	requestCh := make(chan map[string]any, 2)
+	decisionCh := make(chan map[string]any, 2)
+	recordedCh := make(chan map[string]any, 2)
 	b := New(Options{
 		UIPresent: func(string) bool { return true },
 		Publish: func(_, event string, payload any) {
 			m := payload.(map[string]any)
-			if event == "permission_request" {
-				request = m
-			}
-			if event == "permission_decision" {
-				decision = m
+			switch event {
+			case "permission_request":
+				requestCh <- m
+			case "permission_decision":
+				decisionCh <- m
 			}
 		},
-		Audit: func(fields map[string]any) { recorded = fields },
+		Audit: func(fields map[string]any) { recordedCh <- fields },
 	})
 	done := make(chan Outcome, 1)
 	go func() {
@@ -140,6 +142,12 @@ func TestAnswerQuestion(t *testing.T) {
 		}, Request{ID: "q1", RunID: "run", BotID: "bot", Tool: "AskUserQuestion", Args: args})
 	}()
 	waitForPending(t, b, "q1")
+	var request map[string]any
+	select {
+	case request = <-requestCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("permission_request was not published")
+	}
 	if request["kind"] != "question" || request["session_allowed"] != false {
 		t.Fatalf("request %#v", request)
 	}
@@ -178,11 +186,23 @@ func TestAnswerQuestion(t *testing.T) {
 	if string(raw) != want {
 		t.Fatalf("updatedInput\n%s\nwant\n%s", raw, want)
 	}
+	var decision map[string]any
+	select {
+	case decision = <-decisionCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("permission_decision was not published")
+	}
 	if decision["kind"] != "question" || decision["answered"] != 2 || decision["decision"] != Answer {
 		t.Fatalf("decision %#v", decision)
 	}
 	if _, ok := decision["answers"]; ok {
 		t.Fatalf("decision event carried answers: %#v", decision)
+	}
+	var recorded map[string]any
+	select {
+	case recorded = <-recordedCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("audit record was not published")
 	}
 	if recorded["kind"] != "question" || recorded["answered"] != 2 || recorded["source"] != "ui" {
 		t.Fatalf("audit %#v", recorded)
