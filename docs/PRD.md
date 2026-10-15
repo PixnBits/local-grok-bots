@@ -97,6 +97,7 @@ The thread, and only the thread, plus the composer.
 - While the bot is working, a status animation sits at the bottom of the message screen, beside the most recent messages. It is the glanceable “this bot is working” signal. It is not a banner at the top, and it is not only a dot on the roster. When the run ends, the animation goes away and the reply is in the thread.
 - Inbound DMs from other bots appear as a line in this thread.
 - A failed run may leave a short note; the detail is in the log.
+- Optional voice input (mic button with live interim recognition, TTS of bot replies, interactive voice mode that can summarize to one message) is designed in `docs/voice.md`. It reuses the same composer and message path.
 
 ### Bot menu
 Opened from the conversation (the overflow on the bot, not a panel beside the messages). It holds:
@@ -181,8 +182,10 @@ The log is the place you go to verify behavior. The chat transcript stays readab
 - Multi-user auth. Optional shared secret or firewall is enough.
 - Catch-up of missed timers.
 - Per-bot microVMs. A single daemon process (or one process plus tool sandbox) is sufficient.
-- Mobile app, voice, X integration, Slack bridges.
+- Mobile app, X integration, Slack bridges.
 - Share as template, a documents tab, a links tab, a notifications toggle.
+
+Voice is no longer listed as a non-goal. The design for local browser voice (real-time interim recognition, TTS of replies, interactive mode that summarizes to one message) lives in `docs/voice.md`.
 
 ## 11. Acceptance criteria
 
@@ -207,5 +210,6 @@ The log is the place you go to verify behavior. The chat transcript stays readab
 - Computer-use on a virtual display, opened from the conversation the way the official app opens Agent Computer.
 - Share as template.
 - A phone-native client. The page should already be usable on a phone.
+- Local voice conversations (mic button, live interim recognition, TTS of bot replies, interactive mode that summarizes to one message). Design in `docs/voice.md`.
 
 This is the bootstrap: the daemon, the bot objects, the async conversation, the DMs, the meta-bot, and the log, behind a page whose menu matches the Grok Bot client. The conversation is the surface. The profile is where the bot is defined. Desktop usage waits.
