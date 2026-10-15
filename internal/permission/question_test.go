@@ -364,3 +364,14 @@ func TestQuestionSkipSaysSkipped(t *testing.T) {
 		t.Fatalf("%+v", out)
 	}
 }
+
+func TestAnnotationOver4KiBIsRejected(t *testing.T) {
+	qs := []Question{{Text: "Which?"}}
+	long := strings.Repeat("x", maxFreeAnswer+1)
+	for _, n := range []Note{{Notes: &long}, {Preview: &long}} {
+		_, _, err := validateAnswers(qs, map[string]string{"Which?": "free"}, map[string]Note{"Which?": n})
+		if !errors.Is(err, ErrAnswer) || !strings.Contains(err.Error(), "annotation is too long") {
+			t.Fatalf("err = %v", err)
+		}
+	}
+}

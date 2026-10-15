@@ -192,6 +192,9 @@ func validateAnswers(qs []Question, answers map[string]string, notes map[string]
 		if idx < 0 {
 			return nil, nil, fmt.Errorf("%w: unknown annotation", ErrAnswer)
 		}
+		if (note.Preview != nil && len(*note.Preview) > maxFreeAnswer) || (note.Notes != nil && len(*note.Notes) > maxFreeAnswer) {
+			return nil, nil, fmt.Errorf("%w: annotation is too long", ErrAnswer)
+		}
 		m := map[string]any{}
 		if note.Preview != nil {
 			m["preview"] = *note.Preview
