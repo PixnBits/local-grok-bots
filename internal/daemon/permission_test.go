@@ -436,7 +436,10 @@ func waitSubscribed(t *testing.T, app *App, runID string) {
 	t.Fatal("prompt subscriber was not registered")
 }
 
-func TestPlainStreamIsNotAPromptUI(t *testing.T) {
+// startPendingRun starts a fake-Claude turn with no page attached and
+// returns the run once the CLI is asking for a permission.
+func startPendingRun(t *testing.T, timeout time.Duration) (*App, string, string, string) {
+	t.Helper()
 	dir := t.TempDir()
 	installFakeClaude(t, dir)
 	gate := filepath.Join(dir, "gate")
@@ -447,7 +450,7 @@ func TestPlainStreamIsNotAPromptUI(t *testing.T) {
 	app.policy = policy.Policy{
 		Backend: "claude", CLIPermitted: true, TimersEnabled: true,
 		Idle: time.Hour, Imminent: time.Minute,
-		UIPrompts: true, PromptTimeout: 20 * time.Second,
+		UIPrompts: true, PromptTimeout: timeout,
 	}
 	app.rtMu.Unlock()
 	srv := serve(t, app)
@@ -466,41 +469,138 @@ func TestPlainStreamIsNotAPromptUI(t *testing.T) {
 		RunID string `json:"run_id"`
 	}
 	decodeJSON(t, b, &posted)
-	plainRes, events := openSSE(t, srv.URL, bot.ID, posted.RunID, false)
-	waitBus(t, func() bool { return app.bus.Subscribed(posted.RunID) && !app.bus.PromptSubscribed(posted.RunID) })
-	promptRes, _ := openSSE(t, srv.URL, bot.ID, posted.RunID, true)
-	waitBus(t, func() bool { return app.bus.PromptSubscribed(posted.RunID) })
-	promptRes.Body.Close()
-	waitBus(t, func() bool { return !app.bus.PromptSubscribed(posted.RunID) && app.bus.Subscribed(posted.RunID) })
 	if err := os.WriteFile(gate, []byte("go\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sawRequest := false
-	sawNoUI := false
-	deadline := time.Now().Add(4 * time.Second)
-	for time.Now().Before(deadline) && !sawNoUI {
+	return app, srv.URL, bot.ID, posted.RunID
+}
+
+type pendingList struct {
+	Pending []struct {
+		ID       string `json:"id"`
+		RunID    string `json:"run_id"`
+		BotID    string `json:"bot_id"`
+		Tool     string `json:"tool"`
+		Deadline string `json:"deadline"`
+	} `json:"pending"`
+}
+
+func getPending(t *testing.T, base, botID string) pendingList {
+	t.Helper()
+	res, b := do(t, "GET", base+"/api/bots/"+botID+"/permissions", nil, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("pending %d %s", res.StatusCode, b)
+	}
+	var out pendingList
+	decodeJSON(t, b, &out)
+	return out
+}
+
+// Bug: with no ?prompts=1 stream on the run (the bot was not the open tab),
+// the broker denied at once with source no_ui. A request must stay pending
+// until it is answered or times out, and a page opened later must see it.
+func TestPermissionWaitsWithNoPageOpen(t *testing.T) {
+	app, base, botID, runID := startPendingRun(t, 20*time.Second)
+	var list pendingList
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		list = getPending(t, base, botID)
+		if len(list.Pending) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(list.Pending) != 1 {
+		t.Fatalf("pending %+v", list)
+	}
+	p := list.Pending[0]
+	if p.RunID != runID || p.BotID != botID || p.Tool != "Bash" || p.Deadline == "" {
+		t.Fatalf("pending %+v", p)
+	}
+	// Still pending a little later: nothing auto-denied it.
+	time.Sleep(300 * time.Millisecond)
+	if again := getPending(t, base, botID); len(again.Pending) != 1 {
+		t.Fatalf("request was resolved with no page: %+v", again)
+	}
+	res, b := do(t, "GET", base+"/api/bots", nil, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("bots %d", res.StatusCode)
+	}
+	var bots []store.Bot
+	decodeJSON(t, b, &bots)
+	if len(bots) != 1 || bots[0].PendingPermissions != 1 {
+		t.Fatalf("bot list badge %+v", bots)
+	}
+	res, b = do(t, "GET", base+"/api/permissions", nil, "")
+	if res.StatusCode != 200 || !strings.Contains(string(b), p.ID) {
+		t.Fatalf("all pending %d %s", res.StatusCode, b)
+	}
+	// A page that opens now gets the card from the stream history too.
+	_, events := openSSE(t, base, botID, runID, true)
+	sawCard := false
+	wait := time.After(3 * time.Second)
+	for !sawCard {
 		select {
 		case ev := <-events:
-			if strings.HasPrefix(ev, "permission_request\n") {
-				sawRequest = true
-			}
-			if strings.HasPrefix(ev, "permission_decision\n") && strings.Contains(ev, `"source":"no_ui"`) {
-				if !strings.Contains(ev, `"transport":"mcp"`) {
-					t.Fatalf("decision %s", ev)
-				}
-				sawNoUI = true
-			}
-		case <-time.After(20 * time.Millisecond):
+			sawCard = strings.HasPrefix(ev, "permission_request\n") && strings.Contains(ev, p.ID)
+		case <-wait:
+			t.Fatal("late page did not get the permission_request")
 		}
 	}
-	plainRes.Body.Close()
-	if sawRequest {
-		t.Fatal("plain stream received a permission_request")
+	decide := base + "/api/bots/" + botID + "/runs/" + runID + "/permissions/" + p.ID
+	res, b = do(t, "POST", decide, map[string]any{"decision": "allow_once"}, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("allow %d %s", res.StatusCode, b)
 	}
-	if !sawNoUI {
-		t.Fatal("plain stream did not fail closed with source no_ui")
+	res, _ = do(t, "POST", decide, map[string]any{"decision": "deny"}, "")
+	if res.StatusCode == 200 {
+		t.Fatal("second decision accepted")
 	}
-	waitIdle(t, srv.URL, bot.ID, "")
+	waitIdle(t, base, botID, "")
+	got, err := app.st.GetBot(botID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LastRunStatus != "done" || got.LastRunError != "" {
+		t.Fatalf("run %s %s", got.LastRunStatus, got.LastRunError)
+	}
+	saw := false
+	for _, m := range thread(t, base, botID) {
+		if m.Role == "bot" && m.Content == "approved" {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatal("approved reply missing")
+	}
+	if left := getPending(t, base, botID); len(left.Pending) != 0 {
+		t.Fatalf("pending after decision %+v", left)
+	}
+}
+
+// Fail closed: an unanswered request with no page is denied at the timeout.
+func TestPermissionTimesOutWithNoPageOpen(t *testing.T) {
+	app, base, botID, runID := startPendingRun(t, 400*time.Millisecond)
+	waitIdle(t, base, botID, "")
+	tools, err := app.st.RunTools([]string{runID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range tools[runID] {
+		if r.Kind == "permission" && !r.OK && strings.Contains(r.Result, `"source":"timeout"`) {
+			found = true
+		}
+		if r.Kind == "permission" && strings.Contains(r.Result, "no_ui") {
+			t.Fatalf("denied as no_ui: %+v", r)
+		}
+	}
+	if !found {
+		t.Fatalf("no timeout record: %+v", tools[runID])
+	}
+	if left := getPending(t, base, botID); len(left.Pending) != 0 {
+		t.Fatalf("pending after timeout %+v", left)
+	}
 }
 
 func TestClaudeResidualAsksAreDenied(t *testing.T) {

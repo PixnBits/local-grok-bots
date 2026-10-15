@@ -187,6 +187,9 @@ type Bot struct {
 	LastRunError  string  `json:"last_run_error,omitempty"`
 	// ContinueRunID is not a column. The daemon fills it from the in-memory offer.
 	ContinueRunID string `json:"continue_run_id,omitempty"`
+	// PendingPermissions is not a column: open permission or question
+	// requests for this bot, from the daemon's broker.
+	PendingPermissions int `json:"pending_permissions,omitempty"`
 }
 
 type Memory struct {

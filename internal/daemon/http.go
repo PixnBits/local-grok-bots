@@ -28,6 +28,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/cancel", a.handleCancel)
 	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/continue", a.handleContinue)
 	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/permissions/{req_id}", a.handlePermissionDecision)
+	mux.HandleFunc("GET /api/bots/{id}/permissions", a.handlePendingPermissions)
+	mux.HandleFunc("GET /api/permissions", a.handleAllPendingPermissions)
 	mux.HandleFunc("POST /api/mcp/permission", a.handleMCPPermission)
 	mux.HandleFunc("POST /api/mcp/permission/{token}", a.handleMCPPermission)
 	mux.HandleFunc("GET /api/bots/{id}/memory", a.handleListMemory)
@@ -53,7 +55,7 @@ func (a *App) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A live lgb token or MCP permission token must not decide a card,
 		// including when the admin token is unset. Other routes stay 401.
-		if permissionDecisionPath(r) {
+		if permissionDecisionPath(r) || pendingPermissionsPath(r) {
 			if tok, ok := bearerToken(r); ok && a.liveRunCredential(tok) {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": "run token cannot decide permissions"})
 				return
@@ -89,6 +91,19 @@ func permissionDecisionPath(r *http.Request) bool {
 	}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	return len(parts) == 7 && parts[0] == "api" && parts[1] == "bots" && parts[3] == "runs" && parts[5] == "permissions" && parts[2] != "" && parts[4] != "" && parts[6] != ""
+}
+
+// pendingPermissionsPath is a GET of open requests. A run token must not
+// read the cards it would be asking about.
+func pendingPermissionsPath(r *http.Request) bool {
+	if r.Method != http.MethodGet {
+		return false
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) == 2 && parts[0] == "api" && parts[1] == "permissions" {
+		return true
+	}
+	return len(parts) == 4 && parts[0] == "api" && parts[1] == "bots" && parts[2] != "" && parts[3] == "permissions"
 }
 
 func bearerToken(r *http.Request) (string, bool) {
@@ -880,4 +895,21 @@ func writeErr(w http.ResponseWriter, err error) {
 	default:
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 	}
+}
+
+// handlePendingPermissions lists the bot's open permission and question
+// requests, each the same payload as its permission_request event. A page
+// that opens after the event (or after the stream history was trimmed) uses
+// it to show the cards; answers go to the usual decision endpoint.
+func (a *App) handlePendingPermissions(w http.ResponseWriter, r *http.Request) {
+	if _, err := a.st.GetBot(r.PathValue("id")); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pending": a.perm.Pending(r.PathValue("id"))})
+}
+
+// handleAllPendingPermissions lists open requests for every bot.
+func (a *App) handleAllPendingPermissions(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"pending": a.perm.Pending("")})
 }

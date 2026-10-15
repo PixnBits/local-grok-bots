@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -125,9 +126,12 @@ type wait struct {
 	notes     map[string]map[string]any
 	ch        chan string
 	once      sync.Once
+	// public is the permission_request payload, kept so a page that opens
+	// after the request was published can list and answer it.
+	public map[string]any
 }
 
-// New returns a broker. Nil options are safe and deny UI prompts.
+// New returns a broker. Nil options are safe.
 func New(opts Options) *Broker {
 	b := &Broker{
 		pub:       opts.Publish,
@@ -231,6 +235,52 @@ func (b *Broker) Evaluate(ctx context.Context, pol policy.Permission, req Reques
 	return b.canUseTool(ctx, pol, req, "", nil)
 }
 
+// Pending returns copies of the open permission_request payloads for a bot,
+// oldest deadline first. An empty botID lists every bot.
+func (b *Broker) Pending(botID string) []map[string]any {
+	if b == nil {
+		return nil
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := []map[string]any{}
+	for _, w := range b.pending {
+		if botID != "" && w.botID != botID {
+			continue
+		}
+		cp := make(map[string]any, len(w.public))
+		for k, v := range w.public {
+			cp[k] = v
+		}
+		out = append(out, cp)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		di, _ := out[i]["deadline"].(string)
+		dj, _ := out[j]["deadline"].(string)
+		if di != dj {
+			return di < dj
+		}
+		ii, _ := out[i]["id"].(string)
+		ij, _ := out[j]["id"].(string)
+		return ii < ij
+	})
+	return out
+}
+
+// PendingCounts returns how many requests wait on each bot.
+func (b *Broker) PendingCounts() map[string]int {
+	out := map[string]int{}
+	if b == nil {
+		return out
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, w := range b.pending {
+		out[w.botID]++
+	}
+	return out
+}
+
 // DecideFor records a UI answer. allow_session is refused when the request
 // was opened without a managed session-grant policy. An unknown id, or an id
 // that belongs to another bot or run, does not allow the tool.
@@ -328,9 +378,13 @@ func (b *Broker) canUseTool(ctx context.Context, pol policy.Permission, req Requ
 	}
 	timeout := pol.PromptTimeout
 	if timeout <= 0 {
-		timeout = 60 * time.Second
+		timeout = policy.DefaultPromptTimeout
 	}
-	if !pol.UIPrompts || b.uiPresent == nil || !b.uiPresent(req.RunID) {
+	// Only ui_prompts = false denies at once. Whether a page is attached
+	// right now does not matter: the request stays pending until it is
+	// answered, the run ends, or the timeout denies it (fail closed). A page
+	// opened later lists it with Pending and answers it.
+	if !pol.UIPrompts {
 		return b.complete(req, Deny, "no_ui", rule)
 	}
 	sessionOK := pol.AllowSessionGrants && !question
@@ -345,10 +399,6 @@ func (b *Broker) canUseTool(ctx context.Context, pol policy.Permission, req Requ
 		questions: qs,
 		ch:        make(chan string, 1),
 	}
-	b.mu.Lock()
-	b.pending[req.ID] = w
-	b.mu.Unlock()
-
 	deadline := b.now().Add(timeout)
 	fields := map[string]any{
 		"id":              req.ID,
@@ -363,7 +413,12 @@ func (b *Broker) canUseTool(ctx context.Context, pol policy.Permission, req Requ
 		fields["kind"] = "question"
 		fields["questions"] = publicQuestions(qs)
 	}
-	b.publish(req.RunID, "permission_request", withTransport(fields, req.Transport))
+	fields = withTransport(fields, req.Transport)
+	w.public = fields
+	b.mu.Lock()
+	b.pending[req.ID] = w
+	b.mu.Unlock()
+	b.publish(req.RunID, "permission_request", fields)
 
 	waitCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
