@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
@@ -19,13 +20,20 @@ const toolAuthority = "The tools attached to this request are the current, autho
 
 const (
 	maxToolRounds = 8
-	modelTimeout  = 3 * time.Minute
-	runTimeout    = 10 * time.Minute
 	maxReplyBytes = 64 * 1024
 )
 
 func (a *App) execute(botID, runID string) {
-	ctx, cancel := context.WithTimeout(a.ctx, runTimeout)
+	// A CLI turn gets its deadline (cli.turn_timeout) in executeCLI so a
+	// timeout is told apart from a cancel. An Ollama run uses
+	// ollama.run_timeout.
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if a.policy.UsesCLI() {
+		ctx, cancel = context.WithCancel(a.ctx)
+	} else {
+		ctx, cancel = context.WithTimeout(a.ctx, a.policy.EffectiveOllamaRunTimeout())
+	}
 	a.rtMu.Lock()
 	if st := a.loops[botID]; st != nil {
 		st.cancel = cancel
@@ -39,7 +47,7 @@ func (a *App) execute(botID, runID string) {
 	if err != nil {
 		a.takePending(runID)
 		a.dropResume(botID)
-		_, _ = a.st.FinishRun(runID, "error", err.Error())
+		_, _ = a.finishRun(runID, "error", err.Error())
 		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
 		return
 	}
@@ -55,14 +63,14 @@ func (a *App) execute(botID, runID string) {
 		a.takePending(runID)
 		a.dropResume(bot.ID)
 		msg := "ollama backend is not allowed by policy"
-		_, _ = a.st.FinishRun(runID, "error", msg)
+		_, _ = a.finishRun(runID, "error", msg)
 		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": msg})
 		return
 	}
 	if err := a.policy.AllowsModel(modelName); err != nil {
 		a.takePending(runID)
 		a.dropResume(bot.ID)
-		_, _ = a.st.FinishRun(runID, "error", err.Error())
+		_, _ = a.finishRun(runID, "error", err.Error())
 		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
 		return
 	}
@@ -70,7 +78,7 @@ func (a *App) execute(botID, runID string) {
 	// Any other run drops the offer so a timer or DM does not keep it.
 	run, err := a.st.GetRun(runID)
 	if err != nil {
-		_, _ = a.st.FinishRun(runID, "error", err.Error())
+		_, _ = a.finishRun(runID, "error", err.Error())
 		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
 		return
 	}
@@ -84,7 +92,7 @@ func (a *App) execute(botID, runID string) {
 		var hist []store.Message
 		msgs, hist, err = a.buildMessagesHist(bot)
 		if err != nil {
-			_, _ = a.st.FinishRun(runID, "error", err.Error())
+			_, _ = a.finishRun(runID, "error", err.Error())
 			a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
 			return
 		}
@@ -103,17 +111,26 @@ func (a *App) execute(botID, runID string) {
 		}
 		a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "working"})
 		msgs, through = a.foldInput(bot.ID, runID, msgs, through, seen)
-		mctx, mcancel := context.WithTimeout(ctx, modelTimeout)
+		mctx, mcancel := context.WithTimeout(ctx, a.policy.EffectiveOllamaModelTimeout())
+		var roundText strings.Builder
 		resp, err := a.model.Chat(mctx, model.ChatRequest{
 			Model:    modelName,
 			Messages: msgs,
 			Tools:    toolDefs(),
 		}, func(tok string) {
+			roundText.WriteString(tok)
 			a.bus.Publish(runID, "token", map[string]string{"text": tok})
 		})
 		mcancel()
 		if err != nil {
+			// Text streamed before the failure stays in the thread.
+			savePartial := func() {
+				if t := strings.TrimSpace(roundText.String()); t != "" {
+					a.persistBotText(bot.ID, runID, t)
+				}
+			}
 			if ctx.Err() != nil {
+				savePartial()
 				a.finishInterrupted(bot.ID, runID, ctx)
 				return
 			}
@@ -132,7 +149,8 @@ func (a *App) execute(botID, runID string) {
 				continue
 			}
 			a.log(bot.ID, "model_call", map[string]any{"model": modelName, "ok": false, "error": err.Error()})
-			_, _ = a.st.FinishRun(runID, "error", err.Error())
+			savePartial()
+			_, _ = a.finishRun(runID, "error", err.Error())
 			a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
 			return
 		}
@@ -143,7 +161,7 @@ func (a *App) execute(botID, runID string) {
 			if strings.TrimSpace(resp.Content) != "" {
 				a.persistBotText(bot.ID, runID, resp.Content)
 			}
-			_, _ = a.st.FinishRun(runID, "done", "")
+			_, _ = a.finishRun(runID, "done", "")
 			a.bus.Publish(runID, "done", map[string]any{"run_id": runID})
 			return
 		}
@@ -186,7 +204,7 @@ func (a *App) execute(botID, runID string) {
 	}
 	msg := "tool round limit"
 	a.holdResume(bot.ID, runID, msgs)
-	_, _ = a.st.FinishRun(runID, "error", msg)
+	_, _ = a.finishRun(runID, "error", msg)
 	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": msg})
 }
 
@@ -200,12 +218,52 @@ func (a *App) finishInterrupted(botID, runID string, ctx context.Context) {
 		status = "error"
 		errText = "timed out"
 	}
-	_, _ = a.st.FinishRun(runID, status, errText)
+	_, _ = a.finishRun(runID, status, errText)
 	if status == "cancelled" {
 		a.bus.Publish(runID, "done", map[string]any{"run_id": runID, "status": "cancelled"})
 		return
 	}
 	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": errText})
+}
+
+// finishRun stores a run's end state. A run that did not finish "done"
+// first gets a "Notice: " thread message tied to the run, so the thread keeps
+// the error and the run's tool and permission records (shown with the first
+// message of the run) after a failure, the same as after a reply. Notices are
+// not turn input, so they do not start another run.
+func (a *App) finishRun(runID, status, errText string) (bool, error) {
+	if status != "done" {
+		if run, err := a.st.GetRun(runID); err == nil && run.Status == "running" {
+			a.persistRunNotice(run.BotID, runID, status, errText)
+		}
+	}
+	return a.st.FinishRun(runID, status, errText)
+}
+
+func runNoticeText(status, errText string) string {
+	errText = strings.TrimSpace(audit.RedactText(errText))
+	switch {
+	case status == "cancelled":
+		return "Notice: Run cancelled."
+	case errText == "interrupted":
+		return "Notice: Run interrupted before it finished."
+	case errText == "turn_timeout" || errText == "timed out":
+		return "Notice: Run timed out (" + errText + "). Partial output and tool results are kept above."
+	case errText == "":
+		return "Notice: Run failed."
+	default:
+		return "Notice: Run failed: " + clip(errText, 2000)
+	}
+}
+
+func (a *App) persistRunNotice(botID, runID, status, errText string) {
+	m, err := a.st.AddMessage(store.Message{
+		BotID: botID, Thread: "user", Role: "system", Content: runNoticeText(status, errText), RunID: &runID,
+	})
+	if err != nil {
+		return
+	}
+	a.log(botID, "run_notice", map[string]any{"message_id": m.ID, "run_id": runID, "status": status})
 }
 
 func (a *App) persistBotText(botID, runID, content string) {

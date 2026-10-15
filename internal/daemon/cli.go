@@ -89,12 +89,9 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	if lgbEnv != nil {
 		iso.Env = withLGBEnv(iso.Env, filepath.Join(ws, lgbDirName, "bin"), lgbEnv)
 	}
-	turnCtx := ctx
-	if a.policy.TurnTimeout > 0 {
-		var cancel context.CancelFunc
-		turnCtx, cancel = context.WithTimeout(ctx, a.policy.TurnTimeout)
-		defer cancel()
-	}
+	turnTimeout := a.policy.EffectiveTurnTimeout()
+	turnCtx, turnCancel := context.WithTimeout(ctx, turnTimeout)
+	defer turnCancel()
 	a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "working"})
 	var runner clisession.Runner = clisession.ExecRunner{
 		Policy: a.policy,
@@ -170,6 +167,12 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		spec.MCPConfig = cfgPath
 		spec.PermissionTool = permissionToolName
 		eventTransport = policy.TransportMCP
+		// The permission tool call blocks until the user answers. Claude's
+		// MCP client must not give up before the daemon's prompt timeout.
+		if iso != nil {
+			ms := (a.policy.EffectivePromptTimeout() + time.Minute).Milliseconds()
+			iso.Env = append(iso.Env, fmt.Sprintf("MCP_TOOL_TIMEOUT=%d", ms))
+		}
 	default:
 		spec.PermissionPrompts = "none"
 		eventTransport = policy.TransportNone
@@ -178,6 +181,8 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	a.warnGrokDarwinNetwork(bot, runID, backend)
 	trace := &cliTrace{a: a, botID: bot.ID, runID: runID}
 	res, err := runner.Run(turnCtx, spec, func(ev clisession.Event) {
+		// Output is activity: a long turn that keeps working is not idle.
+		a.touchActivity(bot.ID)
 		switch ev.Kind {
 		case "token":
 			if ev.Text == "" {
@@ -245,6 +250,11 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	}
 	trace.finish()
 	text := strings.TrimSpace(trace.reply(audit.RedactText(strings.TrimSpace(res.Text))))
+	if text == "" && (err != nil || turnCtx.Err() != nil) {
+		// A turn that failed or timed out has no result text. What it
+		// streamed after its last tool call is still the reply so far.
+		text = trace.tail()
+	}
 	if text != "" && !streamed {
 		a.bus.Publish(runID, "token", map[string]string{"text": text})
 	}
@@ -252,11 +262,11 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	switch {
 	case a.consumeIdleKill(bot.ID):
 		a.finishCLIInterrupted(bot.ID, runID, text)
-	case a.policy.TurnTimeout > 0 && turnCtx.Err() != nil && ctx.Err() == nil && errors.Is(turnCtx.Err(), context.DeadlineExceeded):
+	case turnCtx.Err() != nil && ctx.Err() == nil && errors.Is(turnCtx.Err(), context.DeadlineExceeded):
 		if text != "" {
 			a.persistBotText(bot.ID, runID, text)
 		}
-		_, _ = a.st.FinishRun(runID, "error", "turn_timeout")
+		_, _ = a.finishRun(runID, "error", "turn_timeout")
 		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": "turn_timeout"})
 	case ctx.Err() != nil:
 		if a.ctx.Err() != nil {
@@ -285,12 +295,16 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 				err = fmt.Errorf("Claude's sandbox is required but can't run here (%s), so the turn was refused. Install bubblewrap and socat on Linux, or a managed policy can set [cli.isolation] claude_sandbox = \"off\"", why)
 			}
 		}
+		// Text the CLI wrote before it failed stays in the thread.
+		if text != "" {
+			a.persistBotText(bot.ID, runID, text)
+		}
 		a.failCLI(bot.ID, runID, backend, err)
 	default:
 		if text != "" {
 			a.persistBotText(bot.ID, runID, text)
 		}
-		_, _ = a.st.FinishRun(runID, "done", "")
+		_, _ = a.finishRun(runID, "done", "")
 		a.bus.Publish(runID, "done", map[string]any{"run_id": runID})
 	}
 }
@@ -299,7 +313,7 @@ func (a *App) finishCLIInterrupted(botID, runID, text string) {
 	if strings.TrimSpace(text) != "" {
 		a.persistBotText(botID, runID, text)
 	}
-	_, _ = a.st.FinishRun(runID, "error", "interrupted")
+	_, _ = a.finishRun(runID, "error", "interrupted")
 	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": "interrupted"})
 }
 
@@ -731,7 +745,7 @@ func (a *App) auditCLI(event, backend, sessionID string, pid int, result string)
 func (a *App) failCLI(botID, runID, backend string, err error) {
 	msg := audit.RedactText(err.Error())
 	a.log(botID, "model_call", map[string]any{"model": backend, "ok": false, "error": msg})
-	_, _ = a.st.FinishRun(runID, "error", msg)
+	_, _ = a.finishRun(runID, "error", msg)
 	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": msg})
 }
 
