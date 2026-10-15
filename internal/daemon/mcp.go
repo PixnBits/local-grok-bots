@@ -58,10 +58,11 @@ printf '{"Authorization":"Bearer %s"}\n' "$tok"
 `
 
 // writePermMCP writes the permission token, the header helper, and the
-// --mcp-config file under DATA_DIR/cli/<bot>/. Each file is mode 0600.
+// --mcp-config file under DATA_DIR/cli/<bot>/perm/<run>/, so two runs of one
+// bot never share or remove each other's files. Each file is mode 0600.
 // The JSON names the helper; it does not contain the token.
 // The returned path is what --mcp-config receives.
-func (a *App) writePermMCP(botID, base, token string) (string, error) {
+func (a *App) writePermMCP(botID, runID, base, token string) (string, error) {
 	if !permTokenOK(token) {
 		return "", fmt.Errorf("permission token is invalid")
 	}
@@ -69,7 +70,10 @@ func (a *App) writePermMCP(botID, base, token string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(root, "cli", botID)
+	if runID == "" || filepath.Base(runID) != runID || runID == "." || runID == ".." {
+		return "", fmt.Errorf("permission files: bad run id")
+	}
+	dir := filepath.Join(root, "cli", botID, "perm", runID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
@@ -110,14 +114,16 @@ func (a *App) writePermMCP(botID, base, token string) (string, error) {
 	return cfgPath, nil
 }
 
-// removePermMCP deletes the permission files for one bot. The state directory
-// and the CLI settings stay.
-func (a *App) removePermMCP(botID string) {
+// removePermMCP deletes one run's permission files and directory. The bot's
+// state directory and CLI settings stay.
+func (a *App) removePermMCP(botID, runID string) {
 	root, err := filepath.Abs(a.cfg.DataDir)
 	if err != nil {
 		return
 	}
-	removePermFiles(filepath.Join(root, "cli", botID))
+	dir := filepath.Join(root, "cli", botID, "perm", runID)
+	removePermFiles(dir)
+	_ = os.Remove(dir)
 }
 
 func removePermFiles(dir string) {

@@ -357,10 +357,8 @@ func TestFakeClaudePermissionRoundTrip(t *testing.T) {
 	if strings.Contains(argv, permToken) || strings.Contains(argv, "/api/mcp/permission/") {
 		t.Fatalf("argv contains the permission token:\n%s", argv)
 	}
-	for _, name := range []string{"mcp.json", "mcp-perm.token", "mcp-perm-headers"} {
-		if _, err := os.Stat(filepath.Join(dir, "cli", bot.ID, name)); !os.IsNotExist(err) {
-			t.Fatalf("%s left after the turn (%v)", name, err)
-		}
+	if left, _ := filepath.Glob(filepath.Join(dir, "cli", bot.ID, "perm", "*")); len(left) != 0 {
+		t.Fatalf("permission files left after the turn: %v", left)
 	}
 	if strings.Contains(argv, "--always-approve") || !strings.Contains(argv, "--allowedTools") || !strings.Contains(argv, "--disallowedTools") {
 		t.Fatalf("argv flags:\n%s", argv)
@@ -1269,7 +1267,11 @@ func bearerFromHelper(command string) string {
 
 func permFilesDuringRun(t *testing.T, dir, botID string) string {
 	t.Helper()
-	base := filepath.Join(dir, "cli", botID)
+	runs, _ := filepath.Glob(filepath.Join(dir, "cli", botID, "perm", "*"))
+	if len(runs) != 1 {
+		t.Fatalf("want one per-run permission dir, got %v", runs)
+	}
+	base := runs[0]
 	for _, name := range []string{"mcp.json", "mcp-perm.token", "mcp-perm-headers"} {
 		st, err := os.Stat(filepath.Join(base, name))
 		if err != nil {
