@@ -33,6 +33,9 @@ type loopState struct {
 	cancel   context.CancelFunc
 	cliPID   int
 	idleKill bool
+	// released is closed when running is cleared. Stored status goes idle
+	// before that, so a waiter on status can still observe the loop running.
+	released chan struct{}
 }
 
 // App is the daemon: HTTP API, turn queue, timers, and the model loop.
@@ -325,6 +328,7 @@ func (a *App) kickLocked(botID string) string {
 	st.running = true
 	st.runID = run.ID
 	st.again = false
+	st.released = make(chan struct{})
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
@@ -377,6 +381,7 @@ func (a *App) continueRun(botID, fromRun string) (string, int, error) {
 	st.running = true
 	st.runID = run.ID
 	st.again = false
+	st.released = make(chan struct{})
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
@@ -495,6 +500,10 @@ func (a *App) endLoop(botID string) {
 		st.again = false
 		st.runID = ""
 		st.cancel = nil
+		if st.released != nil {
+			close(st.released)
+			st.released = nil
+		}
 	}
 	a.rtMu.Unlock()
 	if again && a.ctx.Err() == nil {
