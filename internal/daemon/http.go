@@ -28,6 +28,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/cancel", a.handleCancel)
 	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/continue", a.handleContinue)
 	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/permissions/{req_id}", a.handlePermissionDecision)
+	mux.HandleFunc("POST /api/mcp/permission", a.handleMCPPermission)
 	mux.HandleFunc("POST /api/mcp/permission/{token}", a.handleMCPPermission)
 	mux.HandleFunc("GET /api/bots/{id}/memory", a.handleListMemory)
 	mux.HandleFunc("POST /api/bots/{id}/memory", a.handlePutMemory)
@@ -58,7 +59,7 @@ func (a *App) withAuth(next http.Handler) http.Handler {
 				return
 			}
 		}
-		if r.URL.Path == "/api/health" || r.URL.Path == "/login" || strings.HasPrefix(r.URL.Path, "/api/mcp/permission/") || a.cfg.AuthToken == "" || authorized(r, a.cfg.AuthToken) {
+		if r.URL.Path == "/api/health" || r.URL.Path == "/login" || mcpPermissionOpen(r.URL.Path) || a.cfg.AuthToken == "" || authorized(r, a.cfg.AuthToken) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -71,6 +72,12 @@ func (a *App) withAuth(next http.Handler) http.Handler {
 		}
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 	})
+}
+
+// mcpPermissionOpen is the permission MCP route. The path token and the
+// Bearer token are checked by the handler, not by the admin-token gate.
+func mcpPermissionOpen(path string) bool {
+	return path == "/api/mcp/permission" || strings.HasPrefix(path, "/api/mcp/permission/")
 }
 
 // authCookie carries the admin token for a browser that opened /login.

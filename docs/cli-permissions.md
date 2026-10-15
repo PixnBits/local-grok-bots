@@ -52,7 +52,7 @@ Each decision emits `permission_decision` and, when audit is on, one audit recor
 | | `mcp` | `stream_control` | `none` |
 |---|---|---|---|
 | When | Default, and the empty value. The HTTP tool is attached only when `ui_prompts` is on and the daemon has an HTTP base. Otherwise this mode behaves as `none`. | `claude_transport = "stream_control"`. Stdio is the host even when `ui_prompts` is off or there is no HTTP base. Residual asks still die in the broker as `no_ui`. | `claude_transport = "none"`, or `mcp` falling through as above. |
-| Argv | `-p`, `--output-format stream-json`, `--verbose`, `--include-partial-messages`, and, when a host is attached, `--mcp-config` plus `--permission-prompt-tool mcp__lgbperm__approve`. | `--input-format stream-json`, `--output-format stream-json`, `--verbose`, `--permission-prompt-tool stdio`. No `-p`, no `--mcp-config`, no `--include-partial-messages`, no `--permission-prompts`. The prompt is a stdin message. Model, session, `--permission-mode`, `--allowedTools`, and `--disallowedTools` stay. | `--permission-prompts none`. No prompt tool and no MCP server. |
+| Argv | `-p`, `--output-format stream-json`, `--verbose`, `--include-partial-messages`, and, when a host is attached, `--mcp-config` (a file path, not inline JSON) plus `--permission-prompt-tool mcp__lgbperm__approve`. The permission token is not an argument. | `--input-format stream-json`, `--output-format stream-json`, `--verbose`, `--permission-prompt-tool stdio`. No `-p`, no `--mcp-config`, no `--include-partial-messages`, no `--permission-prompts`. The prompt is a stdin message. Model, session, `--permission-mode`, `--allowedTools`, and `--disallowedTools` stay. | `--permission-prompts none`. No prompt tool and no MCP server. |
 | Ask | HTTP `tools/call` of `approve`. | Stdin `control_request` subtype `can_use_tool`. | Claude denies. The daemon audits `permission_denied`. |
 | Broker | Same order. Deny wins. The card is only for a residual ask. | Same broker, same card. | No card. |
 | `transport` on the event | `mcp` when the tool is attached, otherwise `none`. | `stream_control`. | `none`. |
@@ -65,18 +65,18 @@ When the backend is Claude, the transport is `mcp`, `ui_prompts` is on, and the 
 
 - `--permission-mode` from policy, when set
 - `--allowedTools` / `--disallowedTools` from allow and deny rules
-- `--mcp-config` with an inline HTTP MCP server named `lgbperm`
+- `--mcp-config` pointing at `DATA_DIR/cli/<bot>/mcp.json` (mode 0600). The file names an HTTP server `lgbperm`. Its `url` is `{base}/api/mcp/permission` and does not include the token. Its `headersHelper` is a shell command that reads `mcp-perm.token` (mode 0600) and prints `{"Authorization":"Bearer ..."}`. Claude runs that command in a shell at connect time ([MCP dynamic headers](https://code.claude.com/docs/en/mcp)). The token is not in the JSON and not on argv.
 - `--permission-prompt-tool mcp__lgbperm__approve`
 
 That is Claude's default `--permission-prompts host`: residual asks go to the prompt tool. When `ui_prompts` is off, or the daemon has no HTTP base, the turn passes `--permission-prompts none` and does not attach the prompt tool. Claude denies anything that would have prompted. The daemon audits those `permission_denied` events as source `no_ui` when prompts are off, and as source `policy` when prompts are on but there is no host. A denial reported while a host is attached stays source `cli`.
 
 Ask rules are broker-only. Claude has no matching flag, so an ask applies when Claude calls `approve`. A deny rule is also `--disallowedTools`, so Claude can refuse before the prompt tool.
 
-`POST /api/mcp/permission/{token}` is the MCP endpoint. The token is the credential; the route does not use the daemon Bearer token. It speaks a small JSON-RPC subset: `initialize`, the `notifications/initialized` notification, `ping`, `tools/list`, and `tools/call` for `approve` with `{tool_name, input, tool_use_id}`. An allow returns text content `{"behavior":"allow","updatedInput":{...}}`. A deny returns `{"behavior":"deny","message":"..."}`. `updatedInput` is the original input object (or `{}`), except an answered `AskUserQuestion`, which sends the original input plus `answers`.
+`POST /api/mcp/permission` is the MCP endpoint. The credential is `Authorization: Bearer <token>`. `POST /api/mcp/permission/{token}` still accepts the same token in the path. Neither route uses the daemon admin token. The route speaks a small JSON-RPC subset: `initialize`, the `notifications/initialized` notification, `ping`, `tools/list`, and `tools/call` for `approve` with `{tool_name, input, tool_use_id}`. An allow returns text content `{"behavior":"allow","updatedInput":{...}}`. A deny returns `{"behavior":"deny","message":"..."}`. `updatedInput` is the original input object (or `{}`), except an answered `AskUserQuestion`, which sends the original input plus `answers`.
 
 `permission_denied` system events and `result.permission_denials` are parsed as `permission_decision` and audited. Source is `cli` when a host is attached, `no_ui` when `--permission-prompts none` was set because `ui_prompts` is off, and `policy` when it was set because there is no HTTP host. They do not fail the turn. A headless prompt phrase with no host and without `--permission-prompts none` still fails closed.
 
-The token is dropped when the turn ends. A bind address of `:0` has no stable base URL, so tests that use `httptest` set the base to the server URL.
+The token file, the helper script, and `mcp.json` are removed when the turn ends. The in-memory bind is dropped then too. A bind address of `:0` has no stable base URL, so tests that use `httptest` set the base to the server URL.
 
 ### stream_control
 

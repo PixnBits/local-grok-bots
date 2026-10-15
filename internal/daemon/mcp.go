@@ -10,6 +10,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/PixnBits/local-grok-bots/internal/permission"
@@ -48,20 +50,110 @@ func httpBase(bind string) string {
 	return "http://" + net.JoinHostPort(host, port)
 }
 
-func permissionMCPConfig(base, token string) string {
+// permHeaderScript prints the MCP Authorization header. Claude runs it from
+// headersHelper, so the token stays in a file and off argv and the JSON.
+const permHeaderScript = `#!/bin/sh
+tok=$(tr -d '\n' < "$1")
+printf '{"Authorization":"Bearer %s"}\n' "$tok"
+`
+
+// writePermMCP writes the permission token, the header helper, and the
+// --mcp-config file under DATA_DIR/cli/<bot>/. Each file is mode 0600.
+// The JSON names the helper; it does not contain the token.
+// The returned path is what --mcp-config receives.
+func (a *App) writePermMCP(botID, base, token string) (string, error) {
+	if !permTokenOK(token) {
+		return "", fmt.Errorf("permission token is invalid")
+	}
+	root, err := filepath.Abs(a.cfg.DataDir)
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(root, "cli", botID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	tokenPath := filepath.Join(dir, "mcp-perm.token")
+	scriptPath := filepath.Join(dir, "mcp-perm-headers")
+	cfgPath := filepath.Join(dir, "mcp.json")
+	if err := writeOwnerFile(tokenPath, []byte(token)); err != nil {
+		removePermFiles(dir)
+		return "", err
+	}
+	if err := writeOwnerFile(scriptPath, []byte(permHeaderScript)); err != nil {
+		removePermFiles(dir)
+		return "", err
+	}
+	helper := "/bin/sh " + quoteShell(scriptPath) + " " + quoteShell(tokenPath)
 	payload := map[string]any{
 		"mcpServers": map[string]any{
 			"lgbperm": map[string]any{
-				"type": "http",
-				"url":  strings.TrimRight(base, "/") + "/api/mcp/permission/" + token,
+				"type":          "http",
+				"url":           strings.TrimRight(base, "/") + "/api/mcp/permission",
+				"headersHelper": helper,
 			},
 		},
 	}
-	b, err := json.Marshal(payload)
+	raw, err := json.Marshal(payload)
 	if err != nil {
-		return ""
+		removePermFiles(dir)
+		return "", err
 	}
-	return string(b)
+	if strings.Contains(string(raw), token) {
+		removePermFiles(dir)
+		return "", fmt.Errorf("mcp config would contain the permission token")
+	}
+	if err := writeOwnerFile(cfgPath, raw); err != nil {
+		removePermFiles(dir)
+		return "", err
+	}
+	return cfgPath, nil
+}
+
+// removePermMCP deletes the permission files for one bot. The state directory
+// and the CLI settings stay.
+func (a *App) removePermMCP(botID string) {
+	root, err := filepath.Abs(a.cfg.DataDir)
+	if err != nil {
+		return
+	}
+	removePermFiles(filepath.Join(root, "cli", botID))
+}
+
+func removePermFiles(dir string) {
+	for _, name := range []string{"mcp-perm.token", "mcp-perm-headers", "mcp.json"} {
+		_ = os.Remove(filepath.Join(dir, name))
+	}
+}
+
+func writeOwnerFile(path string, body []byte) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(body)
+	cerr := f.Close()
+	if werr != nil {
+		return werr
+	}
+	if cerr != nil {
+		return cerr
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return err
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if st.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("%s is not private", filepath.Base(path))
+	}
+	return nil
+}
+
+func quoteShell(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func (a *App) registerPerm(botID, runID, sessionID string) string {
@@ -106,6 +198,19 @@ func (a *App) lookupPerm(token string) (permBind, bool) {
 	defer a.permMu.Unlock()
 	b, ok := a.permTokens[token]
 	return b, ok
+}
+
+// mcpPermToken prefers a 64-hex path segment. Otherwise it takes a Bearer
+// token, which is how headersHelper authenticates without putting the
+// secret on the CLI command line.
+func mcpPermToken(r *http.Request) string {
+	if tok := r.PathValue("token"); permTokenOK(tok) {
+		return tok
+	}
+	if tok, ok := bearerToken(r); ok && permTokenOK(tok) {
+		return tok
+	}
+	return ""
 }
 
 func permTokenOK(token string) bool {
@@ -161,12 +266,13 @@ func (a *App) handlePermissionDecision(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleMCPPermission(w http.ResponseWriter, r *http.Request) {
-	bind, ok := a.lookupPerm(r.PathValue("token"))
+	token := mcpPermToken(r)
+	bind, ok := a.lookupPerm(token)
 	if !ok {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
-	w.Header().Set("Mcp-Session-Id", r.PathValue("token"))
+	w.Header().Set("Mcp-Session-Id", token)
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
 	if err != nil || len(body) == 0 || body[0] == '[' {
 		writeRPCError(w, r, nil, -32700, "parse error")

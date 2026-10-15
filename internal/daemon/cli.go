@@ -161,7 +161,13 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	case a.policy.UIPrompts && host:
 		tok := a.registerPerm(bot.ID, runID, sessionID)
 		defer a.unregisterPerm(tok)
-		spec.MCPConfig = permissionMCPConfig(a.permBase, tok)
+		cfgPath, werr := a.writePermMCP(bot.ID, a.permBase, tok)
+		if werr != nil {
+			a.failCLI(bot.ID, runID, backend, werr)
+			return
+		}
+		defer a.removePermMCP(bot.ID)
+		spec.MCPConfig = cfgPath
 		spec.PermissionTool = permissionToolName
 		eventTransport = policy.TransportMCP
 	default:

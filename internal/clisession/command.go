@@ -25,8 +25,9 @@ type Spec struct {
 	// AllowRules and DenyRules are Claude-style patterns such as "Bash(git *)".
 	AllowRules []string
 	DenyRules  []string
-	// MCPConfig is inline JSON for Claude's --mcp-config. When set, and
-	// PermissionPrompts is not "none", the permission prompt tool is passed too.
+	// MCPConfig is a file path or inline JSON for Claude's --mcp-config.
+	// The daemon passes a path. The permission token is not part of this string.
+	// When set, and PermissionPrompts is not "none", the permission prompt tool is passed too.
 	MCPConfig string
 	// PermissionTool is the MCP tool name, mcp__<server>__approve.
 	PermissionTool string

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -54,6 +55,18 @@ func TestMCPRoundTrip(t *testing.T) {
 	res, body = do(t, "POST", srv.URL+"/api/mcp/permission/nope", map[string]any{"jsonrpc": "2.0", "id": 1, "method": "ping"}, "")
 	if res.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("bad token %d %s", res.StatusCode, body)
+	}
+	res, body = do(t, "POST", srv.URL+"/api/mcp/permission", map[string]any{"jsonrpc": "2.0", "id": 4, "method": "ping"}, token)
+	if res.StatusCode != 200 || !strings.Contains(string(body), `"result"`) {
+		t.Fatalf("bearer ping %d %s", res.StatusCode, body)
+	}
+	res, body = do(t, "POST", srv.URL+"/api/mcp/permission", map[string]any{"jsonrpc": "2.0", "id": 5, "method": "ping"}, "")
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("missing bearer %d %s", res.StatusCode, body)
+	}
+	res, body = do(t, "POST", srv.URL+"/api/mcp/permission", map[string]any{"jsonrpc": "2.0", "id": 6, "method": "ping"}, "sekrit")
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("admin token on permission route %d %s", res.StatusCode, body)
 	}
 
 	_, frames := app.bus.SubscribePrompts("run-1")
@@ -309,6 +322,7 @@ func TestFakeClaudePermissionRoundTrip(t *testing.T) {
 	if reqID == "" {
 		t.Fatal("UI did not see a permission_request")
 	}
+	permToken := permFilesDuringRun(t, dir, bot.ID)
 	decide := srv.URL + "/api/bots/" + bot.ID + "/runs/" + posted.RunID + "/permissions/" + reqID
 	res, b = do(t, "POST", decide, map[string]any{"decision": "allow_session"}, "")
 	if res.StatusCode != http.StatusForbidden {
@@ -337,8 +351,16 @@ func TestFakeClaudePermissionRoundTrip(t *testing.T) {
 		t.Fatalf("thread %#v", msgs)
 	}
 	argv := readArgv(t, logPath)
-	if !strings.Contains(argv, "--permission-prompt-tool") || !strings.Contains(argv, "mcp__lgbperm__approve") || !strings.Contains(argv, "/api/mcp/permission/") {
+	if !strings.Contains(argv, "--permission-prompt-tool") || !strings.Contains(argv, "mcp__lgbperm__approve") || !strings.Contains(argv, "mcp.json") {
 		t.Fatalf("argv missing the permission host:\n%s", argv)
+	}
+	if strings.Contains(argv, permToken) || strings.Contains(argv, "/api/mcp/permission/") {
+		t.Fatalf("argv contains the permission token:\n%s", argv)
+	}
+	for _, name := range []string{"mcp.json", "mcp-perm.token", "mcp-perm-headers"} {
+		if _, err := os.Stat(filepath.Join(dir, "cli", bot.ID, name)); !os.IsNotExist(err) {
+			t.Fatalf("%s left after the turn (%v)", name, err)
+		}
 	}
 	if strings.Contains(argv, "--always-approve") || !strings.Contains(argv, "--allowedTools") || !strings.Contains(argv, "--disallowedTools") {
 		t.Fatalf("argv flags:\n%s", argv)
@@ -1036,6 +1058,9 @@ func callPermissionTool(url string) (string, error) {
 		return "", err
 	}
 	notify.Header.Set("Content-Type", "application/json")
+	if fakeMCPBearer != "" {
+		notify.Header.Set("Authorization", "Bearer "+fakeMCPBearer)
+	}
 	res, err := (&http.Client{Timeout: 5 * time.Second}).Do(notify)
 	if err != nil {
 		return "", err
@@ -1163,6 +1188,9 @@ func rpc(url string, id int, method string, params any, dst any) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	if fakeMCPBearer != "" {
+		req.Header.Set("Authorization", "Bearer "+fakeMCPBearer)
+	}
 	client := &http.Client{Timeout: 25 * time.Second}
 	res, err := client.Do(req)
 	if err != nil {
@@ -1182,26 +1210,91 @@ func rpc(url string, id int, method string, params any, dst any) error {
 	return nil
 }
 
+// fakeMCPBearer is the permission token the fake CLI read from headersHelper.
+// The fake is a child of the test, so this variable is not shared with the test.
+var fakeMCPBearer string
+
 func mcpURL(args []string) string {
+	fakeMCPBearer = ""
 	for i := 0; i < len(args)-1; i++ {
 		if args[i] != "--mcp-config" {
 			continue
 		}
+		raw := []byte(args[i+1])
+		if len(raw) == 0 || raw[0] != '{' {
+			b, err := os.ReadFile(args[i+1])
+			if err != nil {
+				return ""
+			}
+			raw = b
+		}
 		var cfg struct {
 			MCPServers map[string]struct {
-				URL string `json:"url"`
+				URL           string `json:"url"`
+				HeadersHelper string `json:"headersHelper"`
 			} `json:"mcpServers"`
 		}
-		if json.Unmarshal([]byte(args[i+1]), &cfg) != nil {
+		if json.Unmarshal(raw, &cfg) != nil {
 			return ""
 		}
 		for _, srv := range cfg.MCPServers {
+			if srv.HeadersHelper != "" {
+				fakeMCPBearer = bearerFromHelper(srv.HeadersHelper)
+			}
 			if srv.URL != "" {
 				return srv.URL
 			}
 		}
 	}
 	return ""
+}
+
+func bearerFromHelper(command string) string {
+	out, err := exec.Command("/bin/sh", "-c", command).Output()
+	if err != nil {
+		return ""
+	}
+	var hdr struct {
+		Authorization string `json:"Authorization"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(out), &hdr) != nil {
+		return ""
+	}
+	const prefix = "Bearer "
+	if !strings.HasPrefix(hdr.Authorization, prefix) {
+		return ""
+	}
+	return strings.TrimPrefix(hdr.Authorization, prefix)
+}
+
+func permFilesDuringRun(t *testing.T, dir, botID string) string {
+	t.Helper()
+	base := filepath.Join(dir, "cli", botID)
+	for _, name := range []string{"mcp.json", "mcp-perm.token", "mcp-perm-headers"} {
+		st, err := os.Stat(filepath.Join(base, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode %o", name, st.Mode().Perm())
+		}
+	}
+	tok, err := os.ReadFile(filepath.Join(base, "mcp-perm.token"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := os.ReadFile(filepath.Join(base, "mcp.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := strings.TrimSpace(string(tok))
+	if token == "" || strings.Contains(string(cfg), token) {
+		t.Fatal("mcp.json contains the permission token")
+	}
+	if !strings.Contains(string(cfg), "headersHelper") || strings.Contains(string(cfg), "/api/mcp/permission/") {
+		t.Fatalf("mcp.json %s", cfg)
+	}
+	return token
 }
 
 func flagValue(args []string, name string) string {
