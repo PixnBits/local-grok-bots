@@ -253,6 +253,24 @@ func TestStreamControlCancelWritesNoResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 	deadline = time.Now().Add(8 * time.Second)
+	decAt := -1
+	for decAt < 0 && time.Now().Before(deadline) {
+		select {
+		case ev := <-f.events:
+			saw = append(saw, ev)
+			if strings.HasPrefix(ev, "permission_decision\n") && strings.Contains(ev, `"source":"cancel"`) && strings.Contains(ev, `"transport":"stream_control"`) {
+				decAt = len(saw) - 1
+			}
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if decAt < 0 {
+		t.Fatalf("cancel decision was not published: %#v", saw)
+	}
+	if err := os.WriteFile(f.cancelDone, []byte("go\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(8 * time.Second)
 	for tokenCompletes(saw, "after-cancel") < 0 && time.Now().Before(deadline) {
 		select {
 		case ev := <-f.events:
@@ -261,16 +279,7 @@ func TestStreamControlCancelWritesNoResponse(t *testing.T) {
 		}
 	}
 	tokAt := tokenCompletes(saw, "after-cancel")
-	if tokAt < 0 {
-		t.Fatalf("events %#v", saw)
-	}
-	decAt := -1
-	for i, ev := range saw {
-		if decAt < 0 && strings.HasPrefix(ev, "permission_decision\n") && strings.Contains(ev, `"source":"cancel"`) && strings.Contains(ev, `"transport":"stream_control"`) {
-			decAt = i
-		}
-	}
-	if decAt < 0 || decAt > tokAt {
+	if tokAt < 0 || decAt > tokAt {
 		t.Fatalf("order decision %d token %d events %#v", decAt, tokAt, saw)
 	}
 	got := f.waitDone()
@@ -414,6 +423,7 @@ type streamFix struct {
 	stdinPath  string
 	gate       string
 	cancelGate string
+	cancelDone string
 	lg         *audit.Logger
 	auditPath  string
 }
@@ -437,7 +447,9 @@ func newStreamTurn(t *testing.T, mode string, pol policy.Policy, withGate, promp
 	}
 	if mode == "cancel" {
 		f.cancelGate = filepath.Join(dir, "cancel")
+		f.cancelDone = filepath.Join(dir, "cancel-done")
 		t.Setenv("LGB_FAKE_CANCEL_GATE", f.cancelGate)
+		t.Setenv("LGB_FAKE_CANCEL_DONE", f.cancelDone)
 	}
 	app := newApp(t, dir, nil)
 	lg, err := audit.Open(f.auditPath)

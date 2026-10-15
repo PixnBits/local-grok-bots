@@ -735,7 +735,10 @@ func fakeStreamClaude(args []string) {
 		fakeToolAsk("req_cancel_1", `{"command":"echo hello"}`)
 		waitFakeFile(os.Getenv("LGB_FAKE_CANCEL_GATE"), true)
 		fakeOut(`{"type":"control_cancel_request","request_id":"req_cancel_1"}`)
-		time.Sleep(300 * time.Millisecond)
+		// The broker publishes the cancel decision off this stdout reader.
+		// The test opens the gate once that event is visible, so the next
+		// line cannot overtake it.
+		waitFakeFile(os.Getenv("LGB_FAKE_CANCEL_DONE"), true)
 		fakeOut(fmt.Sprintf(`{"type":"stream_event","session_id":%q,"event":{"delta":{"type":"text_delta","text":"after-cancel"}}}`, sid))
 		fakeResult(sid, "cancelled")
 	case "question", "question-timeout":
