@@ -26,6 +26,12 @@ func TestPermissionHandlersPresent(t *testing.T) {
 		"allow_once",
 		"allow_session",
 		`"Deny"`,
+		"Submit",
+		"Skip",
+		"perm-header",
+		"perm-question",
+		"ExitPlanMode",
+		`kind === "question"`,
 	} {
 		if !strings.Contains(src, s) {
 			t.Errorf("index.html missing %s", s)
@@ -98,6 +104,43 @@ if (!sess) throw new Error("session button missing");
 b1[0].click();
 b1[1].click();
 sess.click();
+const inputsOf=c=>walk(c,[]).filter(n=>n.tag==="input");
+const qSingle={question:"Which library?", header:"Lib", multiSelect:false, options:[{label:"Go", description:"Go toolchain"},{label:"Rust", description:"Rust toolchain"}]};
+const qMulti={question:"Which libraries?", header:"Libs", multiSelect:true, options:[{label:"Go", description:"Go toolchain"},{label:"Rust", description:"Rust toolchain"}]};
+showPermissionRequest({id:"q1", run_id:"run-1", tool:"AskUserQuestion", kind:"question", deadline:future, session_allowed:true, questions:[qSingle]}, "run-1");
+showPermissionRequest({id:"q2", run_id:"run-1", tool:"AskUserQuestion", kind:"question", deadline:future, session_allowed:true, questions:[qMulti]}, "run-1");
+showPermissionRequest({id:"q3", run_id:"run-1", tool:"AskUserQuestion", kind:"question", deadline:future, session_allowed:false, questions:[qSingle]}, "run-1");
+showPermissionRequest({id:"q5", run_id:"run-1", tool:"AskUserQuestion", kind:"question", deadline:future, session_allowed:false, questions:[{question:"<img src=x>", header:"<b>", multiSelect:false, options:[{label:"<script>", description:"<i>d</i>"},{label:"B", description:"ok"}]}]}, "run-1");
+showPermissionRequest({id:"q4", run_id:"run-1", tool:"AskUserQuestion", kind:"question", deadline:future, session_allowed:false, questions:[qSingle]}, "run-1");
+showPermissionRequest({id:"p1", run_id:"run-1", tool:"ExitPlanMode", arguments:{plan:"ship the plan", command:"<no>"}, deadline:future, session_allowed:false}, "run-1");
+const q1=cardOf("q1");
+if (buttons(q1).map(b=>b.textContent).join(",")!=="Submit,Skip") throw new Error("question buttons "+buttons(q1).map(b=>b.textContent).join(","));
+if (textOf(q1).includes("Allow once") || textOf(q1).includes("Allow for session")) throw new Error("question card offered allow");
+if (!textOf(q1).includes("Lib") || !textOf(q1).includes("Which library?") || !textOf(q1).includes("Go toolchain")) throw new Error("question text "+textOf(q1));
+const qCount=walk(q1,[]).find(n=>n.className==="perm-count");
+if (!qCount || !/^[0-9]+s$/.test(qCount.textContent)) throw new Error("question countdown");
+const q1in=inputsOf(q1);
+if (q1in.length!==4 || q1in[0].attrs.type!=="radio" || q1in[2].attrs.type!=="radio" || q1in[3].attrs.type!=="text") throw new Error("single inputs");
+buttons(q1).find(b=>b.textContent==="Submit").click();
+if (!textOf(q1).includes("Answer each question")) throw new Error("empty submit");
+q1in[0].checked=true;
+buttons(q1).find(b=>b.textContent==="Submit").click();
+const q2in=inputsOf(cardOf("q2"));
+if (q2in.length!==3 || q2in[0].attrs.type!=="checkbox" || q2in[2].attrs.type!=="text") throw new Error("multi inputs");
+q2in[0].checked=true; q2in[1].checked=true; q2in[2].value="my own";
+buttons(cardOf("q2")).find(b=>b.textContent==="Submit").click();
+const q3in=inputsOf(cardOf("q3"));
+q3in[3].value="my own pick";
+(q3in[3].listeners.input||[]).forEach(fn=>fn());
+if (!q3in[2].checked || q3in[0].checked) throw new Error("other did not select");
+buttons(cardOf("q3")).find(b=>b.textContent==="Submit").click();
+buttons(cardOf("q4")).find(b=>b.textContent==="Skip").click();
+const q5=cardOf("q5");
+if (walk(q5,[]).some(n=>n.tag==="img"||n.tag==="script"||n.tag==="html")) throw new Error("question markup");
+if (!textOf(q5).includes("<img src=x>") || !textOf(q5).includes("<script>") || !textOf(q5).includes("<i>d</i>")) throw new Error("question text dropped");
+if (!textOf(cardOf("p1")).includes("ship the plan")) throw new Error("plan dropped");
+if (buttons(cardOf("p1")).map(b=>b.textContent).join(",")!=="Allow once,Deny") throw new Error("plan buttons");
+showPermissionDecision({id:"q1", decision:"answer", source:"ui", tool:"AskUserQuestion", kind:"question"});
 setTimeout(()=>{
   let code = 0;
   try {
@@ -111,7 +154,9 @@ setTimeout(()=>{
       outcome: out?out.textContent:"",
       disabled,
       timeout: out3?out3.textContent:"",
-      timeoutDisabled: buttons(c3).every(b=>b.disabled)
+      timeoutDisabled: buttons(c3).every(b=>b.disabled),
+      questionOutcome: (walk(q1,[]).find(n=>n.className==="perm-outcome")||{}).textContent||"",
+      questionDisabled: inputsOf(q1).every(n=>n.disabled) && buttons(q1).every(b=>b.disabled)
     };
     console.log(JSON.stringify(result));
   } catch (e) {
@@ -144,10 +189,12 @@ setTimeout(()=>{
 			Path string `json:"path"`
 			Body string `json:"body"`
 		} `json:"posts"`
-		Outcome         string `json:"outcome"`
-		Disabled        bool   `json:"disabled"`
-		Timeout         string `json:"timeout"`
-		TimeoutDisabled bool   `json:"timeoutDisabled"`
+		Outcome          string `json:"outcome"`
+		Disabled         bool   `json:"disabled"`
+		Timeout          string `json:"timeout"`
+		TimeoutDisabled  bool   `json:"timeoutDisabled"`
+		QuestionOutcome  string `json:"questionOutcome"`
+		QuestionDisabled bool   `json:"questionDisabled"`
 	}
 	if err := json.Unmarshal([]byte(line), &got); err != nil {
 		t.Fatalf("decode %v: %s", err, out)
@@ -158,10 +205,17 @@ setTimeout(()=>{
 	if !got.TimeoutDisabled || got.Timeout != "deny (timeout)" {
 		t.Fatalf("timeout card %+v", got)
 	}
+	if got.QuestionOutcome != "answer (ui)" || !got.QuestionDisabled {
+		t.Fatalf("question card %+v", got)
+	}
 	want := map[string]string{
 		"/api/bots/bot-1/runs/run-1/permissions/r1": `{"decision":"allow_once"}`,
 		"/api/bots/bot-1/runs/run-1/permissions/r2": `{"decision":"allow_session"}`,
 		"/api/bots/bot-1/runs/run-9/permissions/r4": `{"decision":"deny"}`,
+		"/api/bots/bot-1/runs/run-1/permissions/q1": `{"decision":"answer","answers":{"Which library?":"Go"}}`,
+		"/api/bots/bot-1/runs/run-1/permissions/q2": `{"decision":"answer","answers":{"Which libraries?":"Go, Rust, my own"}}`,
+		"/api/bots/bot-1/runs/run-1/permissions/q3": `{"decision":"answer","answers":{"Which library?":"my own pick"}}`,
+		"/api/bots/bot-1/runs/run-1/permissions/q4": `{"decision":"deny"}`,
 	}
 	gotPosts := map[string]string{}
 	for _, p := range got.Posts {
