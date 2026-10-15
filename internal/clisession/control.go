@@ -52,17 +52,37 @@ type controlSession struct {
 	onEvent func(Event)
 	res     Result
 
-	// mu guards the pending map, early cancels, and init state.
+	// mu guards asks, early cancels, and init state.
 	// It is never held across stdin I/O. wmu guards the stdin writer.
-	mu      sync.Mutex
-	wmu     sync.Mutex
-	closed  bool
-	initID  string
-	initCh  chan initOutcome
-	pending map[string]context.CancelFunc
-	early   map[string]struct{}
-	wg      sync.WaitGroup
-	exited  chan struct{}
+	mu     sync.Mutex
+	wmu    sync.Mutex
+	closed bool
+	initID string
+	initCh chan initOutcome
+	asks   map[string]*askTrack
+	early  map[string]struct{}
+	earlyQ []string
+	wg     sync.WaitGroup
+	exited chan struct{}
+}
+
+// maxEarlyCancels bounds cancel ids that arrive before their request.
+// Past this, the oldest id is forgotten so a reused id can still be answered.
+const maxEarlyCancels = 64
+
+type askPhase int
+
+const (
+	askPending askPhase = iota
+	askInFlight
+	askAnswered
+)
+
+// askTrack is one request id. inFlight and answered ignore a later cancel
+// so the id is not stored in early. A new request may reuse the id.
+type askTrack struct {
+	cancel context.CancelFunc
+	phase  askPhase
 }
 
 type initOutcome struct {
@@ -86,7 +106,7 @@ func runControlSession(ctx context.Context, cmd *exec.Cmd, stdout io.Reader, std
 		w:       stdin,
 		hooks:   hooks,
 		onEvent: onEvent,
-		pending: map[string]context.CancelFunc{},
+		asks:    map[string]*askTrack{},
 		early:   map[string]struct{}{},
 		exited:  make(chan struct{}),
 	}
@@ -334,7 +354,13 @@ func (s *controlSession) ask(id, tool, useID string, input json.RawMessage) {
 		if s.hooks.Decide != nil {
 			dec = s.hooks.Decide(ctx, ask)
 		}
-		if !s.claim(id) || dec.Silent || ctx.Err() != nil {
+		if !s.claim(id) {
+			return
+		}
+		// Keep the id through the write. A cancel in this window must not
+		// land in early, or the next request that reuses the id is dropped.
+		defer s.settle(id)
+		if dec.Silent || ctx.Err() != nil {
 			return
 		}
 		if dec.Behavior == "allow" {
@@ -409,14 +435,19 @@ func (s *controlSession) onCancel(line []byte) {
 		return
 	}
 	s.mu.Lock()
-	cancel, ok := s.pending[id]
-	if ok {
-		delete(s.pending, id)
-	} else {
-		s.early[id] = struct{}{}
+	st := s.asks[id]
+	var cancel context.CancelFunc
+	switch {
+	case st == nil:
+		s.noteEarly(id)
+	case st.phase == askPending:
+		cancel = st.cancel
+		delete(s.asks, id)
+	default:
+		// in flight or already answered: do not remember this cancel.
 	}
 	s.mu.Unlock()
-	if ok && cancel != nil {
+	if cancel != nil {
 		cancel()
 	}
 }
@@ -424,33 +455,81 @@ func (s *controlSession) onCancel(line []byte) {
 func (s *controlSession) track(id string, cancel context.CancelFunc) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, pre := s.early[id]; pre {
-		delete(s.early, id)
+	if s.dropEarly(id) {
 		return false
 	}
-	s.pending[id] = cancel
+	s.asks[id] = &askTrack{cancel: cancel, phase: askPending}
 	return true
 }
 
 func (s *controlSession) claim(id string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.pending[id]; !ok {
+	st := s.asks[id]
+	if st == nil || st.phase != askPending {
 		return false
 	}
-	delete(s.pending, id)
+	st.phase = askInFlight
+	st.cancel = nil
+	return true
+}
+
+func (s *controlSession) settle(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.asks[id]
+	if st == nil || st.phase != askInFlight {
+		return
+	}
+	st.phase = askAnswered
+	st.cancel = nil
+}
+
+func (s *controlSession) noteEarly(id string) {
+	if _, ok := s.early[id]; ok {
+		return
+	}
+	if len(s.early) >= maxEarlyCancels {
+		if len(s.earlyQ) == 0 {
+			return
+		}
+		old := s.earlyQ[0]
+		s.earlyQ = s.earlyQ[1:]
+		delete(s.early, old)
+		if len(s.early) >= maxEarlyCancels {
+			return
+		}
+	}
+	s.early[id] = struct{}{}
+	s.earlyQ = append(s.earlyQ, id)
+}
+
+func (s *controlSession) dropEarly(id string) bool {
+	if _, ok := s.early[id]; !ok {
+		return false
+	}
+	delete(s.early, id)
+	for i, cur := range s.earlyQ {
+		if cur == id {
+			s.earlyQ = append(s.earlyQ[:i], s.earlyQ[i+1:]...)
+			break
+		}
+	}
 	return true
 }
 
 func (s *controlSession) cancelAll() {
 	s.mu.Lock()
-	pending := s.pending
-	s.pending = map[string]context.CancelFunc{}
-	s.mu.Unlock()
-	for _, cancel := range pending {
-		if cancel != nil {
-			cancel()
+	var cancels []context.CancelFunc
+	for _, st := range s.asks {
+		if st != nil && st.phase == askPending && st.cancel != nil {
+			cancels = append(cancels, st.cancel)
 		}
+	}
+	s.asks = map[string]*askTrack{}
+	s.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
 	}
 }
 

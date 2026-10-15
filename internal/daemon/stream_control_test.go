@@ -339,6 +339,52 @@ func TestStreamControlWriteDoesNotStallStdout(t *testing.T) {
 	}
 }
 
+func TestStreamControlCancelDoesNotPoisonReusedID(t *testing.T) {
+	f := newStreamTurn(t, "reuse", policy.Policy{
+		ToolAllow: []string{"Bash"},
+	}, false, false)
+	got := f.waitDone()
+	if got.LastRunStatus != "done" || got.LastRunError != "" {
+		t.Fatalf("run %s %s", got.LastRunStatus, got.LastRunError)
+	}
+	lines := stdinLines(t, f.stdinPath)
+	var sawFirst, sawSecond bool
+	for _, line := range lines {
+		if strings.Contains(line, "echo-first") && strings.Contains(line, `"request_id":"req_reuse_1"`) {
+			sawFirst = true
+		}
+		if strings.Contains(line, "echo-second") && strings.Contains(line, `"request_id":"req_reuse_1"`) {
+			sawSecond = true
+		}
+	}
+	if !sawFirst || !sawSecond {
+		t.Fatalf("stdin %#v", lines)
+	}
+}
+
+func TestStreamControlEarlyCancelIsBounded(t *testing.T) {
+	f := newStreamTurn(t, "early", policy.Policy{
+		ToolAllow: []string{"Bash"},
+	}, false, false)
+	got := f.waitDone()
+	if got.LastRunStatus != "done" || got.LastRunError != "" {
+		t.Fatalf("run %s %s", got.LastRunStatus, got.LastRunError)
+	}
+	lines := stdinLines(t, f.stdinPath)
+	var evicted, kept bool
+	for _, line := range lines {
+		if strings.Contains(line, `"request_id":"early_0"`) && strings.Contains(line, "evicted") {
+			evicted = true
+		}
+		if strings.Contains(line, `"request_id":"early_64"`) || strings.Contains(line, "kept") {
+			kept = true
+		}
+	}
+	if !evicted || kept {
+		t.Fatalf("stdin %#v", lines)
+	}
+}
+
 func TestStreamControlInitializeErrorFailsClosed(t *testing.T) {
 	f := newStreamTurn(t, "init_error", policy.Policy{UIPrompts: true}, false, false)
 	got := f.waitDone()
