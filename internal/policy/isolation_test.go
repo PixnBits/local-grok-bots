@@ -123,3 +123,20 @@ func TestClaudeSandboxOffIsManagedOnly(t *testing.T) {
 		t.Fatal("bad value accepted")
 	}
 }
+
+func TestLGBPolicyKeys(t *testing.T) {
+	d := Defaults()
+	if !d.CLILGB || d.CLILGBManageBots {
+		t.Fatalf("defaults lgb=%v manage=%v", d.CLILGB, d.CLILGBManageBots)
+	}
+	dir := t.TempDir()
+	local := filepath.Join(dir, "policy.toml")
+	_ = os.WriteFile(local, []byte("[cli.isolation]\nlgb = false\nlgb_manage_bots = true\n"), 0o644)
+	p, err := Load(Options{Path: local})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.CLILGB || !p.CLILGBManageBots {
+		t.Fatalf("lgb=%v manage=%v", p.CLILGB, p.CLILGBManageBots)
+	}
+}

@@ -84,6 +84,11 @@ type Policy struct {
 	// CLIClaudeSandbox is required (default: Claude's Bash sandbox on, fail
 	// closed) or off (managed policy only; the daemon adds no sandbox block).
 	CLIClaudeSandbox string
+	// CLILGB puts the lgb command (daemon state tools) on a CLI bot's PATH.
+	// Default on.
+	CLILGB bool
+	// CLILGBManageBots lets lgb create and update other bots. Default off.
+	CLILGBManageBots bool
 	// CLIEnv is added to the scrubbed CLI environment. Only managed policy sets it.
 	CLIEnv map[string]string
 
@@ -130,6 +135,7 @@ func Defaults() Policy {
 		CLIHome:           HomeIsolated,
 		CLIClaudeHome:     HomeAuto,
 		CLIClaudeSandbox:  SandboxRequired,
+		CLILGB:            true,
 		TimersEnabled:     true,
 		SandboxFailClosed: true,
 		ConflictPolicy:    "refuse",
@@ -453,6 +459,12 @@ func (p *Policy) applyIsolation(iso *cliIsoDoc, trusted bool) error {
 			return fmt.Errorf("cli.isolation.claude_sandbox must be required or off")
 		}
 	}
+	if iso.LGB != nil {
+		p.CLILGB = *iso.LGB
+	}
+	if iso.LGBManageBots != nil {
+		p.CLILGBManageBots = *iso.LGBManageBots
+	}
 	if iso.Env != nil {
 		if !trusted {
 			p.Warnings = append(p.Warnings, "cli.isolation.env is ignored; only managed policy can set CLI environment")
@@ -609,6 +621,8 @@ type cliIsoDoc struct {
 	Home          *string            `toml:"home" json:"home"`
 	ClaudeHome    *string            `toml:"claude_home" json:"claude_home"`
 	ClaudeSandbox *string            `toml:"claude_sandbox" json:"claude_sandbox"`
+	LGB           *bool              `toml:"lgb" json:"lgb"`
+	LGBManageBots *bool              `toml:"lgb_manage_bots" json:"lgb_manage_bots"`
 	Env           *map[string]string `toml:"env" json:"env"`
 }
 

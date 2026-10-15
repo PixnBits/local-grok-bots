@@ -550,6 +550,17 @@ if [ "$mode" = "prompt" ]; then
   sleep 120
   exit 0
 fi
+if [ "$mode" = "lgb" ]; then
+  {
+    lgb memory set color blue; echo "rc=$?"
+    lgb timer in 5m check in with the user --name ping; echo "rc=$?"
+    lgb memory list; echo "rc=$?"
+    lgb run_shell ls; echo "rc=$?"
+    lgb bot create Eve spy; echo "rc=$?"
+    LGB_TOKEN=wrong lgb memory list; echo "rc=$?"
+    echo "token=$LGB_TOKEN"
+  } > "$LGB_OUT" 2>&1
+fi
 sid=""
 prev=""
 for a in "$@"; do

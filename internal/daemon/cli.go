@@ -81,6 +81,14 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		a.failCLI(bot.ID, runID, backend, err)
 		return
 	}
+	lgb, lgbEnv, lerr := a.startLGB(ctx, bot, runID, ws)
+	if lerr != nil {
+		a.log(bot.ID, "lgb_unavailable", map[string]any{"run_id": runID, "error": clip(lerr.Error(), 300)})
+	}
+	defer lgb.stop()
+	if lgbEnv != nil {
+		iso.Env = withLGBEnv(iso.Env, filepath.Join(ws, lgbDirName, "bin"), lgbEnv)
+	}
 	turnCtx := ctx
 	if a.policy.TurnTimeout > 0 {
 		var cancel context.CancelFunc
@@ -107,7 +115,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	spec := clisession.Spec{
 		Backend: backend, SessionID: sessionID, Fresh: fresh,
 		Prompt: prompt, Workspace: ws, PermissionMode: mode,
-		AllowRules: append([]string(nil), a.policy.ToolAllow...),
+		AllowRules: append(append([]string(nil), a.policy.ToolAllow...), lgbAllow(lgbEnv)...),
 		DenyRules:  append([]string(nil), a.policy.ToolDeny...),
 		Isolate:    iso,
 		OnStart: func(child int) {
@@ -339,6 +347,38 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isola
 		}
 	}
 	return &iso, nil
+}
+
+// lgbAllow approves only the lgb command. Other shell commands still ask.
+func lgbAllow(env map[string]string) []string {
+	if env == nil {
+		return nil
+	}
+	return []string{"Bash(lgb)", "Bash(lgb *)"}
+}
+
+// withLGBEnv puts lgb first on PATH and adds its spool and run token.
+func withLGBEnv(env []string, bin string, add map[string]string) []string {
+	out := make([]string, 0, len(env)+len(add)+1)
+	havePath := false
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		if _, ok := add[k]; ok {
+			continue
+		}
+		if k == "PATH" {
+			havePath = true
+			kv = "PATH=" + bin + string(os.PathListSeparator) + v
+		}
+		out = append(out, kv)
+	}
+	if !havePath {
+		out = append(out, "PATH="+bin+string(os.PathListSeparator)+"/usr/bin:/bin")
+	}
+	for k, v := range add {
+		out = append(out, k+"="+v)
+	}
+	return out
 }
 
 // botGrants maps the bot's daemon grants onto the CLI's own controls.
@@ -621,7 +661,11 @@ func (a *App) cliPrompt(bot store.Bot, fresh bool, inputs []store.Message) (stri
 // cliBoundary tells a CLI bot what actually confines it. The daemon's own
 // jail and tools (run_shell, timers, memory, other bots) are not available.
 func (a *App) cliBoundary() string {
-	const tail = "You run directly on the host, not inside the daemon's jail, and the daemon's own tools (run_shell, timers, memory, other bots) are not available to you. Some actions need the user's approval; a denied action is final for this turn.\n"
+	tail := "You run directly on the host, not inside the daemon's jail, and the daemon's own tools (run_shell, timers, memory, other bots) are not available to you. Some actions need the user's approval; a denied action is final for this turn.\n"
+	if a.policy.CLILGB && lgbSupported {
+		tail = "You run directly on the host, not inside the daemon's jail; the daemon's run_shell, read_file, and write_file are not available. Some actions need the user's approval; a denied action is final for this turn.\n" +
+			"For timers, your memory notes, other bots, and direct messages, run the lgb command in your shell (run `lgb help` for usage), for example `lgb timer in 5m Remind the user to stretch` or `lgb memory set favorite_color blue`. lgb works only during this turn.\n"
+	}
 	switch a.policy.EffectiveBackend() {
 	case "grok":
 		return "Use your own tools. Grok's sandbox confines them: files are readable and writable in your workspace and temp directories, credential paths are denied, and network access is blocked unless the user granted it (Grok can't block it on macOS). " + tail
