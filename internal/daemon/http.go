@@ -554,7 +554,10 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			flusher.Flush()
-		case f := <-ch:
+		case f, ok := <-ch:
+			if !ok {
+				return
+			}
 			if _, err := w.Write(f.bytes()); err != nil {
 				return
 			}
