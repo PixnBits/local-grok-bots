@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -325,11 +326,140 @@ const lgbHelp = `lgb: daemon tools for this bot. Output is text; exit 0 on succe
 A timer's prompt comes back to you as a [scheduled] message.
 Run each lgb command as its own shell call; a chained command (;, &&, |) asks for approval.`
 
+// lgbUsage appends the bot-timer limits that are actually in force.
+func (a *App) lgbUsage() string {
+	min, perHour := a.policy.BotTimerLimits()
+	if min == 0 && perHour == 0 {
+		return lgbHelp
+	}
+	var b strings.Builder
+	b.WriteString(lgbHelp)
+	b.WriteString("\n")
+	if min > 0 {
+		fmt.Fprintf(&b, "Repeating timers must be at least %s apart (cli.lgb.min_timer_interval).\n", prettyDuration(min))
+	}
+	if perHour > 0 {
+		fmt.Fprintf(&b, "At most %d scheduled turns per hour for this bot (cli.lgb.max_scheduled_per_hour).\n", perHour)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// guardBotTimer rejects a bot-created timer that would start too many paid
+// turns. Ollama has no limit unless policy sets cli.lgb.*. User-created
+// timers (the HTTP API) are not checked here.
+func (a *App) guardBotTimer(botID string, every time.Duration, onceAt time.Time, oneShot bool) error {
+	min, perHour := a.policy.BotTimerLimits()
+	if !oneShot && min > 0 && every < min {
+		return fmt.Errorf("repeating timer interval %s is shorter than the minimum %s (cli.lgb.min_timer_interval)", prettyDuration(every), prettyDuration(min))
+	}
+	if perHour <= 0 {
+		return nil
+	}
+	rate, err := a.scheduledTurnRate(botID, every, onceAt, oneShot)
+	if err != nil {
+		return err
+	}
+	if rate > float64(perHour) {
+		return fmt.Errorf("this bot would exceed %d scheduled turns per hour (cli.lgb.max_scheduled_per_hour)", perHour)
+	}
+	return nil
+}
+
+// scheduledTurnRate is the worse of two hourly counts: the steady rate of
+// enabled repeating timers plus the busiest hour of pending one-shots, and
+// timer fires already logged in the past hour plus this timer's own
+// contribution. The past hour is included so a bot cannot refill the cap
+// by creating another short timer after the previous ones have fired.
+func (a *App) scheduledTurnRate(botID string, every time.Duration, onceAt time.Time, oneShot bool) (float64, error) {
+	timers, err := a.st.ListTimers(botID)
+	if err != nil {
+		return 0, err
+	}
+	var repeat float64
+	var once []time.Time
+	for _, tm := range timers {
+		if !tm.Enabled {
+			continue
+		}
+		if tm.Schedule == store.OnceSchedule {
+			when, perr := time.Parse(time.RFC3339Nano, tm.NextFireAt)
+			if perr != nil {
+				return 0, errors.New("scheduled turns could not be counted")
+			}
+			once = append(once, when)
+			continue
+		}
+		d, perr := store.ParseInterval(tm.Schedule)
+		if perr != nil || d <= 0 {
+			return 0, errors.New("scheduled turns could not be counted")
+		}
+		repeat += float64(time.Hour) / float64(d)
+	}
+	var added float64
+	if oneShot {
+		once = append(once, onceAt)
+		if onceAt.Before(time.Now().Add(time.Hour)) {
+			added = 1
+		}
+	} else if every > 0 {
+		added = float64(time.Hour) / float64(every)
+		repeat += added
+	}
+	fired, err := a.st.CountLogSince(botID, "timer_fired", time.Now().Add(-time.Hour))
+	if err != nil {
+		return 0, err
+	}
+	projected := repeat + float64(busiestHour(once))
+	recent := float64(fired) + added
+	if recent > projected {
+		return recent, nil
+	}
+	return projected, nil
+}
+
+// busiestHour is the most one-shots that fall inside any one-hour window.
+func busiestHour(times []time.Time) int {
+	if len(times) == 0 {
+		return 0
+	}
+	sort.Slice(times, func(i, j int) bool { return times[i].Before(times[j]) })
+	best, j := 0, 0
+	for i := range times {
+		if j < i {
+			j = i
+		}
+		for j < len(times) && times[j].Sub(times[i]) < time.Hour {
+			j++
+		}
+		if n := j - i; n > best {
+			best = n
+		}
+	}
+	return best
+}
+
+func prettyDuration(d time.Duration) string {
+	if d <= 0 {
+		return "0s"
+	}
+	if d%(24*time.Hour) == 0 {
+		return fmt.Sprintf("%dd", d/(24*time.Hour))
+	}
+	s := d.String()
+	if strings.HasSuffix(s, "m0s") {
+		s = strings.TrimSuffix(s, "0s")
+	}
+	if strings.HasSuffix(s, "h0m") {
+		s = strings.TrimSuffix(s, "0m")
+	}
+	return s
+}
+
 // lgbParse maps argv to a tool and its arguments. help returns text and no tool.
 func (a *App) lgbParse(bot store.Bot, args []string) (tool string, targs map[string]any, out string, err error) {
 	usage := errors.New("unknown command; run lgb help")
 	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		return "", nil, lgbHelp, nil
+		return "", nil, a.lgbUsage(), nil
 	}
 	rest, flags := lgbFlags(args[1:])
 	switch args[0] {

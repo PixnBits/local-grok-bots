@@ -89,6 +89,16 @@ type Policy struct {
 	CLILGB bool
 	// CLILGBManageBots lets lgb create and update other bots. Default off.
 	CLILGBManageBots bool
+	// LGBMinTimerSet is true when policy set cli.lgb.min_timer_interval.
+	// LGBMinTimer is that floor. Zero means no floor. When unset, CLI
+	// backends use DefaultCLIMinTimer and Ollama uses no floor.
+	LGBMinTimerSet bool
+	LGBMinTimer    time.Duration
+	// LGBMaxSchedSet is true when policy set cli.lgb.max_scheduled_per_hour.
+	// LGBMaxSchedPerHour is that cap. Zero means no cap. When unset, CLI
+	// backends use DefaultCLIScheduledPerHour and Ollama uses no cap.
+	LGBMaxSchedSet     bool
+	LGBMaxSchedPerHour int
 	// CLIEnv is added to the scrubbed CLI environment. Only managed policy sets it.
 	CLIEnv map[string]string
 
@@ -296,6 +306,24 @@ func (p Policy) EffectiveBackend() string {
 	}
 }
 
+// BotTimerLimits is the floor and hourly cap for timers a bot creates.
+// A zero duration or a zero cap means that check is off. Policy values
+// apply on every backend. When a key is unset, a CLI backend uses the
+// defaults and Ollama uses no limit.
+func (p Policy) BotTimerLimits() (min time.Duration, perHour int) {
+	if p.LGBMinTimerSet {
+		min = p.LGBMinTimer
+	} else if p.UsesCLI() {
+		min = DefaultCLIMinTimer
+	}
+	if p.LGBMaxSchedSet {
+		perHour = p.LGBMaxSchedPerHour
+	} else if p.UsesCLI() {
+		perHour = DefaultCLIScheduledPerHour
+	}
+	return min, perHour
+}
+
 // UsesCLI reports whether this turn is a headless CLI process.
 // The daemon jail stays off on that path. The CLI's own sandbox, configured by
 // the daemon's settings (docs/cli-isolation.md), is the boundary.
@@ -401,6 +429,12 @@ const (
 	SandboxRequired = "required"
 	// SandboxOff leaves Claude's sandbox to the user's managed settings.
 	SandboxOff = "off"
+	// DefaultCLIMinTimer is the repeating-timer floor for a CLI backend
+	// when policy does not set cli.lgb.min_timer_interval.
+	DefaultCLIMinTimer = 5 * time.Minute
+	// DefaultCLIScheduledPerHour is the per-bot scheduled-turn cap for a
+	// CLI backend when policy does not set cli.lgb.max_scheduled_per_hour.
+	DefaultCLIScheduledPerHour = 12
 )
 
 func (p *Policy) applyIsolation(iso *cliIsoDoc, trusted bool) error {
@@ -481,6 +515,55 @@ func (p *Policy) applyIsolation(iso *cliIsoDoc, trusted bool) error {
 		p.CLIEnv = env
 	}
 	return nil
+}
+
+func (p *Policy) applyLGB(doc *cliLGBDoc) error {
+	if doc == nil {
+		return nil
+	}
+	if doc.MinTimerInterval != nil {
+		d, err := parseMinTimer(*doc.MinTimerInterval)
+		if err != nil {
+			return err
+		}
+		p.LGBMinTimerSet = true
+		p.LGBMinTimer = d
+	}
+	if doc.MaxScheduledPerHour != nil {
+		if *doc.MaxScheduledPerHour < 0 {
+			return fmt.Errorf("cli.lgb.max_scheduled_per_hour must not be negative")
+		}
+		p.LGBMaxSchedSet = true
+		p.LGBMaxSchedPerHour = *doc.MaxScheduledPerHour
+	}
+	return nil
+}
+
+// parseMinTimer accepts a duration such as 5m, 1h, or 1d. Zero (0, 0s, 0d)
+// means no floor. Anything shorter than a second, other than zero, is refused.
+func parseMinTimer(s string) (time.Duration, error) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" {
+		return 0, fmt.Errorf("cli.lgb.min_timer_interval is empty")
+	}
+	if s == "0" {
+		return 0, nil
+	}
+	if strings.HasSuffix(s, "d") && !strings.ContainsAny(strings.TrimSuffix(s, "d"), "hms.") {
+		n, err := strconv.Atoi(strings.TrimSuffix(s, "d"))
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("cli.lgb.min_timer_interval must be a duration like 5m, 1h, or 1d, or 0")
+		}
+		return time.Duration(n) * 24 * time.Hour, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return 0, fmt.Errorf("cli.lgb.min_timer_interval must be a duration like 5m, 1h, or 1d, or 0")
+	}
+	if d > 0 && d < time.Second {
+		return 0, fmt.Errorf("cli.lgb.min_timer_interval must be at least 1s, or 0 for no minimum")
+	}
+	return d, nil
 }
 
 // ClaudeUsesUserHome reports whether a Claude turn keeps the user's HOME and
@@ -614,6 +697,13 @@ type cliDoc struct {
 	Permission     *cliPermDoc `toml:"permission" json:"permission"`
 	Pins           *[]Pin      `toml:"pins" json:"pins"`
 	Isolation      *cliIsoDoc  `toml:"isolation" json:"isolation"`
+	LGB            *cliLGBDoc  `toml:"lgb" json:"lgb"`
+}
+
+// cliLGBDoc is [cli.lgb]. Both keys are optional. Zero turns the check off.
+type cliLGBDoc struct {
+	MinTimerInterval    *string `toml:"min_timer_interval" json:"min_timer_interval"`
+	MaxScheduledPerHour *int    `toml:"max_scheduled_per_hour" json:"max_scheduled_per_hour"`
 }
 
 type cliIsoDoc struct {
@@ -827,6 +917,9 @@ func (p *Policy) apply(doc document, trusted bool) error {
 		if err := p.applyIsolation(iso, trusted); err != nil {
 			return err
 		}
+	}
+	if err := p.applyLGB(doc.CLI.LGB); err != nil {
+		return err
 	}
 	if doc.CLI.Pins != nil {
 		pins, err := normPins(*doc.CLI.Pins)

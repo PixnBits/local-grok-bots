@@ -91,6 +91,44 @@ func TestLGBThroughFakeCLI(t *testing.T) {
 	}
 }
 
+func TestLGBRejectsOneSecondRepeat(t *testing.T) {
+	dir := t.TempDir()
+	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))
+	bot, err := app.st.CreateBot("Ada", "d", nil, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := filepath.Join(dir, "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r, _, err := app.startLGB(context.Background(), bot, "run1", ws)
+	if err != nil || r == nil {
+		t.Fatal(err)
+	}
+	r.cancel()
+	<-r.done
+	const name = "00112233445566778899ccdd"
+	body := r.token + "\x00timer\x00every\x001s\x00spam\x00"
+	if err := os.WriteFile(filepath.Join(ws, lgbDirName, "req", name), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.drain(context.Background())
+	got, err := os.ReadFile(filepath.Join(ws, lgbDirName, "resp", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(got)
+	if !strings.HasPrefix(text, "1\n") || !strings.Contains(text, "shorter than the minimum 5m") {
+		t.Fatalf("response %q", text)
+	}
+	if timers, _ := app.st.ListTimers(bot.ID); len(timers) != 0 {
+		t.Fatalf("timer stored: %+v", timers)
+	}
+	r.req.close()
+	r.resp.close()
+}
+
 func TestLGBSpoolIgnoresSwappedLinks(t *testing.T) {
 	dir := t.TempDir()
 	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))

@@ -1771,6 +1771,18 @@ func (s *Store) LogCount(kind string) (int, error) {
 	return n, err
 }
 
+// CountLogSince counts one bot's log events of kind at or after since.
+func (s *Store) CountLogSince(botID, kind string, since time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM log_events WHERE bot_id=? AND kind=? AND ts>=?`,
+		botID, kind, FormatTime(since),
+	).Scan(&n)
+	return n, err
+}
+
 // FailRunning marks any run still in progress as error. Used on clean shutdown.
 func (s *Store) FailRunning(reason string) error {
 	s.mu.Lock()

@@ -64,6 +64,14 @@ imminent_timer_minutes = 2
 # claude_home = "auto"   # macOS: user's HOME (Keychain login); Linux: isolated
 # claude_sandbox = "required"  # Claude Bash sandbox on, fail closed; "off" is managed-only
 #
+# [cli.lgb]
+# Floor for a repeating timer a bot creates, and how many scheduled turns
+# that bot may cause in an hour. On claude or grok the defaults are 5m and
+# 12 when these are unset. 0 turns that check off. Ollama is unchanged
+# unless these are set. Timers created from the page are not limited here.
+# min_timer_interval = "5m"
+# max_scheduled_per_hour = 12
+#
 # [cli.permission]
 # mode is the same knob as permission_mode above. The table wins when both
 # are set. always-allow / bypass / dontAsk, and allow_session_grants, are

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestIsolationDefaultsAndLocalLimits(t *testing.T) {
@@ -138,5 +139,47 @@ func TestLGBPolicyKeys(t *testing.T) {
 	}
 	if p.CLILGB || !p.CLILGBManageBots {
 		t.Fatalf("lgb=%v manage=%v", p.CLILGB, p.CLILGBManageBots)
+	}
+}
+
+func TestLGBTimerPolicy(t *testing.T) {
+	if min, per := Defaults().BotTimerLimits(); min != 0 || per != 0 {
+		t.Fatalf("ollama defaults %s %d", min, per)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.toml")
+	write := func(body string) Policy {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		p, err := Load(Options{Path: path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	p := write("[backend]\nbackend = \"claude\"\n")
+	if min, per := p.BotTimerLimits(); min != DefaultCLIMinTimer || per != DefaultCLIScheduledPerHour {
+		t.Fatalf("cli defaults %s %d", min, per)
+	}
+	p = write("[backend]\nbackend = \"ollama\"\n[cli.lgb]\nmin_timer_interval = \"1d\"\nmax_scheduled_per_hour = 3\n")
+	if !p.LGBMinTimerSet || p.LGBMinTimer != 24*time.Hour || !p.LGBMaxSchedSet || p.LGBMaxSchedPerHour != 3 {
+		t.Fatalf("parsed %+v", p)
+	}
+	if min, per := p.BotTimerLimits(); min != 24*time.Hour || per != 3 {
+		t.Fatalf("ollama policy limits %s %d", min, per)
+	}
+	p = write("[backend]\nbackend = \"grok\"\n[cli.lgb]\nmin_timer_interval = \"0\"\nmax_scheduled_per_hour = 0\n")
+	if min, per := p.BotTimerLimits(); min != 0 || per != 0 || !p.UsesCLI() {
+		t.Fatalf("opt-out %s %d cli %v", min, per, p.UsesCLI())
+	}
+	p = write("[cli.lgb]\nmin_timer_interval = \"500ms\"\n")
+	if p.CLIPermitted || !strings.Contains(strings.Join(p.Warnings, " "), "min_timer_interval") {
+		t.Fatalf("short floor accepted: permitted %v warnings %v", p.CLIPermitted, p.Warnings)
+	}
+	p = write("[cli.lgb]\nmax_scheduled_per_hour = -1\n")
+	if p.CLIPermitted || !strings.Contains(strings.Join(p.Warnings, " "), "max_scheduled_per_hour") {
+		t.Fatalf("negative cap accepted: permitted %v warnings %v", p.CLIPermitted, p.Warnings)
 	}
 }

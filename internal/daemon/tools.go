@@ -577,7 +577,11 @@ func (a *App) setTimer(bot store.Bot, args map[string]any) (string, error) {
 		if perr != nil || d <= 0 {
 			return "", badArgs("in must be a duration like \"90s\", \"5m\", \"2h\", or \"1d\", got %q", in)
 		}
-		t, err = a.st.CreateTimerAt(bot.ID, name, prompt, time.Now().Add(d), "bot")
+		when := time.Now().Add(d)
+		if err = a.guardBotTimer(bot.ID, 0, when, true); err != nil {
+			return "", err
+		}
+		t, err = a.st.CreateTimerAt(bot.ID, name, prompt, when, "bot")
 	case at != "":
 		when, perr := time.Parse(time.RFC3339, at)
 		if perr != nil {
@@ -586,10 +590,22 @@ func (a *App) setTimer(bot store.Bot, args map[string]any) (string, error) {
 		if !when.After(time.Now()) {
 			return "", badArgs("at %q is in the past; the current time is %s", at, time.Now().Format(time.RFC3339))
 		}
+		if err = a.guardBotTimer(bot.ID, 0, when, true); err != nil {
+			return "", err
+		}
 		t, err = a.st.CreateTimerAt(bot.ID, name, prompt, when, "bot")
 	default:
-		if _, perr := store.ParseInterval(every); perr != nil {
+		d, perr := store.ParseInterval(every)
+		if perr != nil {
 			return "", badArgs("every must be an interval like \"30s\", \"5m\", \"2h\", or \"1d\", got %q", every)
+		}
+		// Hard floor for every bot-created repeat. Policy may raise it
+		// (guardBotTimer) and cannot lower it, including a zero opt-out.
+		if d < minBotTimerInterval {
+			return "", badArgs("interval must be at least 1m")
+		}
+		if err = a.guardBotTimer(bot.ID, d, time.Time{}, false); err != nil {
+			return "", err
 		}
 		t, err = a.st.CreateTimer(bot.ID, name, every, prompt, true, "bot")
 	}
