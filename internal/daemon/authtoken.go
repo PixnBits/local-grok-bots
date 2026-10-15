@@ -5,10 +5,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // adminTokenFile is the generated admin token under DATA_DIR.
@@ -24,21 +26,10 @@ func ensureAdminToken(dataDir, envToken string, usesCLI bool) (token, path strin
 		return envToken, "", nil
 	}
 	path = filepath.Join(dataDir, adminTokenFile)
-	if b, rerr := os.ReadFile(path); rerr == nil {
-		st, serr := os.Stat(path)
-		if serr != nil {
-			return "", "", serr
-		}
-		if st.Mode().Perm()&0o077 != 0 {
-			if err := os.Chmod(path, 0o600); err != nil {
-				return "", "", err
-			}
-		}
-		if t := strings.TrimSpace(string(b)); len(t) >= 32 {
-			return t, path, nil
-		}
-	} else if !errors.Is(rerr, fs.ErrNotExist) {
+	if t, ok, rerr := readAdminToken(path); rerr != nil {
 		return "", "", rerr
+	} else if ok {
+		return t, path, nil
 	}
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return "", "", err
@@ -56,4 +47,37 @@ func ensureAdminToken(dataDir, envToken string, usesCLI bool) (token, path strin
 		return "", "", fmt.Errorf("admin token: %w", err)
 	}
 	return token, path, nil
+}
+
+// readAdminToken opens the token file without following a symlink, fixes its
+// mode on the open file, and reports whether it held a usable token.
+func readAdminToken(path string) (string, bool, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("admin token: %w", err)
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return "", false, err
+	}
+	if !st.Mode().IsRegular() {
+		return "", false, fmt.Errorf("admin token: %s is not a regular file", path)
+	}
+	if st.Mode().Perm()&0o077 != 0 {
+		if err := f.Chmod(0o600); err != nil {
+			return "", false, err
+		}
+	}
+	b, err := io.ReadAll(io.LimitReader(f, 4096))
+	if err != nil {
+		return "", false, err
+	}
+	if t := strings.TrimSpace(string(b)); len(t) >= 32 {
+		return t, true, nil
+	}
+	return "", false, nil
 }

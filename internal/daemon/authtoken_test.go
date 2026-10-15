@@ -120,3 +120,21 @@ func TestCLIEnvNeverCarriesAdminToken(t *testing.T) {
 		}
 	}
 }
+
+func TestAdminTokenSymlinkIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "elsewhere")
+	if err := os.WriteFile(target, []byte(strings.Repeat("a", 64)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, adminTokenFile)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ensureAdminToken(dir, "", true); err == nil {
+		t.Fatal("symlinked admin token was followed")
+	}
+	st, err := os.Stat(target)
+	if err != nil || st.Mode().Perm() != 0o644 {
+		t.Fatalf("target touched: %v %v", st.Mode(), err)
+	}
+}
