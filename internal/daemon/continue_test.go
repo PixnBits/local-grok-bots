@@ -117,6 +117,33 @@ func waitBot(t *testing.T, base, id string, ok func(store.Bot) bool) store.Bot {
 	return bot
 }
 
+// waitRunReleased waits until continueRun would accept botID. endLoop stores
+// status idle before it clears the running flag, so a status poll can still
+// get 409 "bot is running".
+func waitRunReleased(t *testing.T, app *App, botID string) {
+	t.Helper()
+	app.rtMu.Lock()
+	st := app.loops[botID]
+	var released chan struct{}
+	running := false
+	if st != nil {
+		running = st.running
+		released = st.released
+	}
+	app.rtMu.Unlock()
+	if !running {
+		return
+	}
+	if released == nil {
+		t.Fatalf("bot %s is running without a release signal", botID)
+	}
+	select {
+	case <-released:
+	case <-time.After(20 * time.Second):
+		t.Fatalf("bot %s did not leave running", botID)
+	}
+}
+
 func postContinue(t *testing.T, base, botID, runID string) (*http.Response, []byte) {
 	t.Helper()
 	return do(t, http.MethodPost, base+"/api/bots/"+botID+"/runs/"+runID+"/continue", nil, "")
@@ -134,6 +161,7 @@ func TestContinueCappedRun(t *testing.T) {
 	got := waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool {
 		return b.Status != "running" && b.ContinueRunID != ""
 	})
+	waitRunReleased(t, app, bot.ID)
 	if got.ContinueRunID != capped || got.LastRunStatus != "error" || got.LastRunError != "tool round limit" {
 		t.Fatalf("offer = %+v", got)
 	}
@@ -215,6 +243,7 @@ func TestContinueAgainAfterSecondCap(t *testing.T) {
 	waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool {
 		return b.ContinueRunID == first
 	})
+	waitRunReleased(t, app, bot.ID)
 	res, b := postContinue(t, srv.URL, bot.ID, first)
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("continue %d %s", res.StatusCode, b)
@@ -226,6 +255,7 @@ func TestContinueAgainAfterSecondCap(t *testing.T) {
 	waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool {
 		return b.Status != "running" && b.ContinueRunID == second.RunID
 	})
+	waitRunReleased(t, app, bot.ID)
 	if calls := mdl.snapshot(); len(calls) != maxToolRounds*2 {
 		t.Fatalf("calls at second cap = %d", len(calls))
 	}
@@ -274,6 +304,7 @@ func TestContinueClearedByNewMessage(t *testing.T) {
 	bot := createBot(t, srv.URL, "Cara")
 	capped := postUser(t, srv.URL, bot.ID, "look around")
 	waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool { return b.ContinueRunID == capped })
+	waitRunReleased(t, app, bot.ID)
 	postUser(t, srv.URL, bot.ID, "start over")
 	waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool {
 		return b.Status != "running" && b.LastRunStatus == "done"
@@ -303,7 +334,8 @@ func TestContinueClearedByTimer(t *testing.T) {
 	bot := createBot(t, srv.URL, "Dora")
 	capped := postUser(t, srv.URL, bot.ID, "look around")
 	waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool { return b.ContinueRunID == capped })
-	tm, err := app.st.CreateTimer(bot.ID, "soon", "1h", "look again", true)
+	waitRunReleased(t, app, bot.ID)
+	tm, err := app.st.CreateTimer(bot.ID, "soon", "1h", "look again", true, "user")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,6 +376,7 @@ func TestContinueWhileRunningIsConflict(t *testing.T) {
 	bot := createBot(t, srv.URL, "Eve")
 	capped := postUser(t, srv.URL, bot.ID, "look around")
 	waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool { return b.ContinueRunID == capped })
+	waitRunReleased(t, app, bot.ID)
 	res, b := postContinue(t, srv.URL, bot.ID, capped)
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("continue %d %s", res.StatusCode, b)
@@ -381,6 +414,7 @@ func TestContinueWithoutOffer(t *testing.T) {
 	waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool {
 		return b.Status != "running" && b.LastRunStatus == "done"
 	})
+	waitRunReleased(t, app, bot.ID)
 	res, b = postContinue(t, srv.URL, bot.ID, runID)
 	if res.StatusCode != http.StatusNotFound {
 		t.Fatalf("finished run %d %s", res.StatusCode, b)
@@ -398,6 +432,7 @@ func TestContinuePausedKeepsOffer(t *testing.T) {
 	bot := createBot(t, srv.URL, "Gia")
 	capped := postUser(t, srv.URL, bot.ID, "look around")
 	waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool { return b.ContinueRunID == capped })
+	waitRunReleased(t, app, bot.ID)
 	res, b := do(t, http.MethodPatch, srv.URL+"/api/bots/"+bot.ID, map[string]string{"status": "paused"}, "")
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("pause %d %s", res.StatusCode, b)
@@ -438,6 +473,7 @@ func TestContinueDeleteDropsOffer(t *testing.T) {
 	bot := createBot(t, srv.URL, "Hana")
 	capped := postUser(t, srv.URL, bot.ID, "look around")
 	waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool { return b.ContinueRunID == capped })
+	waitRunReleased(t, app, bot.ID)
 	res, b := do(t, http.MethodDelete, srv.URL+"/api/bots/"+bot.ID, nil, "")
 	if res.StatusCode != http.StatusNoContent {
 		t.Fatalf("delete %d %s", res.StatusCode, b)

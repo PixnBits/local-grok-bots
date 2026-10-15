@@ -18,7 +18,8 @@ Stable ids for anything that gets referenced. Names are for humans and for bot-t
 | description | text | Standing prompt: role, boundaries, durable rules. |
 | mark | object | `{shape, color}`. Roster and thread only. No behavior. |
 | status | enum | `idle` \| `running` \| `paused`. |
-| model | string, nullable | Override. Null means the daemon default (local Ollama). |
+| model | string, nullable | Override. Null means the daemon default. |
+| backend | string, nullable | Override of daemon backend: `ollama` \| `claude` \| `grok`. Null means daemon default. v1 is daemon-global; per-bot is later. |
 | created_at | timestamp | |
 | updated_at | timestamp | |
 
@@ -108,7 +109,7 @@ JSON over HTTP. One SSE stream for a live turn. All routes under `/api`.
 | PATCH | /api/bots/{id} | `{name?, label?, description?, mark?, model?, status?, pinned?, hidden?, archived?}` | bot. `archived: true` stamps `archived_at`, pauses the bot's enabled timers (marked `archive_paused`), and stops new runs; the thread, memory, timers, and queued messages are kept. `archived: false` clears it, re-enables only the timers archiving paused (next fire counted from now), and starts a run if messages are waiting. Bots carry `archived` and `archived_at` |
 | DELETE | /api/bots/{id} | | 204. Hard delete; API only, the page offers Archive instead |
 | GET | /bots/{id} | | the page (HTML), same as `/`; the client opens that bot. Without a token under `AUTH_TOKEN` it is served with 401 like `/` |
-| GET | /api/bots/{id}/thread | `?before=&limit=` (limit default 50, max 200; `before` is a message id) | the newest `limit` messages before `before` (or overall), oldest first, plus `has_more` (older messages remain): `{messages: [...], has_more, tools: {run_id: [{name, arguments, ok, result_or_error, created_at}]}}` oldest-first; `tools` lists, per reply run, that run's records in order: `kind: "text"` is what the model wrote in the same response as a tool call (in `result_or_error`, no name or arguments), stored before that round's calls; `kind: "call"` is a tool call (arguments redacted, result clipped to 4000 bytes) |
+| GET | /api/bots/{id}/thread | `?before=&limit=` (limit default 50, max 200; `before` is a message id) | the newest `limit` messages before `before` (or overall), oldest first, plus `has_more` (older messages remain): `{messages: [...], has_more, tools: {run_id: [{name, arguments, ok, result_or_error, created_at}]}}` oldest-first; `tools` lists, per reply run, that run's records in order: `kind: "text"` is what the model wrote in the same response as a tool call (in `result_or_error`, no name or arguments), stored before that round's calls; `kind: "call"` is a tool call (arguments redacted, result clipped to 4000 bytes); `kind: "permission"` is a CLI permission decision (`name` is the tool, `arguments` redacted, `ok` true when allowed, `result_or_error` is JSON `{decision, source, rule?, transport?}`). CLI turns store the same `text` and `call` records as Ollama turns: text streamed before a tool call, then the call with its result |
 | POST | /api/bots/{id}/thread/messages | `{content}` | `{message, run_id}` immediately |
 | GET | /api/bots/{id}/thread/stream | `?run_id=` | SSE |
 | POST | /api/bots/{id}/runs/{run_id}/cancel | | `{status}` |
@@ -144,7 +145,7 @@ Optional gate: if `AUTH_TOKEN` is set in the daemon environment, require `Author
 - If the bot is `idle`, the post starts a run and returns its `run_id`.
 - If the bot is `running`, the post returns the live `run_id` and the message is folded into that run: before each model call the run appends any turn input (user messages, scheduled prompts, inbound DMs) stored after what it has already read, records how far it has read in `runs.input_through`, and writes `run_input`. A message that lands after the run's last model call is not lost: the next run starts the moment the current one ends and consumes it. The page follows whichever run is active. Dropping the message or blocking the POST is not acceptable.
 - A run ends in exactly one of `done`, `error`, `cancelled`.
-- On daemon start, any run still marked `running` is marked `error` with reason `daemon_restart`. No resume of a half-finished model call.
+- On daemon start, any run still marked `running` is marked `error` with reason `daemon_restart`. No resume of a half-finished Ollama model call. A CLI backend instead marks that run `interrupted`, keeps `session_id`, and the next user message or timer resumes with `--resume`.
 - Cancel sets the run to `cancelled` and stops further tool calls. Partial output already persisted stays.
 - Bot-to-bot DMs use the same queue on the receiving bot. The sender does not block waiting for a reply.
 - Order is preserved. Nothing is dropped.
@@ -173,15 +174,17 @@ Belief lint: `write_memory` rejects notes whose key or value claim tool availabi
 | set_timer | `{prompt, in? \| at? \| every?, name?}`, exactly one of `in` (one-shot duration like `5m`), `at` (one-shot RFC 3339 time with offset, must be in the future), `every` (repeating interval) | creates an enabled timer on the calling bot and returns `{id, schedule, prompt, next_fire_at, fires_at_local}`. Also accepted: `schedule` (as `every`, or as `in` when `repeat` is false), `seconds` / `in_seconds` / `minutes` numbers, and `message` / `text` / `reminder` for `prompt` |
 | list_timers | | the calling bot's timers |
 | clear_timer | `{id}` | deletes one of the calling bot's timers |
-| read_file | `{path}` | inside the workspace directory only |
-| write_file | `{path, content}` | inside the workspace directory only |
-| run_shell | `{command}` | jailed to the workspace; stdout/stderr captured and truncated |
+| read_file | `{path}` | inside the workspace directory only (Ollama mode) |
+| write_file | `{path, content}` | inside the workspace directory only (Ollama mode) |
+| run_shell | `{command}` | jailed to the workspace; stdout/stderr captured and truncated (Ollama mode) |
 
 Paths that escape the workspace are rejected, including `..`, absolute host paths, and symlink escapes. The meta tools (`create_bot`, `update_bot`) are ordinary tools; the profile performs the same mutations through the API. A change made by a bot is logged with the acting bot id.
 
 Arguments containing anything that looks like a secret are redacted in the log.
 
-### Workspace and shell jail
+**Mode note:** In CLI mode (`backend = claude` or `grok`), `read_file`, `write_file`, and `run_shell` are not daemon tools. The CLI's own tools replace them and run inside the CLI's sandbox. The daemon's only filesystem touch is the narrow timer-injection channel. The daemon does not re-implement the CLI's allow/deny rules.
+
+### Workspace and shell jail (Ollama mode)
 
 ```
 <data dir>/workspace/     host path; this is the only tree tools may touch
@@ -201,7 +204,7 @@ Named grants (`net`, `git`, `ssh`, `build`) live on the bot. The profile and the
 
 Append-only. `kind` is a closed set:
 
-`user_message`, `bot_message`, `dm_sent`, `dm_received`, `tool_start`, `tool_end`, `bot_created`, `bot_updated`, `bot_deleted`, `timer_fired`, `timer_missed`, `model_call`, `run_input`, `run_started`, `run_finished`, `daemon_start`, `daemon_stop`, `grant_use`, `grant_denied`, `net_request`, `sandbox_block`.
+`user_message`, `bot_message`, `dm_sent`, `dm_received`, `tool_start`, `tool_end`, `bot_created`, `bot_updated`, `bot_deleted`, `timer_fired`, `timer_missed`, `model_call`, `run_input`, `run_started`, `run_finished`, `daemon_start`, `daemon_stop`, `grant_use`, `grant_denied`, `net_request`, `sandbox_block`, `cli_override` (CLI turns: workspace config files found, with `files`, `mode`, `action` ignore or refuse, and `blocked`; see `docs/cli-isolation.md`).
 
 `detail` holds the useful bits and stays small:
 
@@ -239,7 +242,7 @@ The page is a client. Refreshing reloads from the daemon. Four surfaces. The con
 
 **Roster.** Mark, name, label, status. Click to open the conversation. The create control sits below the list. Archived bots are not listed; an `Archived (n)` control switches the list to archived bots, and opening one shows an Unarchive action. The bot menu has Archive / Unarchive and no Delete. Opening a bot sets the URL to `/bots/{id}` (history entry; back/forward and reload restore the selection) and the title to `Name — Local Grok Bots`.
 
-**Conversation.** The thread and the composer. Opening a bot loads the newest page and lands at the bottom; scrolling near the top loads the previous page above without moving what is on screen, until `has_more` is false. New output (tokens, tool lines, status, replies) scrolls the list only when the reader is within 80px of the bottom, including height changes from markdown and code rendering; scrolled away, the view stays put and a `New messages ↓` pill jumps back down. The composer is never disabled during a run. Enter sends; Shift+Enter inserts a newline, and the box grows with its content up to 40% of the viewport. Newlines in a message are kept when it is shown. While a run is in progress, a status animation sits inside the message list at the position of the next reply, after the latest message and any live output (in an empty thread it is the first item), driven by `status` events on the stream. It clears when the run ends. User and bot messages render markdown (headings, emphasis, inline code, fenced code blocks, GFM pipe tables, lists, quotes, links). A fenced block is a monospace block that keeps whitespace and indentation, scrolls sideways, and shows its info-string language as a label; there is no syntax highlighting. Each block has a Copy button (shown on hover, always shown on touch screens) that copies the block's raw code and says `Copied` briefly; it uses `navigator.clipboard` in a secure context and a hidden textarea with `execCommand("copy")` otherwise, since the LAN page is plain HTTP. A table needs a header row and an alignment row (`---`, `:--`, `--:`, `:-:`) with the same cell count; `\|` is a literal pipe. A header cell that is only an alignment token (a malformed model table) is shown empty, and a header row made only of such tokens is dropped in the page only; the thread, log, and API keep the original text. The renderer builds DOM nodes from text, so HTML in a message shows as text, and links keep only `http`, `https`, and `mailto`. A reply whose run called tools carries a collapsed summary (`3 tool calls: read_file, run_shell`) that opens to show each call, interleaved in order with the text the model wrote before each round's calls; tool records live in the `run_tools` table and survive reload, and the reply text is unchanged. Every message is its own bubble; while a run streams, each model round's text starts a new bubble rather than appending to the previous one. Each user and bot message has a small Copy button (on hover; always shown on touch screens) that copies the message's stored raw text, with the same clipboard fallback. Inbound DMs appear as a system line in this thread. There is no description editor on this view.
+**Conversation.** The thread and the composer. Opening a bot loads the newest page and lands at the bottom; scrolling near the top loads the previous page above without moving what is on screen, until `has_more` is false. New output (tokens, tool lines, status, replies) scrolls the list only when the reader is within 80px of the bottom, including height changes from markdown and code rendering; scrolled away, the view stays put and a `New messages ↓` pill jumps back down. The composer is never disabled during a run. Enter sends; Shift+Enter inserts a newline, and the box grows with its content up to 40% of the viewport. Newlines in a message are kept when it is shown. While a run is in progress, a status animation sits inside the message list at the position of the next reply, after the latest message and any live output (in an empty thread it is the first item), driven by `status` events on the stream. It clears when the run ends. User and bot messages render markdown (headings, emphasis, inline code, fenced code blocks, GFM pipe tables, lists, quotes, links). A fenced block is a monospace block that keeps whitespace and indentation, scrolls sideways, and shows its info-string language as a label; there is no syntax highlighting. Each block has a Copy button (shown on hover, always shown on touch screens) that copies the block's raw code and says `Copied` briefly; it uses `navigator.clipboard` in a secure context and a hidden textarea with `execCommand("copy")` otherwise, since the LAN page is plain HTTP. A table needs a header row and an alignment row (`---`, `:--`, `--:`, `:-:`) with the same cell count; `\|` is a literal pipe. A header cell that is only an alignment token (a malformed model table) is shown empty, and a header row made only of such tokens is dropped in the page only; the thread, log, and API keep the original text. The renderer builds DOM nodes from text, so HTML in a message shows as text, and links keep only `http`, `https`, and `mailto`. A reply whose run called tools or had permission decisions carries a collapsed summary (`3 tool calls: read_file, run_shell · 1 permission (1 denied)`) that opens to show each call, interleaved in order with the text the model wrote before each round's calls and each permission decision as `✅ allowed Bash(git status) · ui` or `⛔ denied Bash(rm -rf build) · policy`; tool records live in the `run_tools` table and survive reload, and the reply text is unchanged. Every message is its own bubble; while a run streams, each model round's text starts a new bubble rather than appending to the previous one. Each user and bot message has a small Copy button (on hover; always shown on touch screens) that copies the message's stored raw text, with the same clipboard fallback. Inbound DMs appear as a system line in this thread. There is no description editor on this view.
 
 **Bot menu.** Opened from the conversation header, not as a side panel. Items: View profile, Pin, Hide, Duplicate, Delete.
 
@@ -254,7 +257,12 @@ The page is a client. Refreshing reloads from the daemon. Four surfaces. The con
 - Binds on the LAN (or localhost behind a reverse proxy already trusted). No public exposure required. Plain HTTP is fine.
 - Default model is the local Ollama endpoint, overridable by `OLLAMA_MODEL` and per bot. If Ollama is down, runs fail with a clear log line and do not hang.
 - Clean shutdown writes `daemon_stop`. Crash does not; the next start writes `daemon_start` and reconciles runs as above.
-- `bwrap` or `unshare` must be usable for `run_shell`. Missing, the tool fails; the daemon still serves.
+- `bwrap` or `unshare` must be usable for `run_shell` in Ollama mode. Missing, the tool fails; the daemon still serves.
+- Policy loading: precedence is managed settings > `policy.toml` > built-in defaults. Fail-closed: if the policy file is missing or unparseable, the daemon defaults to the strictest mode (daemon jail ON, CLI backends OFF) and logs loudly. When a user-level setting conflicts with a managed policy, the daemon refuses to start or logs the conflict according to `conflict_policy`.
+
+## 9. Policy
+
+The declarative policy file (`policy.toml`) controls the backend and jail behavior. One `backend` knob (`ollama` | `claude` | `grok`) automatically sets jail mode: Ollama implies daemon jail ON; CLI backends imply daemon jail OFF because the CLI's own sandbox is the boundary. See `policy.toml.sample` for the annotated schema. Managed settings (server-managed or MDM) always override the local file.
 
 ## Out of these specs
 

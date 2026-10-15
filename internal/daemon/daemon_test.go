@@ -24,9 +24,15 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if len(os.Args) > 1 && os.Args[1] == "--lgb-fake-claude" {
+		fakeClaudeMain()
+		return
+	}
 	if sandbox.HandleArgs(os.Args[1:]) {
 		return
 	}
+	// Fake CLIs don't need bubblewrap and socat; sandbox tests set their own.
+	claudeSandboxMissing = func() []string { return nil }
 	os.Exit(m.Run())
 }
 
@@ -511,14 +517,14 @@ func TestTimerMissedOnBoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.ReconcileOnBoot("0.1.0"); err != nil {
+	if _, err := st.ReconcileOnBoot("0.1.0", false); err != nil {
 		t.Fatal(err)
 	}
 	bot, err := st.CreateBot("Ada", "", nil, "user")
 	if err != nil {
 		t.Fatal(err)
 	}
-	tm, err := st.CreateTimer(bot.ID, "hourly", "1h", "do the thing", true)
+	tm, err := st.CreateTimer(bot.ID, "hourly", "1h", "do the thing", true, "user")
 	if err != nil {
 		t.Fatal(err)
 	}

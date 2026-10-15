@@ -2,7 +2,7 @@
 
 **Target:** one always-on Framework Desktop (128 GB RAM), local models, a daemon, and a web interface on the home network.
 **Purpose:** bootstrap the same interface and operations as Grok Bot for personal use. Not a product, not multi-tenant, not a general agent framework.
-**Out of scope:** desktop computer-use, virtual displays, channels, GUI automation, family/multi-user, enterprise controls.
+**Out of scope:** desktop computer-use, virtual displays, channels, GUI automation, family/multi-user.
 
 This document is the target. It describes the system we are building toward, not the state of a given deploy. Implementation notes and what has shipped live in the specs and the README.
 
@@ -14,14 +14,15 @@ A daemon on the Framework Desktop that owns the roster of named bots, their memo
 
 The machine is always intended to be on. If it shuts down, the system pauses. That is expected. On boot the daemon comes back, reloads state, and continues. Missed timers are reported, not silently replayed.
 
-Models run locally (Ollama or equivalent on the same box). No weekly token pool, no vendor computer, no phone app required. The web page is the client.
+Models run locally (Ollama or equivalent on the same box) by default. The daemon can also use a CLI backend (Claude Code or Grok CLI). When a CLI backend is selected, the daemon is a thin orchestrator: it hands text to the CLI and reads text back. It never executes commands or touches the filesystem on the bot's behalf. The CLI's own sandbox and any InfoSec-managed settings are the isolation boundary. No weekly token pool, no vendor computer, no phone app required. The web page is the client.
 
 ## 2. What this is not
 
 - Not Hermes, not Claw, not a general coding agent. Those solve different jobs. This is the bot roster, the conversation, and the coordination between bots.
-- Not a desktop automation layer. No browser-on-a-virtual-display, no pointer, no teach-by-clicking. Bots act through tools the daemon exposes (files, shell inside a declared workspace, local model calls, messages to other bots). Computer-use can be added later; it is not in this interface.
+- Not a desktop automation layer. No browser-on-a-virtual-display, no pointer, no teach-by-clicking. Bots act through tools the daemon exposes (files, shell inside a declared workspace, local model calls, messages to other bots) when the backend is Ollama. When the backend is a CLI, the CLI's own tools run inside its sandbox. Computer-use can be added later; it is not in this interface.
 - Not multi-user. One person. The web page can sit on the LAN; it does not need accounts, teams, or SCIM.
 - Not a workflow builder. You name a bot, write its description, and talk to it.
+- Not a second jail layered around a CLI. When a CLI backend is selected, the daemon does not re-jail the CLI process. The CLI's existing sandbox is the boundary.
 
 ## 3. System shape
 
@@ -32,7 +33,7 @@ Framework Desktop (always-on, 128 GB)
     timer / routine scheduler
     message bus (user↔bot, bot↔bot DM)
     action and event log
-    local model client (Ollama)
+    model backend (Ollama default, or CLI: Claude Code / Grok CLI)
   web UI  ←→  daemon API (on the network)
     roster
     conversation
@@ -40,7 +41,7 @@ Framework Desktop (always-on, 128 GB)
     log
 ```
 
-The daemon is the source of truth. The web page is a client. Closing the browser does not stop a turn. Shutting the machine does; the daemon resumes from persisted state on the next boot.
+The daemon is the source of truth for the roster, timers, DMs, and log. The web page is a client. Closing the browser does not stop a turn. Shutting the machine does; the daemon resumes from persisted state on the next boot. When the backend is a CLI, the CLI owns its conversation history; the daemon projects it into the web thread.
 
 ## 4. Core objects
 
@@ -51,7 +52,7 @@ The daemon is the source of truth. The web page is a client. Closing the browser
 - Mark — a colour and a shape, so the roster is scannable
 - Memory — durable notes the bot keeps; not a substitute for the log
 - Status — idle, running, paused
-- Optional model override (default is the local one)
+- Optional model override (default is the daemon backend)
 
 A bot can be created and edited from the profile. A bot can also create or update other bots if it is granted that tool. That meta-bot is how the roster stays manageable without you being the only editor.
 
@@ -74,6 +75,7 @@ A bot can be created and edited from the profile. A bot can also create or updat
 ### Timer / routine
 - A bot can have scheduled work (the daemon owns the clock).
 - On fire, the daemon starts a turn for that bot with the routine prompt.
+- When the backend is a CLI, the daemon injects the prompt as text into the existing CLI session via a narrow append-only channel. The CLI's own tools execute it inside its sandbox.
 - If the machine was off, the timer is missed and logged. No automatic replay.
 - Routines are reviewed on the profile: name, schedule, next run, instruction, and whether it is active. Add, pause, and delete live there.
 
@@ -146,9 +148,11 @@ Bot-to-bot DMs use the same idea: a message arrives, the receiving bot gets a tu
 
 No shared cookie jar, no shared desktop session. Coordination is messages plus the workspace directory the daemon gives the tools.
 
-File and shell tools cannot leave the workspace. Shell runs inside a jail rooted on that directory. Anything the bot should read or run has to be present in the workspace; the host filesystem outside it is not visible. Mounting or copying work into the workspace is how a bot gets material. Per-bot file isolation is desirable later; one shared workspace is enough for this target.
+**Ollama mode (default):** File and shell tools cannot leave the workspace. Shell runs inside a jail rooted on that directory. Anything the bot should read or run has to be present in the workspace; the host filesystem outside it is not visible. Mounting or copying work into the workspace is how a bot gets material. Per-bot file isolation is desirable later; one shared workspace is enough for this target.
 
 The sandbox model — base jail plus named capability grants for network, git, SSH, builds, and later a headless browser — is in `docs/sandbox.md`. The user sets those grants on the profile. Bots cannot grant them. The default remains the locked-down workspace. The browser grant is not built.
+
+**CLI mode:** The daemon's workspace jail is off. File and shell tools are the CLI's own, running inside its sandbox (Seatbelt or bubblewrap plus any managed settings InfoSec has configured). The daemon's only filesystem touch is a narrow append-only channel used to inject timer prompts. The CLI's tools read that channel. The daemon never re-implements the CLI's allow/deny rules for SSH keys, .env files, or other sensitive paths; it inherits them.
 
 ## 8. Logging
 
@@ -184,6 +188,7 @@ The log is the place you go to verify behavior. The chat transcript stays readab
 - Per-bot microVMs. A single daemon process (or one process plus tool sandbox) is sufficient.
 - Mobile app, X integration, Slack bridges.
 - Share as template, a documents tab, a links tab, a notifications toggle.
+- Re-implementing CLI sandbox policy. The daemon does not mirror SSH-key or .env deny rules when a CLI backend is selected.
 
 Voice is no longer listed as a non-goal. The design for local browser voice (real-time interim recognition, TTS of replies, interactive mode that summarizes to one message) lives in `docs/voice.md`.
 
@@ -200,6 +205,7 @@ Voice is no longer listed as a non-goal. The design for local browser voice (rea
 9. Routines are listed on the profile and can be added, paused, and deleted there.
 10. If the machine is powered off at a scheduled time, the timer is recorded as missed, not replayed on boot.
 11. No desktop session or virtual display is required for any of the above.
+12. With `backend = claude` (or `grok`), a bot's shell and file actions are constrained by the CLI's managed settings, and the daemon performs no filesystem operations on the bot's behalf beyond the timer-injection channel.
 
 ## 12. Later
 
@@ -210,6 +216,7 @@ Voice is no longer listed as a non-goal. The design for local browser voice (rea
 - Computer-use on a virtual display, opened from the conversation the way the official app opens Agent Computer.
 - Share as template.
 - A phone-native client. The page should already be usable on a phone.
-- Local voice conversations (mic button, live interim recognition, TTS of bot replies, interactive mode that summarizes to one message). Design in `docs/voice.md`.
+- Local voice conversations (mic button, live interim recognition, TTS of bot replies, interactive voice mode). Design in `docs/voice.md`.
+- Per-bot backend overrides (v1 is daemon-global).
 
 This is the bootstrap: the daemon, the bot objects, the async conversation, the DMs, the meta-bot, and the log, behind a page whose menu matches the Grok Bot client. The conversation is the surface. The profile is where the bot is defined. Desktop usage waits.

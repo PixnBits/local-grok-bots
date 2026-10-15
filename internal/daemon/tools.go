@@ -257,6 +257,9 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		if other.ID == bot.ID {
 			return "", errors.New("cannot DM yourself")
 		}
+		if err := a.allowBotTurn(bot.ID, other.ID, "send_dm"); err != nil {
+			return "", err
+		}
 		if _, _, err := a.st.AddDMPair(bot.ID, other.ID, content, ""); err != nil {
 			return "", err
 		}
@@ -577,7 +580,11 @@ func (a *App) setTimer(bot store.Bot, args map[string]any) (string, error) {
 		if perr != nil || d <= 0 {
 			return "", badArgs("in must be a duration like \"90s\", \"5m\", \"2h\", or \"1d\", got %q", in)
 		}
-		t, err = a.st.CreateTimerAt(bot.ID, name, prompt, time.Now().Add(d))
+		when := time.Now().Add(d)
+		if err = a.guardBotTimer(bot.ID, 0, when, true); err != nil {
+			return "", err
+		}
+		t, err = a.st.CreateTimerAt(bot.ID, name, prompt, when, "bot")
 	case at != "":
 		when, perr := time.Parse(time.RFC3339, at)
 		if perr != nil {
@@ -586,12 +593,19 @@ func (a *App) setTimer(bot store.Bot, args map[string]any) (string, error) {
 		if !when.After(time.Now()) {
 			return "", badArgs("at %q is in the past; the current time is %s", at, time.Now().Format(time.RFC3339))
 		}
-		t, err = a.st.CreateTimerAt(bot.ID, name, prompt, when)
+		if err = a.guardBotTimer(bot.ID, 0, when, true); err != nil {
+			return "", err
+		}
+		t, err = a.st.CreateTimerAt(bot.ID, name, prompt, when, "bot")
 	default:
-		if _, perr := store.ParseInterval(every); perr != nil {
+		d, perr := store.ParseInterval(every)
+		if perr != nil {
 			return "", badArgs("every must be an interval like \"30s\", \"5m\", \"2h\", or \"1d\", got %q", every)
 		}
-		t, err = a.st.CreateTimer(bot.ID, name, every, prompt, true)
+		if err = a.guardBotTimer(bot.ID, d, time.Time{}, false); err != nil {
+			return "", err
+		}
+		t, err = a.st.CreateTimer(bot.ID, name, every, prompt, true, "bot")
 	}
 	if err != nil {
 		return "", err

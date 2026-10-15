@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"crypto/tls"
+	"github.com/PixnBits/local-grok-bots/internal/config"
 	"os"
 	"path/filepath"
 	"testing"
@@ -48,5 +49,16 @@ func TestTLSFilesFailClosedAndSelfSigned(t *testing.T) {
 	}
 	if _, err := tls.LoadX509KeyPair(c, k); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestPermBaseOffUnderTLS(t *testing.T) {
+	c := config.Config{BindAddr: "127.0.0.1:8095"}
+	if permBaseFor(c) != "http://127.0.0.1:8095" {
+		t.Fatalf("plain: %q", permBaseFor(c))
+	}
+	c.TLSSelfSigned = true
+	if permBaseFor(c) != "" {
+		t.Fatalf("tls: %q", permBaseFor(c))
 	}
 }

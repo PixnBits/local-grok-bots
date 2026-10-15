@@ -26,6 +26,9 @@ type Config struct {
 	// Local speech-to-text via whisper.cpp's whisper-cli. Both or neither.
 	WhisperBin   string
 	WhisperModel string
+	// PolicyPath is the policy.toml to load. Empty skips the file and keeps
+	// built-in defaults. The daemon sets this to "policy.toml" unless POLICY_PATH is set.
+	PolicyPath string
 }
 
 func FromEnv() Config {
@@ -42,6 +45,7 @@ func FromEnv() Config {
 		TLSSelfSigned: os.Getenv("TLS_SELF_SIGNED") == "1",
 		WhisperBin:    os.Getenv("WHISPER_BIN"),
 		WhisperModel:  os.Getenv("WHISPER_MODEL"),
+		PolicyPath:    getenv("POLICY_PATH", "policy.toml"),
 	}
 }
 

@@ -27,6 +27,9 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/bots/{id}/thread/stream", a.handleStream)
 	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/cancel", a.handleCancel)
 	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/continue", a.handleContinue)
+	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/permissions/{req_id}", a.handlePermissionDecision)
+	mux.HandleFunc("POST /api/mcp/permission", a.handleMCPPermission)
+	mux.HandleFunc("POST /api/mcp/permission/{token}", a.handleMCPPermission)
 	mux.HandleFunc("GET /api/bots/{id}/memory", a.handleListMemory)
 	mux.HandleFunc("POST /api/bots/{id}/memory", a.handlePutMemory)
 	mux.HandleFunc("DELETE /api/bots/{id}/memory/{key}", a.handleDeleteMemory)
@@ -40,6 +43,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/log", a.handleLog)
 	mux.HandleFunc("GET /api/stt/status", a.handleSTTStatus)
 	mux.HandleFunc("POST /api/stt", a.handleSTT)
+	mux.HandleFunc("GET /login", a.handleLogin)
 	mux.HandleFunc("GET /", a.handleIndex)
 	mux.HandleFunc("GET /index.html", a.handleIndex)
 	// A bot's page. The client reads the id from the path.
@@ -49,7 +53,15 @@ func (a *App) Handler() http.Handler {
 
 func (a *App) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/health" || a.cfg.AuthToken == "" || authorized(r, a.cfg.AuthToken) {
+		// A live lgb token or MCP permission token must not decide a card,
+		// including when the admin token is unset. Other routes stay 401.
+		if permissionDecisionPath(r) {
+			if tok, ok := bearerToken(r); ok && a.liveRunCredential(tok) {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "run token cannot decide permissions"})
+				return
+			}
+		}
+		if r.URL.Path == "/api/health" || r.URL.Path == "/login" || mcpPermissionOpen(r.URL.Path) || a.cfg.AuthToken == "" || authorized(r, a.cfg.AuthToken) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -64,17 +76,88 @@ func (a *App) withAuth(next http.Handler) http.Handler {
 	})
 }
 
-func authorized(r *http.Request, token string) bool {
+// mcpPermissionOpen is the permission MCP route. The path token and the
+// Bearer token are checked by the handler, not by the admin-token gate.
+func mcpPermissionOpen(path string) bool {
+	return path == "/api/mcp/permission" || strings.HasPrefix(path, "/api/mcp/permission/")
+}
+
+// authCookie carries the admin token for a browser that opened /login.
+const authCookie = "lgb_auth"
+
+func permissionDecisionPath(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	return len(parts) == 7 && parts[0] == "api" && parts[1] == "bots" && parts[3] == "runs" && parts[5] == "permissions" && parts[2] != "" && parts[4] != "" && parts[6] != ""
+}
+
+func bearerToken(r *http.Request) (string, bool) {
 	h := r.Header.Get("Authorization")
 	const prefix = "Bearer "
 	if len(h) < len(prefix) || !strings.EqualFold(h[:len(prefix)], prefix) {
+		return "", false
+	}
+	tok := h[len(prefix):]
+	if tok == "" {
+		return "", false
+	}
+	return tok, true
+}
+
+// liveRunCredential reports a per-run lgb token or a live MCP permission token.
+func (a *App) liveRunCredential(token string) bool {
+	if a == nil || token == "" {
 		return false
 	}
-	got := h[len(prefix):]
-	if len(got) != len(token) {
+	a.lgbMu.Lock()
+	_, lgb := a.lgbLive[token]
+	a.lgbMu.Unlock()
+	if lgb {
+		return true
+	}
+	_, ok := a.lookupPerm(token)
+	return ok
+}
+
+func authorized(r *http.Request, token string) bool {
+	h := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if len(h) >= len(prefix) && strings.EqualFold(h[:len(prefix)], prefix) {
+		return tokenEqual(h[len(prefix):], token)
+	}
+	if c, err := r.Cookie(authCookie); err == nil {
+		return tokenEqual(c.Value, token)
+	}
+	return false
+}
+
+func tokenEqual(got, token string) bool {
+	if token == "" || len(got) != len(token) {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
+}
+
+// handleLogin trades a token in the URL for an HttpOnly, same-site cookie,
+// then redirects to the UI. The token never reaches page script.
+func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if a.cfg.AuthToken == "" {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	if !tokenEqual(r.URL.Query().Get("token"), a.cfg.AuthToken) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: authCookie, Value: a.cfg.AuthToken, Path: "/",
+		HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil,
+	})
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -403,6 +486,7 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.log(id, "user_message", map[string]any{"message_id": msg.ID})
+	a.touchActivity(id)
 	a.dropResume(id)
 	runID := a.kick(id)
 	resp := map[string]any{"message": msg, "run_id": nil}
@@ -433,8 +517,19 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
-	hist, ch := a.bus.Subscribe(runID)
+	// prompts=1 is the page that can answer a card. Any other stream client
+	// stays attached for tokens and does not count as a UI.
+	var hist []frame
+	var ch chan frame
+	if r.URL.Query().Get("prompts") == "1" {
+		hist, ch = a.bus.SubscribePrompts(runID)
+	} else {
+		hist, ch = a.bus.Subscribe(runID)
+	}
 	defer a.bus.Unsubscribe(runID, ch)
+	// Flush headers so a permission client counts as present before the next event.
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
 	for _, f := range hist {
 		if _, err := w.Write(f.bytes()); err != nil {
 			return
@@ -468,7 +563,10 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			flusher.Flush()
-		case f := <-ch:
+		case f, ok := <-ch:
+			if !ok {
+				return
+			}
 			if _, err := w.Write(f.bytes()); err != nil {
 				return
 			}
@@ -595,7 +693,7 @@ func (a *App) handleCreateTimer(w http.ResponseWriter, r *http.Request) {
 	if body.Enabled != nil {
 		enabled = *body.Enabled
 	}
-	t, err := a.st.CreateTimer(id, body.Name, body.Schedule, body.Prompt, enabled)
+	t, err := a.st.CreateTimer(id, body.Name, body.Schedule, body.Prompt, enabled, "user")
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

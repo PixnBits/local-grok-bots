@@ -232,6 +232,8 @@
   .tools { margin: 0 0 6px; font-size: 12px; color: var(--muted); white-space: normal; }
   .tools summary { cursor: pointer; }
   .tools .tool { margin-top: 6px; white-space: pre-wrap; max-height: 16em; overflow: auto; }
+  .tools .tool-perm { font-family: var(--mono); }
+  .tools .tool-perm.denied { color: var(--ink); }
   .tool-text { margin-top: 6px; color: var(--ink, inherit); font-size: 13px; padding-left: 8px; border-left: 2px solid var(--line); }
   .tool-result { color: var(--muted); margin-top: 2px; }
   .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; max-width: 100%; }
@@ -254,6 +256,34 @@
     font-family: var(--mono); font-size: 12px; background: #f3eee6; border-radius: 8px; padding: 6px 8px;
     overflow-wrap: anywhere;
   }
+  .perm-card {
+    align-self: flex-start; max-width: min(78ch, 100%);
+    background: #fff; border: 1px solid var(--line); border-radius: 14px;
+    border-bottom-left-radius: 4px; padding: 10px 12px; display: grid; gap: 8px;
+  }
+  .perm-card .perm-tool { font-weight: 600; }
+  .perm-card .perm-args {
+    margin: 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap;
+    overflow-wrap: anywhere; background: #f3eee6; border-radius: 8px; padding: 6px 8px;
+    max-height: 12em; overflow: auto;
+  }
+  .perm-card .perm-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .perm-card .perm-count, .perm-card .perm-outcome, .perm-card .perm-err { font-size: 12px; color: var(--muted); }
+  .perm-card .perm-err { color: var(--err); }
+  .perm-card .perm-header {
+    justify-self: start; font-size: 11px; letter-spacing: .04em; text-transform: uppercase;
+    background: var(--accent-2); color: var(--accent); border-radius: 99px; padding: 2px 8px;
+  }
+  .perm-card .perm-question { font-weight: 600; }
+  .perm-card .perm-option { display: grid; grid-template-columns: auto 1fr; column-gap: 8px; align-items: start; }
+  .perm-card .perm-option input { margin-top: 3px; }
+  .perm-card .perm-desc { grid-column: 2; color: var(--muted); font-size: 12px; }
+  .perm-card .perm-other { grid-column: 2; width: 100%; margin-top: 4px; }
+  .perm-card .perm-plan {
+    margin: 0; white-space: pre-wrap; overflow-wrap: anywhere;
+    background: #f3eee6; border-radius: 8px; padding: 6px 8px;
+  }
+  .perm-card.settled { opacity: .8; }
   .note { margin: 0 14px 8px; color: var(--err); background: var(--err-bg); border-radius: 10px; padding: 8px 10px; font-size: 13px; }
   .note.continue {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -449,7 +479,7 @@
 <div class="auth" id="auth">
   <form class="panel card">
     <h2 style="font-family:var(--serif);margin:0">Token required</h2>
-    <p class="empty">This daemon has AUTH_TOKEN set. Paste the bearer token to continue. It stays in this browser only.</p>
+    <p class="empty">This daemon requires a token (AUTH_TOKEN, or the generated DATA_DIR/admin-token when a CLI backend is on). Paste it here, or open /login?token=&lt;token&gt; once to stay signed in with a cookie. A pasted token stays in this tab only.</p>
     <input id="auth-token" type="password" autocomplete="off" placeholder="Bearer token">
     <button class="primary" type="submit">Continue</button>
     <div class="err" id="auth-err"></div>
@@ -740,15 +770,52 @@ function copyButton(cls, label, getText) {
 }
 // toolSummary is the collapsed "N tool calls: a, b" line on a reply.
 // It opens to show each call with its arguments and result.
+// permline:begin
+// permissionLine is one stored permission decision, e.g.
+// "✅ allowed Bash(git status) · ui". Plain text; callers use textContent.
+function permissionLine(r) {
+  let d = {};
+  try { d = JSON.parse(r.result_or_error || "{}") || {}; } catch (e) { d = {}; }
+  // ok is the stored verdict. A UI allow is decision allow_once or allow_session.
+  const allowed = r.ok === true || /^allow/.test(d.decision || "");
+  const a = r.arguments || {};
+  let arg = "";
+  for (const k of ["command", "file_path", "path", "url", "pattern"]) {
+    if (typeof a[k] === "string" && a[k]) { arg = a[k]; break; }
+  }
+  if (!arg && Object.keys(a).length) arg = JSON.stringify(a);
+  if (arg.length > 120) arg = arg.slice(0, 117) + "…";
+  const tool = (r.name || "tool") + (arg ? "(" + arg + ")" : "");
+  let line = (allowed ? "✅ allowed " : "⛔ denied ") + tool;
+  if (d.source) line += " · " + d.source;
+  if (d.rule) line += " · " + d.rule;
+  return line;
+}
+// hasToolRecords is true when a run has calls or permission decisions to show.
+function hasToolRecords(recs) {
+  return (recs || []).some(r => { const k = r.kind || "call"; return k === "call" || k === "permission"; });
+}
+// permline:end
 function toolSummary(recs) {
   const d = el("details", "tools");
   const calls = recs.filter(r => (r.kind || "call") === "call");
+  const perms = recs.filter(r => r.kind === "permission");
   const names = [...new Set(calls.map(r => r.name))];
-  d.append(el("summary", null, calls.length + (calls.length === 1 ? " tool call: " : " tool calls: ") + names.join(", ")));
-  // Records arrive in order: each round's pre-tool text, then its calls.
+  let label = calls.length + (calls.length === 1 ? " tool call" : " tool calls") + (names.length ? ": " + names.join(", ") : "");
+  if (perms.length) {
+    const denied = perms.filter(r => !r.ok).length;
+    label += " · " + perms.length + (perms.length === 1 ? " permission" : " permissions") + (denied ? " (" + denied + " denied)" : "");
+  }
+  d.append(el("summary", null, label));
+  // Records arrive in order: each round's pre-tool text, then its calls,
+  // with permission decisions where the CLI asked.
   for (const r of recs) {
     if (r.kind === "text") {
       d.append(renderMarkdown(r.result_or_error, el("div", "md tool-text")));
+      continue;
+    }
+    if (r.kind === "permission") {
+      d.append(el("div", "tool tool-perm" + (r.ok ? "" : " denied"), permissionLine(r)));
       continue;
     }
     const call = el("div", "tool");
@@ -951,7 +1018,7 @@ function renderMessages(mode = "bottom") {
     const bubble = el("div", "bubble " + (m.role || "system"));
     const who = whoText(m);
     if (who) bubble.append(el("span", "who", who));
-    if (m.role === "bot" && m.run_id && !shownTools.has(m.run_id) && (state.tools[m.run_id] || []).some(r => (r.kind || "call") === "call")) {
+    if (m.role === "bot" && m.run_id && !shownTools.has(m.run_id) && hasToolRecords(state.tools[m.run_id])) {
       shownTools.add(m.run_id);
       bubble.append(toolSummary(state.tools[m.run_id]));
     }
@@ -1139,7 +1206,252 @@ async function continueRun(runId) {
     state.continuing = false;
   }
 }
+// perm:begin
+const permCards = new Map();
+
+function permissionArgsText(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  try { return JSON.stringify(value, null, 2); } catch (e) { return ""; }
+}
+
+function clearPermissionCards() {
+  for (const rec of permCards.values()) {
+    clearInterval(rec.timer);
+    clearTimeout(rec.expire);
+  }
+  permCards.clear();
+}
+
+function showPermissionRequest(payload, runId) {
+  const id = payload && payload.id ? String(payload.id) : "";
+  if (!id || permCards.has(id)) return permCards.get(id) || null;
+  const run = (payload && payload.run_id) || runId || "";
+  const card = el("div", "perm-card");
+  card.dataset.id = id;
+  const tool = el("div", "perm-tool");
+  tool.textContent = payload.tool == null ? "" : String(payload.tool);
+  const count = el("div", "perm-count");
+  const outcome = el("div", "perm-outcome");
+  const errLine = el("div", "perm-err");
+  const actions = el("div", "perm-actions");
+  const inputs = [];
+  let groups = [];
+  card.append(tool);
+  if (payload && payload.kind === "question") {
+    groups = appendQuestions(card, payload, inputs);
+    const submit = el("button", "primary", "Submit");
+    submit.type = "button";
+    const skip = el("button", null, "Skip");
+    skip.type = "button";
+    submit.addEventListener("click", () => submitQuestion(id, run));
+    skip.addEventListener("click", () => postPermission(id, run, "deny"));
+    actions.append(submit, skip);
+  } else {
+    if (payload && payload.tool === "ExitPlanMode" && payload.arguments && typeof payload.arguments.plan === "string") {
+      const plan = el("pre", "perm-plan");
+      plan.textContent = payload.arguments.plan;
+      card.append(plan);
+    }
+    const args = el("pre", "perm-args");
+    args.textContent = permissionArgsText(payload.arguments);
+    const allow = el("button", "primary", "Allow once");
+    allow.type = "button";
+    const deny = el("button", null, "Deny");
+    deny.type = "button";
+    actions.append(allow, deny);
+    if (payload.session_allowed) {
+      const sess = el("button", null, "Allow for session");
+      sess.type = "button";
+      sess.addEventListener("click", () => postPermission(id, run, "allow_session"));
+      actions.append(sess);
+    }
+    allow.addEventListener("click", () => postPermission(id, run, "allow_once"));
+    deny.addEventListener("click", () => postPermission(id, run, "deny"));
+    card.append(args);
+  }
+  card.append(count, actions, outcome, errLine);
+  const live = $("#live");
+  if (live) live.append(card);
+  const deadline = Date.parse(payload.deadline || "");
+  const rec = {card, count, actions, outcome, errLine, inputs, groups, timer: 0, expire: 0, settled: false, server: false, pending: false};
+  permCards.set(id, rec);
+  const paint = (maySettle) => {
+    const cur = permCards.get(id);
+    if (!cur || cur.server) return;
+    if (Number.isNaN(deadline)) {
+      cur.count.textContent = "";
+      return;
+    }
+    const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    cur.count.textContent = left + "s";
+    if (maySettle && left <= 0) settlePermission(id, "deny", "timeout", false);
+  };
+  paint(false);
+  rec.timer = setInterval(() => paint(true), 250);
+  if (!Number.isNaN(deadline)) rec.expire = setTimeout(() => paint(true), Math.max(0, deadline - Date.now()));
+  return rec;
+}
+
+function appendQuestions(card, payload, inputs) {
+  const groups = [];
+  const list = Array.isArray(payload.questions) ? payload.questions : [];
+  list.forEach((q, qi) => {
+    const header = el("div", "perm-header");
+    header.textContent = q && q.header != null ? String(q.header) : "";
+    const text = el("div", "perm-question");
+    text.textContent = q && q.question != null ? String(q.question) : "";
+    card.append(header, text);
+    const multi = !!(q && q.multiSelect);
+    const name = "perm-" + String(payload.id || qi) + "-" + qi;
+    const group = {question: text.textContent, multi: multi, options: [], other: null, otherText: null};
+    const opts = q && Array.isArray(q.options) ? q.options : [];
+    opts.forEach((o) => {
+      const label = o && o.label != null ? String(o.label) : "";
+      const row = el("label", "perm-option");
+      const input = el("input");
+      input.type = multi ? "checkbox" : "radio";
+      input.name = name;
+      input.value = label;
+      const lab = el("span", null, label);
+      const desc = el("div", "perm-desc");
+      desc.textContent = o && o.description != null ? String(o.description) : "";
+      row.append(input, lab, desc);
+      card.append(row);
+      inputs.push(input);
+      group.options.push({label: label, input: input});
+      if (!multi) {
+        input.addEventListener("change", () => {
+          if (input.checked && group.other) group.other.checked = false;
+        });
+      }
+    });
+    const row = el("div", "perm-option");
+    const textIn = el("input");
+    textIn.type = "text";
+    textIn.className = "perm-other";
+    inputs.push(textIn);
+    group.otherText = textIn;
+    if (multi) {
+      row.append(el("span", null, "Other"), textIn);
+    } else {
+      const other = el("input");
+      other.type = "radio";
+      other.name = name;
+      other.value = "";
+      inputs.push(other);
+      group.other = other;
+      row.append(other, el("span", null, "Other"), textIn);
+      textIn.addEventListener("input", () => {
+        other.checked = true;
+        group.options.forEach((opt) => { opt.input.checked = false; });
+      });
+      other.addEventListener("change", () => {
+        if (other.checked) group.options.forEach((opt) => { opt.input.checked = false; });
+      });
+    }
+    card.append(row);
+    groups.push(group);
+  });
+  return groups;
+}
+
+function collectQuestionAnswers(rec) {
+  if (!rec.groups || !rec.groups.length) return null;
+  const answers = {};
+  for (const group of rec.groups) {
+    const extra = group.otherText && group.otherText.value ? String(group.otherText.value).trim() : "";
+    if (group.multi) {
+      const parts = [];
+      for (const opt of group.options) if (opt.input.checked) parts.push(opt.label);
+      if (extra) parts.push(extra);
+      if (!parts.length) return null;
+      answers[group.question] = parts.join(", ");
+      continue;
+    }
+    if (group.other && group.other.checked) {
+      if (!extra) return null;
+      answers[group.question] = extra;
+      continue;
+    }
+    let value = "";
+    for (const opt of group.options) if (opt.input.checked) value = opt.label;
+    if (!value) return null;
+    answers[group.question] = value;
+  }
+  return answers;
+}
+
+function submitQuestion(id, runId) {
+  const rec = permCards.get(id);
+  if (!rec || rec.settled || rec.pending) return;
+  const answers = collectQuestionAnswers(rec);
+  if (!answers) {
+    rec.errLine.textContent = "Answer each question";
+    return;
+  }
+  rec.errLine.textContent = "";
+  postPermission(id, runId, "answer", {answers: answers});
+}
+
+function setPermDisabled(rec, disabled) {
+  for (const b of rec.actions.querySelectorAll("button")) b.disabled = disabled;
+  if (rec.inputs) for (const n of rec.inputs) n.disabled = disabled;
+}
+
+function settlePermission(id, decision, source, fromServer) {
+  const rec = permCards.get(id);
+  if (!rec) return;
+  if (rec.server) return;
+  if (rec.settled && !fromServer) return;
+  rec.settled = true;
+  if (fromServer) rec.server = true;
+  clearInterval(rec.timer);
+  clearTimeout(rec.expire);
+  rec.card.classList.add("settled");
+  setPermDisabled(rec, true);
+  rec.outcome.textContent = (decision || "deny") + " (" + (source || "") + ")";
+}
+
+function showPermissionDecision(payload) {
+  if (!payload) return;
+  const id = payload.id ? String(payload.id) : "";
+  if (!id) return;
+  if (!permCards.has(id)) {
+    showPermissionRequest({
+      id: id,
+      tool: payload.tool,
+      arguments: payload.arguments,
+      run_id: payload.run_id,
+      session_allowed: false,
+      kind: payload.kind,
+      questions: payload.questions
+    }, payload.run_id || "");
+  }
+  settlePermission(id, payload.decision, payload.source, true);
+}
+
+async function postPermission(id, runId, decision, extra) {
+  const rec = permCards.get(id);
+  if (!rec || rec.settled || rec.pending) return;
+  rec.pending = true;
+  setPermDisabled(rec, true);
+  try {
+    await api("/api/bots/" + state.botId + "/runs/" + encodeURIComponent(runId) + "/permissions/" + encodeURIComponent(id), {
+      method: "POST",
+      body: JSON.stringify(Object.assign({decision: decision}, extra || {}))
+    });
+  } catch (err) {
+    rec.pending = false;
+    if (!rec.settled) {
+      setPermDisabled(rec, false);
+      rec.errLine.textContent = err && err.message ? err.message : "request failed";
+    }
+  }
+}
+// perm:end
 function stopStream() {
+  clearPermissionCards();
   if (state.streamCtl) { state.streamCtl.abort(); state.streamCtl = null; }
   state.streaming = "";
   $("#live").replaceChildren();
@@ -1167,7 +1479,7 @@ async function follow(runId) {
   try {
     const headers = {};
     if (state.token) headers.Authorization = "Bearer " + state.token;
-    const res = await fetch(base() + "/api/bots/" + state.botId + "/thread/stream?run_id=" + encodeURIComponent(runId), {headers, signal: ctl.signal});
+    const res = await fetch(base() + "/api/bots/" + state.botId + "/thread/stream?run_id=" + encodeURIComponent(runId) + "&prompts=1", {headers, signal: ctl.signal});
     if (res.status === 401) { showAuth(); return; }
     if (!res.ok || !res.body) throw new Error("stream failed");
     const reader = res.body.getReader();
@@ -1202,6 +1514,10 @@ async function follow(runId) {
         } else if (event === "tool_result") {
           const ok = payload.ok ? "ok" : "error";
           live.append(el("div", "tool", (payload.name || "tool") + " " + ok + ": " + (payload.result_or_error || "")));
+        } else if (event === "permission_request") {
+          showPermissionRequest(payload, runId);
+        } else if (event === "permission_decision") {
+          showPermissionDecision(payload);
         } else if (event === "done" || event === "error") {
           setWorking(false);
           if (window.voiceOnRunEnd) window.voiceOnRunEnd(event === "done" ? acc : "", event !== "done");

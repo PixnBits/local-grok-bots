@@ -124,3 +124,5 @@ Not yet: WASM Moonshine/Whisper fallback, true streaming `/api/stt/stream`, Pipe
 - Setup on the Framework (user space, Vulkan GPU): clone `ggml-org/whisper.cpp`, `cmake -B build -DGGML_VULKAN=ON -DCMAKE_BUILD_TYPE=Release && cmake --build build -j --target whisper-cli`, download `ggml-large-v3-turbo-q5_0.bin` from `huggingface.co/ggerganov/whisper.cpp`.
 
 Composer: a single pill. Empty: ⚙, 🎤 (dictation) and a round waveform button (voice mode). With text: only a round send arrow. Placeholder is "Message <bot name>".
+
+TLS and CLI backends: the Claude CLI's MCP permission callback is plain HTTP to the daemon, so when TLS is enabled the daemon gives it no callback base. CLI runs then use `--permission-prompts none` (or stream_control when the policy selects it) and the broker denies anything that would have needed a UI prompt. `/api/stt` and `/api/stt/status` sit behind the same admin-token gate as every other API route (Bearer or the `/login` cookie); STT events also go to the policy audit sink (`event: "stt"`) when one is configured.

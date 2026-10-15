@@ -13,7 +13,24 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/PixnBits/local-grok-bots/internal/config"
 )
+
+// tlsConfigured reports whether the daemon will serve HTTPS.
+func tlsConfigured(c config.Config) bool {
+	return c.TLSSelfSigned || c.TLSCert != "" || c.TLSKey != ""
+}
+
+// permBaseFor is the origin the Claude CLI's MCP permission tool calls back.
+// The callback is plain HTTP, so under TLS there is no usable base: the CLI
+// then runs with prompts off and the broker denies residual asks (fail closed).
+func permBaseFor(c config.Config) string {
+	if tlsConfigured(c) {
+		return ""
+	}
+	return httpBase(c.BindAddr)
+}
 
 // tlsFiles returns the cert/key pair to serve HTTPS with, or "" for plain HTTP.
 // Fails closed: a half-configured pair is an error, not a silent HTTP fallback.

@@ -3,6 +3,7 @@ module github.com/PixnBits/local-grok-bots
 go 1.24.0
 
 require (
+	github.com/pelletier/go-toml/v2 v2.2.4
 	golang.org/x/sys v0.36.0
 	modernc.org/sqlite v1.37.0
 )

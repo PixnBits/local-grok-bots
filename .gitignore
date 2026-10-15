@@ -8,3 +8,13 @@
 *.db-wal
 *.db-shm
 /local-grok-bots
+# Local policy files. The daemon reads ./policy.toml by default (POLICY_PATH);
+# managed policy has no default path, but a copy kept here must not be committed.
+# policy.toml.sample stays tracked.
+/policy.toml
+/policy.*.toml
+!/policy.toml.sample
+/managed*.json
+/managed*.toml
+# Per-run lgb spool, created inside each bot workspace.
+.lgb/

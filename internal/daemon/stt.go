@@ -181,6 +181,13 @@ func (a *App) handleSTT(w http.ResponseWriter, r *http.Request) {
 		detail["chars"] = len(text)
 	}
 	_ = a.st.AddLog("", "stt", detail)
+	if a.audit != nil && a.audit.Enabled() {
+		rec := map[string]any{"event": "stt"}
+		for k, v := range detail {
+			rec[k] = v
+		}
+		a.audit.Write(rec)
+	}
 	if err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return

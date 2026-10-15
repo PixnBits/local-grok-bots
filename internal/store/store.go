@@ -172,17 +172,19 @@ type Bot struct {
 	Archived    bool    `json:"archived"`
 	ArchivedAt  *string `json:"archived_at,omitempty"`
 	// Warnings are advisory notes the daemon computes on read; not stored.
-	Warnings      []string `json:"warnings,omitempty"`
-	Grants        []string `json:"grants"`
-	NetAllow      []string `json:"net_allow"`
-	SSHAllow      []string `json:"ssh_allow"`
-	Status        string   `json:"status"`
-	Model         *string  `json:"model"`
-	CreatedAt     string   `json:"created_at,omitempty"`
-	UpdatedAt     string   `json:"updated_at,omitempty"`
-	ActiveRunID   *string  `json:"active_run_id,omitempty"`
-	LastRunStatus string   `json:"last_run_status,omitempty"`
-	LastRunError  string   `json:"last_run_error,omitempty"`
+	Warnings []string `json:"warnings,omitempty"`
+	Grants   []string `json:"grants"`
+	NetAllow []string `json:"net_allow"`
+	SSHAllow []string `json:"ssh_allow"`
+	Status   string   `json:"status"`
+	Model    *string  `json:"model"`
+	// SessionID is the CLI session. It is not part of the web API.
+	SessionID     string  `json:"-"`
+	CreatedAt     string  `json:"created_at,omitempty"`
+	UpdatedAt     string  `json:"updated_at,omitempty"`
+	ActiveRunID   *string `json:"active_run_id,omitempty"`
+	LastRunStatus string  `json:"last_run_status,omitempty"`
+	LastRunError  string  `json:"last_run_error,omitempty"`
 	// ContinueRunID is not a column. The daemon fills it from the in-memory offer.
 	ContinueRunID string `json:"continue_run_id,omitempty"`
 }
@@ -212,6 +214,8 @@ type Timer struct {
 	Enabled    bool    `json:"enabled"`
 	NextFireAt string  `json:"next_fire_at"`
 	LastFireAt *string `json:"last_fire_at"`
+	// Source is "user" or "bot". Only user timers keep a live CLI past idle.
+	Source string `json:"source,omitempty"`
 }
 
 type Run struct {
@@ -300,6 +304,12 @@ CREATE TABLE IF NOT EXISTS bots (
   ssh_allow TEXT NOT NULL DEFAULT '[]',
   status TEXT NOT NULL DEFAULT 'idle',
   model TEXT,
+  session_id TEXT NOT NULL DEFAULT '',
+  cli_pid INTEGER NOT NULL DEFAULT 0,
+  cli_pgid INTEGER NOT NULL DEFAULT 0,
+  cli_start TEXT NOT NULL DEFAULT '',
+  cli_exe TEXT NOT NULL DEFAULT '',
+  cli_marker TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -328,7 +338,8 @@ CREATE TABLE IF NOT EXISTS timers (
   prompt TEXT NOT NULL,
   enabled INTEGER NOT NULL,
   next_fire_at TEXT NOT NULL,
-  last_fire_at TEXT
+  last_fire_at TEXT,
+  source TEXT NOT NULL DEFAULT 'user'
 );
 CREATE INDEX IF NOT EXISTS idx_timers_due ON timers(enabled, next_fire_at);
 CREATE TABLE IF NOT EXISTS runs (
@@ -391,7 +402,15 @@ func (s *Store) evolve() error {
 		{"bots", "grants", "TEXT NOT NULL DEFAULT '[]'"},
 		{"bots", "net_allow", "TEXT NOT NULL DEFAULT '[]'"},
 		{"bots", "ssh_allow", "TEXT NOT NULL DEFAULT '[]'"},
+		{"bots", "session_id", "TEXT NOT NULL DEFAULT ''"},
+		{"bots", "cli_pid", "INTEGER NOT NULL DEFAULT 0"},
+		{"bots", "cli_pgid", "INTEGER NOT NULL DEFAULT 0"},
+		{"bots", "cli_start", "TEXT NOT NULL DEFAULT ''"},
+		{"bots", "cli_exe", "TEXT NOT NULL DEFAULT ''"},
+		{"bots", "cli_marker", "TEXT NOT NULL DEFAULT ''"},
 		{"timers", "name", "TEXT NOT NULL DEFAULT ''"},
+		{"timers", "source", "TEXT NOT NULL DEFAULT 'user'"},
+		{"timers", "archive_paused", "INTEGER NOT NULL DEFAULT 0"},
 		{"runs", "input_through", "TEXT"},
 		{"run_tools", "kind", "TEXT NOT NULL DEFAULT 'call'"},
 		{"bots", "archived_at", "TEXT"},
@@ -438,19 +457,46 @@ func (s *Store) hasColumn(table, col string) (bool, error) {
 
 // ReconcileOnBoot marks leftover running runs failed, idles those bots,
 // and records missed timers without running them. It writes daemon_start.
-func (s *Store) ReconcileOnBoot(version string) error {
+// cliRuns marks those runs interrupted and keeps session_id so the next CLI
+// turn can --resume. Otherwise the Ollama reason daemon_restart is unchanged.
+// Orphan CLI identities are returned and left stored. The caller signals
+// each one, then ClearCLIProc. Clearing here would drop the identity
+// before that signal attempt.
+func (s *Store) ReconcileOnBoot(version string, cliRuns bool) ([]CLIProc, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := FormatTime(Now())
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
 
+	prows, err := tx.Query(`SELECT id, cli_pid, cli_pgid, cli_start, cli_exe, cli_marker FROM bots WHERE cli_pid > 0`)
+	if err != nil {
+		return nil, err
+	}
+	var procs []CLIProc
+	for prows.Next() {
+		var p CLIProc
+		if err := prows.Scan(&p.BotID, &p.PID, &p.PGID, &p.Start, &p.Exe, &p.Marker); err != nil {
+			prows.Close()
+			return nil, err
+		}
+		procs = append(procs, p)
+	}
+	prows.Close()
+	if err := prows.Err(); err != nil {
+		return nil, err
+	}
+
+	reason := "daemon_restart"
+	if cliRuns {
+		reason = "interrupted"
+	}
 	rows, err := tx.Query(`SELECT id, bot_id FROM runs WHERE status='running'`)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	type pair struct{ runID, botID string }
 	var running []pair
@@ -458,31 +504,31 @@ func (s *Store) ReconcileOnBoot(version string) error {
 		var p pair
 		if err := rows.Scan(&p.runID, &p.botID); err != nil {
 			rows.Close()
-			return err
+			return nil, err
 		}
 		running = append(running, p)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	for _, p := range running {
-		if _, err := tx.Exec(`UPDATE runs SET status='error', error='daemon_restart', finished_at=? WHERE id=? AND status='running'`, now, p.runID); err != nil {
-			return err
+		if _, err := tx.Exec(`UPDATE runs SET status='error', error=?, finished_at=? WHERE id=? AND status='running'`, reason, now, p.runID); err != nil {
+			return nil, err
 		}
 		if err := s.addLogTx(tx, p.botID, "run_finished", map[string]any{
-			"run_id": p.runID, "status": "error", "error": "daemon_restart",
+			"run_id": p.runID, "status": "error", "error": reason,
 		}); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if _, err := tx.Exec(`UPDATE bots SET status='idle', updated_at=? WHERE status='running'`, now); err != nil {
-		return err
+		return nil, err
 	}
 
 	trows, err := tx.Query(`SELECT id, bot_id, schedule, next_fire_at FROM timers WHERE enabled=1 AND next_fire_at < ?`, now)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	type missed struct{ id, botID, schedule, when string }
 	var late []missed
@@ -490,35 +536,38 @@ func (s *Store) ReconcileOnBoot(version string) error {
 		var m missed
 		if err := trows.Scan(&m.id, &m.botID, &m.schedule, &m.when); err != nil {
 			trows.Close()
-			return err
+			return nil, err
 		}
 		late = append(late, m)
 	}
 	trows.Close()
 	if err := trows.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	for _, m := range late {
 		next, err := nextAfter(Now(), m.schedule)
 		if err != nil {
 			if _, err := tx.Exec(`UPDATE timers SET enabled=0 WHERE id=?`, m.id); err != nil {
-				return err
+				return nil, err
 			}
 		} else {
 			if _, err := tx.Exec(`UPDATE timers SET next_fire_at=? WHERE id=?`, FormatTime(next), m.id); err != nil {
-				return err
+				return nil, err
 			}
 		}
 		if err := s.addLogTx(tx, m.botID, "timer_missed", map[string]any{
 			"timer_id": m.id, "scheduled_for": m.when,
 		}); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	if err := s.addLogTx(tx, "", "daemon_start", map[string]any{"version": version}); err != nil {
-		return err
+		return nil, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return procs, nil
 }
 
 func nextAfter(from time.Time, schedule string) (time.Time, error) {
@@ -726,7 +775,7 @@ func (s *Store) attachRun(b *Bot) {
 	}
 }
 
-const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, status, model, created_at, updated_at, archived_at FROM bots`
+const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, status, model, session_id, created_at, updated_at, archived_at FROM bots`
 
 func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	var b Bot
@@ -734,7 +783,7 @@ func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	var shape, color, grants, netAllow, sshAllow string
 	var pinned, hidden int
 	var archived sql.NullString
-	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &b.Status, &model, &b.CreatedAt, &b.UpdatedAt, &archived)
+	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &b.Status, &model, &b.SessionID, &b.CreatedAt, &b.UpdatedAt, &archived)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Bot{}, ErrNotFound
 	}
@@ -926,6 +975,86 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 	}
 	s.attachRun(&b)
 	return b, nil
+}
+
+// CLIProc is the CLI process identity stored for one bot.
+// A later boot may signal it only when the live process still matches.
+type CLIProc struct {
+	BotID  string
+	PID    int
+	PGID   int
+	Start  string
+	Exe    string
+	Marker string
+}
+
+// SetCLIProc records the identity captured at spawn.
+// A crash leaves the row so the next boot can try to signal that process.
+func (s *Store) SetCLIProc(id string, p CLIProc) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if p.PID < 0 {
+		p.PID = 0
+	}
+	if p.PGID < 0 {
+		p.PGID = 0
+	}
+	res, err := s.db.Exec(`UPDATE bots SET cli_pid=?, cli_pgid=?, cli_start=?, cli_exe=?, cli_marker=? WHERE id=?`,
+		p.PID, p.PGID, p.Start, p.Exe, p.Marker, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// GetCLIProc reads the stored CLI identity. A cleared row has PID 0.
+func (s *Store) GetCLIProc(id string) (CLIProc, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var p CLIProc
+	p.BotID = id
+	err := s.db.QueryRow(`SELECT cli_pid, cli_pgid, cli_start, cli_exe, cli_marker FROM bots WHERE id=?`, id).
+		Scan(&p.PID, &p.PGID, &p.Start, &p.Exe, &p.Marker)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CLIProc{}, ErrNotFound
+	}
+	return p, err
+}
+
+// ClearCLIProc drops the stored CLI identity.
+// Call it after a boot signal attempt, including when that attempt refuses.
+func (s *Store) ClearCLIProc(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`UPDATE bots SET cli_pid=0, cli_pgid=0, cli_start='', cli_exe='', cli_marker='' WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetBotSession records the CLI session id. It does not write a log row.
+// An idle kill or a restart keeps this value so the next turn can --resume.
+func (s *Store) SetBotSession(id, sessionID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`UPDATE bots SET session_id=? WHERE id=?`, sessionID, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) SetStatus(id, status string) error {
@@ -1210,13 +1339,53 @@ func (s *Store) NeedsRun(botID string) (bool, error) {
 	return pending.String > started.String, nil
 }
 
-// turnInput matches the messages that queue a turn. NeedsRun and
-// TurnInputSince share it.
+// turnInput matches the messages that queue a turn. NeedsRun, TurnInputs,
+// and TurnInputSince share it.
 const turnInput = `(
 		(thread='user' AND role='user')
 		OR (thread='user' AND role='system' AND content NOT LIKE 'Notice: %')
 		OR (thread LIKE 'dm:%' AND role='user')
 	)`
+
+// TurnInputs returns the messages for this CLI turn: user text, scheduled
+// prompts, and inbound DMs created after the previous run started and before
+// this run started. Notices are excluded. The daemon store is the source of
+// truth; CLI transcripts are not read.
+func (s *Store) TurnInputs(botID, currentRunID string) ([]Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var current string
+	err := s.db.QueryRow(`SELECT started_at FROM runs WHERE id=?`, currentRunID).Scan(&current)
+	if err != nil {
+		return nil, err
+	}
+	var prev sql.NullString
+	err = s.db.QueryRow(`SELECT started_at FROM runs WHERE bot_id=? AND id!=? ORDER BY started_at DESC LIMIT 1`, botID, currentRunID).Scan(&prev)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	q := `SELECT id, bot_id, thread, role, content, run_id, created_at FROM messages WHERE bot_id=? AND created_at<? AND ` + turnInput
+	args := []any{botID, current}
+	if prev.Valid && prev.String != "" {
+		q += ` AND created_at>?`
+		args = append(args, prev.String)
+	}
+	q += ` ORDER BY created_at ASC, id ASC`
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Message{}
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
 
 // TurnInputSince returns turn-queuing messages created after since, oldest first.
 func (s *Store) TurnInputSince(botID, since string) ([]Message, error) {
@@ -1319,21 +1488,30 @@ func (s *Store) GetRun(id string) (Run, error) {
 const OnceSchedule = "once"
 
 // CreateTimerAt stores a one-shot timer that fires at at.
-func (s *Store) CreateTimerAt(botID, name, prompt string, at time.Time) (Timer, error) {
+// source is "user" or "bot". Only a user timer keeps a live CLI past idle.
+func (s *Store) CreateTimerAt(botID, name, prompt string, at time.Time, source string) (Timer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	src, err := timerSource(source)
+	if err != nil {
+		return Timer{}, err
+	}
 	t := Timer{
 		ID: id.New(), BotID: botID, Name: strings.TrimSpace(name), Schedule: OnceSchedule, Prompt: prompt,
-		Enabled: true, NextFireAt: FormatTime(at),
+		Enabled: true, NextFireAt: FormatTime(at), Source: src,
 	}
-	_, err := s.db.Exec(`INSERT INTO timers(id, bot_id, name, schedule, prompt, enabled, next_fire_at) VALUES(?,?,?,?,?,?,?)`,
-		t.ID, t.BotID, t.Name, t.Schedule, t.Prompt, 1, t.NextFireAt)
+	_, err = s.db.Exec(`INSERT INTO timers(id, bot_id, name, schedule, prompt, enabled, next_fire_at, source) VALUES(?,?,?,?,?,?,?,?)`,
+		t.ID, t.BotID, t.Name, t.Schedule, t.Prompt, 1, t.NextFireAt, t.Source)
 	return t, err
 }
 
-func (s *Store) CreateTimer(botID, name, schedule, prompt string, enabled bool) (Timer, error) {
+func (s *Store) CreateTimer(botID, name, schedule, prompt string, enabled bool, source string) (Timer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	source, err := timerSource(source)
+	if err != nil {
+		return Timer{}, err
+	}
 	d, err := ParseInterval(schedule)
 	if err != nil {
 		return Timer{}, err
@@ -1344,11 +1522,22 @@ func (s *Store) CreateTimer(botID, name, schedule, prompt string, enabled bool) 
 	}
 	t := Timer{
 		ID: id.New(), BotID: botID, Name: strings.TrimSpace(name), Schedule: strings.TrimSpace(schedule), Prompt: prompt,
-		Enabled: enabled, NextFireAt: FormatTime(Now().Add(d)),
+		Enabled: enabled, NextFireAt: FormatTime(Now().Add(d)), Source: source,
 	}
-	_, err = s.db.Exec(`INSERT INTO timers(id, bot_id, name, schedule, prompt, enabled, next_fire_at) VALUES(?,?,?,?,?,?,?)`,
-		t.ID, t.BotID, t.Name, t.Schedule, t.Prompt, en, t.NextFireAt)
+	_, err = s.db.Exec(`INSERT INTO timers(id, bot_id, name, schedule, prompt, enabled, next_fire_at, source) VALUES(?,?,?,?,?,?,?,?)`,
+		t.ID, t.BotID, t.Name, t.Schedule, t.Prompt, en, t.NextFireAt, t.Source)
 	return t, err
+}
+
+func timerSource(source string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "user":
+		return "user", nil
+	case "bot":
+		return "bot", nil
+	default:
+		return "", fmt.Errorf("timer source must be user or bot")
+	}
 }
 
 func (s *Store) ListTimers(botID string) ([]Timer, error) {
@@ -1492,19 +1681,22 @@ func scanTimers(rows *sql.Rows) ([]Timer, error) {
 	return out, rows.Err()
 }
 
-const timerSelect = `SELECT id, bot_id, name, schedule, prompt, enabled, next_fire_at, last_fire_at FROM timers`
+const timerSelect = `SELECT id, bot_id, name, schedule, prompt, enabled, next_fire_at, last_fire_at, source FROM timers`
 
 func scanTimer(sc interface{ Scan(...any) error }) (Timer, error) {
 	var t Timer
 	var en int
 	var last sql.NullString
-	err := sc.Scan(&t.ID, &t.BotID, &t.Name, &t.Schedule, &t.Prompt, &en, &t.NextFireAt, &last)
+	err := sc.Scan(&t.ID, &t.BotID, &t.Name, &t.Schedule, &t.Prompt, &en, &t.NextFireAt, &last, &t.Source)
 	if err != nil {
 		return Timer{}, err
 	}
 	t.Enabled = en == 1
 	if last.Valid {
 		t.LastFireAt = &last.String
+	}
+	if t.Source == "" {
+		t.Source = "user"
 	}
 	return t, nil
 }
@@ -1626,6 +1818,18 @@ func (s *Store) LogCount(kind string) (int, error) {
 	defer s.mu.Unlock()
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM log_events WHERE kind=?`, kind).Scan(&n)
+	return n, err
+}
+
+// CountLogSince counts one bot's log events of kind at or after since.
+func (s *Store) CountLogSince(botID, kind string, since time.Time) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int
+	err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM log_events WHERE bot_id=? AND kind=? AND ts>=?`,
+		botID, kind, FormatTime(since),
+	).Scan(&n)
 	return n, err
 }
 

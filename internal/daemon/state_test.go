@@ -14,10 +14,10 @@ func TestBotStateEndpoint(t *testing.T) {
 	}})
 	srv := serve(t, app)
 	bot := createBot(t, srv.URL, "Stateful")
-	if _, err := app.st.CreateTimerAt(bot.ID, "walk", "walk the dog", time.Now().Add(5*time.Minute)); err != nil {
+	if _, err := app.st.CreateTimerAt(bot.ID, "walk", "walk the dog", time.Now().Add(5*time.Minute), "user"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.st.CreateTimer(bot.ID, "standup", "1d", "post standup", true); err != nil {
+	if _, err := app.st.CreateTimer(bot.ID, "standup", "1d", "post standup", true, "user"); err != nil {
 		t.Fatal(err)
 	}
 	for _, k := range []string{"a", "b"} {
