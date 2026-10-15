@@ -91,6 +91,51 @@ func TestLGBThroughFakeCLI(t *testing.T) {
 	}
 }
 
+func TestLGBRequestTooLarge(t *testing.T) {
+	dir := t.TempDir()
+	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))
+	bot, err := app.st.CreateBot("Ada", "d", nil, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := filepath.Join(dir, "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r, _, err := app.startLGB(context.Background(), bot, "run1", ws)
+	if err != nil || r == nil {
+		t.Fatal(err)
+	}
+	r.cancel()
+	<-r.done
+	const name = "00112233445566778899ddee"
+	body := make([]byte, lgbMaxReq+1)
+	copy(body, r.token+"\x00memory\x00set\x00k\x00")
+	if err := os.WriteFile(filepath.Join(ws, lgbDirName, "req", name), body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.drain(context.Background())
+	got, err := os.ReadFile(filepath.Join(ws, lgbDirName, "resp", name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(got)
+	if !strings.HasPrefix(text, "2\n") || !strings.Contains(text, "request too large (max 64 KiB)") || strings.Contains(text, "unreadable") {
+		t.Fatalf("response %q", text)
+	}
+	exactName := "aabbccddeeff00112233bbcc"
+	exact := make([]byte, lgbMaxReq)
+	copy(exact, r.token+"\x00memory\x00list\x00")
+	if err := os.WriteFile(filepath.Join(ws, lgbDirName, "req", exactName), exact, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.req.read(exactName, lgbMaxReq); err != nil {
+		t.Fatalf("a request of exactly %d bytes was refused: %v", lgbMaxReq, err)
+	}
+	r.req.close()
+	r.resp.close()
+}
+
 func TestLGBRejectsOneSecondRepeat(t *testing.T) {
 	dir := t.TempDir()
 	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))

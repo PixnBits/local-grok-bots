@@ -40,8 +40,11 @@ func (d *spoolDir) read(name string, max int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !st.Mode().IsRegular() || st.Size() > max {
+	if !st.Mode().IsRegular() {
 		return nil, errSpoolFile
+	}
+	if st.Size() > max {
+		return nil, errRequestTooLarge
 	}
 	return io.ReadAll(io.LimitReader(f, max))
 }

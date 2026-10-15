@@ -36,6 +36,10 @@ const (
 
 var errSpoolFile = errors.New("lgb: bad spool file")
 
+// errRequestTooLarge is a spool file over lgbMaxReq. It is not the same as
+// a link or a non-regular file, which stay "unreadable".
+var errRequestTooLarge = errors.New("request too large (max 64 KiB)")
+
 var lgbReqName = regexp.MustCompile(`^[0-9a-f]{16,64}$`)
 
 // lgbScript is POSIX sh: it needs only sh, od, tr, mv, cat, and sleep, all of
@@ -203,6 +207,9 @@ func (r *lgbRun) drain(ctx context.Context) {
 		var out string
 		if err != nil {
 			code, out = 2, "lgb: unreadable request"
+			if errors.Is(err, errRequestTooLarge) {
+				code, out = 2, "lgb: "+errRequestTooLarge.Error()
+			}
 		} else {
 			code, out = r.handle(ctx, body)
 		}
