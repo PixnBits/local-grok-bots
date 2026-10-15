@@ -611,17 +611,26 @@ func fakeClaudeMain() {
 		sid = flagValue(args, "--resume")
 	}
 	behavior, detail := "deny", "permission host was not configured"
+	mode := os.Getenv("LGB_FAKE_MODE")
 	if url := mcpURL(args); url != "" {
 		var err error
-		behavior, err = callPermissionTool(url)
+		if mode == "question" || mode == "question-timeout" {
+			behavior, err = callQuestionTool(url)
+		} else {
+			behavior, err = callPermissionTool(url)
+		}
 		if err != nil {
 			fmt.Printf("{\"type\":\"result\",\"is_error\":true,\"result\":%q,\"session_id\":%q}\n", err.Error(), sid)
 			os.Exit(1)
 		}
 	}
-	if behavior == "allow" {
-		fmt.Printf("{\"type\":\"stream_event\",\"session_id\":%q,\"event\":{\"delta\":{\"type\":\"text_delta\",\"text\":\"approved\"}}}\n", sid)
-		fmt.Printf("{\"type\":\"result\",\"result\":\"approved\",\"session_id\":%q}\n", sid)
+	if behavior == "allow" || mode == "question" || mode == "question-timeout" {
+		word := "approved"
+		if mode == "question" || mode == "question-timeout" {
+			word = "asked"
+		}
+		fmt.Printf("{\"type\":\"stream_event\",\"session_id\":%q,\"event\":{\"delta\":{\"type\":\"text_delta\",\"text\":%q}}}\n", sid, word)
+		fmt.Printf("{\"type\":\"result\",\"result\":%q,\"session_id\":%q}\n", word, sid)
 		os.Exit(0)
 	}
 	fmt.Printf("{\"type\":\"system\",\"subtype\":\"permission_denied\",\"session_id\":%q,\"tool\":\"Bash\"}\n", sid)
@@ -729,6 +738,10 @@ func fakeStreamClaude(args []string) {
 		time.Sleep(300 * time.Millisecond)
 		fakeOut(fmt.Sprintf(`{"type":"stream_event","session_id":%q,"event":{"delta":{"type":"text_delta","text":"after-cancel"}}}`, sid))
 		fakeResult(sid, "cancelled")
+	case "question", "question-timeout":
+		fakeQuestionAsk("req_q_1")
+		_ = mustStdin(lines)
+		fakeResult(sid, "asked")
 	default:
 		// The tool ask is in flight while ordinary stream events are written,
 		// so the daemon has to parse both on the same stdout.
@@ -760,6 +773,14 @@ func fakeMalformed(lines <-chan string, sid string) {
 
 func fakeToolAsk(id, input string) {
 	fakeOut(`{"type":"control_request","request_id":"` + id + `","request":{"subtype":"can_use_tool","tool_name":"Bash","input":` + input + `,"tool_use_id":"tu_1","permission_suggestions":[],"blocked_path":null,"decision_reason":null}}`)
+}
+
+func fakeQuestionAsk(id string) {
+	input := os.Getenv("LGB_QUESTION_INPUT")
+	if input == "" {
+		input = `{}`
+	}
+	fakeOut(`{"type":"control_request","request_id":"` + id + `","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","input":` + input + `,"tool_use_id":"tu_q"}}`)
 }
 
 func fakeResult(sid, text string) {
@@ -903,6 +924,59 @@ func callPermissionTool(url string) (string, error) {
 		Message  string `json:"message"`
 	}
 	if err := json.Unmarshal([]byte(called.Result.Content[0].Text), &decision); err != nil {
+		return "", err
+	}
+	if decision.Behavior == "" {
+		decision.Behavior = "deny"
+	}
+	return decision.Behavior, nil
+}
+
+func callQuestionTool(url string) (string, error) {
+	input := os.Getenv("LGB_QUESTION_INPUT")
+	if input == "" {
+		return "", fmt.Errorf("question input is unset")
+	}
+	var raw any
+	if err := json.Unmarshal([]byte(input), &raw); err != nil {
+		return "", err
+	}
+	var called struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+		} `json:"result"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := rpc(url, 1, "tools/call", map[string]any{
+		"name": "approve",
+		"arguments": map[string]any{
+			"tool_name":   "AskUserQuestion",
+			"tool_use_id": "tu_q",
+			"input":       raw,
+		},
+	}, &called); err != nil {
+		return "", err
+	}
+	if called.Error != nil {
+		return "", fmt.Errorf("%s", called.Error.Message)
+	}
+	if len(called.Result.Content) == 0 || called.Result.Content[0].Text == "" {
+		return "", fmt.Errorf("empty tool result")
+	}
+	text := called.Result.Content[0].Text
+	if p := os.Getenv("LGB_QUESTION_OUT"); p != "" {
+		if err := os.WriteFile(p, []byte(text), 0o644); err != nil {
+			return "", err
+		}
+	}
+	var decision struct {
+		Behavior string `json:"behavior"`
+	}
+	if err := json.Unmarshal([]byte(text), &decision); err != nil {
 		return "", err
 	}
 	if decision.Behavior == "" {

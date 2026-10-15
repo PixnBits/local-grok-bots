@@ -85,6 +85,19 @@ func (a *App) unregisterPerm(token string) {
 	a.permMu.Unlock()
 }
 
+func (a *App) permTokenList() []string {
+	if a == nil {
+		return nil
+	}
+	a.permMu.Lock()
+	defer a.permMu.Unlock()
+	out := make([]string, 0, len(a.permTokens))
+	for token := range a.permTokens {
+		out = append(out, token)
+	}
+	return out
+}
+
 func (a *App) lookupPerm(token string) (permBind, bool) {
 	if !permTokenOK(token) {
 		return permBind{}, false
@@ -112,7 +125,9 @@ func permTokenOK(token string) bool {
 
 func (a *App) handlePermissionDecision(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Decision string `json:"decision"`
+		Decision    string                     `json:"decision"`
+		Answers     map[string]string          `json:"answers"`
+		Annotations map[string]permission.Note `json:"annotations"`
 	}
 	if err := readJSON(w, r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -122,11 +137,17 @@ func (a *App) handlePermissionDecision(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
-	err := a.perm.DecideFor(r.PathValue("id"), r.PathValue("run_id"), r.PathValue("req_id"), body.Decision)
+	botID, runID, reqID := r.PathValue("id"), r.PathValue("run_id"), r.PathValue("req_id")
+	var err error
+	if strings.TrimSpace(body.Decision) == permission.Answer {
+		err = a.perm.Answer(botID, runID, reqID, body.Answers, body.Annotations)
+	} else {
+		err = a.perm.DecideFor(botID, runID, reqID, body.Decision)
+	}
 	switch {
 	case err == nil:
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
-	case errors.Is(err, permission.ErrDecision):
+	case errors.Is(err, permission.ErrDecision), errors.Is(err, permission.ErrAnswer):
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 	case errors.Is(err, permission.ErrDecided):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
@@ -225,6 +246,9 @@ func (a *App) callApprove(w http.ResponseWriter, r *http.Request, id json.RawMes
 	var text []byte
 	if out.Behavior == "allow" {
 		updated := args.Input
+		if out.UpdatedInput != nil {
+			updated = out.UpdatedInput
+		}
 		if updated == nil {
 			updated = map[string]any{}
 		}

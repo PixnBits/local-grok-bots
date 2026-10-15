@@ -159,7 +159,8 @@ func (b *Broker) AddHook(h Hook) {
 }
 
 // Evaluate decides a tool call. The order is hooks, deny rules, ask rules,
-// mode, allow rules, then canUseTool. Deny wins over a later allow.
+// then AskUserQuestion (always a UI question), then a hook allow, bypass
+// mode, allow rules, a session grant, and canUseTool. Deny wins over a later allow.
 func (b *Broker) Evaluate(ctx context.Context, pol policy.Permission, req Request) Outcome {
 	if ctx == nil {
 		ctx = context.Background()

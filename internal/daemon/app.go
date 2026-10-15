@@ -49,6 +49,10 @@ type App struct {
 	permBase   string
 	permMu     sync.Mutex
 	permTokens map[string]permBind
+	// lgbLive holds per-run lgb tokens until that run's spool stops.
+	// They are not the admin token and cannot decide a permission card.
+	lgbMu   sync.Mutex
+	lgbLive map[string]struct{}
 	// runner, when set, replaces the real CLI exec. Tests use it.
 	runner clisession.Runner
 	// cliTTY, when set, overrides /dev/tty detection for permission prompts.

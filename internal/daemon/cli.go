@@ -568,7 +568,19 @@ func (a *App) decideStreamControl(ctx context.Context, botID, runID, sessionID s
 		return clisession.ControlDecision{Silent: true}
 	}
 	if out.Behavior == permission.Allow {
-		return clisession.ControlDecision{Behavior: permission.Allow, RawInput: ask.RawInput}
+		raw := ask.RawInput
+		if out.UpdatedInput != nil {
+			b, err := json.Marshal(out.UpdatedInput)
+			if err != nil {
+				msg := out.Message
+				if msg == "" {
+					msg = "denied"
+				}
+				return clisession.ControlDecision{Behavior: permission.Deny, Message: msg}
+			}
+			raw = b
+		}
+		return clisession.ControlDecision{Behavior: permission.Allow, RawInput: raw}
 	}
 	msg := out.Message
 	if msg == "" {

@@ -113,6 +113,7 @@ func (a *App) startLGB(ctx context.Context, bot store.Bot, runID, ws string) (*l
 	cctx, cancel := context.WithCancel(ctx)
 	r := &lgbRun{a: a, bot: bot, runID: runID, token: "lgbr_" + hex.EncodeToString(buf), root: root,
 		req: req, resp: resp, cancel: cancel, done: make(chan struct{})}
+	a.noteRunToken(r.token)
 	go r.loop(cctx)
 	env := map[string]string{
 		"LGB_SPOOL": root,
@@ -121,11 +122,48 @@ func (a *App) startLGB(ctx context.Context, bot store.Bot, runID, ws string) (*l
 	return r, env, nil
 }
 
+func (a *App) noteRunToken(token string) {
+	if a == nil || token == "" {
+		return
+	}
+	a.lgbMu.Lock()
+	defer a.lgbMu.Unlock()
+	if a.lgbLive == nil {
+		a.lgbLive = map[string]struct{}{}
+	}
+	a.lgbLive[token] = struct{}{}
+}
+
+func (a *App) forgetRunToken(token string) {
+	if a == nil || token == "" {
+		return
+	}
+	a.lgbMu.Lock()
+	delete(a.lgbLive, token)
+	a.lgbMu.Unlock()
+}
+
+func (a *App) lgbTokens() []string {
+	if a == nil {
+		return nil
+	}
+	a.lgbMu.Lock()
+	defer a.lgbMu.Unlock()
+	out := make([]string, 0, len(a.lgbLive))
+	for token := range a.lgbLive {
+		out = append(out, token)
+	}
+	return out
+}
+
 // stop ends the run's lgb: the token is dropped and pending requests are
 // answered with an error by nobody (the script times out).
 func (r *lgbRun) stop() {
 	if r == nil {
 		return
+	}
+	if r.a != nil {
+		r.a.forgetRunToken(r.token)
 	}
 	r.cancel()
 	<-r.done

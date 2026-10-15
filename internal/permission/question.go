@@ -45,8 +45,8 @@ type Option struct {
 
 // Note is an optional per-question annotation. Nil pointers were omitted.
 type Note struct {
-	Preview *string
-	Notes   *string
+	Preview *string `json:"preview,omitempty"`
+	Notes   *string `json:"notes,omitempty"`
 }
 
 func parseQuestions(args map[string]any) ([]Question, error) {

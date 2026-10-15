@@ -200,7 +200,8 @@ func (a *App) recordPermission(payload any) {
 		return
 	}
 	// The broker reports a UI allow as allow_once or allow_session, not allow.
-	allowed := decision == permission.Allow || decision == permission.AllowOnce || decision == permission.AllowSession
+	// An answered question is allow on the wire and decision "answer" here.
+	allowed := decision == permission.Allow || decision == permission.AllowOnce || decision == permission.AllowSession || decision == permission.Answer
 	detail := map[string]any{"decision": decision, "allowed": allowed, "source": m["source"]}
 	if r, _ := m["rule"].(string); r != "" {
 		detail["rule"] = r
@@ -208,8 +209,27 @@ func (a *App) recordPermission(payload any) {
 	if tr, _ := m["transport"].(string); tr != "" {
 		detail["transport"] = tr
 	}
+	if kind, _ := m["kind"].(string); kind != "" {
+		detail["kind"] = kind
+		if n, ok := answeredCount(m["answered"]); ok {
+			detail["answered"] = n
+		}
+	}
 	body, _ := json.Marshal(detail)
 	_ = a.st.AddRunTool(runID, botID, store.ToolRecord{
 		Kind: "permission", Name: tool, Arguments: args, OK: allowed, Result: string(body),
 	})
+}
+
+func answeredCount(v any) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	default:
+		return 0, false
+	}
 }

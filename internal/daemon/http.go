@@ -50,6 +50,14 @@ func (a *App) Handler() http.Handler {
 
 func (a *App) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// A live lgb token or MCP permission token must not decide a card,
+		// including when the admin token is unset. Other routes stay 401.
+		if permissionDecisionPath(r) {
+			if tok, ok := bearerToken(r); ok && a.liveRunCredential(tok) {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "run token cannot decide permissions"})
+				return
+			}
+		}
 		if r.URL.Path == "/api/health" || r.URL.Path == "/login" || strings.HasPrefix(r.URL.Path, "/api/mcp/permission/") || a.cfg.AuthToken == "" || authorized(r, a.cfg.AuthToken) {
 			next.ServeHTTP(w, r)
 			return
@@ -67,6 +75,42 @@ func (a *App) withAuth(next http.Handler) http.Handler {
 
 // authCookie carries the admin token for a browser that opened /login.
 const authCookie = "lgb_auth"
+
+func permissionDecisionPath(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	return len(parts) == 7 && parts[0] == "api" && parts[1] == "bots" && parts[3] == "runs" && parts[5] == "permissions" && parts[2] != "" && parts[4] != "" && parts[6] != ""
+}
+
+func bearerToken(r *http.Request) (string, bool) {
+	h := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if len(h) < len(prefix) || !strings.EqualFold(h[:len(prefix)], prefix) {
+		return "", false
+	}
+	tok := h[len(prefix):]
+	if tok == "" {
+		return "", false
+	}
+	return tok, true
+}
+
+// liveRunCredential reports a per-run lgb token or a live MCP permission token.
+func (a *App) liveRunCredential(token string) bool {
+	if a == nil || token == "" {
+		return false
+	}
+	a.lgbMu.Lock()
+	_, lgb := a.lgbLive[token]
+	a.lgbMu.Unlock()
+	if lgb {
+		return true
+	}
+	_, ok := a.lookupPerm(token)
+	return ok
+}
 
 func authorized(r *http.Request, token string) bool {
 	h := r.Header.Get("Authorization")
