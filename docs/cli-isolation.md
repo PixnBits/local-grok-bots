@@ -19,6 +19,9 @@ home = "isolated"
 # isolated: per-bot HOME on every OS. user: managed policy only.
 # home = "user" overrides this.
 claude_home = "auto"
+# Claude only. required (default): Claude's Bash sandbox on, fail closed.
+# off: the daemon writes no sandbox block. Managed policy only.
+claude_sandbox = "required"
 # Added to the scrubbed environment. Only managed policy can set this.
 # env = { ANTHROPIC_BASE_URL = "https://gateway.corp.example" }
 ```
@@ -79,7 +82,8 @@ On each bot's first Claude turn after the daemon starts, the daemon writes a
   `CLAUDE.md`, hooks, or `settings*.json` from them. This is the form the Agent
   SDK passes for `setting_sources=[]`.
 - `--settings DATA_DIR/cli/<bot>/claude-settings.json`: daemon-written,
-  `disableAllHooks` and `enableAllProjectMcpServers: false`.
+  `disableAllHooks`, `enableAllProjectMcpServers: false`, and the restrictions
+  under [Sandbox and tools](#sandbox-and-tools).
 - `--strict-mcp-config`: only the daemon's `--mcp-config` (the permission tool
   on the mcp transport), never `.mcp.json` or `~/.claude.json`.
 - `CLAUDE_CONFIG_DIR=<home>/.claude`.
@@ -95,11 +99,108 @@ Grok has no flag to skip setting sources. The daemon:
   `CLAUDE.md`, project skills, and project hooks are not loaded;
 - sets `GROK_HOME=<home>/.grok`, so `~/.grok/config.toml`, `~/.grok/rules`,
   user hooks and plugins do not load;
+- runs `--sandbox lgb`, a custom profile it writes to `<home>/.grok/sandbox.toml`
+  (see [Sandbox and tools](#sandbox-and-tools));
+- hard links `~/.grok/auth.json` into the isolated home (Grok 1.0.52 says
+  "Not signed in" when it is a symlink); it relinks when the user's file is
+  replaced, and falls back to a symlink across filesystems, so keep DATA_DIR
+  on the same filesystem as HOME;
 - sets every `GROK_CLAUDE_*_ENABLED` and `GROK_CURSOR_*_ENABLED` to `false`;
 - drops `GROK_CONFIG`/`GROK_CONFIG_PATH`.
 
 `/etc/grok/requirements.toml`, `/etc/grok/managed_config.toml`, and the synced
 managed config still apply.
+
+## Sandbox and tools
+
+The daemon jail is off for CLI backends, so each CLI's own sandbox is the
+boundary. The daemon configures it per turn from the bot's grants (`net` with
+its host list, `git`, `ssh`). The settings only add restrictions.
+
+### Claude
+
+The `--settings` file adds:
+
+- `permissions.deny`: `Skill`, `SlashCommand`; `WebFetch`, `WebSearch` unless
+  `net`; `Bash(git push)`/`Bash(git push *)` unless `git`; `ssh`, `scp`,
+  `sftp`, `rsync` unless `ssh`; `Read`/`Edit` of credential paths under the real
+  HOME (`.ssh`, `.aws`, `.gnupg`, `.config/gh`, `.netrc`, `.docker/config.json`,
+  `.kube`, `.config/gcloud`, `.azure`, both CLIs' login files) and of the
+  daemon's `admin-token` and `state.db*`. Paths are written `//abs/path`
+  because `~` would name the per-bot HOME.
+- `permissions.blockReadsOutsideWorkingDirectories: true`.
+- With `claude_sandbox = "required"` (default), a `sandbox` block:
+  `enabled: true`, `failIfUnavailable: true`, `allowUnsandboxedCommands: false`,
+  `autoAllowBashIfSandboxed: false` (Bash still asks through the daemon),
+  `network.strictAllowlist: true` with `allowedDomains` = the bot's `net` hosts
+  (empty without `net`), and `credentials.files` deny entries for the same
+  paths.
+
+Claude's sandbox needs `bwrap` and `socat` on Linux (Seatbelt is built into
+macOS). Before launch the daemon checks for both; if one is missing, or Claude
+exits with a sandbox error, the turn fails with a notice naming what is
+missing and a `cli_sandbox_unavailable` entry in the bot log and audit. A
+managed policy can set `claude_sandbox = "off"`; a local one can't (warning).
+
+How this combines with sandbox settings a user already has (from Claude's
+settings and sandboxing docs, Claude Code v2.1.285+):
+
+- Managed settings: highest precedence. A managed boolean (`enabled`,
+  `failIfUnavailable`, `allowUnsandboxedCommands`) wins over the daemon's
+  value, and arrays merge. The daemon never writes `enabled: false`, so a
+  managed sandbox stays on. If managed sets `allowUnsandboxedCommands: true`,
+  managed wins; the daemon can't tighten that key. Deny rules from every scope
+  are evaluated first, so the daemon's deny rules can't be undone by an allow
+  elsewhere, and managed deny rules still apply.
+- User `~/.claude/settings.json`: not loaded (`--setting-sources=`), except
+  that Claude still applies its `sandbox.credentials` deny entries. A user's own
+  `allowedDomains`, `excludedCommands`, or `allowWrite` therefore don't carry
+  over. That narrows, never widens, and can break a workflow that relied on
+  them: ask the admin for a policy host grant instead.
+- `--settings` with `allowUnsandboxedCommands: false` makes the sandbox
+  "admin-required", so a repository's settings can't loosen it either.
+- Orgs that already run the sandbox through managed settings and want only
+  theirs: managed `claude_sandbox = "off"`. Deny rules and the read block stay.
+
+### Grok
+
+With an isolated home (default) the daemon writes:
+
+```toml
+[profiles.lgb]
+extends = "strict"           # reads: workspace, system paths, GROK_HOME
+restrict_network = true      # false with a net grant
+deny = ["/home/u/.ssh", ...]  # existing credential paths, admin-token, state.db*
+```
+
+and passes `--sandbox lgb` plus `--disallowed-tools web_fetch,web_search`
+unless `net`. A custom profile fails closed: Grok refuses to start if it can't
+apply it (unknown profile, bad `sandbox.toml`, or no `bwrap` for a deny list on
+Linux). Only existing paths are listed, since Grok also refuses a deny path it
+can't bind. A `ssh` grant drops `~/.ssh` from the list. Grok's own
+`auth.json` is not denied.
+
+A profile pinned in `requirements.toml` (`/etc/grok` or signed) outranks
+`--sandbox`, so a stricter managed pin still wins. The user's
+`~/.grok/config.toml` sandbox profile and `~/.grok/sandbox.toml` are not read
+under the isolated home; the daemon's profile extends `strict`, the strictest
+built-in.
+
+Under managed `home = "user"` the daemon does not write the user's
+`~/.grok/sandbox.toml`. It passes built-in `--sandbox strict`, which Grok runs
+unenforced, with a warning, if it can't apply.
+
+### Daemon API
+
+With a CLI backend the HTTP API requires a token. `AUTH_TOKEN` wins; otherwise
+the daemon generates one at `DATA_DIR/admin-token` (0600) and prints its path
+at startup. Paste it in the UI, or open `/login?token=<token>` once to get an
+HttpOnly, SameSite=Strict cookie. The token is never in the CLI environment:
+`AUTH_TOKEN` and any variable whose value contains the token are dropped, and
+both CLIs are denied the file. Without the token a CLI's shell can't call the
+API, including `POST .../permissions/{id}`. `GET /api/health` stays open, as
+does the per-run MCP permission route, which only asks the broker. Ollama-only
+setups need no token unless `AUTH_TOKEN` is set.
 
 ## Override files
 
@@ -123,10 +224,21 @@ Under `overrides = "refuse"` every hit fails the turn with
 
 - Fake-CLI tests check argv, the child environment, the per-bot home,
   credential links, the scan, and refuse/ignore.
-- Real Grok 1.0.52 on Linux: with an isolated `GROK_HOME` and a linked
-  `auth.json`, a headless `-p` turn authenticated, reported the folder
+- Real Grok 1.0.52 on Linux, 2026-10-14: a symlinked `auth.json` gave "Not
+  signed in"; a hard link authenticated. Through `PrepareIsolation` and
+  `Args`, the `lgb` profile blocked `curl https://example.com` (could not
+  resolve host), denied `cat` of the admin token and `ls ~/.ssh`, denied a
+  write outside the workspace, allowed one inside, and `web_fetch`/`web_search`
+  were not in the tool list. An unknown `--sandbox` profile refused to start.
+  Under strict, `read_file` of `~/.bashrc` was denied.
+- Earlier, with an isolated `GROK_HOME`, a headless `-p` turn authenticated, reported the folder
   untrusted, and ignored an `AGENTS.md` instruction. `grok inspect` still lists
   a workspace `.mcp.json` with every compat cell off, which is why it is refused.
+- Claude's sandbox block, deny rules, the bwrap/socat check, and the merge
+  with managed settings are tested only against the settings JSON and a fake
+  CLI. The merge rules are from Claude's docs. A real run should confirm that
+  `failIfUnavailable` exits as expected, that `//abs` Read/Edit rules match,
+  and that a managed sandbox still applies alongside `--settings`.
 - Claude was not installed on the test machine. The flags come from the CLI
   reference and the Agent SDK source; that `--setting-sources=` with an empty
   list also skips project `CLAUDE.md`, and that the credential symlink works

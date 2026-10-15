@@ -15,7 +15,7 @@ go build -o local-grok-bots ./cmd/local-grok-bots
 | `OLLAMA_URL` | `http://127.0.0.1:11434` | Local Ollama HTTP API |
 | `OLLAMA_MODEL` | `llama3.2` | Model used when a bot has no override. Set this to a model you have pulled. |
 | `BIND_ADDR` | `0.0.0.0:8080` | Address the daemon listens on |
-| `AUTH_TOKEN` | unset | If set, every route except `GET /api/health` requires `Authorization: Bearer <token>` |
+| `AUTH_TOKEN` | unset | If set, every route except `GET /api/health` requires `Authorization: Bearer <token>` (or the cookie from `/login?token=`). With a CLI backend and no `AUTH_TOKEN`, a token is generated at `DATA_DIR/admin-token` (0600); see [docs/cli-isolation.md](docs/cli-isolation.md#daemon-api) |
 | `SANDBOX_BUILD_BINDS` | unset | Colon-separated absolute paths. With the `build` grant, each path is a read-only bind in the shell jail. |
 
 Paths inside `DATA_DIR`:

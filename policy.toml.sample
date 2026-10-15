@@ -62,6 +62,7 @@ imminent_timer_minutes = 2
 # overrides = "ignore"
 # home = "isolated"
 # claude_home = "auto"   # macOS: user's HOME (Keychain login); Linux: isolated
+# claude_sandbox = "required"  # Claude Bash sandbox on, fail closed; "off" is managed-only
 #
 # [cli.permission]
 # mode is the same knob as permission_mode above. The table wins when both
