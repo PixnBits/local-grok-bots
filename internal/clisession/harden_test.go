@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -359,5 +360,28 @@ func TestUserSandboxCannotWidenPolicy(t *testing.T) {
 	net := doc["sandbox"].(map[string]any)["network"].(map[string]any)
 	if mustJSON(net["allowedDomains"]) != `["evil.example"]` {
 		t.Fatalf("intersection: %v", net)
+	}
+}
+
+// Denying DATA_DIR/cli whole makes Grok's own home read-only and Grok exits
+// (seen live with grok 1.0.52). The deny skips the path to the bot's home.
+func TestGrokDenyKeepsOwnHomeWritable(t *testing.T) {
+	cli := filepath.Join(t.TempDir(), "cli")
+	state := filepath.Join(cli, "bot")
+	for _, d := range []string{filepath.Join(state, "home"), filepath.Join(state, "perm", "r1"), filepath.Join(cli, "other")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	toml := grokSandboxTOML(IsolationOptions{StateDir: state, Home: filepath.Join(state, "home"), Protect: []string{cli}})
+	for _, want := range []string{filepath.Join(cli, "other"), filepath.Join(state, "perm")} {
+		if !strings.Contains(toml, strconv.Quote(want)) {
+			t.Fatalf("missing deny %s:\n%s", want, toml)
+		}
+	}
+	for _, bad := range []string{strconv.Quote(cli), strconv.Quote(state), strconv.Quote(filepath.Join(state, "home"))} {
+		if strings.Contains(toml, bad) {
+			t.Fatalf("own home denied (%s):\n%s", bad, toml)
+		}
 	}
 }

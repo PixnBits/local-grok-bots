@@ -230,6 +230,14 @@ apply it (unknown profile, bad `sandbox.toml`, or no `bwrap` for a deny list on
 Linux). Only existing paths are listed, since Grok also refuses a deny path it
 can't bind. A `ssh` grant drops `~/.ssh` from the list. Grok's own
 `auth.json` is not denied.
+`DATA_DIR/cli` is not denied whole, because the bot's own `HOME` or
+`GROK_HOME` is under it and Grok must write there (a whole-directory deny
+made it exit at start). Instead every existing entry under it is denied
+except the path down to the bot's own home: other bots' state, this bot's
+`perm/` and settings files. Checked live with grok 1.0.52 in both home
+modes: the turn ran, the workspace was readable, and a file beside the
+bot's home was refused. A bot directory created after the turn starts is
+not in that turn's list.
 
 On macOS, Grok's `restrict_network` is not enforced, so a Grok bot
 without a `net` grant still has network access there. Only the web tools are

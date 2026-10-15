@@ -620,11 +620,17 @@ func grokSandboxTOML(o IsolationOptions) string {
 	if o.Grants.SSH {
 		skip[".ssh"] = true
 	}
+	var keep []string
+	if o.Home != "" {
+		keep = append(keep, filepath.Clean(o.Home))
+	} else if o.StateDir != "" {
+		keep = append(keep, filepath.Join(filepath.Clean(o.StateDir), "grok-home"))
+	}
 	for _, p := range protectedPaths(o.UserHome, o.Protect, skip) {
 		// Grok refuses to start when a deny path can't be bound, so only
 		// existing paths are listed.
 		if _, err := os.Lstat(p); err == nil {
-			deny = append(deny, p)
+			deny = append(deny, denyAround(filepath.Clean(p), keep)...)
 		}
 	}
 	var b strings.Builder
@@ -648,4 +654,32 @@ func grokDisallowed(g Grants) []string {
 		return nil
 	}
 	return []string{"web_fetch", "web_search"}
+}
+
+// denyAround returns p, or, when p contains one of keep (the bot's own HOME
+// or GROK_HOME, which Grok must write), every existing entry under p except
+// the path down to keep. Denying DATA_DIR/cli whole would make Grok's own
+// home read-only and stop it from starting.
+func denyAround(p string, keep []string) []string {
+	inside := false
+	for _, k := range keep {
+		if k == p {
+			return nil
+		}
+		if strings.HasPrefix(k, p+string(filepath.Separator)) {
+			inside = true
+		}
+	}
+	if !inside {
+		return []string{p}
+	}
+	entries, err := os.ReadDir(p)
+	if err != nil {
+		return []string{p}
+	}
+	var out []string
+	for _, e := range entries {
+		out = append(out, denyAround(filepath.Join(p, e.Name()), keep)...)
+	}
+	return out
 }
