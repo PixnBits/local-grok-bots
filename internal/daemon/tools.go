@@ -257,6 +257,9 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		if other.ID == bot.ID {
 			return "", errors.New("cannot DM yourself")
 		}
+		if err := a.allowBotTurn(bot.ID, other.ID, "send_dm"); err != nil {
+			return "", err
+		}
 		if _, _, err := a.st.AddDMPair(bot.ID, other.ID, content, ""); err != nil {
 			return "", err
 		}

@@ -284,6 +284,16 @@ that check off. Ollama is unchanged unless those keys are set. One-shot
 timers have no minimum interval. Timers created from the page are not
 limited here.
 
+The same hourly cap also counts turns another bot starts. Each `send_dm`
+(tool or `lgb dm`) that would start a turn on the recipient, and each
+timer-fired turn, is counted per recipient over a rolling hour, in memory
+(a daemon restart resets it). When the recipient is at the cap, the DM is
+not delivered, the sender's tool call fails with a message naming
+`cli.lgb.max_scheduled_per_hour`, and `bot_turn_cap` is written to the
+recipient's bot log and the audit log. Timer turns are only counted, not
+refused, since timers are already checked when created. DMs and turns the
+user starts from the page are not counted.
+
 Transport. Both sandboxes block the network, and live with Grok 1.0.52 the
 `lgb` profile (`restrict_network = true`) refused a connect to a unix socket
 both in `/tmp` and in the workspace. So lgb uses a spool in the workspace,

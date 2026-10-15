@@ -67,6 +67,9 @@ type App struct {
 	cancel    context.CancelFunc
 
 	rtMu sync.Mutex
+	// turns counts bot- and timer-started turns per bot (turncap.go).
+	turnsOnce sync.Once
+	turns     *botTurns
 	// permSeen is each live run's stored permission decisions, so a CLI
 	// denial report for a request the broker already decided adds nothing.
 	seenMu   sync.Mutex
@@ -281,6 +284,7 @@ func (a *App) fireDue() {
 		}); err != nil {
 			continue
 		}
+		a.noteScheduledTurn(tm.BotID)
 		a.kick(tm.BotID)
 	}
 }
