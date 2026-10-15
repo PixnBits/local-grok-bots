@@ -1,6 +1,6 @@
 # Sandbox model
 
-The target for how bots run code. The current jail (unshare + chroot, workspace only, fails closed) is the right default. This document is how we add capability without a policy language or a microVM.
+The target for how bots run code. The current jail (unshare + chroot, workspace only, fails closed) is the right default for Ollama mode. This document is how we add capability without a policy language or a microVM.
 
 ## Why this shape
 
@@ -8,7 +8,7 @@ Major coding agents (Claude Code, Codex, Cursor, Grok Build) converged on the sa
 
 The 2026 sandbox-escape research (Pillar Security, CSA) is the relevant caution. In almost every case the agent stayed inside the box. It wrote a file — a hook config, a git setting, a task definition — that a trusted process *outside* the sandbox later executed. The boundary held; the trust handoff did not. Network allowlists and “no standing secrets inside the jail” reduce blast radius from prompt injection. Capability tokens are cleaner than RBAC for agents because the action is dynamic, but a full capability system is more machinery than this daemon needs.
 
-## The model
+## The model (Ollama mode)
 
 One base jail. A short list of named grants on the bot (or on a run). No policy language. No microVM.
 
@@ -33,9 +33,18 @@ Every grant use and every denial is a log event. Surface irreversible actions (p
 
 A coding bot can clone, build, test, and (when granted) push or reach a host. Every other bot stays in the locked-down workspace. The log remains the place to verify what actually happened.
 
+## CLI backend mode
+
+When the policy selects `backend = claude` or `backend = grok`, the daemon's workspace jail is off. The daemon does not wrap the CLI process in bubblewrap or Seatbelt. The CLI's own sandbox (Seatbelt on macOS, bubblewrap on Linux/WSL2) plus any InfoSec-managed settings (domain allowlists, credential deny/mask, `allowManagedDomainsOnly`, `failIfUnavailable`, etc.) are the isolation boundary.
+
+The daemon is a thin orchestrator: it spawns or resumes the CLI headless, injects timer prompts via a narrow append-only channel that the CLI's own tools read, and relays the CLI's streaming output to the web portal. It never executes shell commands or file operations on the bot's behalf. Sensitive-path restrictions (SSH keys, `.env` files, etc.) are enforced by the CLI's existing policy, not re-implemented by the daemon.
+
+Nested jails are avoided. The daemon does not attempt to re-jail a CLI that already has its own sandbox.
+
 ## Out
 
 - Per-bot microVMs.
 - A general policy language or capability-token system.
 - Mounting host credentials into the jail.
 - Full computer-use or a virtual display. Headless browser is a later grant; take-control is not.
+- Re-implementing CLI sandbox policy when a CLI backend is selected.

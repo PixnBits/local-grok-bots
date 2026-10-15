@@ -16,8 +16,8 @@ func TestArchiveAndRestore(t *testing.T) {
 	}})
 	srv := serve(t, app)
 	bot := createBot(t, srv.URL, "Arc")
-	on, _ := app.st.CreateTimer(bot.ID, "on", "1h", "ping", true)
-	off, _ := app.st.CreateTimer(bot.ID, "off", "1h", "ping", false)
+	on, _ := app.st.CreateTimer(bot.ID, "on", "1h", "ping", true, "user")
+	off, _ := app.st.CreateTimer(bot.ID, "off", "1h", "ping", false, "user")
 
 	res, b := do(t, http.MethodPatch, srv.URL+"/api/bots/"+bot.ID, map[string]any{"archived": true}, "")
 	if res.StatusCode != 200 {

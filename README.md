@@ -1,6 +1,6 @@
 # local-grok-bots
 
-One Go daemon for a personal bot roster on the Framework Desktop. It keeps bots, threads, DMs, timers, and the log in SQLite, calls a local Ollama, and serves a small web page.
+One Go daemon for a personal bot roster on the Framework Desktop. It keeps bots, threads, DMs, timers, and the log in SQLite, calls a local Ollama by default, and serves a small web page. It can also use a CLI backend (Claude Code or Grok CLI); backend selection and jail behavior come from `policy.toml` (see `policy.toml.sample`).
 
 ```bash
 go build -o local-grok-bots ./cmd/local-grok-bots
@@ -15,7 +15,7 @@ go build -o local-grok-bots ./cmd/local-grok-bots
 | `OLLAMA_URL` | `http://127.0.0.1:11434` | Local Ollama HTTP API |
 | `OLLAMA_MODEL` | `llama3.2` | Model used when a bot has no override. Set this to a model you have pulled. |
 | `BIND_ADDR` | `0.0.0.0:8080` | Address the daemon listens on |
-| `AUTH_TOKEN` | unset | If set, every route except `GET /api/health` requires `Authorization: Bearer <token>` |
+| `AUTH_TOKEN` | unset | If set, every route except `GET /api/health` requires `Authorization: Bearer <token>` (or the cookie from `/login?token=`). With a CLI backend and no `AUTH_TOKEN`, a token is generated at `DATA_DIR/admin-token` (0600); see [docs/cli-isolation.md](docs/cli-isolation.md#daemon-api) |
 | `SANDBOX_BUILD_BINDS` | unset | Colon-separated absolute paths. With the `build` grant, each path is a read-only bind in the shell jail. |
 
 Paths inside `DATA_DIR`:
@@ -32,6 +32,8 @@ data/workspace/    the only tree bots may read, write, or shell in
 File tools resolve against `workspace/` and reject `..`, absolute host paths, and symlink escapes.
 
 `run_shell` uses bubblewrap when `bwrap` is installed, and otherwise `unshare` with a chroot. The workspace is bind-mounted at `/work`. The host filesystem outside it is not visible, and the shell starts with no network. If it reports its workspace as `/work`, that is the jail path, not the host path. If neither `bwrap` nor `unshare` can build the jail, the shell fails closed and the daemon still serves.
+
+On macOS, `run_shell` runs under `/usr/bin/sandbox-exec` with a generated Seatbelt profile. It denies by default, reads system paths and the workspace, writes only the workspace and a private temp dir, never writes `.git/hooks`, and has no network. There is no `/work` mount, so the shell starts in the real workspace path. `net` and `ssh` grants are denied on macOS because the connect proxy needs `LD_PRELOAD`. A missing `sandbox-exec` fails closed. Apple marks `sandbox-exec` deprecated; it still ships, but this path has only been compile-checked, not run on a Mac. Behavior change: before this release `run_shell` always failed closed on macOS; Ollama bots with `run_shell` now run commands there.
 
 Grants on the bot (`net`, `git`, `ssh`, `build`) are set from the profile. A missing grant fails closed. `git push` returns a diff and does not push. The model is `docs/sandbox.md`.
 
@@ -55,10 +57,24 @@ For a user unit, change `WantedBy` to `default.target`, put the unit in `~/.conf
 
 The page is plain HTTP on the LAN. The browser warning is expected. Do not port-forward it.
 
+## launchd (macOS)
+
+`deploy/org.pixnbits.local-grok-bots.plist` is a LaunchAgent. It binds `127.0.0.1:8080` and keeps data in `~/Library/Application Support/local-grok-bots`. Replace `USERNAME` first; launchd does not expand `~`.
+
+```bash
+GOOS=darwin GOARCH=arm64 go build -o local-grok-bots ./cmd/local-grok-bots   # amd64 for Intel
+sudo install -m 755 local-grok-bots /usr/local/bin/local-grok-bots
+mkdir -p ~/Library/"Application Support"/local-grok-bots ~/Library/LaunchAgents
+sed "s/USERNAME/$USER/g" deploy/org.pixnbits.local-grok-bots.plist > ~/Library/LaunchAgents/org.pixnbits.local-grok-bots.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/org.pixnbits.local-grok-bots.plist
+```
+
+Stop it with `launchctl bootout gui/$(id -u)/org.pixnbits.local-grok-bots`. Logs go to `~/Library/Logs/local-grok-bots.log`. The SQLite driver is pure Go, so the binary cross-compiles without cgo. A binary copied from another machine may need `xattr -d com.apple.quarantine` or signing before Gatekeeper runs it.
+
 ## What the page does today
 
 The page is a roster (mark, name, label, status), a conversation with a composer that stays enabled during a run, a profile opened from the bot menu, and a separate log. The conversation does not edit the bot. Messages render markdown in the page, including fenced code blocks with a language label and GFM pipe tables; stored text is unchanged and HTML in a message shows as text. Code blocks and messages have Copy buttons; a message's button copies its original markdown. While a run is alive, a working animation sits in the message list where the next reply will appear. Pin and hide are roster flags; hide does not pause the bot or its routines. Archive (bot menu) takes a bot off the roster, pauses its routines, and stops new runs while keeping all its data; the Archived list restores it. Delete is API-only.
 
-Streaming tokens and tool lines come from `GET /api/bots/{id}/thread/stream?run_id=`. Tokens that arrive with a tool call show while that run is streaming and are not kept on the thread; they are kept with the run's tool records and show, in order, when the tool-call summary is opened. The kept reply is the one with no tool call. Each tool call is also stored per run, and after the run the reply shows a collapsed tool-call summary that opens on tap. If Ollama is down, the run fails and the log records `model_call` with the error. A tool call Ollama cannot parse is diagnosed and tried once more in that run, when a round remains. A second parse failure, or a parse failure on the last round, ends the run. Unreachable Ollama, an HTTP error, a stream failure, and a timeout are not retried. A restart marks an in-flight run `error` / `daemon_restart` and does not resume the model call. A timer whose `next_fire_at` is already past at boot is logged as `timer_missed` and rescheduled, not run. A message sent while a run is alive joins that run before its next model call; if the run has already made its last call, a new run answers it. Tools reach the model as full JSON Schemas with described, example-bearing arguments; a malformed call gets an error listing the expected arguments. `set_timer` takes `in` (one-shot, e.g. `5m`), `at` (one-shot RFC 3339), or `every` (repeating). A run stops after 8 model rounds with `tool round limit`. The page can continue that transcript for another 8 rounds. A new message, another turn, or a restart drops the offer.
+Streaming tokens and tool lines come from `GET /api/bots/{id}/thread/stream?run_id=`. Tokens that arrive with a tool call show while that run is streaming and are not kept on the thread; they are kept with the run's tool records and show, in order, when the tool-call summary is opened. The kept reply is the one with no tool call. Each tool call is also stored per run, and after the run the reply shows a collapsed tool-call summary that opens on tap. If Ollama is down, the run fails and the log records `model_call` with the error. A tool call Ollama cannot parse is diagnosed and tried once more in that run, when a round remains. A second parse failure, or a parse failure on the last round, ends the run. Unreachable Ollama, an HTTP error, a stream failure, and a timeout are not retried. An Ollama restart marks an in-flight run `error` / `daemon_restart` and does not resume the model call. A CLI restart marks that run `interrupted`, keeps `session_id`, and the next message or timer uses `--resume`. A timer whose `next_fire_at` is already past at boot is logged as `timer_missed` and rescheduled, not run. A message sent while a run is alive joins that run before its next model call; if the run has already made its last call, a new run answers it. Tools reach the model as full JSON Schemas with described, example-bearing arguments; a malformed call gets an error listing the expected arguments. `set_timer` takes `in` (one-shot, e.g. `5m`), `at` (one-shot RFC 3339), or `every` (repeating). A run stops after 8 model rounds with `tool round limit`. The page can continue that transcript for another 8 rounds. A new message, another turn, or a restart drops the offer.
 
 Target shape is in `docs/PRD.md`. Contracts are in `docs/specs.md`.

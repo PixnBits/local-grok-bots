@@ -17,7 +17,7 @@ func TestOnceTimerFiresOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	at := time.Now().Add(time.Minute)
-	tm, err := s.CreateTimerAt(b.ID, "", "walk the dog", at)
+	tm, err := s.CreateTimerAt(b.ID, "", "walk the dog", at, "user")
 	if err != nil || tm.Schedule != OnceSchedule || tm.NextFireAt != FormatTime(at) {
 		t.Fatalf("create %#v %v", tm, err)
 	}

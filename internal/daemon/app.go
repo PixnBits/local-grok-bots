@@ -3,13 +3,19 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/audit"
+	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/config"
 	"github.com/PixnBits/local-grok-bots/internal/model"
+	"github.com/PixnBits/local-grok-bots/internal/permission"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
@@ -21,59 +27,155 @@ type resumeHold struct {
 }
 
 type loopState struct {
-	running bool
-	again   bool
-	runID   string
-	cancel  context.CancelFunc
+	running  bool
+	again    bool
+	runID    string
+	cancel   context.CancelFunc
+	cliPID   int
+	idleKill bool
+	// released is closed when running is cleared. Stored status goes idle
+	// before that, so a waiter on status can still observe the loop running.
+	released chan struct{}
 }
 
 // App is the daemon: HTTP API, turn queue, timers, and the model loop.
 type App struct {
-	cfg   config.Config
-	st    *store.Store
-	model model.Client
-	ws    string
-	bus   *Bus
+	cfg    config.Config
+	st     *store.Store
+	model  model.Client
+	ws     string
+	bus    *Bus
+	policy policy.Policy
+	perm   *permission.Broker
+	// permBase is the HTTP origin the CLI calls back, such as http://127.0.0.1:8787.
+	// Empty means there is no permission host. A headless prompt still fails closed.
+	permBase   string
+	permMu     sync.Mutex
+	permTokens map[string]permBind
+	// lgbLive holds per-run lgb tokens until that run's spool stops.
+	// They are not the admin token and cannot decide a permission card.
+	lgbMu   sync.Mutex
+	lgbLive map[string]struct{}
+	// runner, when set, replaces the real CLI exec. Tests use it.
+	runner clisession.Runner
+	// cliTTY, when set, overrides /dev/tty detection for permission prompts.
+	cliTTY func() bool
+	audit  *audit.Logger
 	// shellDial, when set, is the sandbox proxy's outbound dial. Tests use it.
 	shellDial func(context.Context, string, string) (net.Conn, error)
 	ctx       context.Context
 	cancel    context.CancelFunc
 
-	rtMu    sync.Mutex
-	loops   map[string]*loopState
-	resume  map[string]resumeHold
-	pending map[string][]model.Message
-	closing bool
-	wg      sync.WaitGroup
+	rtMu sync.Mutex
+	// turns counts bot- and timer-started turns per bot (turncap.go).
+	turnsOnce sync.Once
+	turns     *botTurns
+	// permSeen is each live run's stored permission decisions, so a CLI
+	// denial report for a request the broker already decided adds nothing.
+	seenMu   sync.Mutex
+	permSeen map[string]*runPerms
+	// loginChecked holds bot ids whose Claude login source was recorded.
+	loginChecked sync.Map
+	loops        map[string]*loopState
+	resume       map[string]resumeHold
+	pending      map[string][]model.Message
+	activity     map[string]time.Time
+	closing      bool
+	wg           sync.WaitGroup
 }
 
 func New(cfg config.Config, m model.Client) (*App, error) {
-	st, err := store.Open(cfg.DBPath())
+	pol, err := policy.Load(policy.Options{
+		Path:           cfg.PolicyPath,
+		ManagedPath:    os.Getenv("MANAGED_POLICY"),
+		EnvBind:        os.Getenv("BIND_ADDR"),
+		EnvOllamaURL:   os.Getenv("OLLAMA_URL"),
+		EnvOllamaModel: os.Getenv("OLLAMA_MODEL"),
+	})
 	if err != nil {
 		return nil, err
 	}
-	if err := st.ReconcileOnBoot(cfg.Version); err != nil {
-		st.Close()
+	for _, w := range pol.Warnings {
+		fmt.Fprintf(os.Stderr, "local-grok-bots: %s\n", w)
+	}
+	if pol.HasBind {
+		cfg.BindAddr = pol.Bind
+	}
+	if pol.HasOllamaHost {
+		cfg.OllamaURL = pol.OllamaHost
+	}
+	if pol.HasOllamaModel {
+		cfg.Model = pol.OllamaModel
+	}
+	tok, tokPath, err := ensureAdminToken(cfg.DataDir, cfg.AuthToken, pol.UsesCLI())
+	if err != nil {
 		return nil, err
+	}
+	if tokPath != "" {
+		cfg.AuthToken = tok
+		fmt.Fprintf(os.Stderr, "local-grok-bots: a CLI backend is enabled, so the API requires a token; it is in %s. Open /login?token=<token> once per browser.\n", tokPath)
+	}
+	aud, err := audit.Open(pol.AuditLog)
+	if err != nil {
+		return nil, err
+	}
+	st, err := store.Open(cfg.DBPath())
+	if err != nil {
+		_ = aud.Close()
+		return nil, err
+	}
+	procs, err := st.ReconcileOnBoot(cfg.Version, pol.UsesCLI())
+	if err != nil {
+		st.Close()
+		_ = aud.Close()
+		return nil, err
+	}
+	for _, proc := range procs {
+		clisession.KillStoredCLI(clisession.StoredCLI{
+			PID: proc.PID, PGID: proc.PGID, Start: proc.Start, Exe: proc.Exe, Marker: proc.Marker,
+		})
+		_ = st.ClearCLIProc(proc.BotID)
 	}
 	if m == nil {
 		m = model.NewOllama(cfg.OllamaURL)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{
-		cfg:     cfg,
-		st:      st,
-		model:   m,
-		ws:      cfg.Workspace(),
-		bus:     NewBus(),
-		ctx:     ctx,
-		cancel:  cancel,
-		loops:   map[string]*loopState{},
-		resume:  map[string]resumeHold{},
-		pending: map[string][]model.Message{},
+		cfg:        cfg,
+		st:         st,
+		model:      m,
+		ws:         cfg.Workspace(),
+		bus:        NewBus(),
+		policy:     pol,
+		audit:      aud,
+		ctx:        ctx,
+		cancel:     cancel,
+		loops:      map[string]*loopState{},
+		resume:     map[string]resumeHold{},
+		pending:    map[string][]model.Message{},
+		activity:   map[string]time.Time{},
+		permTokens: map[string]permBind{},
+		permBase:   httpBase(cfg.BindAddr),
 	}
+	a.perm = permission.New(permission.Options{
+		Publish: func(runID, event string, payload any) {
+			if event == "permission_decision" {
+				a.recordPermission(payload)
+			}
+			a.bus.Publish(runID, event, payload)
+		},
+		UIPresent: func(runID string) bool {
+			return a.bus.PromptSubscribed(runID)
+		},
+		Audit: func(fields map[string]any) {
+			if a.audit != nil && a.audit.Enabled() {
+				a.audit.Write(fields)
+			}
+		},
+	})
 	if err := mkdirWorkspace(a.ws); err != nil {
 		st.Close()
+		_ = aud.Close()
 		cancel()
 		return nil, err
 	}
@@ -99,6 +201,10 @@ func mkdirWorkspace(path string) error {
 // Shutdown stops timers and runs, records daemon_stop, and closes the database.
 func (a *App) Shutdown() {
 	a.rtMu.Lock()
+	if a.closing {
+		a.rtMu.Unlock()
+		return
+	}
 	a.closing = true
 	a.rtMu.Unlock()
 	a.cancel()
@@ -106,6 +212,9 @@ func (a *App) Shutdown() {
 	_ = a.st.FailRunning("shutdown")
 	_ = a.st.AddLog("", "daemon_stop", map[string]any{})
 	_ = a.st.Close()
+	if a.audit != nil {
+		_ = a.audit.Close()
+	}
 }
 
 // Run serves HTTP until ctx is cancelled, then shuts down cleanly.
@@ -147,12 +256,19 @@ func (a *App) timerLoop() {
 			return
 		case <-t.C:
 			a.fireDue()
+			a.killIdle()
 		}
 	}
 }
 
 func (a *App) fireDue() {
 	if a.ctx.Err() != nil {
+		return
+	}
+	a.rtMu.Lock()
+	enabled := a.policy.TimersEnabled
+	a.rtMu.Unlock()
+	if !enabled {
 		return
 	}
 	due, err := a.st.ClaimDueTimers(time.Now().UTC())
@@ -168,6 +284,7 @@ func (a *App) fireDue() {
 		}); err != nil {
 			continue
 		}
+		a.noteScheduledTurn(tm.BotID)
 		a.kick(tm.BotID)
 	}
 }
@@ -218,6 +335,7 @@ func (a *App) kickLocked(botID string) string {
 	st.running = true
 	st.runID = run.ID
 	st.again = false
+	st.released = make(chan struct{})
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
@@ -270,6 +388,7 @@ func (a *App) continueRun(botID, fromRun string) (string, int, error) {
 	st.running = true
 	st.runID = run.ID
 	st.again = false
+	st.released = make(chan struct{})
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
@@ -388,6 +507,10 @@ func (a *App) endLoop(botID string) {
 		st.again = false
 		st.runID = ""
 		st.cancel = nil
+		if st.released != nil {
+			close(st.released)
+			st.released = nil
+		}
 	}
 	a.rtMu.Unlock()
 	if again && a.ctx.Err() == nil {
