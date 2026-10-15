@@ -175,6 +175,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		eventTransport = policy.TransportNone
 		cliDenySource = cliNoHostSource(a.policy.UIPrompts)
 	}
+	a.warnGrokDarwinNetwork(bot, runID, backend)
 	trace := &cliTrace{a: a, botID: bot.ID, runID: runID}
 	res, err := runner.Run(turnCtx, spec, func(ev clisession.Event) {
 		switch ev.Kind {
@@ -503,6 +504,31 @@ func (a *App) recordSandboxRefusal(botID, backend, why string) {
 		}
 		a.audit.Write(rec)
 	}
+}
+
+// warnGrokDarwinNetwork records that this Grok turn has no network jail.
+// macOS does not enforce restrict_network. The turn still runs. Linux, and a
+// bot that was granted net, are quiet.
+func (a *App) warnGrokDarwinNetwork(bot store.Bot, runID, backend string) {
+	if !strings.EqualFold(backend, "grok") || cliGOOS != "darwin" {
+		return
+	}
+	for _, g := range bot.Grants {
+		if g == "net" {
+			return
+		}
+	}
+	const reason = "restrict_network is not enforced on macOS"
+	fields := map[string]any{"backend": backend, "os": "darwin", "run_id": runID, "reason": reason}
+	a.log(bot.ID, "cli_network_unrestricted", fields)
+	if a.audit != nil && a.audit.Enabled() {
+		rec := map[string]any{"event": "cli_network_unrestricted", "bot_id": bot.ID}
+		for k, v := range fields {
+			rec[k] = v
+		}
+		a.audit.Write(rec)
+	}
+	fmt.Fprintf(os.Stderr, "local-grok-bots: grok on macOS does not enforce restrict_network; bot %s has no net grant (cli_network_unrestricted)\n", bot.ID)
 }
 
 // cliGOOS is the OS the Claude home default is chosen for. Tests set it.

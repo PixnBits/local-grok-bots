@@ -95,6 +95,9 @@ On each bot's first Claude turn after the daemon starts, the daemon writes a
   under [Sandbox and tools](#sandbox-and-tools).
 - `--strict-mcp-config`: only the daemon's `--mcp-config` (the permission tool
   on the mcp transport), never `.mcp.json` or `~/.claude.json`.
+  Permission prompts on the mcp transport depend on MCP. If managed policy
+  disables MCP, set `claude_transport = "stream_control"` so the broker
+  answers asks on stdin instead. See `docs/cli-permissions.md`.
 - `CLAUDE_CONFIG_DIR=<home>/.claude`.
 - Enterprise `managed-settings.json` still applies and still wins. That is
   intended.
@@ -219,6 +222,13 @@ Linux). Only existing paths are listed, since Grok also refuses a deny path it
 can't bind. A `ssh` grant drops `~/.ssh` from the list. Grok's own
 `auth.json` is not denied.
 
+On macOS, Grok's `restrict_network` is not enforced, so a Grok bot
+without a `net` grant still has network access there. Only the web tools are
+removed. Once per such turn the daemon writes `cli_network_unrestricted` to
+the bot log and the audit sink (`backend`, `os`, `run_id`, `reason`) and
+prints the same warning on stderr. A `net` grant, and every Linux turn, stay
+quiet. Use Claude, or Linux, where network isolation matters.
+
 A profile pinned in `requirements.toml` (`/etc/grok` or signed) outranks
 `--sandbox`, so a stricter managed pin still wins. The user's
 `~/.grok/config.toml` sandbox profile and `~/.grok/sandbox.toml` are not read
@@ -309,6 +319,18 @@ both CLIs are denied the file. Without the token a CLI's shell can't call the
 API, including `POST .../permissions/{id}`. `GET /api/health` stays open, as
 does the per-run MCP permission route, which only asks the broker. Ollama-only
 setups need no token unless `AUTH_TOKEN` is set.
+
+## Ollama run_shell on macOS
+
+On macOS, Ollama `run_shell` now runs under `/usr/bin/sandbox-exec` with a
+generated Seatbelt profile. Before this branch it failed closed on macOS, so
+the tool never ran a command there. There is no `/work` mount: the shell
+starts in the real workspace path. The profile denies by default, reads
+system paths and the workspace, and writes only the workspace and a private
+temp directory. `net` and `ssh` grants are denied because the connect proxy
+needs `LD_PRELOAD`, so the network stays closed. A missing `sandbox-exec`
+fails closed. Apple marks `sandbox-exec` deprecated; it still ships. This
+path has been compile-checked, not run on a Mac.
 
 ## Interactive tools
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -264,6 +265,123 @@ type sandboxFailRunner struct{}
 
 func (sandboxFailRunner) Run(context.Context, clisession.Spec, func(clisession.Event)) (clisession.Result, error) {
 	return clisession.Result{}, fmt.Errorf("sandbox profile lgb could not be applied")
+}
+
+type okRunner struct{}
+
+func (okRunner) Run(context.Context, clisession.Spec, func(clisession.Event)) (clisession.Result, error) {
+	return clisession.Result{Text: "ok", SessionID: "sess-ok"}, nil
+}
+
+func TestGrokDarwinNetworkIsWarned(t *testing.T) {
+	old := cliGOOS
+	cliGOOS = "darwin"
+	t.Cleanup(func() { cliGOOS = old })
+	dir := t.TempDir()
+	app := newApp(t, dir, nil)
+	logPath := filepath.Join(dir, "audit.log")
+	lg, err := audit.Open(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.audit = lg
+	app.runner = okRunner{}
+	app.rtMu.Lock()
+	app.policy = policy.Policy{Backend: "grok", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute}
+	app.rtMu.Unlock()
+	srv := serve(t, app)
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldErr := os.Stderr
+	os.Stderr = w
+	t.Cleanup(func() { os.Stderr = oldErr })
+
+	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Geo", "description": "g"}, "")
+	if res.StatusCode != 201 && res.StatusCode != 200 {
+		t.Fatalf("create %d %s", res.StatusCode, b)
+	}
+	var bot store.Bot
+	decodeJSON(t, b, &bot)
+	postGrok(t, srv.URL, bot.ID)
+	waitIdle(t, srv.URL, bot.ID, "")
+	postGrok(t, srv.URL, bot.ID)
+	waitIdle(t, srv.URL, bot.ID, "")
+	_ = w.Close()
+	os.Stderr = oldErr
+	stderr, _ := io.ReadAll(r)
+	if strings.Count(string(stderr), "cli_network_unrestricted") != 2 {
+		t.Fatalf("stderr warnings:\n%s", stderr)
+	}
+	evs, err := app.st.ListLog(bot.ID, "cli_network_unrestricted", "", 10)
+	if err != nil || len(evs) != 2 {
+		t.Fatalf("log %v %v", evs, err)
+	}
+	for _, ev := range evs {
+		d := string(ev.Detail)
+		for _, want := range []string{`"backend":"grok"`, `"os":"darwin"`, `"run_id":`, `"reason":"restrict_network is not enforced on macOS"`} {
+			if !strings.Contains(d, want) {
+				t.Fatalf("detail lacks %s: %s", want, d)
+			}
+		}
+	}
+	if err := lg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil || strings.Count(string(raw), `"event":"cli_network_unrestricted"`) != 2 || !strings.Contains(string(raw), `"os":"darwin"`) {
+		t.Fatalf("audit %s %v", raw, err)
+	}
+}
+
+func TestGrokNetworkWarnSkipsLinuxAndNetGrant(t *testing.T) {
+	dir := t.TempDir()
+	app := newApp(t, dir, nil)
+	app.runner = okRunner{}
+	app.rtMu.Lock()
+	app.policy = policy.Policy{Backend: "grok", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute}
+	app.rtMu.Unlock()
+	srv := serve(t, app)
+	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Geo", "description": "g"}, "")
+	if res.StatusCode != 201 && res.StatusCode != 200 {
+		t.Fatalf("create %d %s", res.StatusCode, b)
+	}
+	var bot store.Bot
+	decodeJSON(t, b, &bot)
+	postGrok(t, srv.URL, bot.ID)
+	waitIdle(t, srv.URL, bot.ID, "")
+	if n := networkWarnings(t, app, bot.ID); n != 0 {
+		t.Fatalf("linux warned %d times", n)
+	}
+	old := cliGOOS
+	cliGOOS = "darwin"
+	t.Cleanup(func() { cliGOOS = old })
+	if _, err := app.st.UpdateBot(bot.ID, store.BotPatch{GrantsSet: true, Grants: []string{"net"}}); err != nil {
+		t.Fatal(err)
+	}
+	postGrok(t, srv.URL, bot.ID)
+	waitIdle(t, srv.URL, bot.ID, "")
+	if n := networkWarnings(t, app, bot.ID); n != 0 {
+		t.Fatalf("net grant warned %d times", n)
+	}
+}
+
+func postGrok(t *testing.T, base, botID string) {
+	t.Helper()
+	res, b := do(t, "POST", base+"/api/bots/"+botID+"/thread/messages", map[string]any{"content": "go"}, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("post %d %s", res.StatusCode, b)
+	}
+}
+
+func networkWarnings(t *testing.T, app *App, botID string) int {
+	t.Helper()
+	evs, err := app.st.ListLog(botID, "cli_network_unrestricted", "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(evs)
 }
 
 func TestGrokSandboxFailureIsAudited(t *testing.T) {
