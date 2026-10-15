@@ -63,3 +63,21 @@ func TestClaudeSandboxManagedOffSkipsCheckAndBlock(t *testing.T) {
 		t.Fatalf("admin token not denied to Claude tools: %s", b)
 	}
 }
+
+func TestCLIPreambleStatesTheRealBoundary(t *testing.T) {
+	dir := t.TempDir()
+	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))
+	got := app.cliBoundary()
+	for _, want := range []string{"Claude Code's sandbox", "not inside the daemon's jail", "run_shell"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("claude boundary lacks %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, "your own sandbox is the boundary") {
+		t.Fatalf("old wording: %s", got)
+	}
+	app.policy.Backend = "grok"
+	if g := app.cliBoundary(); !strings.Contains(g, "Grok's sandbox") {
+		t.Fatalf("grok boundary: %s", g)
+	}
+}

@@ -618,6 +618,21 @@ func (a *App) cliPrompt(bot store.Bot, fresh bool, inputs []store.Message) (stri
 	return b.String(), nil
 }
 
+// cliBoundary tells a CLI bot what actually confines it. The daemon's own
+// jail and tools (run_shell, timers, memory, other bots) are not available.
+func (a *App) cliBoundary() string {
+	const tail = "You run directly on the host, not inside the daemon's jail, and the daemon's own tools (run_shell, timers, memory, other bots) are not available to you. Some actions need the user's approval; a denied action is final for this turn.\n"
+	switch a.policy.EffectiveBackend() {
+	case "grok":
+		return "Use your own tools. Grok's sandbox confines them: files are readable and writable in your workspace and temp directories, credential paths are denied, and network access is blocked unless the user granted it (Grok can't block it on macOS). " + tail
+	default:
+		if a.policy.CLIClaudeSandbox == policy.SandboxOff {
+			return "Use your own tools. Shell commands run under your organization's Claude sandbox settings, if any. Reads outside your workspace, credential files, web tools, git push, and ssh are denied unless the user granted them. " + tail
+		}
+		return "Use your own tools. Shell commands run in Claude Code's sandbox: writes go only to your workspace and temp directories, and network reaches only hosts the user granted. File tools can't read outside your workspace or touch credential files, and web tools, git push, and ssh are denied unless granted. " + tail
+	}
+}
+
 func (a *App) writeCLIPreamble(b *strings.Builder, bot store.Bot) error {
 	mem, err := a.st.ListMemory(bot.ID)
 	if err != nil {
@@ -643,7 +658,8 @@ func (a *App) writeCLIPreamble(b *strings.Builder, bot store.Bot) error {
 		b.WriteString(m.Value)
 		b.WriteString("\n")
 	}
-	b.WriteString("\nUse your own tools. This process is not wrapped in the daemon jail; your own sandbox is the boundary.\n")
+	b.WriteString("\n")
+	b.WriteString(a.cliBoundary())
 	b.WriteString("Scheduled prompts are prefixed with [scheduled]. Direct messages from other bots are prefixed with [DM from Name].\n\n")
 	return nil
 }

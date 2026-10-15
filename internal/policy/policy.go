@@ -291,7 +291,8 @@ func (p Policy) EffectiveBackend() string {
 }
 
 // UsesCLI reports whether this turn is a headless CLI process.
-// The daemon jail stays off on that path. The CLI's own sandbox is the boundary.
+// The daemon jail stays off on that path. The CLI's own sandbox, configured by
+// the daemon's settings (docs/cli-isolation.md), is the boundary.
 func (p Policy) UsesCLI() bool {
 	switch p.EffectiveBackend() {
 	case "claude", "grok":
