@@ -170,8 +170,8 @@ exits with a sandbox error, the turn fails with a notice naming what is
 missing and a `cli_sandbox_unavailable` entry in the bot log and audit. A
 managed policy can set `claude_sandbox = "off"`; a local one can't (warning).
 `"off"` only stops the daemon from writing its own sandbox block. It does
-not turn off a sandbox the user or managed settings already enable: those
-keys are still copied (see below).
+not turn off a sandbox the user or managed settings already enable: the
+user's restrictive keys are still copied (see below).
 
 How this combines with sandbox settings a user already has (from Claude's
 settings and sandboxing docs, Claude Code v2.1.285+):
@@ -179,8 +179,7 @@ settings and sandboxing docs, Claude Code v2.1.285+):
 - Managed settings: highest precedence. A managed boolean (`enabled`,
   `failIfUnavailable`, `allowUnsandboxedCommands`) wins over the daemon's
   value, and arrays merge. The daemon's own sandbox block never sets
-  `enabled: false`. A user's `enabled: false` is copied only when the daemon
-  is not writing its own block (`claude_sandbox = "off"`). Managed settings
+  `enabled: false`. A user's `enabled: false` is never copied. Managed settings
   still win, so a managed sandbox stays on. If managed sets
   `allowUnsandboxedCommands: true`, managed wins; the daemon can't tighten
   that key. Deny rules from every scope are evaluated first, so the daemon's
@@ -190,14 +189,18 @@ settings and sandboxing docs, Claude Code v2.1.285+):
   The daemon reads it from the real user home and copies its `sandbox` keys
   into the `--settings` file. `permissions.deny` and `sandbox.credentials.files`
   are unions, so a user deny is kept and the daemon's denies are added. On one
-  credential path, `deny` wins over `allow`. Other user sandbox keys are kept,
-  including `allowedDomains`, `excludedCommands`, and `allowWrite`. The daemon
-  does not add entries to those allowlists. Where the daemon also sets a
-  boolean, the stricter value is written: `enabled`, `failIfUnavailable`, and
-  `network.strictAllowlist` are true if either side says true;
-  `allowUnsandboxedCommands` and `autoAllowBashIfSandboxed` are false if
-  either side says false. If the user did not set `allowedDomains`, the
-  daemon's grant list is used when the daemon writes a sandbox block. Allow
+  credential path, `deny` wins over `allow`. Only restrictive user keys are
+  kept: booleans take the stricter value (`enabled`, `failIfUnavailable`,
+  `network.strictAllowlist` true if either side says true;
+  `allowUnsandboxedCommands`, `autoAllowBashIfSandboxed`,
+  `network.allowLocalBinding` false if either side says false; a user value
+  alone is kept only when it is the restrictive one), and deny lists
+  (`deniedDomains`, `filesystem.denyRead`/`denyWrite`) are unions.
+  Allowlists (`allowedDomains`, `allowUnixSockets`, `filesystem.allowRead`/
+  `allowWrite`) are narrowed to what policy grants: a user list is
+  intersected with the daemon's, and is empty when policy grants nothing.
+  User lists never replace the daemon's. `excludedCommands` and any other
+  key not listed here are dropped. Allow
   rules, hooks, and the rest of the user file are not copied. A missing file
   means there is nothing to carry. If the file exists and cannot be read or
   parsed, the turn is refused and audited as `cli_sandbox_unavailable`,

@@ -135,18 +135,18 @@ func TestUserSandboxEnabledSurvivesSandboxOff(t *testing.T) {
 		t.Fatalf("user sandbox not kept: %v", sb)
 	}
 	raw := mustJSON(doc)
-	for _, want := range []string{"Bash(curl *)", "corp.example", "docker", "/tmp/user-scratch", "/srv/hidden", "/only-user", "WebFetch"} {
+	for _, want := range []string{"Bash(curl *)", "/srv/hidden", "/only-user", "WebFetch"} {
 		if !strings.Contains(raw, want) {
 			t.Fatalf("missing %s in %s", want, raw)
 		}
 	}
-	for _, banned := range []string{"Bash(danger)", "PreToolUse", "sk-user-secret", `"enabled":false`} {
+	for _, banned := range []string{"Bash(danger)", "PreToolUse", "sk-user-secret", `"enabled":false`, "corp.example", `"docker"`, "excludedCommands", "/tmp/user-scratch", `"strictAllowlist":false`} {
 		if strings.Contains(raw, banned) {
 			t.Fatalf("copied or loosened %s in %s", banned, raw)
 		}
 	}
 	net := sb["network"].(map[string]any)
-	if net["strictAllowlist"] != false || mustJSON(net["allowedDomains"]) != `["corp.example"]` {
+	if _, ok := net["strictAllowlist"]; ok || mustJSON(net["allowedDomains"]) != `[]` {
 		t.Fatalf("network %v", net)
 	}
 }
@@ -183,10 +183,10 @@ func TestUserDenyAndCredentialsAreUnioned(t *testing.T) {
 		t.Fatalf("bool merge loosened the daemon sandbox: %v", sb)
 	}
 	net := sb["network"].(map[string]any)
-	if net["strictAllowlist"] != true || mustJSON(net["allowedDomains"]) != `["corp.example"]` {
-		t.Fatalf("allowlist changed: %v", net)
+	if net["strictAllowlist"] != true || mustJSON(net["allowedDomains"]) != `[]` {
+		t.Fatalf("allowlist not narrowed to policy: %v", net)
 	}
-	if strings.Contains(mustJSON(net), "pypi.org") {
+	if strings.Contains(mustJSON(net), "pypi.org") || strings.Contains(mustJSON(net), "corp.example") {
 		t.Fatalf("daemon host added to the user allowlist: %v", net)
 	}
 	files := sb["credentials"].(map[string]any)["files"].([]any)
@@ -328,4 +328,36 @@ func grokArgv(t *testing.T, iso *Isolation) string {
 		t.Fatal(err)
 	}
 	return strings.Join(a, " ")
+}
+
+// A user sandbox block must not widen policy: with no net grant, user
+// domains, sockets, allowWrite "/" and excludedCommands are all dropped.
+func TestUserSandboxCannotWidenPolicy(t *testing.T) {
+	home := t.TempDir()
+	writeUserSettings(t, home, `{"sandbox": {
+		"enabled": true,
+		"excludedCommands": ["curl"],
+		"someFutureKey": true,
+		"network": {"allowedDomains": ["evil.example"], "allowUnixSockets": ["/var/run/docker.sock"], "allowLocalBinding": true},
+		"filesystem": {"allowWrite": ["/"], "allowRead": ["/"]}
+	}}`)
+	for _, on := range []bool{true, false} {
+		doc := claudeDoc(t, IsolationOptions{UserHome: home, ClaudeSandbox: on})
+		sb := doc["sandbox"].(map[string]any)
+		raw := mustJSON(sb)
+		if sb["enabled"] != true {
+			t.Fatalf("sandbox=%v: user enabled lost: %s", on, raw)
+		}
+		for _, bad := range []string{"evil.example", "docker.sock", `"/"`, "excludedCommands", "curl", "someFutureKey", `"allowLocalBinding":true`} {
+			if strings.Contains(raw, bad) {
+				t.Fatalf("sandbox=%v: %s leaked into %s", on, bad, raw)
+			}
+		}
+	}
+	doc := claudeDoc(t, IsolationOptions{UserHome: home, ClaudeSandbox: true,
+		Grants: Grants{Net: true, NetAllow: []string{"pypi.org", "evil.example"}}})
+	net := doc["sandbox"].(map[string]any)["network"].(map[string]any)
+	if mustJSON(net["allowedDomains"]) != `["evil.example"]` {
+		t.Fatalf("intersection: %v", net)
+	}
 }

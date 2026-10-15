@@ -203,17 +203,19 @@ func checkUserSandboxShape(sb map[string]any) error {
 	return nil
 }
 
+// mergeSandbox builds the sandbox block from scratch. From the user's block it
+// keeps only keys that restrict: stricter booleans, deny lists, and allowlists
+// narrowed to what the daemon (policy) grants. User allowlists never replace
+// the daemon's, and unknown keys such as excludedCommands are dropped. A user
+// whose sandbox is enabled stays enabled.
 func mergeSandbox(daemon, user map[string]any) (map[string]any, error) {
 	if user == nil {
 		return daemon, nil
 	}
-	out, err := cloneMap(user)
-	if err != nil {
-		return nil, userSettingsErr("", err)
-	}
 	if daemon == nil {
-		return out, nil
+		daemon = map[string]any{}
 	}
+	out := map[string]any{}
 	for _, key := range []struct {
 		name       string
 		trueStrict bool
@@ -223,24 +225,198 @@ func mergeSandbox(daemon, user map[string]any) (map[string]any, error) {
 		{"allowUnsandboxedCommands", false},
 		{"autoAllowBashIfSandboxed", false},
 	} {
-		raw, ok := daemon[key.name]
-		if !ok {
-			continue
-		}
-		if err := applyStricterBool(out, key.name, raw, key.trueStrict); err != nil {
+		if err := stricterBool(out, key.name, daemon[key.name], user[key.name], key.trueStrict); err != nil {
 			return nil, err
 		}
 	}
-	if err := mergeNetwork(out, daemon["network"]); err != nil {
+	if err := mergeNetwork(out, daemon["network"], user["network"]); err != nil {
 		return nil, err
 	}
-	if err := mergeCredentials(out, daemon["credentials"]); err != nil {
+	if err := mergeCredentials(out, daemon["credentials"], user["credentials"]); err != nil {
 		return nil, err
 	}
-	if err := mergeFilesystem(out, daemon["filesystem"]); err != nil {
+	if err := mergeFilesystem(out, daemon["filesystem"], user["filesystem"]); err != nil {
 		return nil, err
 	}
 	return out, nil
+}
+
+// stricterBool writes the stricter of the daemon and user values. A user
+// value alone is kept only when it is the restrictive one.
+func stricterBool(dst map[string]any, key string, daemonVal, userVal any, trueIsStricter bool) error {
+	var d, u *bool
+	if daemonVal != nil {
+		b, ok := daemonVal.(bool)
+		if !ok {
+			return fmt.Errorf("sandbox %s: daemon value is not a bool", key)
+		}
+		d = &b
+	}
+	if userVal != nil {
+		b, ok := userVal.(bool)
+		if !ok {
+			return userSettingsErr("", fmt.Errorf("sandbox.%s is not a bool", key))
+		}
+		u = &b
+	}
+	switch {
+	case d != nil && u != nil:
+		if trueIsStricter {
+			dst[key] = *d || *u
+		} else {
+			dst[key] = *d && *u
+		}
+	case d != nil:
+		dst[key] = *d
+	case u != nil && *u == trueIsStricter:
+		dst[key] = *u
+	}
+	return nil
+}
+
+func objectArg(v any, what string, user bool) (map[string]any, error) {
+	if v == nil {
+		return map[string]any{}, nil
+	}
+	m, ok := v.(map[string]any)
+	if !ok {
+		err := fmt.Errorf("sandbox.%s is not an object", what)
+		if user {
+			return nil, userSettingsErr("", err)
+		}
+		return nil, err
+	}
+	return m, nil
+}
+
+// intersectAllow narrows a user allowlist to what the daemon grants. Without a
+// user list the daemon's list is used; without a daemon list nothing is allowed.
+func intersectAllow(dst map[string]any, key string, d, u map[string]any) error {
+	dRaw, dHas := d[key]
+	uRaw, uHas := u[key]
+	if !dHas && !uHas {
+		return nil
+	}
+	dl, ok := asStringList(dRaw)
+	if !ok {
+		return fmt.Errorf("daemon sandbox %s is not a list of strings", key)
+	}
+	if !uHas || uRaw == nil {
+		if dHas {
+			dst[key] = dl
+		}
+		return nil
+	}
+	ul, ok := asStringList(uRaw)
+	if !ok {
+		return userSettingsErr("", fmt.Errorf("sandbox %s is not a list of strings", key))
+	}
+	grant := map[string]bool{}
+	for _, s := range dl {
+		grant[s] = true
+	}
+	out := []string{}
+	for _, s := range ul {
+		if grant[s] {
+			out = append(out, s)
+		}
+	}
+	dst[key] = out
+	return nil
+}
+
+func mergeNetwork(out map[string]any, daemonNet, userNet any) error {
+	if daemonNet == nil && userNet == nil {
+		return nil
+	}
+	dNet, err := objectArg(daemonNet, "network", false)
+	if err != nil {
+		return err
+	}
+	uNet, err := objectArg(userNet, "network", true)
+	if err != nil {
+		return err
+	}
+	n := map[string]any{}
+	if err := stricterBool(n, "strictAllowlist", dNet["strictAllowlist"], uNet["strictAllowlist"], true); err != nil {
+		return err
+	}
+	if err := stricterBool(n, "allowLocalBinding", dNet["allowLocalBinding"], uNet["allowLocalBinding"], false); err != nil {
+		return err
+	}
+	for _, key := range []string{"allowedDomains", "allowUnixSockets"} {
+		if err := intersectAllow(n, key, dNet, uNet); err != nil {
+			return err
+		}
+	}
+	if dNet["deniedDomains"] != nil || uNet["deniedDomains"] != nil {
+		merged, err := unionStringListField(uNet["deniedDomains"], dNet["deniedDomains"])
+		if err != nil {
+			return userSettingsErr("", err)
+		}
+		n["deniedDomains"] = merged
+	}
+	if len(n) > 0 {
+		out["network"] = n
+	}
+	return nil
+}
+
+func mergeCredentials(out map[string]any, daemonCred, userCred any) error {
+	if daemonCred == nil && userCred == nil {
+		return nil
+	}
+	dCred, err := objectArg(daemonCred, "credentials", false)
+	if err != nil {
+		return err
+	}
+	uCred, err := objectArg(userCred, "credentials", true)
+	if err != nil {
+		return err
+	}
+	if dCred["files"] == nil && uCred["files"] == nil {
+		return nil
+	}
+	files, err := unionCredFiles(dCred["files"], uCred["files"])
+	if err != nil {
+		return userSettingsErr("", err)
+	}
+	out["credentials"] = map[string]any{"files": files}
+	return nil
+}
+
+func mergeFilesystem(out map[string]any, daemonFS, userFS any) error {
+	if daemonFS == nil && userFS == nil {
+		return nil
+	}
+	dFS, err := objectArg(daemonFS, "filesystem", false)
+	if err != nil {
+		return err
+	}
+	uFS, err := objectArg(userFS, "filesystem", true)
+	if err != nil {
+		return err
+	}
+	f := map[string]any{}
+	for _, key := range []string{"denyRead", "denyWrite"} {
+		if dFS[key] == nil && uFS[key] == nil {
+			continue
+		}
+		merged, err := unionStringListField(uFS[key], dFS[key])
+		if err != nil {
+			return userSettingsErr("", err)
+		}
+		f[key] = merged
+	}
+	for _, key := range []string{"allowRead", "allowWrite"} {
+		if err := intersectAllow(f, key, dFS, uFS); err != nil {
+			return err
+		}
+	}
+	if len(f) > 0 {
+		out["filesystem"] = f
+	}
+	return nil
 }
 
 func cloneMap(m map[string]any) (map[string]any, error) {
@@ -253,131 +429,6 @@ func cloneMap(m map[string]any) (map[string]any, error) {
 		return nil, err
 	}
 	return out, nil
-}
-
-func applyStricterBool(dst map[string]any, key string, daemonVal any, trueIsStricter bool) error {
-	d, ok := daemonVal.(bool)
-	if !ok {
-		return fmt.Errorf("sandbox %s: daemon value is not a bool", key)
-	}
-	raw, exists := dst[key]
-	if !exists || raw == nil {
-		dst[key] = d
-		return nil
-	}
-	u, ok := raw.(bool)
-	if !ok {
-		return userSettingsErr("", fmt.Errorf("sandbox.%s is not a bool", key))
-	}
-	if trueIsStricter {
-		dst[key] = u || d
-		return nil
-	}
-	dst[key] = u && d
-	return nil
-}
-
-func mergeNetwork(out map[string]any, daemonNet any) error {
-	if daemonNet == nil {
-		return nil
-	}
-	dNet, ok := daemonNet.(map[string]any)
-	if !ok {
-		return fmt.Errorf("daemon sandbox network is not an object")
-	}
-	uNet, err := objectField(out, "network")
-	if err != nil {
-		return err
-	}
-	out["network"] = uNet
-	if raw, ok := dNet["strictAllowlist"]; ok {
-		if err := applyStricterBool(uNet, "strictAllowlist", raw, true); err != nil {
-			return err
-		}
-	}
-	if raw, ok := dNet["allowLocalBinding"]; ok {
-		if err := applyStricterBool(uNet, "allowLocalBinding", raw, false); err != nil {
-			return err
-		}
-	}
-	// An allowlist the user wrote is kept whole. Adding the daemon's hosts
-	// would loosen it. The daemon's list is used only when the user set none.
-	if _, userHas := uNet["allowedDomains"]; !userHas {
-		if raw, ok := dNet["allowedDomains"]; ok {
-			uNet["allowedDomains"] = raw
-		}
-	}
-	if _, userHas := uNet["allowUnixSockets"]; !userHas {
-		if raw, ok := dNet["allowUnixSockets"]; ok {
-			uNet["allowUnixSockets"] = raw
-		}
-	}
-	if raw, ok := dNet["deniedDomains"]; ok {
-		merged, err := unionStringListField(uNet["deniedDomains"], raw)
-		if err != nil {
-			return err
-		}
-		uNet["deniedDomains"] = merged
-	}
-	return nil
-}
-
-func mergeCredentials(out map[string]any, daemonCred any) error {
-	if daemonCred == nil {
-		return nil
-	}
-	dCred, ok := daemonCred.(map[string]any)
-	if !ok {
-		return fmt.Errorf("daemon sandbox credentials is not an object")
-	}
-	uCred, err := objectField(out, "credentials")
-	if err != nil {
-		return err
-	}
-	out["credentials"] = uCred
-	if dCred["files"] != nil || uCred["files"] != nil {
-		files, err := unionCredFiles(dCred["files"], uCred["files"])
-		if err != nil {
-			return userSettingsErr("", err)
-		}
-		uCred["files"] = files
-	}
-	return nil
-}
-
-func mergeFilesystem(out map[string]any, daemonFS any) error {
-	if daemonFS == nil {
-		return nil
-	}
-	dFS, ok := daemonFS.(map[string]any)
-	if !ok {
-		return fmt.Errorf("daemon sandbox filesystem is not an object")
-	}
-	uFS, err := objectField(out, "filesystem")
-	if err != nil {
-		return err
-	}
-	out["filesystem"] = uFS
-	for _, key := range []string{"denyRead", "denyWrite"} {
-		raw, ok := dFS[key]
-		if !ok {
-			continue
-		}
-		merged, err := unionStringListField(uFS[key], raw)
-		if err != nil {
-			return err
-		}
-		uFS[key] = merged
-	}
-	for _, key := range []string{"allowRead", "allowWrite"} {
-		if _, userHas := uFS[key]; userHas {
-			continue
-		}
-		if raw, ok := dFS[key]; ok {
-			uFS[key] = raw
-		}
-	}
-	return nil
 }
 
 func objectField(parent map[string]any, key string) (map[string]any, error) {
