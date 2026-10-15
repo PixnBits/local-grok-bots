@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -302,6 +303,42 @@ func TestStreamControlCancelWritesNoResponse(t *testing.T) {
 	}
 }
 
+func TestStreamControlWriteDoesNotStallStdout(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("stdin pipe size is set with F_SETPIPE_SZ")
+	}
+	f := newStreamTurn(t, "stall", policy.Policy{
+		UIPrompts: true, PromptTimeout: 20 * time.Second,
+		ToolAllow: []string{"Bash"},
+	}, true, true)
+	release := func() {
+		if f.stallRelease == "" {
+			return
+		}
+		_ = os.WriteFile(f.stallRelease, []byte("go\n"), 0o644)
+	}
+	t.Cleanup(release)
+	f.openGate()
+	var saw []string
+	deadline := time.Now().Add(8 * time.Second)
+	for tokenCompletes(saw, "unstuck") < 0 && time.Now().Before(deadline) {
+		select {
+		case ev := <-f.events:
+			saw = append(saw, ev)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	release()
+	if tokenCompletes(saw, "unstuck") < 0 {
+		got := f.waitDone()
+		t.Fatalf("stdout reader stalled while stdin Write was blocked (run %s %s)", got.LastRunStatus, got.LastRunError)
+	}
+	got := f.waitDone()
+	if got.LastRunStatus != "done" || got.LastRunError != "" {
+		t.Fatalf("run %s %s", got.LastRunStatus, got.LastRunError)
+	}
+}
+
 func TestStreamControlInitializeErrorFailsClosed(t *testing.T) {
 	f := newStreamTurn(t, "init_error", policy.Policy{UIPrompts: true}, false, false)
 	got := f.waitDone()
@@ -413,19 +450,20 @@ func TestDaemonUnknownClaudeTransportDoesNotSpawn(t *testing.T) {
 }
 
 type streamFix struct {
-	t          *testing.T
-	app        *App
-	url        string
-	bot        store.Bot
-	runID      string
-	events     <-chan string
-	argvPath   string
-	stdinPath  string
-	gate       string
-	cancelGate string
-	cancelDone string
-	lg         *audit.Logger
-	auditPath  string
+	t            *testing.T
+	app          *App
+	url          string
+	bot          store.Bot
+	runID        string
+	events       <-chan string
+	argvPath     string
+	stdinPath    string
+	gate         string
+	cancelGate   string
+	cancelDone   string
+	stallRelease string
+	lg           *audit.Logger
+	auditPath    string
 }
 
 func newStreamTurn(t *testing.T, mode string, pol policy.Policy, withGate, prompts bool) *streamFix {
@@ -450,6 +488,10 @@ func newStreamTurn(t *testing.T, mode string, pol policy.Policy, withGate, promp
 		f.cancelDone = filepath.Join(dir, "cancel-done")
 		t.Setenv("LGB_FAKE_CANCEL_GATE", f.cancelGate)
 		t.Setenv("LGB_FAKE_CANCEL_DONE", f.cancelDone)
+	}
+	if mode == "stall" {
+		f.stallRelease = filepath.Join(dir, "stall-release")
+		t.Setenv("LGB_FAKE_STALL_RELEASE", f.stallRelease)
 	}
 	app := newApp(t, dir, nil)
 	lg, err := audit.Open(f.auditPath)

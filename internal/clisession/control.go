@@ -52,7 +52,10 @@ type controlSession struct {
 	onEvent func(Event)
 	res     Result
 
+	// mu guards the pending map, early cancels, and init state.
+	// It is never held across stdin I/O. wmu guards the stdin writer.
 	mu      sync.Mutex
+	wmu     sync.Mutex
 	closed  bool
 	initID  string
 	initCh  chan initOutcome
@@ -483,8 +486,8 @@ func (s *controlSession) writeJSON(v any) error {
 	if len(b) == 0 || b[len(b)-1] != '\n' {
 		b = append(b, '\n')
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
 	if s.closed || s.w == nil {
 		return io.ErrClosedPipe
 	}
@@ -493,8 +496,8 @@ func (s *controlSession) writeJSON(v any) error {
 }
 
 func (s *controlSession) closeIn() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.wmu.Lock()
+	defer s.wmu.Unlock()
 	if s.closed {
 		return
 	}

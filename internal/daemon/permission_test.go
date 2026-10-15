@@ -686,6 +686,17 @@ func fakeStreamClaude(args []string) {
 	// The gate is the same one MCP tests use: the daemon's initialize
 	// request sits in the pipe until a subscriber is ready.
 	waitFakeGate()
+	switch os.Getenv("LGB_FAKE_MODE") {
+	case "stall":
+		fakeStall(args)
+		return
+	case "reuse":
+		fakeReuse(args)
+		return
+	case "early":
+		fakeEarly(args)
+		return
+	}
 	log := stdinLogger()
 	lines := make(chan string, 32)
 	go func() {
@@ -788,6 +799,162 @@ func fakeQuestionAsk(id string) {
 
 func fakeResult(sid, text string) {
 	fakeOut(fmt.Sprintf(`{"type":"result","result":%q,"session_id":%q}`, text, sid))
+}
+
+func fakeSession(args []string) string {
+	sid := flagValue(args, "--session-id")
+	if sid == "" {
+		sid = flagValue(args, "--resume")
+	}
+	return sid
+}
+
+// scriptedIn reads the daemon's stdin a line at a time without pulling a
+// whole pipe into a buffer. Stall mode needs that so one Write stays blocked.
+func scriptedIn() (*bufio.Reader, func(string)) {
+	return bufio.NewReaderSize(os.Stdin, 16), stdinLogger()
+}
+
+func mustReadLine(in *bufio.Reader, log func(string)) string {
+	line, err := readLineWait(in, 15*time.Second)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "fake claude stdin: %v\n", err)
+		os.Exit(1)
+	}
+	log(line)
+	return line
+}
+
+// readLineWait reads one stdin line. The pipe does not support read deadlines,
+// so the timer lives beside the read.
+func readLineWait(in *bufio.Reader, d time.Duration) (string, error) {
+	type got struct {
+		line string
+		err  error
+	}
+	ch := make(chan got, 1)
+	go func() {
+		line, err := in.ReadString('\n')
+		ch <- got{strings.TrimRight(line, "\r\n"), err}
+	}()
+	select {
+	case g := <-ch:
+		if g.err != nil {
+			return "", g.err
+		}
+		return g.line, nil
+	case <-time.After(d):
+		return "", fmt.Errorf("timeout")
+	}
+}
+
+func fakeHandshake(in *bufio.Reader, log func(string)) {
+	first := mustReadLine(in, log)
+	id := controlRequestID(first)
+	if id == "" {
+		fmt.Fprintf(os.Stderr, "missing initialize: %s\n", first)
+		os.Exit(1)
+	}
+	fakeOut(fmt.Sprintf(`{"type":"control_response","response":{"subtype":"success","request_id":%q,"response":{}}}`, id))
+	if _, ok := readUserPrompt(in, log); !ok {
+		os.Exit(1)
+	}
+}
+
+func readUserPrompt(in *bufio.Reader, log func(string)) (string, bool) {
+	line := mustReadLine(in, log)
+	if !strings.Contains(line, `"type":"user"`) {
+		fmt.Fprintf(os.Stderr, "missing user prompt: %s\n", line)
+		return "", false
+	}
+	return line, true
+}
+
+// fakeStall fills the stdin pipe on purpose. A control_cancel_request and a
+// token follow the first byte of the blocked response. The stdout reader has
+// to handle both while that Write is still blocked.
+func fakeStall(args []string) {
+	in, log := scriptedIn()
+	fakeHandshake(in, log)
+	sz := shrinkStdinPipe()
+	body := strings.Repeat("A", sz+8192)
+	fakeToolAsk("req_stall_1", `{"command":"`+body+`"}`)
+	if err := readByteWait(in, 15*time.Second); err != nil {
+		fmt.Fprintf(os.Stderr, "fake claude stall read: %v\n", err)
+		os.Exit(1)
+	}
+	fakeOut(`{"type":"control_cancel_request","request_id":"req_stall_1"}`)
+	sid := fakeSession(args)
+	fakeOut(fmt.Sprintf(`{"type":"stream_event","session_id":%q,"event":{"delta":{"type":"text_delta","text":"unstuck"}}}`, sid))
+	waitFakeFile(os.Getenv("LGB_FAKE_STALL_RELEASE"), true)
+	if _, err := readLineWait(in, 15*time.Second); err != nil {
+		fmt.Fprintf(os.Stderr, "fake claude stall drain: %v\n", err)
+		os.Exit(1)
+	}
+	fakeResult(sid, "stalled")
+	os.Exit(0)
+}
+
+// fakeReuse cancels an id after its response has been written, then sends a
+// new can_use_tool with that same id. The second ask must still be answered.
+func fakeReuse(args []string) {
+	in, log := scriptedIn()
+	fakeHandshake(in, log)
+	fakeToolAsk("req_reuse_1", `{"command":"echo-first"}`)
+	first := mustReadLine(in, log)
+	if !strings.Contains(first, "echo-first") || !strings.Contains(first, `"request_id":"req_reuse_1"`) {
+		fmt.Fprintf(os.Stderr, "first response %s\n", first)
+		os.Exit(1)
+	}
+	fakeOut(`{"type":"control_cancel_request","request_id":"req_reuse_1"}`)
+	fakeToolAsk("req_reuse_1", `{"command":"echo-second"}`)
+	second := mustReadLine(in, log)
+	if !strings.Contains(second, "echo-second") || !strings.Contains(second, `"request_id":"req_reuse_1"`) {
+		fmt.Fprintf(os.Stderr, "reused id got %s\n", second)
+		os.Exit(1)
+	}
+	fakeResult(fakeSession(args), "reused")
+	os.Exit(0)
+}
+
+// fakeEarly sends one more cancel than the early set keeps, then asks with
+// the oldest id and with an id that is still in the set.
+func fakeEarly(args []string) {
+	in, log := scriptedIn()
+	fakeHandshake(in, log)
+	const capN = 64
+	for i := 0; i <= capN; i++ {
+		fakeOut(fmt.Sprintf(`{"type":"control_cancel_request","request_id":"early_%d"}`, i))
+	}
+	fakeToolAsk("early_0", `{"command":"evicted"}`)
+	got := mustReadLine(in, log)
+	if !strings.Contains(got, `"request_id":"early_0"`) || !strings.Contains(got, "evicted") {
+		fmt.Fprintf(os.Stderr, "evicted id got %s\n", got)
+		os.Exit(1)
+	}
+	fakeToolAsk("early_64", `{"command":"kept"}`)
+	extra, err := readLineWait(in, 2*time.Second)
+	if err == nil {
+		log(extra)
+		fmt.Fprintf(os.Stderr, "kept id was answered: %s\n", extra)
+		os.Exit(1)
+	}
+	fakeResult(fakeSession(args), "early-done")
+	os.Exit(0)
+}
+
+func readByteWait(in *bufio.Reader, d time.Duration) error {
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := in.ReadByte()
+		errCh <- err
+	}()
+	select {
+	case err := <-errCh:
+		return err
+	case <-time.After(d):
+		return fmt.Errorf("timeout")
+	}
 }
 
 func controlRequestID(line string) string {
