@@ -9,7 +9,7 @@ This document describes the architecture. Implementation notes and current state
 
 - Real-time speech-to-text that shows words as they are recognized (interim results), like Grok, not a batch transcription that appears only at the end.
 - TTS for finished bot messages.
-- Interactive voice conversation mode that can be summarized into a single message in the thread.
+- Interactive voice conversation mode whose turns land in the thread as normal messages.
 - Fully local: browser APIs or on-device models. Optional daemon-side models on the Framework Desktop are allowed because the daemon is already local.
 - Reuse the existing message path: `POST /api/bots/{id}/thread/messages` + SSE `/thread/stream`.
 
@@ -47,15 +47,13 @@ Document the chosen path in the deploy notes when the feature lands. The daemon 
 - TTS hooks the existing `follow(run_id)` `done` path.
 - No daemon changes required for the pure-browser path.
 
-## Phase 2 — Interactive voice mode + summary
+## Phase 2 — Interactive voice mode
 
 - Voice-mode toggle in the conversation view.
 - Loop: listen → end-of-utterance (silence, VAD, or endpoint) → auto-`send()` the final transcript → follow stream → TTS the bot reply → resume listening.
 - Keep the full raw transcript of the voice session in client memory.
-- On "End voice" / "Summarize" (or mode exit):
-  - Inject a short message such as "Summarize the preceding voice conversation into a single concise, self-contained message for the thread" and let the existing bot + Ollama loop produce it, or
-  - Client posts one clean summary message (optionally with a collapsed transcript for the log).
-- Raw intermediate turns can stay temporary or be posted then archived. The thread ends with one coherent message.
+- "End voice" just stops listening and speaking. No summary is posted.
+- Decision (after phone testing): the summary option is no longer used. Every voice turn is already sent through the normal message path, so the thread already holds the full conversation as ordinary user and bot messages. A summary would duplicate it, add an extra model run, and put a long synthetic prompt in the thread. An explicit summary can still be requested by just asking the bot.
 - Barge-in: new speech cancels current TTS and restarts recognition.
 
 ## Phase 2 latency reduction (streaming words into LLM, LLM into synthesizer)
@@ -96,7 +94,7 @@ Avoid loading heavy models on lightweight devices.
 
 - A user on Chrome with a language pack can press the mic, see words appear live, and have the final transcript submitted as a normal message.
 - Bot replies are spoken when they finish.
-- A voice-mode session can be ended and produce a single summarized message in the thread.
+- A voice-mode session can be ended; its turns remain in the thread as normal messages.
 - No audio leaves the browser or the Framework Desktop.
 - On a lightweight device the defaults stay light; the user can still force heavier models if they want.
 
@@ -108,12 +106,12 @@ Implemented (pure browser path, no new API endpoints):
 - Composer: 🎤 dictation, **Voice** mode toggle, ⚙ voice settings (stored in `localStorage` key `lgb.voice`).
 - STT: Web Speech API with `processLocally = true` only. Fail closed: if the browser has no on-device mode (`SpeechRecognition.available`), the mic refuses rather than falling back to cloud recognition. Language pack is installed on first use via `SpeechRecognition.install()`. Interim words show in a preview strip above the composer (finals solid, interim italic); on stop, finals are appended to the textarea, or sent if "send automatically" is on.
 - TTS: `speechSynthesis` with `localService === true` voices only; if none exist, nothing is spoken (message shown). Markdown and code blocks are stripped before speaking. Any send cancels speech.
-- Voice mode: listen → ~0.9 s silence after a final result ends the utterance → `send()` → follow stream → speak reply → listen again. Barge-in is a setting (default off, because without headphones the mic hears the TTS). "End & summarize" posts one message asking the bot to summarize the session, with the client-side transcript inline; the bot's reply is the summary. Raw turns remain in the thread as normal messages.
+- Voice mode: listen → ~0.9 s silence after a final result ends the utterance → `send()` → follow stream → speak reply → listen again. Barge-in is a setting (default off, because without headphones the mic hears the TTS). "End voice" stops; turns remain in the thread as normal messages (no summary, see Phase 2).
 - Device detection: cores / deviceMemory / WebGPU shown in settings; no heavy models are loaded anywhere.
 
 Secure context: the daemon can now serve HTTPS itself. `TLS_CERT` + `TLS_KEY` use an existing pair; `TLS_SELF_SIGNED=1` generates (once) an ECDSA cert under `DATA_DIR/tls/` for localhost, the host name, and all interface IPs. Setting only one of `TLS_CERT`/`TLS_KEY` is a startup error. TLS mode is recorded in the event log (`tls_enabled`). Accept the browser's certificate warning once per device, or import `DATA_DIR/tls/cert.pem` as trusted.
 
-Not yet: WASM Moonshine/Whisper fallback, true streaming `/api/stt/stream`, Piper/Kokoro, streaming LLM tokens into TTS (Phase 2 latency work), archiving raw voice turns after summary.
+Not yet: WASM Moonshine/Whisper fallback, true streaming `/api/stt/stream`, Piper/Kokoro, streaming LLM tokens into TTS (Phase 2 latency work).
 
 ### Daemon speech recognition (fallback for Android Chrome and other browsers without on-device Web Speech)
 

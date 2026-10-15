@@ -366,7 +366,7 @@
         <div class="msgs" id="msgs"><p class="empty">Choose a bot to read its thread.</p><div class="live" id="live"></div><div class="working" id="working" hidden aria-live="polite"><span class="pulse" aria-hidden="true"></span><span id="working-text">working</span></div></div>
         <button type="button" class="new-pill" id="new-pill" hidden>New messages ↓</button>
         <div class="note" id="run-note" hidden></div>
-        <div class="voice-bar" id="voice-bar" hidden aria-live="polite"><span id="voice-state">Voice mode: listening</span><span class="row"><button type="button" id="voice-summarize">End &amp; summarize</button><button type="button" id="voice-end" class="ghost">End</button></span></div>
+        <div class="voice-bar" id="voice-bar" hidden aria-live="polite"><span id="voice-state">Voice mode: listening</span><span class="row"><button type="button" id="voice-end">End voice</button></span></div>
         <div class="voice-settings" id="voice-settings" hidden>
           <strong>Voice (local only)</strong>
           <label><input type="checkbox" id="vs-tts"> Speak bot replies when they finish</label>
@@ -1690,12 +1690,6 @@ function speakableText(md) {
     .replace(/\s+/g, " ")
     .trim();
 }
-function voiceSummaryPrompt(turns) {
-  const lines = turns.map(t => (t.who === "user" ? "Me: " : "You: ") + t.text.replace(/\s+/g, " ").trim());
-  return "Summarize the preceding voice conversation into a single concise, self-contained message for the thread. " +
-    "Capture decisions, facts, and open questions; skip greetings and filler.\n\n" +
-    "Voice transcript (" + turns.length + " turns):\n" + lines.join("\n");
-}
 // Light defaults on small devices; heavy local models are never auto-loaded.
 function voiceDeviceProfile(nav) {
   const cores = nav.hardwareConcurrency || 0, mem = nav.deviceMemory || 0, gpu = !!nav.gpu;
@@ -1711,7 +1705,7 @@ function voiceDeviceProfile(nav) {
   let cfg = Object.assign({}, defaults);
   try { Object.assign(cfg, JSON.parse(localStorage.getItem(KEY) || "{}")); } catch {}
   const save = () => localStorage.setItem(KEY, JSON.stringify(cfg));
-  const v = {rec: null, listening: false, finals: "", mode: false, turns: [], awaiting: false, speaking: false, localOK: null, summarizing: false};
+  const v = {rec: null, listening: false, finals: "", mode: false, turns: [], awaiting: false, speaking: false, localOK: null};
   const msg = (t) => { $("#voice-msg").textContent = t || ""; };
   v.engine = "checking…";
   v.statusP = fetch(base() + "/api/stt/status", {headers: state.token ? {Authorization: "Bearer " + state.token} : {}}).then(r => r.json()).then(j => { v.daemonSTT = j; if (v.engine === "checking…") v.engine = j.available ? "Framework speech recognition (" + j.engine + "), ready" : "Framework speech recognition not configured"; }).catch(() => { v.engine = "Framework speech recognition unreachable"; });
@@ -1919,14 +1913,9 @@ function voiceDeviceProfile(nav) {
 
   window.voiceOnSend = (content) => {
     if (synth) synth.cancel();
-    if (v.mode && !v.summarizing) v.turns.push({who: "user", text: content});
+    if (v.mode) v.turns.push({who: "user", text: content});
   };
   window.voiceOnRunEnd = (text, failed) => {
-    if (v.summarizing) {
-      v.summarizing = false; v.awaiting = false;
-      if (!failed && cfg.tts) speak(text);
-      return;
-    }
     if (!v.mode) { if (!failed && cfg.tts && text) speak(text); return; }
     if (!failed && text) v.turns.push({who: "bot", text});
     v.awaiting = false;
@@ -1951,14 +1940,6 @@ function voiceDeviceProfile(nav) {
     $("#voice-btn").classList.remove("on"); $("#voice-bar").hidden = true; $("#mic-btn").disabled = false;
     $("#mic-btn").classList.remove("on");
   }
-  async function summarize() {
-    const turns = v.turns.slice();
-    stopAll();
-    if (!turns.length) { msg("Nothing to summarize."); return; }
-    v.summarizing = true;
-    const ok = await send(voiceSummaryPrompt(turns));
-    if (!ok) v.summarizing = false;
-  }
 
   function renderSettings() {
     $("#vs-tts").checked = cfg.tts; $("#vs-autosend").checked = cfg.autosend; $("#vs-bargein").checked = cfg.bargein;
@@ -1981,7 +1962,6 @@ function voiceDeviceProfile(nav) {
   $("#mic-btn").addEventListener("click", toggleMic);
   $("#voice-btn").addEventListener("click", () => { v.mode ? stopAll() : startMode(); });
   $("#voice-end").addEventListener("click", stopAll);
-  $("#voice-summarize").addEventListener("click", summarize);
   window.voiceDebug = v;
 })();
 </script>

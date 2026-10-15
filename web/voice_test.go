@@ -26,9 +26,9 @@ func TestVoiceHelpers(t *testing.T) {
 	js := src[i:j] + `
 console.log(JSON.stringify({
   speak: speakableText("# Title\n**Bold** and [link](https://x.y) with ` + "`code`" + `\n` + "```go\\nx := 1\\n```" + `\n- item"),
-  prompt: voiceSummaryPrompt([{who:"user",text:"hi  there"},{who:"bot",text:"hello"}]),
   small: voiceDeviceProfile({hardwareConcurrency:4, deviceMemory:2}).heavyOK,
   big: voiceDeviceProfile({hardwareConcurrency:16, deviceMemory:8, gpu:{}}).heavyOK,
+  summarizeGone: typeof voiceSummaryPrompt === "undefined",
 }));`
 	path := filepath.Join(t.TempDir(), "v.js")
 	if err := os.WriteFile(path, []byte(js), 0o600); err != nil {
@@ -41,8 +41,9 @@ console.log(JSON.stringify({
 		t.Fatalf("node: %v\n%s", err, out)
 	}
 	var got struct {
-		Speak, Prompt string
+		Speak         string
 		Small, Big    bool
+		SummarizeGone bool
 	}
 	if err := json.Unmarshal(out, &got); err != nil {
 		t.Fatalf("decode %v: %s", err, out)
@@ -50,8 +51,8 @@ console.log(JSON.stringify({
 	if got.Speak != "Title Bold and link with code (code omitted) item" {
 		t.Errorf("speak %q", got.Speak)
 	}
-	if !strings.Contains(got.Prompt, "single concise, self-contained message") || !strings.Contains(got.Prompt, "Me: hi there\nYou: hello") {
-		t.Errorf("prompt %q", got.Prompt)
+	if !got.SummarizeGone {
+		t.Error("voiceSummaryPrompt should be removed")
 	}
 	if got.Small || !got.Big {
 		t.Errorf("profile small=%v big=%v", got.Small, got.Big)
