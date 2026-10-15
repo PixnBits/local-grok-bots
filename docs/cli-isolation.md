@@ -222,12 +222,14 @@ which both sandboxes let the CLI write:
 - The CLI gets `PATH=<workspace>/.lgb/bin:…`, `LGB_SPOOL`, and `LGB_TOKEN`.
 
 Token. `lgbr_` plus 32 random bytes, made per run, never the admin token, and
-only accepted by the spool. The HTTP API returns 401 for it (live). When the
-run ends the poller stops, the token is cleared, and `req` is removed, so a
-later call fails with "not available in this run" (live). At most 200 calls
-per turn. Every call, including a bad token, is written as `lgb_call` to the
-bot log and the audit sink with `run_id`, the command, the tool, redacted
-arguments, and the result.
+only accepted by the spool. The HTTP API returns 401 for it. The permission
+decision route is the exception: a live `lgbr_` token, or the turn's MCP
+permission token, is 403 there. After the run the token is forgotten, so that
+route returns 401 again. When the run ends the poller stops, the token is
+cleared, and `req` is removed, so a later call fails with "not available in
+this run" (live). At most 200 calls per turn. Every call, including a bad
+token, is written as `lgb_call` to the bot log and the audit sink with
+`run_id`, the command, the tool, redacted arguments, and the result.
 
 Approval. The daemon adds allow rules `Bash(lgb)` and `Bash(lgb *)`
 (`--allowedTools` for Claude, `--allow` for Grok). Other shell commands still
@@ -250,6 +252,85 @@ both CLIs are denied the file. Without the token a CLI's shell can't call the
 API, including `POST .../permissions/{id}`. `GET /api/health` stays open, as
 does the per-run MCP permission route, which only asks the broker. Ollama-only
 setups need no token unless `AUTH_TOKEN` is set.
+
+## Interactive tools
+
+Claude's built-in question and plan tools are specified in
+`@anthropic-ai/claude-agent-sdk` 0.3.300 `sdk-tools.d.ts`
+(`AskUserQuestionInput`, `AskUserQuestionOutput`, `ExitPlanModeInput`).
+The daemon is headless. This is what each interactive path does.
+
+### AskUserQuestion
+
+Handled. The broker keeps a small case-sensitive set, and today the only name
+in it is `AskUserQuestion`. Hooks, then deny rules, still run first, so a deny
+rule on that tool wins. Otherwise it is always a UI question. A bypass mode,
+an allow rule, a hook allow, and a session grant do not answer it, because
+there is no answer yet. Malformed input (not 1–4 questions, or a question
+missing its text, header, boolean `multiSelect`, or 2–4 options with a label
+and a description) is a deny, rule `malformed`, with no card.
+
+`permission_request` carries `kind: "question"` and the validated questions.
+Question text is redacted with the usual redactor; `multiSelect` stays a
+boolean. The page shows a header chip, the question, radios or checkboxes
+with their descriptions, an Other text field, Submit, Skip, and the countdown.
+Submit posts `{"decision":"answer","answers":{<question text>: <value>}}`.
+Skip posts `{"decision":"deny"}`. Text is set with `textContent`.
+
+Answer keys Claude receives are the original question text. The page may send
+the redacted text it was shown; the broker maps that back to the original and
+maps a redacted option label back to the original label. A single choice is
+the option label, or the typed string when the user picks Other. A multi-select
+value is the chosen labels joined by `", "` (a label that itself contains
+`", "` is kept whole). Optional `annotations` (`preview`, `notes`), keyed by
+question text, are copied into `updatedInput` only when the client sent some.
+
+Both transports return the same body. Allow is `{"behavior":"allow","updatedInput":{...original input, answers}}`.
+A Skip, a timeout, `no_ui`, or a cancel that writes a response is
+`{"behavior":"deny","message":"The user did not answer the question (<reason>)."}`.
+A hook or policy deny keeps the ordinary deny message. `stream_control`'s
+`control_cancel_request` still writes no response. A daemon restart drops the
+in-memory ask and sends nothing. A shutdown cancel uses source `cancel` when
+a response is written.
+
+`allow_once` or `allow_session` on a question, or `answer` on any other
+request, is 400 and leaves the request pending. A second decision is 409.
+A live `lgbr_` token or the turn's MCP permission token is 403 on
+`POST /api/bots/{id}/runs/{run_id}/permissions/{req_id}` only. The admin
+token, Bearer or the `lgb_auth` cookie, is what decides. One decision is
+stored per request. The audit record has `kind: "question"`, `answered`
+(how many questions), `source`, and the answers after redaction. The
+`updatedInput` sent back to Claude is not redacted.
+
+### ExitPlanMode
+
+A normal allow/deny card. The broker does not special-case the tool. When
+`arguments.plan` is a string, the card shows that text above the argument
+dump, then Allow once, Deny, and Allow for session when the policy offers it.
+In SDK 0.3.300, `ExitPlanModeInput` is `allowedPrompts` plus unknown keys.
+`plan` is not a required field. The card shows it when the call includes it.
+
+### MCP elicitation
+
+Declined. The daemon sets `disableAllHooks` and does not implement Claude's
+elicitation dialog or Elicitation hooks. An unrecognized `control_request`
+subtype, including `mcp_message` and `hook_callback`, gets
+`Unsupported control request subtype: ...` and a deny audit. There is no form.
+
+### requiresUserInteraction
+
+Claude treats `AskUserQuestion`, and MCP tools whose
+`_meta["anthropic/requiresUserInteraction"]` is true, as something it will not
+auto-approve before it calls the host. That annotation is not on the
+`can_use_tool` payload this daemon sees. The broker forces a question only
+for the case-sensitive name `AskUserQuestion`. Any other tool that reaches
+the broker follows the normal order.
+
+### Grok
+
+Grok has no permission host on this branch. A headless TUI prompt fails the
+turn with `permission prompt requires a TTY or an explicit permission_mode`
+(`ErrPermissionPrompt`). It does not open a card.
 
 ## Override files
 
@@ -275,8 +356,9 @@ Under `overrides = "refuse"` every hit fails the turn with
   a Grok bot set a 10-minute timer and wrote `favorite_color=teal` through lgb;
   `lgb run_shell id` gave "unknown command" and `lgb bot create` gave "off by
   policy"; all four calls were logged as `lgb_call` with the run id; the run
-  token got 401 on `/api/bots` and on the permission decision route and failed
-  after the run. `curl` and `cat admin-token` were asked for, which cancelled
+  token got 401 on `/api/bots` and, in that build, on the permission decision
+  route, and failed after the run. A live run token on the decision route is
+  now 403. `curl` and `cat admin-token` were asked for, which cancelled
   the headless turn.
 - lgb with Claude is tested only with the fake CLI (argv has `--allowedTools
   Bash(lgb *)`, the script ran, the memory and timer landed). That Claude's

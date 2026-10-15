@@ -30,21 +30,22 @@ Always-allow modes are `always`, `always-allow`, `always_allow`, `always-approve
 1. Hooks, in registration order. A hook may return `deny`, `ask`, or `allow`.
 2. Deny rules.
 3. Ask rules. An ask forces the UI path even in a bypass mode.
-4. A hook allow, if one was recorded and no deny or ask fired.
-5. Bypass mode, only when the resolved mode is an always-allow mode. The daemon copies that mode onto the CLI only when managed policy set it.
-6. Allow rules.
-7. An in-memory session grant for this bot and session.
-8. canUseTool: publish `permission_request` and wait, or deny.
+4. `AskUserQuestion`, matched case-sensitively. A hook deny or a deny rule still wins. Otherwise this is always a UI question: a bypass mode, an allow rule, a hook allow, and a session grant do not answer it. The wire shape and the card are in `docs/cli-isolation.md` under Interactive tools.
+5. A hook allow, if one was recorded and no deny or ask fired.
+6. Bypass mode, only when the resolved mode is an always-allow mode. The daemon copies that mode onto the CLI only when managed policy set it.
+7. Allow rules.
+8. An in-memory session grant for this bot and session.
+9. canUseTool: publish `permission_request` and wait, or deny.
 
 Rules match the tool name, with an optional argument glob in parentheses: `Bash(git status*)`. `*` and `?` are globs. The tool name is case-insensitive. The argument text is case-sensitive and comes from `command`, `cmd`, `file_path`, `filePath`, or `path`. The pattern is anchored to the whole string.
 
-canUseTool denies with source `no_ui` when `ui_prompts` is off or no stream client has declared it can answer prompts (`?prompts=1` on that run). It does not publish `permission_request` in that case. Otherwise it publishes and waits for `Decide`. The page shows the tool name, the arguments as sent (already redacted), a countdown to `deadline`, and posts `{"decision":"allow_once"|"deny"|"allow_session"}` to the route above. `allow_session` is offered only when `session_allowed` is true. A `permission_decision`, or the countdown hitting zero, disables the card and shows the decision and source. Timeout, context cancel, an unknown id, and a daemon restart deny. Pending requests live only in memory. `allow_session` is rejected and the request stays pending when managed policy did not allow session grants. A grant is stored per bot and session (or per run when the session id is empty) and is checked after allow rules, so a later deny or ask still wins.
+canUseTool denies with source `no_ui` when `ui_prompts` is off or no stream client has declared it can answer prompts (`?prompts=1` on that run). It does not publish `permission_request` in that case. Otherwise it publishes and waits for `Decide`. The page shows the tool name, the arguments as sent (already redacted), a countdown to `deadline`, and posts `{"decision":"allow_once"|"deny"|"allow_session"}` to the route above. `allow_session` is offered only when `session_allowed` is true. A question (`kind: "question"`) is a different card: header, question text, options, an Other field, Submit, and Skip. Submit posts `{"decision":"answer","answers":{...}}`. Skip posts `deny`. A `permission_decision`, or the countdown hitting zero, disables the card and shows the decision and source. Timeout, context cancel, an unknown id, and a daemon restart deny. Pending requests live only in memory. `allow_session` is rejected and the request stays pending when managed policy did not allow session grants. A grant is stored per bot and session (or per run when the session id is empty) and is checked after allow rules, so a later deny or ask still wins.
 
-Each decision emits `permission_decision` and, when audit is on, one audit record: `source` (`policy`, `hook`, `ui`, `timeout`, `no_ui`, `cancel`, or `cli`), the rule that matched, tool, redacted arguments, bot, run, time, decision, and `transport`. Arguments go through `audit.RedactValue` (the same redactor the daemon uses for tool payloads). The allow payload sent back to Claude keeps the original arguments so the tool still runs.
+Each decision emits `permission_decision` and, when audit is on, one audit record: `source` (`policy`, `hook`, `ui`, `timeout`, `no_ui`, `cancel`, or `cli`), the rule that matched, tool, redacted arguments, bot, run, time, decision, and `transport`. A question adds `kind`, `answered`, and redacted `answers` on the audit record. The SSE decision carries `kind` and `answered` and omits the answer text. Arguments go through `audit.RedactValue` (the same redactor the daemon uses for tool payloads). The allow payload sent back to Claude keeps the original arguments so the tool still runs.
 
 `transport` is the wire actually used, not a second copy of the policy string. `stream_control` is stamped for every decision on that transport, including a broker `no_ui` deny. `mcp` is stamped only when the HTTP prompt tool is attached. `none` is stamped when the turn passes `--permission-prompts none`: the policy value `none`, or `mcp` with `ui_prompts` off or with no HTTP base. The approval card ignores the field.
 
-`POST /api/bots/{id}/runs/{run_id}/permissions/{req_id}` with `{"decision":"allow_once"|"deny"|"allow_session"}` calls `Decide`. The request must belong to that bot and run. Bearer auth still applies to this route.
+`POST /api/bots/{id}/runs/{run_id}/permissions/{req_id}` accepts `{"decision":"allow_once"|"deny"|"allow_session"}`, or `{"decision":"answer","answers":{...}}` with optional `annotations` for a question. The request must belong to that bot and run. `answer` on any other request, or `allow_once` or `allow_session` on a question, is 400 and leaves it pending. A second decision is 409. A live `lgbr_` token or MCP permission token is 403 on this route. The admin token, as a Bearer or the `lgb_auth` cookie, still decides. Other routes return 401 for a run token.
 
 ## Claude transport
 
@@ -71,7 +72,7 @@ That is Claude's default `--permission-prompts host`: residual asks go to the pr
 
 Ask rules are broker-only. Claude has no matching flag, so an ask applies when Claude calls `approve`. A deny rule is also `--disallowedTools`, so Claude can refuse before the prompt tool.
 
-`POST /api/mcp/permission/{token}` is the MCP endpoint. The token is the credential; the route does not use the daemon Bearer token. It speaks a small JSON-RPC subset: `initialize`, the `notifications/initialized` notification, `ping`, `tools/list`, and `tools/call` for `approve` with `{tool_name, input, tool_use_id}`. An allow returns text content `{"behavior":"allow","updatedInput":{...}}`. A deny returns `{"behavior":"deny","message":"..."}`. `updatedInput` is the original input object (or `{}`).
+`POST /api/mcp/permission/{token}` is the MCP endpoint. The token is the credential; the route does not use the daemon Bearer token. It speaks a small JSON-RPC subset: `initialize`, the `notifications/initialized` notification, `ping`, `tools/list`, and `tools/call` for `approve` with `{tool_name, input, tool_use_id}`. An allow returns text content `{"behavior":"allow","updatedInput":{...}}`. A deny returns `{"behavior":"deny","message":"..."}`. `updatedInput` is the original input object (or `{}`), except an answered `AskUserQuestion`, which sends the original input plus `answers`.
 
 `permission_denied` system events and `result.permission_denials` are parsed as `permission_decision` and audited. Source is `cli` when a host is attached, `no_ui` when `--permission-prompts none` was set because `ui_prompts` is off, and `policy` when it was set because there is no HTTP host. They do not fail the turn. A headless prompt phrase with no host and without `--permission-prompts none` still fails closed.
 
@@ -108,7 +109,7 @@ Claude asks with:
 {"type":"control_request","request_id":"X","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{},"tool_use_id":"...","permission_suggestions":[],"blocked_path":null,"decision_reason":null}}
 ```
 
-That call goes through the broker. Allow echoes the original `input` bytes as `updatedInput` (not the redacted copy):
+That call goes through the broker. Allow echoes the original `input` bytes as `updatedInput` (not the redacted copy). An answered `AskUserQuestion` is the exception: the daemon remarshals the original input with `answers` filled in.
 
 ```json
 {"type":"control_response","response":{"subtype":"success","request_id":"X","response":{"behavior":"allow","updatedInput":{}}}}
@@ -158,7 +159,7 @@ Every broker decision, from any transport and including `permission_denials`
 on a Claude result, is also written to `run_tools` as `kind: "permission"`
 with the tool, redacted arguments, and `{decision, source, rule, transport}`.
 The reply's tool summary shows them after a reload. Each request has exactly one record: `ok` is true for
-`allow`, `allow_once`, and `allow_session`. A CLI-side denial report
+`allow`, `allow_once`, `allow_session`, and `answer`. A question record also stores `kind` and `answered`, not the answer text. A CLI-side denial report
 (`permission_denied` or `result.permission_denials`) adds a record only when
 the broker did not already decide that request; it is matched by
 `tool_use_id`, else by tool and redacted arguments, else (for a report that
