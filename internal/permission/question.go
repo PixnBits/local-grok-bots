@@ -224,6 +224,10 @@ func questionIndex(qs []Question, key string) int {
 	return -1
 }
 
+// maxFreeAnswer is the largest free-text AskUserQuestion answer, in bytes.
+// A matching option label is not free text and is not measured against it.
+const maxFreeAnswer = 4 << 10
+
 func canonicalValue(q Question, value string) (string, error) {
 	if strings.TrimSpace(value) == "" {
 		return "", fmt.Errorf("%w: empty answer", ErrAnswer)
@@ -232,6 +236,9 @@ func canonicalValue(q Question, value string) (string, error) {
 		return label, nil
 	}
 	if !q.Multi {
+		if len(value) > maxFreeAnswer {
+			return "", fmt.Errorf("%w: answer is too long", ErrAnswer)
+		}
 		return value, nil
 	}
 	parts := strings.Split(value, ", ")
@@ -243,6 +250,9 @@ func canonicalValue(q Question, value string) (string, error) {
 		if label, ok := matchLabel(q, part); ok {
 			out = append(out, label)
 			continue
+		}
+		if len(part) > maxFreeAnswer {
+			return "", fmt.Errorf("%w: answer is too long", ErrAnswer)
 		}
 		out = append(out, part)
 	}

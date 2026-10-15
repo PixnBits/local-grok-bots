@@ -290,3 +290,59 @@ func TestQuestionTimeoutAndFreeText(t *testing.T) {
 		t.Fatalf("multi %s", raw)
 	}
 }
+
+func TestFreeTextAnswerCap(t *testing.T) {
+	pol := policy.Permission{UIPrompts: true, PromptTimeout: time.Second}
+	start := func(id string, args map[string]any) (*Broker, chan Outcome) {
+		t.Helper()
+		b := New(Options{UIPresent: func(string) bool { return true }})
+		done := make(chan Outcome, 1)
+		go func() {
+			done <- b.Evaluate(context.Background(), pol, Request{
+				ID: id, RunID: "run", BotID: "bot", Tool: "AskUserQuestion", Args: args,
+			})
+		}()
+		waitForPending(t, b, id)
+		return b, done
+	}
+	b, done := start("cap", sampleQuestion(false))
+	over := strings.Repeat("a", maxFreeAnswer+1)
+	if err := b.Answer("bot", "run", "cap", map[string]string{"Which library?": over}, nil); !errors.Is(err, ErrAnswer) {
+		t.Fatalf("over cap: %v", err)
+	}
+	exact := strings.Repeat("b", maxFreeAnswer)
+	if err := b.Answer("bot", "run", "cap", map[string]string{"Which library?": exact}, nil); err != nil {
+		t.Fatal(err)
+	}
+	out := <-done
+	raw, _ := json.Marshal(out.UpdatedInput["answers"])
+	if string(raw) != `{"Which library?":"`+exact+`"}` {
+		t.Fatalf("capped answer %s", raw)
+	}
+
+	label := strings.Repeat("c", maxFreeAnswer+8)
+	args := map[string]any{
+		"questions": []any{map[string]any{
+			"question": "Which library?", "header": "Lib", "multiSelect": false,
+			"options": []any{
+				map[string]any{"label": label, "description": "long"},
+				map[string]any{"label": "Rust", "description": "Rust toolchain"},
+			},
+		}},
+	}
+	b, done = start("label", args)
+	if err := b.Answer("bot", "run", "label", map[string]string{"Which library?": label}, nil); err != nil {
+		t.Fatalf("long label: %v", err)
+	}
+	out = <-done
+	if out.UpdatedInput["answers"].(map[string]any)["Which library?"] != label {
+		t.Fatalf("label answer %+v", out.UpdatedInput["answers"])
+	}
+
+	b, done = start("multi", sampleQuestion(true))
+	if err := b.Answer("bot", "run", "multi", map[string]string{"Which library?": "Go, " + over}, nil); !errors.Is(err, ErrAnswer) {
+		t.Fatalf("multi free text: %v", err)
+	}
+	b.DecideFor("bot", "run", "multi", Deny)
+	<-done
+}

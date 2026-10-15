@@ -45,7 +45,7 @@ Each decision emits `permission_decision` and, when audit is on, one audit recor
 
 `transport` is the wire actually used, not a second copy of the policy string. `stream_control` is stamped for every decision on that transport, including a broker `no_ui` deny. `mcp` is stamped only when the HTTP prompt tool is attached. `none` is stamped when the turn passes `--permission-prompts none`: the policy value `none`, or `mcp` with `ui_prompts` off or with no HTTP base. The approval card ignores the field.
 
-`POST /api/bots/{id}/runs/{run_id}/permissions/{req_id}` accepts `{"decision":"allow_once"|"deny"|"allow_session"}`, or `{"decision":"answer","answers":{...}}` with optional `annotations` for a question. The request must belong to that bot and run. `answer` on any other request, or `allow_once` or `allow_session` on a question, is 400 and leaves it pending. A second decision is 409. A live `lgbr_` token or MCP permission token is 403 on this route. The admin token, as a Bearer or the `lgb_auth` cookie, still decides. Other routes return 401 for a run token.
+`POST /api/bots/{id}/runs/{run_id}/permissions/{req_id}` accepts `{"decision":"allow_once"|"deny"|"allow_session"}`, or `{"decision":"answer","answers":{...}}` with optional `annotations` for a question. The request must belong to that bot and run. `answer` on any other request, or `allow_once` or `allow_session` on a question, is 400 and leaves it pending. A free-text answer longer than 4 KiB is 400 and leaves the question pending. A second decision is 409. A live `lgbr_` token or MCP permission token is 403 on this route. The admin token, as a Bearer or the `lgb_auth` cookie, still decides. Other routes return 401 for a run token.
 
 ## Claude transport
 

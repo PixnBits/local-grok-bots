@@ -330,9 +330,10 @@ Skip posts `{"decision":"deny"}`. Text is set with `textContent`.
 Answer keys Claude receives are the original question text. The page may send
 the redacted text it was shown; the broker maps that back to the original and
 maps a redacted option label back to the original label. A single choice is
-the option label, or the typed string when the user picks Other. A multi-select
-value is the chosen labels joined by `", "` (a label that itself contains
-`", "` is kept whole). Optional `annotations` (`preview`, `notes`), keyed by
+the option label, or the typed string when the user picks Other. Free text
+longer than 4 KiB is rejected with HTTP 400 and the question stays pending.
+A multi-select value is the chosen labels joined by `", "` (a label that
+itself contains `", "` is kept whole). Optional `annotations` (`preview`, `notes`), keyed by
 question text, are copied into `updatedInput` only when the client sent some.
 
 Both transports return the same body. Allow is `{"behavior":"allow","updatedInput":{...original input, answers}}`.

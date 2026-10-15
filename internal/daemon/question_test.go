@@ -622,3 +622,68 @@ func questionSSE(t *testing.T, base, botID, runID, token string) <-chan string {
 	}()
 	return events
 }
+
+func TestFreeTextAnswerIs400(t *testing.T) {
+	app := newApp(t, t.TempDir(), nil)
+	app.cfg.AuthToken = "sekrit"
+	srv := serve(t, app)
+	_, frames := app.bus.SubscribePrompts("run-1")
+	t.Cleanup(func() { app.bus.Unsubscribe("run-1", frames) })
+	out := make(chan permission.Outcome, 1)
+	go func() {
+		out <- app.perm.Evaluate(context.Background(), policy.Permission{
+			UIPrompts: true, PromptTimeout: 20 * time.Second,
+		}, permission.Request{
+			RunID: "run-1", BotID: "bot", Tool: "AskUserQuestion", Args: map[string]any{
+				"questions": []any{map[string]any{
+					"question": "Which library?", "header": "Lib", "multiSelect": false,
+					"options": []any{
+						map[string]any{"label": "Go", "description": "Go toolchain"},
+						map[string]any{"label": "Rust", "description": "Rust toolchain"},
+					},
+				}},
+			},
+		})
+	}()
+	var reqID string
+	deadline := time.Now().Add(3 * time.Second)
+	for reqID == "" && time.Now().Before(deadline) {
+		select {
+		case f := <-frames:
+			if f.event != "permission_request" {
+				continue
+			}
+			var payload struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(f.data, &payload); err != nil {
+				t.Fatal(err)
+			}
+			reqID = payload.ID
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if reqID == "" {
+		t.Fatal("no permission_request")
+	}
+	decide := srv.URL + "/api/bots/bot/runs/run-1/permissions/" + reqID
+	over := strings.Repeat("a", 4<<10+1)
+	res, b := do(t, "POST", decide, map[string]any{"decision": "answer", "answers": map[string]string{"Which library?": over}}, "sekrit")
+	if res.StatusCode != http.StatusBadRequest || !strings.Contains(string(b), "too long") {
+		t.Fatalf("over 4KiB %d %s", res.StatusCode, b)
+	}
+	exact := strings.Repeat("b", 4<<10)
+	res, b = do(t, "POST", decide, map[string]any{"decision": "answer", "answers": map[string]string{"Which library?": exact}}, "sekrit")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("4KiB answer %d %s", res.StatusCode, b)
+	}
+	select {
+	case got := <-out:
+		answers, _ := got.UpdatedInput["answers"].(map[string]any)
+		if got.Decision != permission.Answer || answers["Which library?"] != exact {
+			t.Fatalf("%+v", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("evaluate did not return")
+	}
+}
