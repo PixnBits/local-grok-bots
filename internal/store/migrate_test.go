@@ -68,4 +68,66 @@ VALUES('t1', 'b1', '1h', 'do it', 1, '2999-01-01T00:00:00.000000000Z');
 	if len(timers) != 1 || timers[0].Name != "" || timers[0].Prompt != "do it" {
 		t.Fatalf("migrated timers %#v", timers)
 	}
+	for _, col := range []string{"cli_pid", "cli_pgid", "cli_start", "cli_exe", "cli_marker"} {
+		ok, err := st.hasColumn("bots", col)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !ok {
+			t.Fatalf("migrate did not add %s", col)
+		}
+	}
+}
+
+func TestCLIProcKeptUntilCleared(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	bot, err := st.CreateBot("Ada", "local", nil, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := CLIProc{PID: 4242, PGID: 4242, Start: "999", Exe: "/usr/bin/claude", Marker: "run-1"}
+	if err := st.SetCLIProc(bot.ID, want); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		got, err := st.ReconcileOnBoot("0.1.0", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].BotID != bot.ID || got[0].PID != want.PID || got[0].PGID != want.PGID || got[0].Start != want.Start || got[0].Exe != want.Exe || got[0].Marker != want.Marker {
+			t.Fatalf("reconcile %d %+v", i, got)
+		}
+	}
+	bare := CLIProc{PID: 4321}
+	if err := st.SetCLIProc(bot.ID, bare); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.ReconcileOnBoot("0.1.0", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].PID != bare.PID || got[0].Start != "" || got[0].Exe != "" {
+		t.Fatalf("bare pid was dropped or filled %+v", got)
+	}
+	if err := st.ClearCLIProc(bot.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err = st.ReconcileOnBoot("0.1.0", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("cleared identity returned %+v", got)
+	}
+	cleared, err := st.GetCLIProc(bot.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.PID != 0 || cleared.PGID != 0 || cleared.Start != "" || cleared.Exe != "" || cleared.Marker != "" {
+		t.Fatalf("clear left %+v", cleared)
+	}
 }

@@ -119,12 +119,14 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		AllowRules: append(append([]string(nil), a.policy.ToolAllow...), lgbAllow(lgbEnv)...),
 		DenyRules:  append([]string(nil), a.policy.ToolDeny...),
 		Isolate:    iso,
+		Marker:     runID,
 		OnStart: func(child int) {
 			if child <= 0 {
 				return
 			}
 			pid = child
 			a.setCLIPID(bot.ID, child)
+			a.noteCLIProc(bot.ID, child, runID, "")
 			a.auditCLI("cli_start", backend, sessionID, child, "")
 		},
 	}

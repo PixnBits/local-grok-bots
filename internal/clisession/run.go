@@ -65,6 +65,8 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 	// Linux kills this process group. macOS uses the same group signal,
 	// with a leader-only fallback if the group signal is rejected.
 	prepareProc(cmd)
+	// The marker is how boot recognizes this child. It is not inherited.
+	applySessionMarker(cmd, spec.Marker)
 	cmd.Cancel = func() error {
 		killGroup(cmd.Process)
 		return nil
@@ -150,6 +152,27 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 		return res, fmt.Errorf("%s: %s", argv[0], clip(audit.RedactText(msg), 2000))
 	}
 	return res, nil
+}
+
+// applySessionMarker sets LGB_SESSION_MARKER on the child and drops any
+// inherited value. An invalid marker leaves the environment unchanged.
+func applySessionMarker(cmd *exec.Cmd, marker string) {
+	if cmd == nil || !validMarker(marker) {
+		return
+	}
+	base := cmd.Env
+	if base == nil {
+		base = os.Environ()
+	}
+	prefix := SessionMarkerEnv + "="
+	out := make([]string, 0, len(base)+1)
+	for _, kv := range base {
+		if strings.HasPrefix(kv, prefix) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	cmd.Env = append(out, prefix+marker)
 }
 
 func (e ExecRunner) notePin(ctx context.Context, backend, path string) error {

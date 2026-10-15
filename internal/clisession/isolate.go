@@ -67,7 +67,7 @@ func keepInheritedLGB(name string) bool {
 	if !passInheritedLGB || !strings.HasPrefix(name, "LGB_") {
 		return false
 	}
-	return name != "LGB_SPOOL" && name != "LGB_TOKEN"
+	return name != "LGB_SPOOL" && name != "LGB_TOKEN" && name != SessionMarkerEnv
 }
 
 // passEnv names variables kept from the daemon environment.

@@ -121,14 +121,17 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		_ = aud.Close()
 		return nil, err
 	}
-	pids, err := st.ReconcileOnBoot(cfg.Version, pol.UsesCLI())
+	procs, err := st.ReconcileOnBoot(cfg.Version, pol.UsesCLI())
 	if err != nil {
 		st.Close()
 		_ = aud.Close()
 		return nil, err
 	}
-	for _, pid := range pids {
-		clisession.KillStoredCLI(pid)
+	for _, proc := range procs {
+		clisession.KillStoredCLI(clisession.StoredCLI{
+			PID: proc.PID, PGID: proc.PGID, Start: proc.Start, Exe: proc.Exe, Marker: proc.Marker,
+		})
+		_ = st.ClearCLIProc(proc.BotID)
 	}
 	if m == nil {
 		m = model.NewOllama(cfg.OllamaURL)

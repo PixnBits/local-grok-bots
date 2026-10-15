@@ -45,6 +45,9 @@ type Spec struct {
 	Bin string
 	// OnStart is called with the child pid after Start.
 	OnStart func(pid int)
+	// Marker is the run id written to LGB_SESSION_MARKER on the child.
+	// Boot will not signal a Linux process that lacks this value.
+	Marker string
 }
 
 // Event is one parsed stream record.

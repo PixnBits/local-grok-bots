@@ -119,6 +119,7 @@ func TestPrepareIsolationDropsInheritedLGB(t *testing.T) {
 		"LGB_ARGV_LOG=/tmp/argv",
 		"LGB_SPOOL=/tmp/evil-spool",
 		"LGB_TOKEN=lgbr_inherited",
+		"LGB_SESSION_MARKER=inherited-run",
 		"LGB_SECRET=nope",
 	}
 	extra := map[string]string{"LGB_SPOOL": "/ws/.lgb", "LGB_TOKEN": "lgbr_run"}
@@ -134,6 +135,9 @@ func TestPrepareIsolationDropsInheritedLGB(t *testing.T) {
 		env := envMap(iso.Env)
 		if env["LGB_SPOOL"] != "/ws/.lgb" || env["LGB_TOKEN"] != "lgbr_run" {
 			t.Fatalf("run token env: %v", iso.Env)
+		}
+		if _, ok := env["LGB_SESSION_MARKER"]; ok {
+			t.Fatalf("inherited session marker leaked: %v", iso.Env)
 		}
 		if env["PATH"] != "/usr/bin" {
 			t.Fatalf("PATH: %v", iso.Env)

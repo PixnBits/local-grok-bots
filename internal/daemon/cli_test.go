@@ -266,13 +266,14 @@ func TestCLICrashRestartKillsGroupAndResumes(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	const marker = "run-crash"
 	started := make(chan int, 1)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		_, _ = (clisession.ExecRunner{HasTTY: func() bool { return false }}).Run(ctx, clisession.Spec{
 			Backend: "claude", Bin: filepath.Join(dir, "bin", "claude"),
-			Prompt: "orphan", Workspace: dir, Fresh: true,
+			Prompt: "orphan", Workspace: dir, Fresh: true, Marker: marker,
 			OnStart: func(pid int) { started <- pid },
 		}, nil)
 	}()
@@ -283,6 +284,10 @@ func TestCLICrashRestartKillsGroupAndResumes(t *testing.T) {
 		t.Fatal("orphan cli did not start")
 	}
 	child := pidFile(t, childPath)
+	id, err := clisession.Identify(leader, marker, "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() {
 		cancel()
 		_ = syscall.Kill(-leader, syscall.SIGKILL)
@@ -310,7 +315,9 @@ func TestCLICrashRestartKillsGroupAndResumes(t *testing.T) {
 	if _, err := st.InsertRunningRun(bot.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.SetCLIPID(bot.ID, leader); err != nil {
+	if err := st.SetCLIProc(bot.ID, store.CLIProc{
+		PID: id.PID, PGID: id.PGID, Start: id.Start, Exe: id.Exe, Marker: id.Marker,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Close(); err != nil {
@@ -393,6 +400,13 @@ func TestCLIShutdownMidTurnResumes(t *testing.T) {
 			t.Fatal(err)
 		}
 		if got.SessionID != "" {
+			proc, perr := app.st.GetCLIProc(bot.ID)
+			if perr != nil {
+				t.Fatal(perr)
+			}
+			if proc.PID <= 1 || proc.PGID != proc.PID || proc.Start == "" || proc.Exe == "" || proc.Marker == "" {
+				t.Fatalf("cli identity %+v", proc)
+			}
 			break
 		}
 		if time.Now().After(deadline) {
@@ -412,6 +426,13 @@ func TestCLIShutdownMidTurnResumes(t *testing.T) {
 	}
 	if got.SessionID == "" || got.LastRunStatus != "error" || got.LastRunError != "interrupted" {
 		t.Fatalf("after shutdown %#v", got)
+	}
+	proc, err := st.GetCLIProc(bot.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proc.PID != 0 || proc.PGID != 0 || proc.Start != "" || proc.Exe != "" || proc.Marker != "" {
+		t.Fatalf("cli identity left after shutdown %+v", proc)
 	}
 	session := got.SessionID
 	if err := st.Close(); err != nil {

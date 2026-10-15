@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
@@ -42,7 +43,22 @@ func (a *App) setCLIPID(botID string, pid int) {
 		st.cliPID = pid
 	}
 	a.rtMu.Unlock()
-	_ = a.st.SetCLIPID(botID, pid)
+}
+
+// noteCLIProc stores start time, process group, executable, and marker.
+// Identify runs before anything is written. A failure leaves only the
+// in-memory pid, so a later boot cannot signal a process we did not prove.
+func (a *App) noteCLIProc(botID string, pid int, marker, launchedExe string) {
+	if pid <= 1 || a.st == nil {
+		return
+	}
+	id, err := clisession.Identify(pid, marker, launchedExe)
+	if err != nil {
+		return
+	}
+	_ = a.st.SetCLIProc(botID, store.CLIProc{
+		BotID: botID, PID: id.PID, PGID: id.PGID, Start: id.Start, Exe: id.Exe, Marker: id.Marker,
+	})
 }
 
 func (a *App) clearCLIPID(botID, runID string) {
@@ -54,7 +70,7 @@ func (a *App) clearCLIPID(botID, runID string) {
 	}
 	a.rtMu.Unlock()
 	if match {
-		_ = a.st.SetCLIPID(botID, 0)
+		_ = a.st.ClearCLIProc(botID)
 	}
 }
 

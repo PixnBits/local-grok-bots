@@ -90,6 +90,83 @@ func processAlive(pid int) bool {
 	return syscall.Kill(pid, 0) == nil
 }
 
+func TestKillStoredIgnoresNameAndMismatchedStart(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-c", "sleep 30 # claude grok")
+	cmd.Env = append(os.Environ(), SessionMarkerEnv+"=not-the-run")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_, _ = cmd.Process.Wait()
+		}
+	})
+	pid := cmd.Process.Pid
+	// The old check killed any process whose command contained those names.
+	KillStoredCLI(StoredCLI{PID: pid, PGID: pid, Start: "1", Exe: "/bin/sh", Marker: "not-the-run"})
+	if !processAlive(pid) {
+		t.Fatal("name-like process was signaled")
+	}
+	stored, err := Identify(pid, "not-the-run", cmd.Path)
+	if err == nil {
+		t.Fatal("identified a process still in this test's process group")
+	}
+	_ = stored
+}
+
+func TestKillStoredMatchesStartGroupAndMarker(t *testing.T) {
+	dir := t.TempDir()
+	childFile := filepath.Join(dir, "child")
+	cmd := exec.Command("/bin/sh", "-c", fmt.Sprintf(
+		"sleep 120 &\necho $! > %q\nsleep 120\n", childFile,
+	))
+	prepareProc(cmd)
+	applySessionMarker(cmd, "run-orphan")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	leader := cmd.Process.Pid
+	t.Cleanup(func() {
+		if processAlive(leader) {
+			_ = syscall.Kill(-leader, syscall.SIGKILL)
+		}
+		_, _ = cmd.Process.Wait()
+	})
+	stored, err := Identify(leader, "run-orphan", cmd.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.PID != leader || stored.PGID != leader || stored.Start == "" || stored.Exe == "" || stored.Marker != "run-orphan" {
+		t.Fatalf("identity %+v", stored)
+	}
+	child := waitPIDFile(t, childFile)
+	wrong := stored
+	wrong.Start = "1"
+	KillStoredCLI(wrong)
+	if !stillRunning(leader) {
+		t.Fatal("mismatched start time was signaled")
+	}
+	KillStoredCLI(StoredCLI{PID: os.Getpid(), PGID: os.Getpid(), Start: stored.Start, Exe: stored.Exe, Marker: stored.Marker})
+	if !processAlive(os.Getpid()) {
+		t.Fatal("signaled our own pid")
+	}
+	KillStoredCLI(stored)
+	waitDone := make(chan struct{})
+	go func() {
+		_, _ = cmd.Process.Wait()
+		close(waitDone)
+	}()
+	select {
+	case <-waitDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("matching identity did not reap the shell")
+	}
+	if stillRunning(leader) || stillRunning(child) {
+		t.Fatalf("still running leader=%v child=%v", stillRunning(leader), stillRunning(child))
+	}
+}
+
 // stillRunning ignores zombies. kill(pid, 0) succeeds for a zombie.
 func stillRunning(pid int) bool {
 	if !processAlive(pid) {

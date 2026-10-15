@@ -306,6 +306,10 @@ CREATE TABLE IF NOT EXISTS bots (
   model TEXT,
   session_id TEXT NOT NULL DEFAULT '',
   cli_pid INTEGER NOT NULL DEFAULT 0,
+  cli_pgid INTEGER NOT NULL DEFAULT 0,
+  cli_start TEXT NOT NULL DEFAULT '',
+  cli_exe TEXT NOT NULL DEFAULT '',
+  cli_marker TEXT NOT NULL DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -400,6 +404,10 @@ func (s *Store) evolve() error {
 		{"bots", "ssh_allow", "TEXT NOT NULL DEFAULT '[]'"},
 		{"bots", "session_id", "TEXT NOT NULL DEFAULT ''"},
 		{"bots", "cli_pid", "INTEGER NOT NULL DEFAULT 0"},
+		{"bots", "cli_pgid", "INTEGER NOT NULL DEFAULT 0"},
+		{"bots", "cli_start", "TEXT NOT NULL DEFAULT ''"},
+		{"bots", "cli_exe", "TEXT NOT NULL DEFAULT ''"},
+		{"bots", "cli_marker", "TEXT NOT NULL DEFAULT ''"},
 		{"timers", "name", "TEXT NOT NULL DEFAULT ''"},
 		{"timers", "source", "TEXT NOT NULL DEFAULT 'user'"},
 		{"timers", "archive_paused", "INTEGER NOT NULL DEFAULT 0"},
@@ -451,8 +459,10 @@ func (s *Store) hasColumn(table, col string) (bool, error) {
 // and records missed timers without running them. It writes daemon_start.
 // cliRuns marks those runs interrupted and keeps session_id so the next CLI
 // turn can --resume. Otherwise the Ollama reason daemon_restart is unchanged.
-// Orphan CLI pids are returned and cleared. The caller signals them.
-func (s *Store) ReconcileOnBoot(version string, cliRuns bool) ([]int, error) {
+// Orphan CLI identities are returned and left stored. The caller signals
+// each one, then ClearCLIProc. Clearing here would drop the identity
+// before that signal attempt.
+func (s *Store) ReconcileOnBoot(version string, cliRuns bool) ([]CLIProc, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := FormatTime(Now())
@@ -462,26 +472,21 @@ func (s *Store) ReconcileOnBoot(version string, cliRuns bool) ([]int, error) {
 	}
 	defer tx.Rollback()
 
-	prows, err := tx.Query(`SELECT cli_pid FROM bots WHERE cli_pid > 0`)
+	prows, err := tx.Query(`SELECT id, cli_pid, cli_pgid, cli_start, cli_exe, cli_marker FROM bots WHERE cli_pid > 0`)
 	if err != nil {
 		return nil, err
 	}
-	var pids []int
+	var procs []CLIProc
 	for prows.Next() {
-		var pid int
-		if err := prows.Scan(&pid); err != nil {
+		var p CLIProc
+		if err := prows.Scan(&p.BotID, &p.PID, &p.PGID, &p.Start, &p.Exe, &p.Marker); err != nil {
 			prows.Close()
 			return nil, err
 		}
-		if pid > 1 {
-			pids = append(pids, pid)
-		}
+		procs = append(procs, p)
 	}
 	prows.Close()
 	if err := prows.Err(); err != nil {
-		return nil, err
-	}
-	if _, err := tx.Exec(`UPDATE bots SET cli_pid=0 WHERE cli_pid != 0`); err != nil {
 		return nil, err
 	}
 
@@ -562,7 +567,7 @@ func (s *Store) ReconcileOnBoot(version string, cliRuns bool) ([]int, error) {
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return pids, nil
+	return procs, nil
 }
 
 func nextAfter(from time.Time, schedule string) (time.Time, error) {
@@ -972,15 +977,60 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 	return b, nil
 }
 
-// SetCLIPID records the live CLI process. Zero clears it.
-// A crash leaves the pid so the next boot can signal that process group.
-func (s *Store) SetCLIPID(id string, pid int) error {
+// CLIProc is the CLI process identity stored for one bot.
+// A later boot may signal it only when the live process still matches.
+type CLIProc struct {
+	BotID  string
+	PID    int
+	PGID   int
+	Start  string
+	Exe    string
+	Marker string
+}
+
+// SetCLIProc records the identity captured at spawn.
+// A crash leaves the row so the next boot can try to signal that process.
+func (s *Store) SetCLIProc(id string, p CLIProc) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if pid < 0 {
-		pid = 0
+	if p.PID < 0 {
+		p.PID = 0
 	}
-	res, err := s.db.Exec(`UPDATE bots SET cli_pid=? WHERE id=?`, pid, id)
+	if p.PGID < 0 {
+		p.PGID = 0
+	}
+	res, err := s.db.Exec(`UPDATE bots SET cli_pid=?, cli_pgid=?, cli_start=?, cli_exe=?, cli_marker=? WHERE id=?`,
+		p.PID, p.PGID, p.Start, p.Exe, p.Marker, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// GetCLIProc reads the stored CLI identity. A cleared row has PID 0.
+func (s *Store) GetCLIProc(id string) (CLIProc, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var p CLIProc
+	p.BotID = id
+	err := s.db.QueryRow(`SELECT cli_pid, cli_pgid, cli_start, cli_exe, cli_marker FROM bots WHERE id=?`, id).
+		Scan(&p.PID, &p.PGID, &p.Start, &p.Exe, &p.Marker)
+	if errors.Is(err, sql.ErrNoRows) {
+		return CLIProc{}, ErrNotFound
+	}
+	return p, err
+}
+
+// ClearCLIProc drops the stored CLI identity.
+// Call it after a boot signal attempt, including when that attempt refuses.
+func (s *Store) ClearCLIProc(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	res, err := s.db.Exec(`UPDATE bots SET cli_pid=0, cli_pgid=0, cli_start='', cli_exe='', cli_marker='' WHERE id=?`, id)
 	if err != nil {
 		return err
 	}

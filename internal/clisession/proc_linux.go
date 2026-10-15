@@ -7,9 +7,15 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
+
+// markerRequired is true because /proc/<pid>/environ is readable for a
+// process this user started.
+const markerRequired = true
 
 // prepareProc puts the CLI in its own process group so a later kill reaches
 // the CLI and the children it starts. Linux signals that group.
@@ -27,25 +33,100 @@ func killGroup(p *os.Process) {
 	_ = p.Kill()
 }
 
-// KillStoredCLI signals a CLI left behind by a crashed daemon.
-// It does nothing unless the pid still looks like claude or grok, so a reused
-// pid is left alone. Linux reads /proc; the signal is the same process-group kill.
-func KillStoredCLI(pid int) {
-	if pid <= 1 || pid == os.Getpid() || !looksLikeCLI(pid) {
-		return
+// Identify reads the live process after spawn. launchedExe is unused on
+// Linux: the executable is read from /proc/<pid>/exe. The marker must
+// already be in the process environment.
+func Identify(pid int, marker, launchedExe string) (StoredCLI, error) {
+	_ = launchedExe
+	if !validMarker(marker) {
+		return StoredCLI{}, fmt.Errorf("cli marker is empty")
 	}
-	proc, err := os.FindProcess(pid)
-	if err != nil || proc == nil {
-		return
+	live, ok := inspectCLI(pid, marker)
+	if !ok || !live.MarkerOK {
+		return StoredCLI{}, fmt.Errorf("cli pid %d is not the process this daemon just started", pid)
 	}
-	killGroup(proc)
+	if refuseOwn(live.PID, live.PGID) {
+		return StoredCLI{}, fmt.Errorf("cli pid %d is in this daemon's process group", pid)
+	}
+	return StoredCLI{PID: live.PID, PGID: live.PGID, Start: live.Start, Exe: live.Exe, Marker: marker}, nil
 }
 
-func looksLikeCLI(pid int) bool {
-	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err != nil || len(b) == 0 {
+func inspectCLI(pid int, marker string) (liveCLI, bool) {
+	if pid <= 1 {
+		return liveCLI{}, false
+	}
+	pgid, start, err := readProcStat(pid)
+	if err != nil {
+		return liveCLI{}, false
+	}
+	got, err := syscall.Getpgid(pid)
+	if err != nil || got != pgid || got <= 1 {
+		return liveCLI{}, false
+	}
+	exe, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	if err != nil || exe == "" {
+		return liveCLI{}, false
+	}
+	return liveCLI{
+		PID: pid, PGID: got, Start: start, Exe: exe,
+		MarkerOK: environHasMarker(pid, marker),
+	}, true
+}
+
+func readProcStat(pid int) (pgid int, start string, err error) {
+	b, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, "", err
+	}
+	return parseProcStat(b)
+}
+
+// parseProcStat reads pgrp (field 5) and starttime (field 22) from
+// /proc/<pid>/stat. comm sits in parentheses and may contain spaces
+// and parentheses, so the fields after the last ')' are the stable tail.
+func parseProcStat(b []byte) (pgid int, start string, err error) {
+	i := bytes.LastIndexByte(b, ')')
+	if i < 0 || i+2 >= len(b) {
+		return 0, "", fmt.Errorf("proc stat has no comm")
+	}
+	fields := strings.Fields(string(b[i+1:]))
+	// field 3 is index 0, so field 5 is index 2 and field 22 is index 19.
+	if len(fields) < 20 {
+		return 0, "", fmt.Errorf("proc stat is short")
+	}
+	pgid, err = strconv.Atoi(fields[2])
+	if err != nil || pgid <= 1 {
+		return 0, "", fmt.Errorf("proc stat pgrp")
+	}
+	start = fields[19]
+	if start == "" || strings.Trim(start, "0123456789") != "" {
+		return 0, "", fmt.Errorf("proc stat starttime")
+	}
+	return pgid, start, nil
+}
+
+func environHasMarker(pid int, marker string) bool {
+	if !validMarker(marker) {
 		return false
 	}
-	text := strings.ToLower(string(bytes.ReplaceAll(b, []byte{0}, []byte{' '})))
-	return strings.Contains(text, "claude") || strings.Contains(text, "grok")
+	want := SessionMarkerEnv + "=" + marker
+	// Right after exec, /proc/<pid>/environ can read back empty for a few
+	// milliseconds. A process that really has no environment stays empty.
+	for attempt := 0; attempt < 25; attempt++ {
+		b, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+		if err != nil {
+			return false
+		}
+		if len(b) == 0 {
+			time.Sleep(2 * time.Millisecond)
+			continue
+		}
+		for _, ent := range bytes.Split(b, []byte{0}) {
+			if string(ent) == want {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
