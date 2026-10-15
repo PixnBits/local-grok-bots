@@ -299,7 +299,8 @@
   .voice-bar .row { display: flex; gap: 6px; }
   .voice-msg { margin: 0 12px; color: var(--muted); font-size: 12px; min-height: 0; }
   .voice-settings { margin: 0 12px 6px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; display: grid; gap: 6px; font-size: 13px; }
-  .voice-settings label { display: flex; gap: 6px; align-items: center; }
+  .voice-settings label { display: flex; gap: 8px; align-items: center; justify-content: flex-start; }
+  .voice-settings input[type=checkbox] { width: auto; flex: none; margin: 0; }
   .voice-settings .meta { color: var(--muted); font-size: 12px; }
   #mic-btn.on, #voice-btn.on { background: var(--err-bg); color: var(--err); }
 </style>

@@ -101,3 +101,16 @@ Avoid loading heavy models on lightweight devices.
 - On a lightweight device the defaults stay light; the user can still force heavier models if they want.
 
 See also: `docs/PRD.md` (interface and later), `docs/specs.md` (API contracts, which stay unchanged for the pure-browser path).
+
+## Implementation status (branch `voice/local-browser`)
+
+Implemented (pure browser path, no new API endpoints):
+- Composer: 🎤 dictation, **Voice** mode toggle, ⚙ voice settings (stored in `localStorage` key `lgb.voice`).
+- STT: Web Speech API with `processLocally = true` only. Fail closed: if the browser has no on-device mode (`SpeechRecognition.available`), the mic refuses rather than falling back to cloud recognition. Language pack is installed on first use via `SpeechRecognition.install()`. Interim words show in a preview strip above the composer (finals solid, interim italic); on stop, finals are appended to the textarea, or sent if "send automatically" is on.
+- TTS: `speechSynthesis` with `localService === true` voices only; if none exist, nothing is spoken (message shown). Markdown and code blocks are stripped before speaking. Any send cancels speech.
+- Voice mode: listen → ~0.9 s silence after a final result ends the utterance → `send()` → follow stream → speak reply → listen again. Barge-in is a setting (default off, because without headphones the mic hears the TTS). "End & summarize" posts one message asking the bot to summarize the session, with the client-side transcript inline; the bot's reply is the summary. Raw turns remain in the thread as normal messages.
+- Device detection: cores / deviceMemory / WebGPU shown in settings; no heavy models are loaded anywhere.
+
+Secure context: the daemon can now serve HTTPS itself. `TLS_CERT` + `TLS_KEY` use an existing pair; `TLS_SELF_SIGNED=1` generates (once) an ECDSA cert under `DATA_DIR/tls/` for localhost, the host name, and all interface IPs. Setting only one of `TLS_CERT`/`TLS_KEY` is a startup error. TLS mode is recorded in the event log (`tls_enabled`). Accept the browser's certificate warning once per device, or import `DATA_DIR/tls/cert.pem` as trusted.
+
+Not yet: WASM Moonshine/Whisper fallback, daemon `/api/stt/stream`, Piper/Kokoro, streaming LLM tokens into TTS (Phase 2 latency work), archiving raw voice turns after summary.
