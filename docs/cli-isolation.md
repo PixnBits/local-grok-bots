@@ -22,6 +22,10 @@ claude_home = "auto"
 # Claude only. required (default): Claude's Bash sandbox on, fail closed.
 # off: the daemon writes no sandbox block. Managed policy only.
 claude_sandbox = "required"
+# lgb: daemon state tools for CLI bots (default true).
+lgb = true
+# Let lgb create and update other bots (default false).
+lgb_manage_bots = false
 # Added to the scrubbed environment. Only managed policy can set this.
 # env = { ANTHROPIC_BASE_URL = "https://gateway.corp.example" }
 ```
@@ -190,6 +194,51 @@ Under managed `home = "user"` the daemon does not write the user's
 `~/.grok/sandbox.toml`. It passes built-in `--sandbox strict`, which Grok runs
 unenforced, with a warning, if it can't apply.
 
+### lgb: daemon state tools without MCP
+
+Each CLI turn gets an `lgb` command on its PATH. It reaches only these daemon
+tools: `set_timer` (in/at/every), `list_timers`, `clear_timer`,
+`write_memory`, `delete_memory`, memory list, `list_bots`, `read_bot`,
+`send_dm`, and `create_bot`/`update_bot` only with `lgb_manage_bots = true`.
+There is no route to `run_shell`, `read_file`, `write_file`, grants, or
+permission decisions; argv is parsed by the daemon and anything else is
+"unknown command". `lgb help` prints usage.
+
+Transport. Both sandboxes block the network, and live with Grok 1.0.52 the
+`lgb` profile (`restrict_network = true`) refused a connect to a unix socket
+both in `/tmp` and in the workspace. So lgb uses a spool in the workspace,
+which both sandboxes let the CLI write:
+
+- Before each turn the daemon deletes and recreates
+  `<workspace>/.lgb/{bin,req,resp}` (0700) and writes `bin/lgb`, a POSIX `sh`
+  script (needs `sh`, `od`, `tr`, `mv`, `head`, `tail`, `sleep`).
+- The script writes `token\0arg\0arg…` to `req/.<id>`, renames it to
+  `req/<id>`, and waits up to 60 s for `resp/<id>` (first line exit code).
+- The daemon polls `req` every 100 ms through directory file descriptors it
+  opened at setup, with `O_NOFOLLOW` for every read and `O_EXCL|O_NOFOLLOW` plus
+  `renameat` for every write. A bot that swaps `req`/`resp` for a symlink, or
+  plants a link as a request, can't make the daemon read or write outside the
+  spool (tested). Names must be hex; requests over 64 KiB are refused.
+- The CLI gets `PATH=<workspace>/.lgb/bin:…`, `LGB_SPOOL`, and `LGB_TOKEN`.
+
+Token. `lgbr_` plus 32 random bytes, made per run, never the admin token, and
+only accepted by the spool. The HTTP API returns 401 for it (live). When the
+run ends the poller stops, the token is cleared, and `req` is removed, so a
+later call fails with "not available in this run" (live). At most 200 calls
+per turn. Every call, including a bad token, is written as `lgb_call` to the
+bot log and the audit sink with `run_id`, the command, the tool, redacted
+arguments, and the result.
+
+Approval. The daemon adds allow rules `Bash(lgb)` and `Bash(lgb *)`
+(`--allowedTools` for Claude, `--allow` for Grok). Other shell commands still
+ask as before. A chained command (`lgb … ; echo $?`) is not covered and asks;
+the preamble tells the bot to run each lgb call alone. Live, Grok's headless
+ask for such a command cancelled the turn.
+
+Claude sandbox users: nothing else changes. The settings file, deny rules,
+sandbox block and managed-settings behavior are as above. lgb runs inside
+Claude's sandbox (writes to the workspace, no network) and adds one allow rule.
+
 ### Daemon API
 
 With a CLI backend the HTTP API requires a token. `AUTH_TOKEN` wins; otherwise
@@ -221,6 +270,17 @@ Under `overrides = "refuse"` every hit fails the turn with
 `workspace CLI config override refused: <files>`, and the CLI is not started.
 
 ## Verified, and not
+
+- lgb live with Grok 1.0.52 and a real daemon on a test port (2026-10-14):
+  a Grok bot set a 10-minute timer and wrote `favorite_color=teal` through lgb;
+  `lgb run_shell id` gave "unknown command" and `lgb bot create` gave "off by
+  policy"; all four calls were logged as `lgb_call` with the run id; the run
+  token got 401 on `/api/bots` and on the permission decision route and failed
+  after the run. `curl` and `cat admin-token` were asked for, which cancelled
+  the headless turn.
+- lgb with Claude is tested only with the fake CLI (argv has `--allowedTools
+  Bash(lgb *)`, the script ran, the memory and timer landed). That Claude's
+  sandbox allows the workspace spool and `/dev/urandom` needs a real run.
 
 - Fake-CLI tests check argv, the child environment, the per-bot home,
   credential links, the scan, and refuse/ignore.
