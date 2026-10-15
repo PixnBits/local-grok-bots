@@ -664,7 +664,7 @@ func (a *App) cliBoundary() string {
 	tail := "You run directly on the host, not inside the daemon's jail, and the daemon's own tools (run_shell, timers, memory, other bots) are not available to you. Some actions need the user's approval; a denied action is final for this turn.\n"
 	if a.policy.CLILGB && lgbSupported {
 		tail = "You run directly on the host, not inside the daemon's jail; the daemon's run_shell, read_file, and write_file are not available. Some actions need the user's approval; a denied action is final for this turn.\n" +
-			"For timers, your memory notes, other bots, and direct messages, run the lgb command in your shell (run `lgb help` for usage), for example `lgb timer in 5m Remind the user to stretch` or `lgb memory set favorite_color blue`. lgb works only during this turn.\n"
+			"For timers, your memory notes, other bots, and direct messages, run the lgb command in your shell (run `lgb help` for usage), for example `lgb timer in 5m Remind the user to stretch` or `lgb memory set favorite_color blue`. Run each lgb command as its own shell call, with nothing chained (no ;, &&, pipes, or $?), so it is approved without asking. lgb works only during this turn.\n"
 	}
 	switch a.policy.EffectiveBackend() {
 	case "grok":

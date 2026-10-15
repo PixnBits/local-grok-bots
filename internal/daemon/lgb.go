@@ -284,7 +284,8 @@ const lgbHelp = `lgb: daemon tools for this bot. Output is text; exit 0 on succe
   lgb bot create <name> <description...> [--label LABEL]   if policy allows
   lgb bot update <name|id> [--name N] [--label L] [--description D]   if policy allows
 
-A timer's prompt comes back to you as a [scheduled] message.`
+A timer's prompt comes back to you as a [scheduled] message.
+Run each lgb command as its own shell call; a chained command (;, &&, |) asks for approval.`
 
 // lgbParse maps argv to a tool and its arguments. help returns text and no tool.
 func (a *App) lgbParse(bot store.Bot, args []string) (tool string, targs map[string]any, out string, err error) {
