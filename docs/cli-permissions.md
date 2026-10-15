@@ -170,4 +170,4 @@ keeps workspace and user CLI config from adding allow rules, is in
 
 ## Audit and redaction
 
-Secret-looking keys (`token`, `secret`, `password`, `api_key`, `authorization`, `credential`, `bearer`) and values (`sk-…`, `ghp_…`, `github_pat_…`, bearer tokens) are redacted before the event and the audit line. The `updatedInput` sent back to Claude, over MCP or `stream_control`, is not redacted.
+Secret-looking keys (`token`, `secret`, `password`, `api_key`, `authorization`, `credential`, `bearer`) and values are redacted before the event and the audit line, including inside nested maps, slices, and error strings. Value shapes are Anthropic keys (`sk-ant-…`, including later hyphen and underscore segments), other `sk-…` keys, xAI keys (`xai-…`), `ghp_…`, `github_pat_…`, `lgbr_` run tokens, 64-hex admin and API tokens, and bearer tokens. Booleans, numbers, and null stay their JSON types. The `updatedInput` sent back to Claude, over MCP or `stream_control`, is not redacted.

@@ -1,5 +1,5 @@
 // Package audit writes one JSON object per line for CLI start and stop.
-// An empty destination writes nothing. Secrets in string fields are redacted.
+// An empty destination writes nothing. Secrets in nested values are redacted.
 package audit
 
 import (
@@ -9,6 +9,7 @@ import (
 	"log/syslog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -27,7 +28,20 @@ var (
 	userinfo    = regexp.MustCompile(`://[^/\s:]+:[^/\s@]+@`)
 	secretKV    = regexp.MustCompile(`(?i)\b(XAI_API_KEY|ANTHROPIC_API_KEY|SSH_AUTH_SOCK|AUTHORIZATION|PROXY_AUTHORIZATION)=([^\s]+)`)
 	secretKeyRe = regexp.MustCompile(`(?i)(token|secret|password|passwd|api[_-]?key|authorization|credential|bearer)`)
-	secretValRe = regexp.MustCompile(`(?i)\b(?:sk-[a-z0-9]{8,}|ghp_[a-zA-Z0-9]{8,}|github_pat_[a-zA-Z0-9_]{8,}|bearer\s+[a-z0-9\-._~+/]+=*)`)
+	// sk-ant- allows hyphen and underscore segments (api03, admin01, oat01).
+	// lgbr_ is the per-run token (prefix plus 32 bytes of hex). A bare 64-hex
+	// word is the generated admin token and the MCP permission token.
+	// Exact-length tokens keep a trailing boundary so a longer hex run is left alone.
+	secretValRe = regexp.MustCompile(`(?i)\b(?:` +
+		`sk-ant-[a-z0-9_-]{8,}` +
+		`|sk-[a-z0-9]{8,}` +
+		`|xai-[a-z0-9]{20,}` +
+		`|ghp_[a-z0-9]{8,}` +
+		`|github_pat_[a-z0-9_]{8,}` +
+		`|lgbr_[a-f0-9]{64}\b` +
+		`|bearer\s+[a-z0-9\-._~+/]+=*` +
+		`|[a-f0-9]{64}\b` +
+		`)`)
 )
 
 // Open selects the sink. dest is empty, "stderr", "syslog", or an absolute path.
@@ -60,17 +74,15 @@ func (l *Logger) Enabled() bool {
 	return l != nil && l.w != nil
 }
 
-// Write emits one JSON line. String values are redacted.
+// Write emits one JSON line. Nested maps, slices, and error strings are redacted.
+// Booleans, numbers, and null are left as themselves.
 func (l *Logger) Write(fields map[string]any) {
 	if l == nil || l.w == nil {
 		return
 	}
-	out := make(map[string]any, len(fields)+1)
-	for k, v := range fields {
-		if s, ok := v.(string); ok {
-			v = Redact(s)
-		}
-		out[k] = v
+	out, _ := redactWalk(fields, false).(map[string]any)
+	if out == nil {
+		out = map[string]any{}
 	}
 	if _, ok := out["ts"]; !ok {
 		out["ts"] = time.Now().UTC().Format(time.RFC3339Nano)
@@ -109,29 +121,84 @@ func RedactText(s string) string {
 }
 
 // RedactValue walks a JSON-like value and redacts secret keys and token-shaped
-// strings. String leaves are clipped.
+// strings. String leaves are clipped. Booleans, numbers, and null stay their
+// own types. error values are redacted as their Error string.
 func RedactValue(v any) any {
+	return redactWalk(v, true)
+}
+
+func redactWalk(v any, clip bool) any {
+	if v == nil {
+		return nil
+	}
 	switch t := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(t))
-		for k, val := range t {
-			if secretKeyRe.MatchString(k) {
-				out[k] = "[redacted]"
+	case json.Number:
+		return t
+	case error:
+		if isNilPtr(t) {
+			return nil
+		}
+		return finishString(t.Error(), clip)
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.String:
+		return finishString(rv.String(), clip)
+	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64:
+		return v
+	case reflect.Map:
+		if rv.IsNil() {
+			return map[string]any{}
+		}
+		out := make(map[string]any, rv.Len())
+		for _, key := range rv.MapKeys() {
+			ks := fmt.Sprint(key.Interface())
+			if secretKeyRe.MatchString(ks) {
+				out[ks] = "[redacted]"
 				continue
 			}
-			out[k] = RedactValue(val)
+			out[ks] = redactWalk(rv.MapIndex(key).Interface(), clip)
 		}
 		return out
-	case []any:
-		out := make([]any, len(t))
-		for i := range t {
-			out[i] = RedactValue(t[i])
+	case reflect.Slice, reflect.Array:
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			return v
+		}
+		if rv.Kind() == reflect.Slice && rv.IsNil() {
+			return []any{}
+		}
+		out := make([]any, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			out[i] = redactWalk(rv.Index(i).Interface(), clip)
 		}
 		return out
-	case string:
-		return clipText(RedactText(t), 500)
+	case reflect.Pointer, reflect.Interface:
+		if rv.IsNil() {
+			return nil
+		}
+		return redactWalk(rv.Elem().Interface(), clip)
 	default:
-		return clipText(fmt.Sprint(t), 500)
+		return v
+	}
+}
+
+func finishString(s string, clip bool) string {
+	s = RedactText(s)
+	if !clip {
+		return s
+	}
+	return clipText(s, 500)
+}
+
+func isNilPtr(v any) bool {
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Pointer, reflect.Interface, reflect.Slice, reflect.Map, reflect.Func, reflect.Chan:
+		return rv.IsNil()
+	default:
+		return false
 	}
 }
 
