@@ -40,6 +40,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/bots/{id}/dms", a.handleDMs)
 	mux.HandleFunc("GET /api/dms/{bot_a}/{bot_b}", a.handleDMThread)
 	mux.HandleFunc("GET /api/log", a.handleLog)
+	mux.HandleFunc("GET /login", a.handleLogin)
 	mux.HandleFunc("GET /", a.handleIndex)
 	mux.HandleFunc("GET /index.html", a.handleIndex)
 	// A bot's page. The client reads the id from the path.
@@ -49,7 +50,7 @@ func (a *App) Handler() http.Handler {
 
 func (a *App) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/health" || strings.HasPrefix(r.URL.Path, "/api/mcp/permission/") || a.cfg.AuthToken == "" || authorized(r, a.cfg.AuthToken) {
+		if r.URL.Path == "/api/health" || r.URL.Path == "/login" || strings.HasPrefix(r.URL.Path, "/api/mcp/permission/") || a.cfg.AuthToken == "" || authorized(r, a.cfg.AuthToken) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -64,17 +65,46 @@ func (a *App) withAuth(next http.Handler) http.Handler {
 	})
 }
 
+// authCookie carries the admin token for a browser that opened /login.
+const authCookie = "lgb_auth"
+
 func authorized(r *http.Request, token string) bool {
 	h := r.Header.Get("Authorization")
 	const prefix = "Bearer "
-	if len(h) < len(prefix) || !strings.EqualFold(h[:len(prefix)], prefix) {
-		return false
+	if len(h) >= len(prefix) && strings.EqualFold(h[:len(prefix)], prefix) {
+		return tokenEqual(h[len(prefix):], token)
 	}
-	got := h[len(prefix):]
-	if len(got) != len(token) {
+	if c, err := r.Cookie(authCookie); err == nil {
+		return tokenEqual(c.Value, token)
+	}
+	return false
+}
+
+func tokenEqual(got, token string) bool {
+	if token == "" || len(got) != len(token) {
 		return false
 	}
 	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
+}
+
+// handleLogin trades a token in the URL for an HttpOnly, same-site cookie,
+// then redirects to the UI. The token never reaches page script.
+func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if a.cfg.AuthToken == "" {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
+	if !tokenEqual(r.URL.Query().Get("token"), a.cfg.AuthToken) {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: authCookie, Value: a.cfg.AuthToken, Path: "/",
+		HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil,
+	})
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {

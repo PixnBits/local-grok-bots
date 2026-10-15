@@ -431,7 +431,7 @@
 <div class="auth" id="auth">
   <form class="panel card">
     <h2 style="font-family:var(--serif);margin:0">Token required</h2>
-    <p class="empty">This daemon has AUTH_TOKEN set. Paste the bearer token to continue. It stays in this browser only.</p>
+    <p class="empty">This daemon requires a token (AUTH_TOKEN, or the generated DATA_DIR/admin-token when a CLI backend is on). Paste it here, or open /login?token=&lt;token&gt; once to stay signed in with a cookie. A pasted token stays in this tab only.</p>
     <input id="auth-token" type="password" autocomplete="off" placeholder="Bearer token">
     <button class="primary" type="submit">Continue</button>
     <div class="err" id="auth-err"></div>

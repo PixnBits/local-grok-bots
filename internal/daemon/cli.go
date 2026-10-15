@@ -304,6 +304,7 @@ func (a *App) cliIsolation(botID, backend, ws string) (*clisession.Isolation, er
 		StateDir: state,
 		Base:     os.Environ(),
 		Extra:    a.policy.CLIEnv,
+		Secrets:  []string{a.cfg.AuthToken},
 	}
 	opts.UserHome, _ = os.UserHomeDir()
 	ownHome := isolated

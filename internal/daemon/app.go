@@ -97,6 +97,14 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	if pol.HasOllamaModel {
 		cfg.Model = pol.OllamaModel
 	}
+	tok, tokPath, err := ensureAdminToken(cfg.DataDir, cfg.AuthToken, pol.UsesCLI())
+	if err != nil {
+		return nil, err
+	}
+	if tokPath != "" {
+		cfg.AuthToken = tok
+		fmt.Fprintf(os.Stderr, "local-grok-bots: a CLI backend is enabled, so the API requires a token; it is in %s. Open /login?token=<token> once per browser.\n", tokPath)
+	}
 	aud, err := audit.Open(pol.AuditLog)
 	if err != nil {
 		return nil, err

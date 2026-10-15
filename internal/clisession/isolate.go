@@ -35,6 +35,9 @@ type IsolationOptions struct {
 	Base []string
 	// Extra is policy-set environment. It wins over everything else.
 	Extra map[string]string
+	// Secrets are daemon values (the admin token) that must never reach the
+	// CLI. A variable whose value contains one is dropped, whatever its name.
+	Secrets []string
 }
 
 // passEnv names variables kept from the daemon environment.
@@ -141,6 +144,14 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 	}
 	for k, v := range o.Extra {
 		env[k] = v
+	}
+	delete(env, "AUTH_TOKEN")
+	for k, v := range env {
+		for _, sec := range o.Secrets {
+			if sec != "" && strings.Contains(v, sec) {
+				delete(env, k)
+			}
+		}
 	}
 	keys := make([]string, 0, len(env))
 	for k := range env {

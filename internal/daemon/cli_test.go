@@ -336,11 +336,11 @@ func TestCLICrashRestartKillsGroupAndResumes(t *testing.T) {
 	t.Setenv("LGB_CLI_MODE", "ok")
 	_ = os.WriteFile(logPath, nil, 0o644)
 	srv := serve(t, app)
-	res, b := do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "next"}, "")
+	res, b := do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "next"}, app.cfg.AuthToken)
 	if res.StatusCode != 200 {
 		t.Fatalf("post %d %s", res.StatusCode, b)
 	}
-	waitIdle(t, srv.URL, bot.ID, "")
+	waitIdle(t, srv.URL, bot.ID, app.cfg.AuthToken)
 	argv := readArgv(t, logPath)
 	if !strings.Contains(argv, "--resume") || !strings.Contains(argv, session) || strings.Contains(argv, "--session-id") {
 		t.Fatalf("next message did not resume %s:\n%s", session, argv)
@@ -358,7 +358,7 @@ func TestCLICrashRestartKillsGroupAndResumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.fireDue()
-	waitIdle(t, srv.URL, bot.ID, "")
+	waitIdle(t, srv.URL, bot.ID, app.cfg.AuthToken)
 	argv = readArgv(t, logPath)
 	if !strings.Contains(argv, "--resume") || !strings.Contains(argv, session) || !strings.Contains(argv, "[scheduled] check the gate") {
 		t.Fatalf("timer did not resume:\n%s", argv)
@@ -422,11 +422,11 @@ func TestCLIShutdownMidTurnResumes(t *testing.T) {
 	_ = os.WriteFile(logPath, nil, 0o644)
 	app2 := newCLIApp(t, dir, policyPath)
 	srv := serve(t, app2)
-	res, b := do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "next"}, "")
+	res, b := do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "next"}, app2.cfg.AuthToken)
 	if res.StatusCode != 200 {
 		t.Fatalf("post %d %s", res.StatusCode, b)
 	}
-	waitIdle(t, srv.URL, bot.ID, "")
+	waitIdle(t, srv.URL, bot.ID, app2.cfg.AuthToken)
 	argv := readArgv(t, logPath)
 	if !strings.Contains(argv, "--resume") || !strings.Contains(argv, session) || strings.Contains(argv, "--session-id") {
 		t.Fatalf("shutdown resume %s:\n%s", session, argv)
@@ -440,7 +440,7 @@ func TestCLIShutdownMidTurnResumes(t *testing.T) {
 		t.Fatal(err)
 	}
 	app2.fireDue()
-	waitIdle(t, srv.URL, bot.ID, "")
+	waitIdle(t, srv.URL, bot.ID, app2.cfg.AuthToken)
 	argv = readArgv(t, logPath)
 	if !strings.Contains(argv, "--resume") || !strings.Contains(argv, session) || !strings.Contains(argv, "[scheduled] check the gate") {
 		t.Fatalf("timer after shutdown:\n%s", argv)
