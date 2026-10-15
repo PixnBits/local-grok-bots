@@ -399,18 +399,20 @@ func TestCLIShutdownMidTurnResumes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.SessionID != "" {
-			proc, perr := app.st.GetCLIProc(bot.ID)
-			if perr != nil {
-				t.Fatal(perr)
-			}
+		// The session id is stored before the CLI starts; the identity row is
+		// written from OnStart. Wait for both before shutting down.
+		proc, perr := app.st.GetCLIProc(bot.ID)
+		if perr != nil {
+			t.Fatal(perr)
+		}
+		if got.SessionID != "" && proc.PID > 1 {
 			if proc.PID <= 1 || proc.PGID != proc.PID || proc.Start == "" || proc.Exe == "" || proc.Marker == "" {
 				t.Fatalf("cli identity %+v", proc)
 			}
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("session was not stored before shutdown")
+			t.Fatal("session and cli identity were not stored before shutdown")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
