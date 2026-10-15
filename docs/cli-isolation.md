@@ -35,10 +35,12 @@ lgb_manage_bots = false
 Every CLI turn gets a fresh environment. Nothing is inherited except
 `PATH`, `LANG`, `LC_*`, `TERM`, `TZ`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`,
 the proxy variables, `SSL_CERT_FILE`/`SSL_CERT_DIR`/`NODE_EXTRA_CA_CERTS`,
-the daemon's own `LGB_*`, and the backend credential
+and the backend credential
 (`ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` for Claude, `XAI_API_KEY` for
-Grok). Every other `ANTHROPIC_*`, `CLAUDE_*`, and `GROK_*` variable is dropped,
-including `ANTHROPIC_BASE_URL`, `CLAUDE_CONFIG_DIR`, `GROK_CONFIG`, and
+Grok). `LGB_*` from the daemon process is not copied. The daemon sets
+`LGB_SPOOL` and `LGB_TOKEN` for that run. Every other `ANTHROPIC_*`,
+`CLAUDE_*`, and `GROK_*` variable is dropped, including
+`ANTHROPIC_BASE_URL`, `CLAUDE_CONFIG_DIR`, `GROK_CONFIG`, and
 `GROK_SANDBOX`. Managed `cli.isolation.env` is applied last.
 
 With `home = "isolated"`, `HOME` is `DATA_DIR/cli/<bot>/home`. The only file
@@ -234,6 +236,20 @@ There is no route to `run_shell`, `read_file`, `write_file`, grants, or
 permission decisions; argv is parsed by the daemon and anything else is
 "unknown command". `lgb help` prints usage.
 
+`list_bots`, `read_bot`, and `send_dm` reach every bot on this daemon.
+There is no allow-list. `list_bots` returns id, name, label, and status.
+`read_bot` takes a name or id and returns that bot's description, model, and
+memory keys and values. `send_dm` queues a turn on the named bot.
+`create_bot` and `update_bot` stay behind `lgb_manage_bots`.
+
+A repeating timer the bot creates (`lgb timer every`, or `set_timer` with
+`every`) is limited on Claude and Grok: at least 5 minutes, and at most 12
+scheduled turns an hour for that bot. Policy sets both, as
+`cli.lgb.min_timer_interval` and `cli.lgb.max_scheduled_per_hour`. `0` turns
+that check off. Ollama is unchanged unless those keys are set. One-shot
+timers have no minimum interval. Timers created from the page are not
+limited here.
+
 Transport. Both sandboxes block the network, and live with Grok 1.0.52 the
 `lgb` profile (`restrict_network = true`) refused a connect to a unix socket
 both in `/tmp` and in the workspace. So lgb uses a spool in the workspace,
@@ -248,18 +264,22 @@ which both sandboxes let the CLI write:
   opened at setup, with `O_NOFOLLOW` for every read and `O_EXCL|O_NOFOLLOW` plus
   `renameat` for every write. A bot that swaps `req`/`resp` for a symlink, or
   plants a link as a request, can't make the daemon read or write outside the
-  spool (tested). Names must be hex; requests over 64 KiB are refused.
-- The CLI gets `PATH=<workspace>/.lgb/bin:…`, `LGB_SPOOL`, and `LGB_TOKEN`.
+  spool (tested). Names must be hex. A request over 64 KiB is refused with
+  `lgb: request too large (max 64 KiB)`.
+- The CLI gets `PATH=<workspace>/.lgb/bin:…`. The daemon sets `LGB_SPOOL`
+  and `LGB_TOKEN` for this run. Other `LGB_*` variables are not passed through.
 
-Token. `lgbr_` plus 32 random bytes, made per run, never the admin token, and
-only accepted by the spool. The HTTP API returns 401 for it. The permission
-decision route is the exception: a live `lgbr_` token, or the turn's MCP
-permission token, is 403 there. After the run the token is forgotten, so that
-route returns 401 again. When the run ends the poller stops, the token is
-cleared, and `req` is removed, so a later call fails with "not available in
-this run" (live). At most 200 calls per turn. Every call, including a bad
-token, is written as `lgb_call` to the bot log and the audit sink with
-`run_id`, the command, the tool, redacted arguments, and the result.
+Token. One token per run: `lgbr_` plus 32 random bytes. It is not single-use.
+The same token authorizes every lgb call in that run, up to 200 calls, and
+call 201 returns `lgb: call limit for this turn reached`. It is never the
+admin token, and only the spool accepts it. The HTTP API returns 401 for it.
+The permission decision route is the exception: a live `lgbr_` token, or the
+turn's MCP permission token, is 403 there. The token is revoked when the run
+ends: it is forgotten, the poller stops, and `req` is removed. A later call
+fails with "not available in this run", and that route returns 401 again.
+Every call, including a bad token, is written as `lgb_call` to the bot log
+and the audit sink with `run_id`, the command, the tool, redacted arguments,
+and the result.
 
 Approval. The daemon adds allow rules `Bash(lgb)` and `Bash(lgb *)`
 (`--allowedTools` for Claude, `--allow` for Grok). Other shell commands still
