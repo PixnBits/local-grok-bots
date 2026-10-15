@@ -103,7 +103,11 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 		}
 		if o.UserHome != "" {
 			for _, rel := range credFiles[backend] {
-				linkCred(filepath.Join(o.UserHome, rel), filepath.Join(o.Home, rel))
+				if backend == "grok" {
+					hardlinkCred(filepath.Join(o.UserHome, rel), filepath.Join(o.Home, rel))
+				} else {
+					linkCred(filepath.Join(o.UserHome, rel), filepath.Join(o.Home, rel))
+				}
 			}
 		}
 	}
@@ -198,6 +202,23 @@ func linkCred(src, dst string) {
 	}
 	_ = os.Remove(dst)
 	_ = os.Symlink(src, dst)
+}
+
+// hardlinkCred shares Grok's login by hard link: grok 1.0.52 reports "Not
+// signed in" when auth.json is a symlink. It is relinked when the user's file
+// was replaced (a new inode). Across filesystems it falls back to a symlink.
+func hardlinkCred(src, dst string) {
+	st, err := os.Stat(src)
+	if err != nil || !st.Mode().IsRegular() {
+		return
+	}
+	if cur, err := os.Lstat(dst); err == nil && cur.Mode().IsRegular() && os.SameFile(st, cur) {
+		return
+	}
+	_ = os.Remove(dst)
+	if err := os.Link(src, dst); err != nil {
+		_ = os.Symlink(src, dst)
+	}
 }
 
 // overrideNames are workspace files a CLI would read as configuration.

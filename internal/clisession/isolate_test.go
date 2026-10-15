@@ -94,8 +94,20 @@ func TestPrepareIsolationGrok(t *testing.T) {
 	if iso.SettingsPath != "" {
 		t.Fatal("grok got a claude settings file")
 	}
-	if _, err := os.Readlink(filepath.Join(home, ".grok", "auth.json")); err != nil {
-		t.Fatal("grok auth not linked")
+	src, _ := os.Stat(filepath.Join(user, ".grok", "auth.json"))
+	dst, err := os.Lstat(filepath.Join(home, ".grok", "auth.json"))
+	if err != nil || !dst.Mode().IsRegular() || !os.SameFile(src, dst) {
+		t.Fatalf("grok auth not hard linked: %v %v", dst, err)
+	}
+	// The user's login replaced by rename gets relinked on the next turn.
+	_ = os.WriteFile(filepath.Join(user, ".grok", "auth.json.new"), []byte(`{"v":2}`), 0o600)
+	_ = os.Rename(filepath.Join(user, ".grok", "auth.json.new"), filepath.Join(user, ".grok", "auth.json"))
+	if _, err := PrepareIsolation(IsolationOptions{Backend: "grok", StateDir: t.TempDir(), Home: home, UserHome: user}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(filepath.Join(home, ".grok", "auth.json"))
+	if string(b) != `{"v":2}` {
+		t.Fatalf("not relinked: %s", b)
 	}
 }
 
