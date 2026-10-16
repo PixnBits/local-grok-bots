@@ -38,10 +38,17 @@ type Egress struct {
 	requireGate bool
 	gateMu      sync.Mutex
 	gates       map[string]gateBinding
-	// onAudit records one loopback request. It is not used for a unix socket.
+	// onAudit records one request. Headers and bodies are not passed.
 	// The callback receives the bot, the run, the normalized path, and the status.
-	onAudit func(botID, runID, path string, status int)
+	onAudit  func(botID, runID, path string, status int)
+	routeBot string
+	routeRun string
+	denyMu   sync.Mutex
+	denyAt   []time.Time
 }
+
+// denyAuditLimit is how many 403 rows one proxy writes per second.
+var denyAuditLimit = 20
 
 // gateBinding is the bot and run a placeholder bearer was admitted for.
 type gateBinding struct {
@@ -181,7 +188,7 @@ func (e *Egress) Admit(botID, runID, secret string) func() {
 	}
 }
 
-// SetAudit registers the loopback request record. A nil function disables it.
+// SetAudit registers the request record. A nil function disables it.
 // The callback must not expect headers, a body, or the presented bearer.
 func (e *Egress) SetAudit(fn func(botID, runID, path string, status int)) {
 	if e == nil {
@@ -192,17 +199,64 @@ func (e *Egress) SetAudit(fn func(botID, runID, path string, status int)) {
 	e.gateMu.Unlock()
 }
 
+// BindRoute sets the bot and run recorded for unix-socket requests.
+func (e *Egress) BindRoute(botID, runID string) {
+	if e == nil {
+		return
+	}
+	e.gateMu.Lock()
+	e.routeBot = botID
+	e.routeRun = runID
+	e.gateMu.Unlock()
+}
+
 func (e *Egress) note(botID, runID, path string, status int) {
-	if e == nil || !e.requireGate {
+	if e == nil {
 		return
 	}
 	e.gateMu.Lock()
 	fn := e.onAudit
+	if botID == "" {
+		botID = e.routeBot
+	}
+	if runID == "" {
+		runID = e.routeRun
+	}
 	e.gateMu.Unlock()
 	if fn == nil {
 		return
 	}
+	if status == http.StatusForbidden && !e.allowDenyAudit() {
+		return
+	}
 	fn(botID, runID, path, status)
+}
+
+func (e *Egress) allowDenyAudit() bool {
+	if e == nil {
+		return false
+	}
+	limit := denyAuditLimit
+	if limit < 1 {
+		return false
+	}
+	e.denyMu.Lock()
+	defer e.denyMu.Unlock()
+	now := time.Now()
+	cut := now.Add(-time.Second)
+	n := 0
+	for _, t := range e.denyAt {
+		if t.After(cut) {
+			e.denyAt[n] = t
+			n++
+		}
+	}
+	e.denyAt = e.denyAt[:n]
+	if len(e.denyAt) >= limit {
+		return false
+	}
+	e.denyAt = append(e.denyAt, now)
+	return true
 }
 
 func (e *Egress) admits(botID, runID, presented string) bool {
@@ -309,16 +363,9 @@ func (e *Egress) serve(trip http.RoundTripper) {
 				e.note(botID, runID, norm, http.StatusServiceUnavailable)
 				return
 			}
-			dst := w
-			var sw *statusWriter
-			if e.requireGate {
-				sw = &statusWriter{ResponseWriter: w}
-				dst = sw
-			}
-			proxy.ServeHTTP(dst, fwd.WithContext(context.WithValue(fwd.Context(), egressToken{}, tok)))
-			if sw != nil {
-				e.note(botID, runID, norm, sw.status())
-			}
+			sw := &statusWriter{ResponseWriter: w}
+			proxy.ServeHTTP(sw, fwd.WithContext(context.WithValue(fwd.Context(), egressToken{}, tok)))
+			e.note(botID, runID, norm, sw.status())
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -411,14 +458,14 @@ func (e *Egress) prepare(r *http.Request) (botID, runID, path string, fwd *http.
 		return "", "", "", nil, false
 	}
 	if !e.requireGate {
+		p := ""
+		if r.URL != nil {
+			p, _ = normalizeProxyPath(r.URL.Path)
+		}
 		if e.allowRequest(r) && e.allowPath(r) {
-			p := ""
-			if r.URL != nil {
-				p, _ = normalizeProxyPath(r.URL.Path)
-			}
 			return "", "", p, r, true
 		}
-		return "", "", "", nil, false
+		return "", "", p, nil, false
 	}
 	if r.URL == nil {
 		return "", "", "", nil, false

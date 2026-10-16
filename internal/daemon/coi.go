@@ -137,6 +137,9 @@ func (r *lgbRun) execCOI(ctx context.Context, args []string) (int, string) {
 		SpoolDev:  r.spoolDev,
 		SpoolIno:  r.spoolIno,
 		StateDir:  r.a.cfg.DataDir,
+		BotID:     r.bot.ID,
+		RunID:     r.runID,
+		OnProxy:   r.auditCOIProxy,
 		OnPrompt: func(pctx context.Context) {
 			red := make([]string, len(rest))
 			for i, arg := range rest {
@@ -260,6 +263,29 @@ func (r *lgbRun) noteInnerPrompt(ctx context.Context, pol policy.Permission, nam
 		return
 	}
 	_ = r.a.perm.Evaluate(ctx, pol, req)
+}
+
+func (r *lgbRun) auditCOIProxy(botID, runID, path string, status int) {
+	if r == nil || r.a == nil || r.a.audit == nil || !r.a.audit.Enabled() {
+		return
+	}
+	if botID == "" {
+		botID = r.bot.ID
+	}
+	if runID == "" {
+		runID = r.runID
+	}
+	rec := map[string]any{
+		"event":  "coi_proxy_request",
+		"bot_id": botID,
+		"run_id": runID,
+		"path":   path,
+		"status": status,
+	}
+	if status == 403 {
+		rec["auth"] = "none"
+	}
+	r.a.audit.Write(rec)
 }
 
 func (r *lgbRun) auditCOI(name string, args []string, status, errMsg, credHome string, secrets []string, exitCode int, withExit bool) {

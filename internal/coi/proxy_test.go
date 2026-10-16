@@ -379,6 +379,133 @@ func TestLoopbackAuditsRequest(t *testing.T) {
 	}
 }
 
+func TestEgressAuditsUnixSocketRequest(t *testing.T) {
+	trip := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: 204,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("")),
+		}, nil
+	})
+	eg, addr := startBridge(t, nil, trip)
+	const headerMark = "unit-header-marker"
+	const bodyMark = "unit-body-marker"
+	var mu sync.Mutex
+	var lines []string
+	eg.BindRoute("bot-coi", "run-coi")
+	eg.SetAudit(func(botID, runID, path string, status int) {
+		mu.Lock()
+		lines = append(lines, fmt.Sprintf("bot=%s run=%s path=%s status=%d", botID, runID, path, status))
+		mu.Unlock()
+	})
+	req, err := http.NewRequest(http.MethodGet, "http://"+addr+"/v1/ping", strings.NewReader(bodyMark))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+PlaceholderToken)
+	req.Header.Set("X-Secret", headerMark)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 204 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	if code := rawStatus(t, addr, "/admin"); code != http.StatusForbidden {
+		t.Fatalf("deny %d", code)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(lines)
+		mu.Unlock()
+		if n >= 2 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	mu.Lock()
+	text := strings.Join(lines, "\n")
+	mu.Unlock()
+	if !strings.Contains(text, "bot=bot-coi run=run-coi path=/v1/ping status=204") {
+		t.Fatalf("allow audit %s", text)
+	}
+	if !strings.Contains(text, "bot=bot-coi run=run-coi path=/admin status=403") {
+		t.Fatalf("deny audit %s", text)
+	}
+	for _, bad := range []string{PlaceholderToken, headerMark, bodyMark, "Authorization", "X-Secret", "real-token-value"} {
+		if strings.Contains(text, bad) {
+			t.Fatal("audit contains a secret or header")
+		}
+	}
+}
+
+func TestForbiddenProxyAuditIsRateLimited(t *testing.T) {
+	prev := denyAuditLimit
+	denyAuditLimit = 3
+	t.Cleanup(func() { denyAuditLimit = prev })
+	eg, addr := startBridge(t, nil, nil)
+	var mu sync.Mutex
+	var n int
+	eg.SetAudit(func(botID, runID, path string, status int) {
+		mu.Lock()
+		n++
+		mu.Unlock()
+	})
+	for i := 0; i < 10; i++ {
+		if code := rawStatus(t, addr, "/admin"); code != http.StatusForbidden {
+			t.Fatalf("deny %d", code)
+		}
+	}
+	mu.Lock()
+	got := n
+	mu.Unlock()
+	if got != 3 {
+		t.Fatalf("audited %d, want 3", got)
+	}
+}
+
+func TestLoopbackForbiddenAuditIsRateLimited(t *testing.T) {
+	prev := denyAuditLimit
+	denyAuditLimit = 3
+	t.Cleanup(func() { denyAuditLimit = prev })
+	eg, err := StartLoopback([]string{GrokChatHost}, nil, func() (string, error) {
+		return "real-token-value", nil
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eg.Close()
+	var mu sync.Mutex
+	var n int
+	eg.SetAudit(func(botID, runID, path string, status int) {
+		mu.Lock()
+		n++
+		mu.Unlock()
+	})
+	for i := 0; i < 10; i++ {
+		req, err := http.NewRequest(http.MethodGet, eg.Base()+"/v1/ping", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("status %d", resp.StatusCode)
+		}
+	}
+	mu.Lock()
+	got := n
+	mu.Unlock()
+	if got != 3 {
+		t.Fatalf("audited %d, want 3", got)
+	}
+}
+
 func TestEgressPathAllowlistSkipsUpstream(t *testing.T) {
 	var calls atomic.Int32
 	trip := roundTripFunc(func(r *http.Request) (*http.Response, error) {

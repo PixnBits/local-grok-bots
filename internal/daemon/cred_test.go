@@ -397,6 +397,18 @@ func TestGrokProxyRequestIsAudited(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
+	deny, err := http.NewRequest(http.MethodGet, origin+"/v1/ping", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dresp, err := http.DefaultClient.Do(deny)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dresp.Body.Close()
+	if dresp.StatusCode != http.StatusForbidden {
+		t.Fatalf("deny %d", dresp.StatusCode)
+	}
 	if err := lg.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -411,10 +423,15 @@ func TestGrokProxyRequestIsAudited(t *testing.T) {
 		`"run_id":"run-1"`,
 		`"path":"/v1/ping"`,
 		`"status":204`,
+		`"status":403`,
+		`"auth":"none"`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing %s", want)
 		}
+	}
+	if strings.Contains(text, `"auth":"none"`) && !strings.Contains(text, `"status":403`) {
+		t.Fatal("unauthenticated mark without a 403")
 	}
 	for _, bad := range []string{key, marker, headerMark, bodyMark, queryMark, "Authorization", "X-Secret"} {
 		if strings.Contains(text, bad) {
