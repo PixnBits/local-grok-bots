@@ -189,7 +189,6 @@ func TestCLIIdleKillKeepsSession(t *testing.T) {
 func TestCLITruncatedStreamIsInterrupted(t *testing.T) {
 	dir := t.TempDir()
 	installCLIStub(t, dir, "grok")
-	t.Setenv("LGB_ARGV_LOG", filepath.Join(dir, "argv.log"))
 	t.Setenv("LGB_CLI_MODE", "trunc")
 	app := newApp(t, dir, nil)
 	app.rtMu.Lock()
@@ -202,6 +201,11 @@ func TestCLITruncatedStreamIsInterrupted(t *testing.T) {
 	}
 	var bot store.Bot
 	decodeJSON(t, b, &bot)
+	argvLog := filepath.Join(app.ws, "bots", bot.ID, "argv.log")
+	if err := os.MkdirAll(filepath.Dir(argvLog), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LGB_ARGV_LOG", argvLog)
 	res, b = do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "go"}, "")
 	if res.StatusCode != 200 {
 		t.Fatalf("post %d %s", res.StatusCode, b)
@@ -214,7 +218,7 @@ func TestCLITruncatedStreamIsInterrupted(t *testing.T) {
 	if got.LastRunError != "interrupted" || got.SessionID == "" {
 		t.Fatalf("status %s err %s session %q", got.LastRunStatus, got.LastRunError, got.SessionID)
 	}
-	argv := readArgv(t, os.Getenv("LGB_ARGV_LOG"))
+	argv := readArgv(t, argvLog)
 	if strings.Contains(argv, "--always-approve") || !strings.Contains(argv, "streaming-json") {
 		t.Fatalf("grok args:\n%s", argv)
 	}

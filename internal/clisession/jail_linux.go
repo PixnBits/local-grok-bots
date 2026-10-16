@@ -141,14 +141,6 @@ func stripSandboxFlag(args []string) []string {
 	return out
 }
 
-func hostJailLogKey(k string) bool {
-	switch k {
-	case "LGB_ENV_LOG", "LGB_ARGV_LOG", "LGB_FIXTURE", "LGB_AUTH_LOG":
-		return true
-	}
-	return false
-}
-
 func envVal(env []string, key string) string {
 	prefix := key + "="
 	for i := len(env) - 1; i >= 0; i-- {

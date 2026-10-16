@@ -30,6 +30,12 @@ func runFixture(t *testing.T, backend, fixture string) (*App, store.Bot, []store
 	t.Helper()
 	app, dir, bot, _ := isolationApp(t, backend, "")
 	path := filepath.Join(dir, "fixture.jsonl")
+	if backend == "grok" {
+		path = filepath.Join(app.ws, "bots", bot.ID, "fixture.jsonl")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := os.WriteFile(path, []byte(fixture), 0o644); err != nil {
 		t.Fatal(err)
 	}
