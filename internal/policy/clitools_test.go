@@ -333,7 +333,7 @@ max_calls_per_hour = 2
 	    "allowed_args": ["-p", "--cwd", "--max-turns"],
 	    "value_flags": ["-p", "--cwd", "--max-turns"],
 	    "credential_files": [".grok/auth.json"],
-	    "fixed_args": ["--sandbox", "lgb", "--permission-mode", "acceptEdits"],
+	    "fixed_args": ["--always-approve"],
 	    "fixed_env": ["GROK_CLAUDE_MCPS_ENABLED=false"],
 	    "bots": ["ada"],
 	    "timeout": "1m",
@@ -352,7 +352,7 @@ max_calls_per_hour = 2
 	if grok.SandboxBin != "/usr/bin/bwrap" {
 		t.Fatalf("sandbox_bin %+v", grok)
 	}
-	if strings.Join(grok.FixedArgs, ",") != "--sandbox,lgb,--permission-mode,acceptEdits" {
+	if strings.Join(grok.FixedArgs, ",") != "--always-approve" {
 		t.Fatalf("fixed_args %v", grok.FixedArgs)
 	}
 	if strings.Join(grok.FixedEnv, ",") != "GROK_CLAUDE_MCPS_ENABLED=false" {
@@ -387,5 +387,106 @@ max_calls_per_hour = 1
 	}
 	if p.Loaded || len(p.CLITools) != 0 {
 		t.Fatalf("escaped credential file did not fail closed: %+v %v", p.CLITools, p.Warnings)
+	}
+}
+
+func TestProxyHostsNarrowAndJailOptIn(t *testing.T) {
+	local := writePol(t, "policy.toml", `
+[[tools.cli]]
+name = "grok"
+path = "/tmp/evil"
+credential_home = "/tmp/evil-home"
+proxy_hosts = ["api.x.ai", "evil.example"]
+allow_jail_credentials = true
+timeout = "30s"
+max_output = 100
+max_calls_per_hour = 2
+`)
+	managed := writePol(t, "managed.json", `{
+	  "tools": {"cli": [{
+	    "name": "grok",
+	    "path": "/usr/bin/grok",
+	    "credential_home": "/var/lib/lgb/grok",
+	    "proxy_hosts": ["api.x.ai", "cli-chat-proxy.grok.com"],
+	    "allow_jail_credentials": true,
+	    "timeout": "1m",
+	    "max_output": 8000,
+	    "max_calls_per_hour": 20
+	  }]}
+	}`)
+	p, err := Load(Options{Path: local, ManagedPath: managed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grok, ok := p.COI("grok")
+	if !ok {
+		t.Fatal(p.Warnings)
+	}
+	if !grok.AllowJailCredentials {
+		t.Fatal("managed jail opt-in was cleared by a rejected local true")
+	}
+	if strings.Join(grok.ProxyHosts, ",") != "api.x.ai" {
+		t.Fatalf("proxy_hosts %v", grok.ProxyHosts)
+	}
+	text := strings.Join(p.Warnings, "\n")
+	if !strings.Contains(text, "allow_jail_credentials is ignored") || !strings.Contains(text, "proxy_hosts") {
+		t.Fatalf("warnings %s", text)
+	}
+
+	off := writePol(t, "off.toml", `
+[[tools.cli]]
+name = "grok"
+path = "/usr/bin/grok"
+credential_home = "/var/lib/lgb/grok"
+allow_jail_credentials = false
+timeout = "30s"
+max_output = 100
+max_calls_per_hour = 2
+`)
+	p, err = Load(Options{Path: off, ManagedPath: managed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grok, ok = p.COI("grok")
+	if !ok || grok.AllowJailCredentials {
+		t.Fatalf("local false did not turn the managed opt-in off: %+v", grok)
+	}
+
+	only := writePol(t, "only.toml", `
+[[tools.cli]]
+name = "grok"
+path = "/usr/bin/grok"
+credential_home = "/var/lib/lgb/grok"
+proxy_hosts = ["API.X.AI."]
+allow_jail_credentials = true
+timeout = "1s"
+max_output = 1
+max_calls_per_hour = 1
+`)
+	p, err = Load(Options{Path: only})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grok, ok = p.COI("grok")
+	if !ok || grok.AllowJailCredentials || strings.Join(grok.ProxyHosts, ",") != "api.x.ai" {
+		t.Fatalf("local-only %+v warnings %v", grok, p.Warnings)
+	}
+
+	bad := writePol(t, "bad-host.toml", `
+[[tools.cli]]
+name = "grok"
+path = "/usr/bin/grok"
+credential_home = "/var/lib/lgb/grok"
+proxy_hosts = ["https://api.x.ai/v1"]
+timeout = "1s"
+max_output = 1
+max_calls_per_hour = 1
+`)
+	p, err = Load(Options{Path: bad})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Loaded || len(p.CLITools) != 0 {
+		t.Fatalf("bad proxy host did not fail closed: %+v", p.CLITools)
 	}
 }

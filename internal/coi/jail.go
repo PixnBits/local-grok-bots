@@ -12,6 +12,13 @@ import (
 
 const jailHomeName = "coi-home"
 
+// jailProxySock is the only socket path bind-mounted into the Linux jail.
+const jailProxySock = "/coi-proxy.sock"
+
+// PlaceholderToken is the dummy bearer written into the jail. The host
+// proxy replaces it and never forwards it.
+const PlaceholderToken = "coi-placeholder-token"
+
 // grokCompatOff turns off Grok's Claude, Cursor, and Codex compatibility
 // scans so a workspace .mcp.json or sibling config is not loaded.
 var grokCompatOff = []string{
@@ -24,11 +31,9 @@ var grokCompatOff = []string{
 	"GROK_MANAGED_MCPS_ENABLED",
 }
 
-const grokSandboxTOML = `# Written by local-grok-bots for each COI call. Do not edit.
-[profiles.lgb]
-extends = "strict"
-restrict_network = false
-deny = []
+// grokPlaceholder is a synthetic login file. It contains no value from the
+// host credential file. Grok reads it; the proxy overwrites Authorization.
+const grokPlaceholder = `{"https://auth.x.ai::00000000-0000-4000-8000-000000000001":{"key":"` + PlaceholderToken + `","auth_mode":"oidc","expires_at":"2099-01-01T00:00:00.000000000Z","refresh_token":"coi-placeholder-refresh","oidc_issuer":"https://auth.x.ai","oidc_client_id":"00000000-0000-4000-8000-000000000001"}}
 `
 
 type jailSpec struct {
@@ -38,10 +43,53 @@ type jailSpec struct {
 	Env        []string
 	Home       string
 	SandboxBin string
+	// Forwarder is the daemon binary. When set, the jail runs it as
+	// --coi-forward and that process starts Bin.
+	Forwarder  string
+	ProxySock  string
+	BaseEnvs   []string
+	BasePrefix string
 }
 
-func prepareJailHome(tool policy.CLITool) (string, error) {
-	home, err := os.MkdirTemp("", jailHomeName+"-")
+// HomesDir is the private parent for per-call jail homes.
+func HomesDir(dataDir string) string {
+	return filepath.Join(dataDir, "coi", "homes")
+}
+
+// CleanStaleHomes removes leftover coi-home-* directories under the daemon
+// data dir and, from older builds, under the host temp dir.
+func CleanStaleHomes(dataDir string) {
+	if strings.TrimSpace(dataDir) != "" {
+		removeStaleHomes(HomesDir(dataDir))
+	}
+	removeStaleHomes(os.TempDir())
+}
+
+func removeStaleHomes(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasPrefix(name, jailHomeName+"-") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			continue
+		}
+		_ = os.RemoveAll(path)
+	}
+}
+
+func prepareJailHome(stateDir string, tool policy.CLITool, copySecrets bool) (string, error) {
+	parent, err := homesParent(stateDir)
+	if err != nil {
+		return "", err
+	}
+	home, err := os.MkdirTemp(parent, jailHomeName+"-")
 	if err != nil {
 		return "", ErrSandboxUnavailable
 	}
@@ -49,7 +97,12 @@ func prepareJailHome(tool policy.CLITool) (string, error) {
 		_ = os.RemoveAll(home)
 		return "", ErrSandboxUnavailable
 	}
-	if err := copyCredentialFiles(tool.CredentialHome, home, tool.CredentialFiles); err != nil {
+	if copySecrets {
+		if err := copyCredentialFiles(tool.CredentialHome, home, tool.CredentialFiles); err != nil {
+			_ = os.RemoveAll(home)
+			return "", err
+		}
+	} else if err := writePlaceholderFiles(home, tool); err != nil {
 		_ = os.RemoveAll(home)
 		return "", err
 	}
@@ -58,11 +111,22 @@ func prepareJailHome(tool policy.CLITool) (string, error) {
 		_ = os.RemoveAll(home)
 		return "", ErrSandboxUnavailable
 	}
-	if err := os.WriteFile(filepath.Join(grokDir, "sandbox.toml"), []byte(grokSandboxTOML), 0o600); err != nil {
-		_ = os.RemoveAll(home)
+	return home, nil
+}
+
+func homesParent(stateDir string) (string, error) {
+	stateDir = filepath.Clean(strings.TrimSpace(stateDir))
+	if stateDir == "" || stateDir == "." || !filepath.IsAbs(stateDir) {
 		return "", ErrSandboxUnavailable
 	}
-	return home, nil
+	dir := HomesDir(stateDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", ErrSandboxUnavailable
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", ErrSandboxUnavailable
+	}
+	return dir, nil
 }
 
 func copyCredentialFiles(credHome, destHome string, rels []string) error {
@@ -118,6 +182,73 @@ func copyCredentialFiles(credHome, destHome string, rels []string) error {
 
 func daemonArgs(tool policy.CLITool) []string {
 	return append([]string{}, tool.FixedArgs...)
+}
+
+// jailEntry is the process bwrap or sandbox-exec starts. With a forwarder,
+// that process is the daemon binary and Bin is exec'd after the listener is up.
+// sock is the proxy socket path visible to that process.
+func jailEntry(spec jailSpec, sock string) (entry string, args []string, extras []string) {
+	if spec.Forwarder == "" {
+		return spec.Bin, append([]string{}, spec.Args...), nil
+	}
+	if sock == "" {
+		sock = jailProxySock
+	}
+	args = []string{"--coi-forward", "--sock", sock}
+	for _, name := range spec.BaseEnvs {
+		args = append(args, "--env", name)
+	}
+	if spec.BasePrefix != "" {
+		args = append(args, "--prefix", spec.BasePrefix)
+	}
+	args = append(args, "--", spec.Bin)
+	args = append(args, spec.Args...)
+	return spec.Forwarder, args, []string{spec.Bin}
+}
+
+func writePlaceholderFiles(home string, tool policy.CLITool) error {
+	rels := append([]string{}, tool.CredentialFiles...)
+	if strings.EqualFold(tool.Name, "grok") {
+		rels = append(rels, ".grok/auth.json")
+	}
+	seen := map[string]bool{}
+	for _, rel := range rels {
+		dst, err := destRel(home, rel)
+		if err != nil {
+			return err
+		}
+		if seen[dst] {
+			continue
+		}
+		seen[dst] = true
+		if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+			return ErrSandboxUnavailable
+		}
+		body := []byte(`{"token":"` + PlaceholderToken + `"}` + "\n")
+		if strings.EqualFold(tool.Name, "grok") && filepath.Base(dst) == "auth.json" {
+			body = []byte(grokPlaceholder)
+		}
+		if err := os.WriteFile(dst, body, 0o600); err != nil {
+			return ErrSandboxUnavailable
+		}
+	}
+	return nil
+}
+
+func destRel(destHome, rel string) (string, error) {
+	rel = strings.TrimSpace(rel)
+	if rel == "" {
+		return "", fmt.Errorf("credential home is not available")
+	}
+	clean := filepath.ToSlash(filepath.Clean(rel))
+	if filepath.IsAbs(clean) || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") {
+		return "", fmt.Errorf("credential home is not available")
+	}
+	dst := filepath.Join(destHome, filepath.FromSlash(clean))
+	if !hasPathPrefix(destHome, dst) {
+		return "", fmt.Errorf("credential home is not available")
+	}
+	return dst, nil
 }
 
 func applyFixedEnv(env, extra []string) []string {

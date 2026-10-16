@@ -31,6 +31,9 @@ type Call struct {
 	BaseEnv   []string
 	// Paths are redacted in addition to the resolved credential home.
 	Paths []string
+	// StateDir is the daemon data directory. Jail homes and proxy sockets
+	// are created under it, not in the host temp directory.
+	StateDir string
 	// OnPrompt is called when the CLI asks for a permission.
 	// It must return without waiting on this process. The call is still denied.
 	OnPrompt func(ctx context.Context)
@@ -124,11 +127,26 @@ func Run(ctx context.Context, c Call) Result {
 	}
 	paths := append([]string{}, c.Paths...)
 	paths = append(paths, c.Tool.CredentialHome, tool.CredentialHome)
+	if err := JailCredentialGate(tool); err != nil {
+		return Result{Code: 1, Status: StatusDenied, Err: err.Error()}
+	}
 	env, err := ScrubEnv(c.BaseEnv, tool.CredentialHome, c.Workspace)
 	if err != nil {
 		return Result{Code: 1, Status: StatusDenied, Err: "credential home is not available"}
 	}
-	home, err := prepareJailHome(tool)
+	var egress *Egress
+	if ProxyRequired(tool) {
+		tok, err := AccessToken(tool)
+		if err != nil {
+			return Result{Code: 1, Status: StatusDenied, Err: ErrProxyUnavailable.Error()}
+		}
+		egress, err = StartEgress(filepath.Join(c.StateDir, "coi", "proxy"), tool.ProxyHosts, tok, nil)
+		if err != nil {
+			return Result{Code: 1, Status: StatusDenied, Err: ErrProxyUnavailable.Error()}
+		}
+		defer egress.Close()
+	}
+	home, err := prepareJailHome(c.StateDir, tool, UsesJailCredentials(tool))
 	if err != nil {
 		msg := err.Error()
 		if msg == "" {
@@ -140,14 +158,28 @@ func Run(ctx context.Context, c Call) Result {
 	env = pinJailEnv(applyFixedEnv(env, tool.FixedEnv), home, tool.Name)
 	runCtx, cancel := context.WithTimeout(ctx, tool.Timeout)
 	defer cancel()
-	cmd, err := wrapCommand(jailSpec{
+	spec := jailSpec{
 		Bin:        tool.Path,
 		Args:       append(daemonArgs(tool), c.Args...),
 		Workspace:  c.Workspace,
 		Env:        env,
 		Home:       home,
 		SandboxBin: tool.SandboxBin,
-	})
+	}
+	if egress != nil {
+		exe, err := os.Executable()
+		if err != nil {
+			return Result{Code: 1, Status: StatusDenied, Err: ErrProxyUnavailable.Error()}
+		}
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = resolved
+		}
+		spec.Forwarder = exe
+		spec.ProxySock = egress.Sock()
+		spec.BaseEnvs = forwardEnvNames(tool.Name)
+		spec.BasePrefix = forwardPrefix(tool.Name)
+	}
+	cmd, err := wrapCommand(spec)
 	if err != nil {
 		return Result{Code: 1, Status: StatusDenied, Err: ErrSandboxUnavailable.Error()}
 	}
@@ -200,6 +232,20 @@ func Run(ctx context.Context, c Call) Result {
 		code = 1
 	}
 	return Result{Code: code, Output: redacted, Status: StatusOK}
+}
+
+func forwardEnvNames(name string) []string {
+	if strings.EqualFold(name, "grok") {
+		return []string{"GROK_CLI_CHAT_PROXY_BASE_URL", "GROK_XAI_API_BASE_URL", "XAI_API_BASE_URL"}
+	}
+	return []string{"COI_FORWARD_URL"}
+}
+
+func forwardPrefix(name string) string {
+	if strings.EqualFold(name, "grok") {
+		return "/v1"
+	}
+	return ""
 }
 
 type capture struct {

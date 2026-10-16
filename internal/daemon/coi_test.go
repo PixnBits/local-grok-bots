@@ -253,8 +253,8 @@ func TestCOIShimRunsFakeCLI(t *testing.T) {
 		return string(out)
 	}
 	out := runShim("coi", "fake", "--version")
-	if !strings.Contains(out, "[redacted]") {
-		t.Fatalf("shim output was not redacted:\n%s", out)
+	if !strings.Contains(out, coi.PlaceholderToken) || strings.Contains(out, coiSecret) {
+		t.Fatalf("shim output:\n%s", out)
 	}
 	assertClean(t, out, f.cred)
 	envb, err := os.ReadFile(filepath.Join(f.ws, "child.env"))
@@ -284,7 +284,7 @@ func TestCOIShimRunsFakeCLI(t *testing.T) {
 	f.clearRan(t)
 	again := runShim("lgb", "coi", "fake", "--model", coiSecret)
 	assertClean(t, again, f.cred)
-	if !strings.Contains(again, "[redacted]") {
+	if !strings.Contains(again, coi.PlaceholderToken) {
 		t.Fatalf("lgb coi output:\n%s", again)
 	}
 
@@ -292,6 +292,7 @@ func TestCOIShimRunsFakeCLI(t *testing.T) {
 	if len(logs) < 2 {
 		t.Fatalf("coi logs: %+v", logs)
 	}
+	redactedArg := false
 	for _, m := range logs[:2] {
 		if m["run_id"] != f.run.runID || m["cli"] != "fake" || m["status"] != coi.StatusOK {
 			t.Fatalf("log %+v", m)
@@ -299,6 +300,16 @@ func TestCOIShimRunsFakeCLI(t *testing.T) {
 		if m["exit_code"] != float64(0) {
 			t.Fatalf("exit %+v", m["exit_code"])
 		}
+		if args, ok := m["args"].([]any); ok {
+			for _, a := range args {
+				if a == "[redacted]" {
+					redactedArg = true
+				}
+			}
+		}
+	}
+	if !redactedArg {
+		t.Fatalf("secret arg was not redacted: %+v", logs[:2])
 	}
 	raw := string(mustRead(t, f.audit))
 	if !strings.Contains(raw, `"event":"coi_call"`) || !strings.Contains(raw, f.bot.ID) || !strings.Contains(raw, f.run.runID) {
@@ -642,6 +653,52 @@ func TestCOIAuditRedactsSecretArg(t *testing.T) {
 	}
 	raw := string(mustRead(t, f.audit))
 	assertClean(t, raw, f.cred)
+}
+
+func TestCOIDeniesJailCredentialsWithoutOptIn(t *testing.T) {
+	f := setupCOI(t, 1, nil)
+	f.manual()
+	f.writeTools(t, f.entry("fake", f.bin, f.cred, f.bots, 1)+"fixed_args = [\"--always-approve\"]\n")
+	code, out := f.coi(t, "fake", "--version")
+	if code != 1 || !strings.Contains(out, "jail credentials are not allowed") || f.ran() {
+		t.Fatalf("opt-in %d %q ran=%v", code, out, f.ran())
+	}
+	logs := f.logs(t)
+	if len(logs) == 0 || logs[0]["error"] != "jail credentials are not allowed" {
+		t.Fatalf("log %+v", logs)
+	}
+	f.writeTools(t, f.entry("fake", f.bin, f.cred, f.bots, 1))
+	f.clearRan(t)
+	code, out = f.coi(t, "fake", "--version")
+	if code != 0 || !strings.Contains(out, coi.PlaceholderToken) || strings.Contains(out, coiSecret) || !f.ran() {
+		t.Fatalf("follow-up %d %q ran=%v", code, out, f.ran())
+	}
+}
+
+func TestCOIProxyUnavailableDoesNotRun(t *testing.T) {
+	f := setupCOI(t, 1, nil)
+	f.manual()
+	f.writeTools(t, f.entry("fake", f.bin, f.cred, f.bots, 1)+"proxy_hosts = [\"api.test\"]\n")
+	code, out := f.coi(t, "fake", "--version")
+	if code != 1 || !strings.Contains(out, "proxy is not available") || f.ran() {
+		t.Fatalf("proxy %d %q ran=%v", code, out, f.ran())
+	}
+	raw := string(mustRead(t, f.audit))
+	if !strings.Contains(raw, `"event":"coi_proxy_unavailable"`) {
+		t.Fatal("audit missing coi_proxy_unavailable")
+	}
+	assertClean(t, raw, f.cred)
+	assertClean(t, out, f.cred)
+	ev, err := f.app.st.ListLog(f.bot.ID, "coi_proxy_unavailable", "", 10)
+	if err != nil || len(ev) == 0 {
+		t.Fatalf("log %v %d", err, len(ev))
+	}
+	f.writeTools(t, f.entry("fake", f.bin, f.cred, f.bots, 1))
+	f.clearRan(t)
+	code, out = f.coi(t, "fake", "--version")
+	if code != 0 || !f.ran() {
+		t.Fatalf("slot consumed %d %q ran=%v", code, out, f.ran())
+	}
 }
 
 func mustRead(t *testing.T, path string) []byte {

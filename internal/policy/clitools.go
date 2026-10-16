@@ -11,20 +11,22 @@ import (
 // CLITool is one host CLI the credential broker may run.
 // A zero Timeout, MaxOutput, or MaxCallsPerHour denies every call.
 type CLITool struct {
-	Name            string
-	Path            string
-	AllowedArgs     []string
-	ValueFlags      []string
-	CredentialFiles []string
-	FixedArgs       []string
-	FixedEnv        []string
-	SandboxBin      string
-	CredentialHome  string
-	Bots            []string
-	Timeout         time.Duration
-	MaxOutput       int64
-	MaxCallsPerHour int
-	Lock            bool
+	Name                 string
+	Path                 string
+	AllowedArgs          []string
+	ValueFlags           []string
+	CredentialFiles      []string
+	FixedArgs            []string
+	FixedEnv             []string
+	SandboxBin           string
+	ProxyHosts           []string
+	AllowJailCredentials bool
+	CredentialHome       string
+	Bots                 []string
+	Timeout              time.Duration
+	MaxOutput            int64
+	MaxCallsPerHour      int
+	Lock                 bool
 }
 
 // AllowsBot reports whether id or name is on the grant list.
@@ -65,6 +67,8 @@ type cliEntry struct {
 	fixedSet   bool
 	envSet     bool
 	binSet     bool
+	hostsSet   bool
+	jailSet    bool
 }
 
 type toolsDoc struct {
@@ -78,20 +82,22 @@ func (d toolsDoc) configured() bool {
 }
 
 type cliToolDoc struct {
-	Name            string   `toml:"name" json:"name"`
-	Path            string   `toml:"path" json:"path"`
-	AllowedArgs     []string `toml:"allowed_args" json:"allowed_args"`
-	ValueFlags      []string `toml:"value_flags" json:"value_flags"`
-	CredentialFiles []string `toml:"credential_files" json:"credential_files"`
-	FixedArgs       []string `toml:"fixed_args" json:"fixed_args"`
-	FixedEnv        []string `toml:"fixed_env" json:"fixed_env"`
-	SandboxBin      string   `toml:"sandbox_bin" json:"sandbox_bin"`
-	CredentialHome  string   `toml:"credential_home" json:"credential_home"`
-	Bots            []string `toml:"bots" json:"bots"`
-	Timeout         *string  `toml:"timeout" json:"timeout"`
-	MaxOutput       *int64   `toml:"max_output" json:"max_output"`
-	MaxCallsPerHour *int     `toml:"max_calls_per_hour" json:"max_calls_per_hour"`
-	Lock            *bool    `toml:"lock" json:"lock"`
+	Name                 string   `toml:"name" json:"name"`
+	Path                 string   `toml:"path" json:"path"`
+	AllowedArgs          []string `toml:"allowed_args" json:"allowed_args"`
+	ValueFlags           []string `toml:"value_flags" json:"value_flags"`
+	CredentialFiles      []string `toml:"credential_files" json:"credential_files"`
+	FixedArgs            []string `toml:"fixed_args" json:"fixed_args"`
+	FixedEnv             []string `toml:"fixed_env" json:"fixed_env"`
+	SandboxBin           string   `toml:"sandbox_bin" json:"sandbox_bin"`
+	ProxyHosts           []string `toml:"proxy_hosts" json:"proxy_hosts"`
+	AllowJailCredentials *bool    `toml:"allow_jail_credentials" json:"allow_jail_credentials"`
+	CredentialHome       string   `toml:"credential_home" json:"credential_home"`
+	Bots                 []string `toml:"bots" json:"bots"`
+	Timeout              *string  `toml:"timeout" json:"timeout"`
+	MaxOutput            *int64   `toml:"max_output" json:"max_output"`
+	MaxCallsPerHour      *int     `toml:"max_calls_per_hour" json:"max_calls_per_hour"`
+	Lock                 *bool    `toml:"lock" json:"lock"`
 }
 
 func (p *Policy) applyCLITools(doc toolsDoc, trusted bool) error {
@@ -115,6 +121,12 @@ func (p *Policy) applyCLITools(doc toolsDoc, trusted bool) error {
 			if entries[i].tool.Lock {
 				p.Warnings = append(p.Warnings, fmt.Sprintf("tools.cli %q lock is ignored; only managed policy can lock an entry", entries[i].tool.Name))
 				entries[i].tool.Lock = false
+			}
+			if entries[i].tool.AllowJailCredentials {
+				p.Warnings = append(p.Warnings, fmt.Sprintf("tools.cli %q allow_jail_credentials is ignored; only managed policy can put credentials in the jail", entries[i].tool.Name))
+				entries[i].tool.AllowJailCredentials = false
+				// Drop the marker so a rejected true does not turn a managed grant off.
+				entries[i].jailSet = false
 			}
 		}
 		p.cliLocal = entries
@@ -252,6 +264,18 @@ func parseCLITool(row cliToolDoc, requireComplete bool) (cliEntry, error) {
 		e.tool.SandboxBin = bin
 		e.binSet = true
 	}
+	if row.ProxyHosts != nil {
+		hosts, err := normProxyHosts(name, row.ProxyHosts)
+		if err != nil {
+			return cliEntry{}, err
+		}
+		e.tool.ProxyHosts = hosts
+		e.hostsSet = true
+	}
+	if row.AllowJailCredentials != nil {
+		e.tool.AllowJailCredentials = *row.AllowJailCredentials
+		e.jailSet = true
+	}
 	if row.Bots != nil {
 		bots, err := normCLIBots(name, row.Bots)
 		if err != nil {
@@ -354,6 +378,23 @@ func normRelFiles(name, field string, in []string) ([]string, error) {
 		}
 		seen[k] = true
 		out = append(out, clean)
+	}
+	return out, nil
+}
+
+func normProxyHosts(name string, in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, h := range in {
+		h = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(h, ".")))
+		if h == "" || strings.ContainsAny(h, "/\\ \t@*") || strings.Contains(h, "://") || strings.Contains(h, ":") {
+			return nil, fmt.Errorf("tools.cli %q proxy_hosts %q must be a host name", name, h)
+		}
+		if seen[h] {
+			continue
+		}
+		seen[h] = true
+		out = append(out, h)
 	}
 	return out, nil
 }
@@ -550,6 +591,21 @@ func narrowCLI(managed, local cliEntry, warns *[]string) CLITool {
 		out.CredentialFiles = kept
 		if len(extra) > 0 {
 			*warns = append(*warns, fmt.Sprintf("tools.cli %q credential_files %s ignored; local policy can only narrow managed policy", name, strings.Join(extra, ", ")))
+		}
+	}
+	if local.hostsSet {
+		kept, extra := narrowList(managed.tool.ProxyHosts, local.tool.ProxyHosts, true)
+		out.ProxyHosts = kept
+		if len(extra) > 0 {
+			*warns = append(*warns, fmt.Sprintf("tools.cli %q proxy_hosts %s ignored; local policy can only narrow managed policy", name, strings.Join(extra, ", ")))
+		}
+	}
+	if local.jailSet {
+		if local.tool.AllowJailCredentials && !managed.tool.AllowJailCredentials {
+			*warns = append(*warns, fmt.Sprintf("tools.cli %q allow_jail_credentials is ignored; only managed policy can put credentials in the jail", name))
+		}
+		if !local.tool.AllowJailCredentials {
+			out.AllowJailCredentials = false
 		}
 	}
 	if local.timeoutSet {

@@ -32,11 +32,19 @@ func wrapCommand(spec jailSpec) (*exec.Cmd, error) {
 	if err := os.MkdirAll(tmp, 0o700); err != nil {
 		return nil, ErrSandboxUnavailable
 	}
-	prof, err := coiSeatbeltProfile(filepath.Clean(ws), filepath.Clean(home), filepath.Clean(bin))
+	entry, entryArgs, extras := jailEntry(spec, spec.ProxySock)
+	entryBin := bin
+	if entry != spec.Bin {
+		entryBin, err = resolvedFile(entry)
+		if err != nil {
+			return nil, ErrSandboxUnavailable
+		}
+	}
+	prof, err := coiSeatbeltProfile(filepath.Clean(ws), filepath.Clean(home), filepath.Clean(entryBin), spec.ProxySock, extras)
 	if err != nil {
 		return nil, ErrSandboxUnavailable
 	}
-	args := append([]string{"-p", prof, bin}, spec.Args...)
+	args := append([]string{"-p", prof, entryBin}, entryArgs...)
 	cmd := exec.Command(exe, args...)
 	cmd.Dir = ws
 	env := envMap(spec.Env)

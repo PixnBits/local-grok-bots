@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,9 +99,20 @@ func (r *lgbRun) execCOI(ctx context.Context, args []string) (int, string) {
 		return 1, "coi: credential home is not available"
 	}
 	paths := []string{tool.CredentialHome, ready.CredentialHome}
+	if err := coi.JailCredentialGate(ready); err != nil {
+		r.auditCOI(name, rest, coi.StatusDenied, err.Error(), tool.CredentialHome, secrets, 0, false)
+		return 1, "coi: " + coi.RedactOutput(err.Error(), paths, secrets)
+	}
+	if coi.UsesJailCredentials(ready) {
+		r.warnJailCredentials(name)
+	}
 	if err := coi.SandboxReady(ready.SandboxBin); err != nil {
 		r.auditSandbox(name, rest, ready.CredentialHome, secrets)
 		return 1, "coi: " + coi.RedactOutput(coi.ErrSandboxUnavailable.Error(), paths, secrets)
+	}
+	if err := coi.ProxyPreflight(ready); err != nil {
+		r.auditProxy(name, rest, ready.CredentialHome, secrets)
+		return 1, "coi: " + coi.RedactOutput(coi.ErrProxyUnavailable.Error(), paths, secrets)
 	}
 	if !r.a.coiCounter().Take(bot.ID, tool.Name, tool.MaxCallsPerHour) {
 		r.auditCOI(name, rest, coi.StatusDenied, "hourly cap reached", tool.CredentialHome, secrets, 0, false)
@@ -113,6 +125,7 @@ func (r *lgbRun) execCOI(ctx context.Context, args []string) (int, string) {
 		Workspace: ws,
 		BaseEnv:   os.Environ(),
 		Paths:     paths,
+		StateDir:  r.a.cfg.DataDir,
 		OnPrompt: func(pctx context.Context) {
 			red := make([]string, len(rest))
 			for i, arg := range rest {
@@ -133,11 +146,36 @@ func (r *lgbRun) execCOI(ctx context.Context, args []string) (int, string) {
 		r.auditSandbox(name, rest, ready.CredentialHome, secrets)
 		return 1, "coi: " + coi.RedactOutput(msg, paths, secrets)
 	}
+	if msg == coi.ErrProxyUnavailable.Error() {
+		r.auditProxy(name, rest, ready.CredentialHome, secrets)
+		return 1, "coi: " + coi.RedactOutput(msg, paths, secrets)
+	}
 	r.auditCOI(name, rest, res.Status, msg, ready.CredentialHome, secrets, 0, false)
 	return 1, "coi: " + coi.RedactOutput(msg, paths, secrets)
 }
 
 func (r *lgbRun) auditSandbox(name string, args []string, credHome string, secrets []string) {
+	r.auditCOIFailure("coi_sandbox_unavailable", coi.ErrSandboxUnavailable.Error(), name, args, credHome, secrets)
+}
+
+func (r *lgbRun) auditProxy(name string, args []string, credHome string, secrets []string) {
+	r.auditCOIFailure("coi_proxy_unavailable", coi.ErrProxyUnavailable.Error(), name, args, credHome, secrets)
+}
+
+func (r *lgbRun) warnJailCredentials(name string) {
+	if r == nil || r.a == nil {
+		return
+	}
+	msg := "managed allow_jail_credentials copies credential files into the jail"
+	fmt.Fprintf(os.Stderr, "local-grok-bots: coi %s: %s\n", name, msg)
+	r.a.log(r.bot.ID, "coi_jail_credentials", map[string]any{
+		"run_id":  r.runID,
+		"cli":     name,
+		"warning": msg,
+	})
+}
+
+func (r *lgbRun) auditCOIFailure(event, errText, name string, args []string, credHome string, secrets []string) {
 	if r == nil || r.a == nil {
 		return
 	}
@@ -154,11 +192,11 @@ func (r *lgbRun) auditSandbox(name string, args []string, credHome string, secre
 		"cli":    name,
 		"args":   red,
 		"status": coi.StatusDenied,
-		"error":  coi.ErrSandboxUnavailable.Error(),
+		"error":  errText,
 	}
-	r.a.log(r.bot.ID, "coi_sandbox_unavailable", fields)
+	r.a.log(r.bot.ID, event, fields)
 	if r.a.audit != nil && r.a.audit.Enabled() {
-		rec := map[string]any{"event": "coi_sandbox_unavailable", "bot_id": r.bot.ID}
+		rec := map[string]any{"event": event, "bot_id": r.bot.ID}
 		for k, v := range fields {
 			rec[k] = v
 		}

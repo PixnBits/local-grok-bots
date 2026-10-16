@@ -38,6 +38,7 @@ func TestRunFakeCLIRedactsAndScrubs(t *testing.T) {
 		},
 		Args:      []string{"--version"},
 		Workspace: ws,
+		StateDir:  root,
 		BaseEnv: []string{
 			"PATH=" + os.Getenv("PATH"),
 			"LANG=C",
@@ -52,7 +53,7 @@ func TestRunFakeCLIRedactsAndScrubs(t *testing.T) {
 	if strings.Contains(res.Output, cred) || strings.Contains(res.Output, "hunter2-hunter2") || strings.Contains(res.Output, token) {
 		t.Fatalf("output leaked: %s", res.Output)
 	}
-	if !strings.Contains(res.Output, "[redacted]") {
+	if !strings.Contains(res.Output, PlaceholderToken) {
 		t.Fatalf("output %s", res.Output)
 	}
 	env, err := os.ReadFile(filepath.Join(ws, "child.env"))
@@ -104,7 +105,7 @@ func TestRunFailClosed(t *testing.T) {
 	limits.Timeout = 0
 	cases := []policy.CLITool{inside, missing, plain, fileHome, limits}
 	for _, tool := range cases {
-		res := Run(context.Background(), Call{Tool: tool, Args: []string{"--version"}, Workspace: ws})
+		res := Run(context.Background(), Call{Tool: tool, Args: []string{"--version"}, Workspace: ws, StateDir: root})
 		if res.Status != StatusDenied {
 			t.Fatalf("%+v status %s", tool, res.Status)
 		}
@@ -129,7 +130,7 @@ func TestRunPromptTimeoutAndOutputLimit(t *testing.T) {
 			Name: "ask", Path: prompt, CredentialHome: cred,
 			AllowedArgs: []string{"--version"}, Timeout: 5 * time.Second, MaxOutput: 4096,
 		},
-		Args: []string{"--version"}, Workspace: ws,
+		Args: []string{"--version"}, Workspace: ws, StateDir: root,
 		OnPrompt: func(context.Context) { prompted++ },
 	})
 	if res.Status != StatusDenied || res.Err != "permission prompt denied" || prompted != 1 {
@@ -145,7 +146,7 @@ func TestRunPromptTimeoutAndOutputLimit(t *testing.T) {
 			Name: "slow", Path: slow, CredentialHome: cred,
 			AllowedArgs: []string{"--version"}, Timeout: 200 * time.Millisecond, MaxOutput: 1024,
 		},
-		Args: []string{"--version"}, Workspace: ws,
+		Args: []string{"--version"}, Workspace: ws, StateDir: root,
 	})
 	if res.Status != StatusError || res.Err != "timed out" || time.Since(start) > 3*time.Second {
 		t.Fatalf("timeout %+v after %s", res, time.Since(start))
@@ -157,7 +158,7 @@ func TestRunPromptTimeoutAndOutputLimit(t *testing.T) {
 			Name: "chatty", Path: chatty, CredentialHome: cred,
 			AllowedArgs: []string{"--version"}, Timeout: 5 * time.Second, MaxOutput: 64,
 		},
-		Args: []string{"--version"}, Workspace: ws,
+		Args: []string{"--version"}, Workspace: ws, StateDir: root,
 	})
 	if res.Status != StatusOK || !strings.Contains(res.Output, "[output truncated]") || len(res.Output) > 200 {
 		t.Fatalf("limit %+v", res)
@@ -193,7 +194,7 @@ func TestRunSandboxHidesCredentialHome(t *testing.T) {
 			AllowedArgs: []string{"--version"}, CredentialFiles: []string{"auth.json"},
 			Timeout: time.Second, MaxOutput: 4096,
 		},
-		Args: []string{"--version"}, Workspace: ws,
+		Args: []string{"--version"}, Workspace: ws, StateDir: root,
 	})
 	if res.Status != StatusOK || res.Code != 0 {
 		t.Fatalf("result %+v", res)
@@ -201,8 +202,8 @@ func TestRunSandboxHidesCredentialHome(t *testing.T) {
 	if strings.Contains(res.Output, "LEAK") || strings.Contains(res.Output, "hunter2-hunter2") || strings.Contains(res.Output, cred) {
 		t.Fatalf("sandbox leaked credential home: %s", res.Output)
 	}
-	if !strings.Contains(res.Output, "[redacted]") {
-		t.Fatalf("copy was not readable: %s", res.Output)
+	if !strings.Contains(res.Output, PlaceholderToken) {
+		t.Fatalf("placeholder was not readable: %s", res.Output)
 	}
 }
 
@@ -220,7 +221,7 @@ func TestRunSandboxUnavailable(t *testing.T) {
 			AllowedArgs: []string{"--version"}, SandboxBin: filepath.Join(root, "no-bwrap"),
 			Timeout: time.Second, MaxOutput: 1024,
 		},
-		Args: []string{"--version"}, Workspace: ws,
+		Args: []string{"--version"}, Workspace: ws, StateDir: root,
 	})
 	if res.Status != StatusDenied || res.Err != ErrSandboxUnavailable.Error() {
 		t.Fatalf("result %+v", res)
@@ -230,8 +231,80 @@ func TestRunSandboxUnavailable(t *testing.T) {
 	}
 }
 
+func TestRunOptInCopiesAndRedacts(t *testing.T) {
+	root := t.TempDir()
+	ws := filepath.Join(root, "ws")
+	cred := filepath.Join(root, "cred")
+	if err := os.MkdirAll(ws, 0o755); err != nil || os.MkdirAll(cred, 0o755) != nil {
+		t.Fatal(err)
+	}
+	secret := "hunter2-hunter2"
+	if err := os.WriteFile(filepath.Join(cred, "auth.json"), []byte(`{"token":"`+secret+`"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := writeExe(t, root, "fake", "#!/bin/sh\ncat \"$HOME/auth.json\"\n")
+	res := Run(context.Background(), Call{
+		Tool: policy.CLITool{
+			Name: "fake", Path: script, CredentialHome: cred,
+			AllowedArgs: []string{"--version"}, CredentialFiles: []string{"auth.json"},
+			AllowJailCredentials: true,
+			Timeout:              time.Second, MaxOutput: 4096,
+		},
+		Args: []string{"--version"}, Workspace: ws, StateDir: root,
+	})
+	if res.Status != StatusOK || res.Code != 0 {
+		t.Fatalf("result %+v", res)
+	}
+	if strings.Contains(res.Output, secret) || strings.Contains(res.Output, PlaceholderToken) || !strings.Contains(res.Output, "[redacted]") {
+		t.Fatal("opt-in output was not a redacted copy")
+	}
+}
+
+func TestRunProxyKeepsHostTokenOut(t *testing.T) {
+	root := t.TempDir()
+	ws := filepath.Join(root, "ws")
+	cred := filepath.Join(root, "cred")
+	if err := os.MkdirAll(ws, 0o755); err != nil || os.MkdirAll(cred, 0o755) != nil {
+		t.Fatal(err)
+	}
+	const hostToken = "real-token-value-should-not-leak"
+	body := `{"https://auth.x.ai::00000000-0000-4000-8000-000000000001":{"key":"` + hostToken + `","expires_at":"2099-01-01T00:00:00.000000000Z"}}`
+	if err := os.WriteFile(filepath.Join(cred, "auth.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := writeExe(t, root, "fake", "#!/bin/sh\ncp \"$HOME/auth.json\" \"$PWD/jail-auth.json\" || echo COPY_FAIL\nprintf '%s\\n' \"$COI_FORWARD_URL\"\n")
+	res := Run(context.Background(), Call{
+		Tool: policy.CLITool{
+			Name: "fake", Path: script, CredentialHome: cred,
+			AllowedArgs: []string{"--version"}, CredentialFiles: []string{"auth.json"},
+			ProxyHosts: []string{"api.test"},
+			Timeout:    10 * time.Second, MaxOutput: 4096,
+		},
+		Args: []string{"--version"}, Workspace: ws, StateDir: root,
+	})
+	if res.Status != StatusOK || res.Code != 0 {
+		t.Fatalf("status %s code %d err %s", res.Status, res.Code, res.Err)
+	}
+	copied, err := os.ReadFile(filepath.Join(ws, "jail-auth.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(copied), hostToken) {
+		t.Fatal("jail file contains the host token")
+	}
+	if !strings.Contains(string(copied), PlaceholderToken) {
+		t.Fatal("jail file is not the placeholder")
+	}
+	if strings.Contains(res.Output, hostToken) {
+		t.Fatal("output contains the host token")
+	}
+	if !strings.Contains(res.Output, "http://127.0.0.1:") {
+		t.Fatalf("forward url missing: %s", res.Output)
+	}
+}
+
 func TestSeatbeltProfileHidesHome(t *testing.T) {
-	prof, err := coiSeatbeltProfile("/work", "/tmp/coi-home-1", "/usr/bin/grok")
+	prof, err := coiSeatbeltProfile("/work", "/tmp/coi-home-1", "/usr/bin/grok", "/coi-proxy.sock", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +317,13 @@ func TestSeatbeltProfileHidesHome(t *testing.T) {
 	if strings.Contains(prof, "/.grok") || strings.Contains(prof, "/Users") {
 		t.Fatalf("opened a host home:\n%s", prof)
 	}
-	if !strings.Contains(prof, "(allow network-outbound)") {
-		t.Fatal("API network missing")
+	if strings.Contains(prof, "(allow network-outbound)\n") {
+		t.Fatal("unrestricted outbound")
+	}
+	if !strings.Contains(prof, `path-literal "/coi-proxy.sock"`) || !strings.Contains(prof, `localhost:*`) {
+		t.Fatalf("proxy path missing:\n%s", prof)
+	}
+	if !strings.Contains(prof, `(subpath "/work/.lgb")`) {
+		t.Fatalf("lgb not hidden:\n%s", prof)
 	}
 }

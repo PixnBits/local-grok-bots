@@ -175,6 +175,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 			}
 		},
 	})
+	coi.CleanStaleHomes(cfg.DataDir)
 	if err := mkdirWorkspace(a.ws); err != nil {
 		st.Close()
 		_ = aud.Close()

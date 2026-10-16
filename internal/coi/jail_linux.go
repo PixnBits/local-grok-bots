@@ -39,12 +39,23 @@ func linuxBwrapArgs(spec jailSpec) ([]string, error) {
 	if !filepath.IsAbs(home) {
 		return nil, ErrSandboxUnavailable
 	}
+	// Net is unshared, so the jail has no resolv.conf bind and no host /run.
+	// The host proxy resolves allowlisted API hosts. IPC is a fresh namespace.
 	args := []string{
 		"--unshare-user", "--unshare-pid", "--unshare-uts",
-		"--die-with-parent", "--clearenv",
+		"--unshare-ipc", "--unshare-net",
+		"--die-with-parent", "--new-session", "--clearenv",
 	}
-	for _, dir := range []string{"/usr", "/bin", "/lib", "/lib64", "/etc", "/run"} {
+	for _, dir := range []string{"/usr", "/bin", "/lib", "/lib64", "/etc"} {
 		args = roBindTry(args, dir)
+	}
+	entry, entryArgs, extras := jailEntry(spec, jailProxySock)
+	entryBin := bin
+	if entry != spec.Bin {
+		entryBin, err = resolvedFile(entry)
+		if err != nil {
+			return nil, err
+		}
 	}
 	args = append(args,
 		"--proc", "/proc",
@@ -52,11 +63,27 @@ func linuxBwrapArgs(spec jailSpec) ([]string, error) {
 		"--tmpfs", "/tmp",
 		"--bind", home, jailHomeInside,
 		"--bind", ws, ws,
-		"--ro-bind", bin, bin,
+		"--tmpfs", filepath.Join(ws, ".lgb"),
+		"--ro-bind", entryBin, entryBin,
 		"--chdir", ws,
 	)
-	if orig := filepath.Clean(spec.Bin); orig != bin {
-		args = append(args, "--ro-bind", bin, orig)
+	if orig := filepath.Clean(entry); orig != entryBin {
+		args = append(args, "--ro-bind", entryBin, orig)
+	}
+	for _, extra := range extras {
+		resolved, err := resolvedFile(extra)
+		if err != nil {
+			return nil, err
+		}
+		if resolved != entryBin {
+			args = append(args, "--ro-bind", resolved, resolved)
+		}
+		if clean := filepath.Clean(extra); clean != resolved {
+			args = append(args, "--ro-bind", resolved, clean)
+		}
+	}
+	if spec.ProxySock != "" {
+		args = append(args, "--bind", spec.ProxySock, jailProxySock)
 	}
 	for _, e := range spec.Env {
 		k, v, ok := strings.Cut(e, "=")
@@ -76,8 +103,8 @@ func linuxBwrapArgs(spec jailSpec) ([]string, error) {
 		args = append(args, "--setenv", k, v)
 	}
 	args = append(args, "--setenv", "PWD", ws)
-	args = append(args, "--", bin)
-	args = append(args, spec.Args...)
+	args = append(args, "--", entryBin)
+	args = append(args, entryArgs...)
 	return args, nil
 }
 

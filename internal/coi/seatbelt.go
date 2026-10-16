@@ -8,10 +8,16 @@ import (
 
 // coiSeatbeltProfile is the macOS sandbox-exec profile for one inner CLI.
 // Writes are limited to the workspace and the private HOME. The credential
-// home is not listed, so deny-default hides it. Network is allowed so the
-// CLI can reach its API; filesystem isolation is the control.
-func coiSeatbeltProfile(workspace, home, bin string) (string, error) {
-	for _, p := range []string{workspace, home, bin} {
+// home is not listed, so deny-default hides it. Outbound network is denied
+// except localhost (the in-jail forwarder) and the proxy unix socket.
+// This profile is untested on darwin; it must still compile.
+func coiSeatbeltProfile(workspace, home, bin, proxySock string, extra []string) (string, error) {
+	paths := []string{workspace, home, bin}
+	if proxySock != "" {
+		paths = append(paths, proxySock)
+	}
+	paths = append(paths, extra...)
+	for _, p := range paths {
 		if err := checkSBPath(p); err != nil {
 			return "", err
 		}
@@ -39,10 +45,20 @@ func coiSeatbeltProfile(workspace, home, bin string) (string, error) {
 	}
 	b.WriteString(")\n")
 	fmt.Fprintf(&b, "(allow file-read* (literal %s))\n", sbQuote(bin))
+	for _, p := range extra {
+		fmt.Fprintf(&b, "(allow file-read* (literal %s))\n", sbQuote(p))
+	}
 	fmt.Fprintf(&b, "(allow file-read* file-write* (subpath %s) (subpath %s))\n", sbQuote(workspace), sbQuote(home))
+	fmt.Fprintf(&b, "(deny file-read* file-write* (subpath %s))\n", sbQuote(filepath.Join(workspace, ".lgb")))
 	b.WriteString("(allow file-write* (literal \"/dev/null\") (literal \"/dev/tty\"))\n")
-	b.WriteString("(allow network-outbound)\n(allow system-socket)\n")
-	b.WriteString("(allow mach-lookup (global-name \"com.apple.dnssd.service\") (global-name \"com.apple.trustd\") (global-name \"com.apple.trustd.agent\"))\n")
+	b.WriteString("(allow system-socket)\n")
+	b.WriteString("(allow network-bind (local ip \"localhost:*\"))\n")
+	b.WriteString("(allow network-inbound (local ip \"localhost:*\"))\n")
+	b.WriteString("(allow network-outbound (remote ip \"localhost:*\"))\n")
+	if proxySock != "" {
+		fmt.Fprintf(&b, "(allow file-read* file-write* (literal %s))\n", sbQuote(proxySock))
+		fmt.Fprintf(&b, "(allow network-outbound (remote unix-socket (path-literal %s)))\n", sbQuote(proxySock))
+	}
 	return b.String(), nil
 }
 

@@ -20,11 +20,17 @@ var (
 	ErrNoArgs = errors.New("no arguments allowed")
 	// ErrSandboxUnavailable means the inner CLI jail could not start.
 	ErrSandboxUnavailable = errors.New("sandbox is not available")
+	// ErrProxyUnavailable means the egress proxy could not start or has no token.
+	ErrProxyUnavailable = errors.New("proxy is not available")
+	// ErrJailCredentials means real credential files would enter the jail
+	// without a managed opt-in.
+	ErrJailCredentials = errors.New("jail credentials are not allowed")
 )
 
 // blockedWord is a whole token or split word that prints or changes credentials.
-// --always-approve and --sandbox are blocked even when listed; the daemon may
-// still prepend them through fixed_args. update is blocked as a token so the
+// --always-approve and --sandbox are blocked even when listed. The daemon may
+// prepend --always-approve through fixed_args. It does not prepend --sandbox:
+// the daemon jail is the only sandbox. update is blocked as a token so the
 // CLI cannot self-update; --no-auto-update is also blocked here and belongs in
 // fixed_args.
 var blockedWord = map[string]bool{
