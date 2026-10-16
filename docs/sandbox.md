@@ -41,6 +41,8 @@ The daemon is a thin orchestrator: it spawns or resumes the CLI headless, inject
 
 Nested jails are avoided. The daemon does not attempt to re-jail a CLI that already has its own sandbox.
 
+The host CLI broker later in this document is a different path. There the daemon's bubblewrap or Seatbelt jail is the only sandbox. The inner CLI is not given a second sandbox profile.
+
 ## COIs (connectors) and credential brokering
 
 User-configured connectors (COIs) — for example a Grok COI that can edit a project, or any authenticated HTTP/MCP/CLI integration — must be callable from a bot without ever placing credentials inside the sandbox. The LLM, Ollama process, or any code it runs must not be able to read, log, or exfiltrate those credentials for other purposes.
@@ -97,12 +99,17 @@ Internal LGB COIs (timers, etc.) already follow the daemon-mediated pattern. Use
 
 The first slice is a host CLI invoked from the bot jail through the lgb spool. The bot never receives `credential_home`. The inner CLI is still untrusted relative to those credentials, so the daemon runs it in its own OS sandbox:
 
-- Linux: bubblewrap (`bwrap`). Missing or failed `bwrap` denies the call and audits `coi_sandbox_unavailable`. There is no unshare fallback.
-- macOS: `sandbox-exec` with a generated Seatbelt profile. Missing `sandbox-exec` is the same denial.
-- Only the bot workspace is writable. System directories (`/usr`, `/bin`, `/lib`, `/etc`, …) are read-only. The resolved CLI **file** is bound read-only. The daemon does not bind `~/.grok`, the credential home, or any other host home.
-- `credential_home` is not mounted. Policy `credential_files` (relative paths such as `.grok/auth.json`) are copied into a private 0700 HOME for the call and deleted afterward. Inside the Linux jail that HOME is a bind over tmpfs at `/tmp/coi-home`.
+- Linux: bubblewrap (`bwrap`) with `--unshare-user`, `--unshare-pid`, `--unshare-uts`, `--unshare-ipc`, `--unshare-net`, and `--new-session`. Missing or failed `bwrap` denies the call and audits `coi_sandbox_unavailable`. There is no unshare fallback. Host `/run` and `/var/run` are not mounted. With the network namespace empty, the jail has no `resolv.conf` bind; the host proxy resolves DNS.
+- macOS: `sandbox-exec` with a generated Seatbelt profile. Missing `sandbox-exec` is the same denial. The profile denies network-outbound except localhost and, when a proxy is in use, the proxy unix socket. It also denies read and write of `<workspace>/.lgb`. That profile is untested on macOS; it still compiles.
+- Only the bot workspace is writable. System directories (`/usr`, `/bin`, `/lib`, `/etc`, …) are read-only. The resolved CLI **file** is bound read-only. The daemon does not bind `~/.grok`, the credential home, or any other host home. A tmpfs covers `<workspace>/.lgb`, so the bot spool is not visible to the inner CLI.
+- `credential_home` is not mounted. The private HOME is a 0700 directory under `<data>/coi/homes` (not the host temp dir), deleted after the call. Startup removes stale `coi-home-*` directories there and any leftover ones directly under the host temp dir. Inside the Linux jail that HOME is a bind over tmpfs at `/tmp/coi-home`.
+- The jail does not receive real credential bytes. `proxy_hosts` (hostnames only, no scheme, port, or path) turns on the egress proxy. The first host is the TLS upstream. The jail gets a placeholder file (`coi-placeholder-token`, and for an entry named `grok` a synthetic `auth.json` whose expiry is far in the future). The daemon binary is bound read-only and started as `--coi-forward`. That process listens on `127.0.0.1:<port>` inside the jail, splices the TCP connection to a unix socket, then execs the CLI. The socket lives in a 0700 directory under `<data>/coi/proxy`, mode 0600, and its filename does not end in `.sock`. Linux bind-mounts it at `/coi-proxy.sock`. That is the only socket path mounted into the jail.
+- Grok is pointed at `http://127.0.0.1:<port>/v1` via `GROK_CLI_CHAT_PROXY_BASE_URL`, `GROK_XAI_API_BASE_URL`, and `XAI_API_BASE_URL`. Other CLIs get `COI_FORWARD_URL` with no path prefix. The host proxy is a reverse proxy: it opens TLS to the first allowlisted host, forwards the path, and sets `Authorization: Bearer` from the credential file. It does not log bodies or headers. An HTTP CONNECT proxy cannot inject that header, because the CLI's TLS would hide it, so CONNECT is not used. The CLI must accept an `http://` base URL.
+- The host reads the Grok login file (`key` as the bearer, `refresh_token` when present). If `expires_at` is within 90 seconds, the host POSTs `grant_type=refresh_token` to `https://auth.x.ai/oauth2/token` and writes the new access token back to that file, mode 0600. A successful refresh can rotate the refresh token. Refreshing a copy of the user's login file can desync the real one. If refresh fails and the access token is still valid, the call continues. If it is expired and refresh fails, the call is denied.
+- If the proxy cannot be prepared, the call is denied and audited as `coi_proxy_unavailable`. The daemon does not fall back to copying secrets. The preflight runs before the hourly slot is taken.
+- Without `proxy_hosts`, listed `credential_files` are still placeholders. Copying the real files requires managed `allow_jail_credentials = true`. The daemon then logs `coi_jail_credentials`. Local policy cannot turn that flag on. It can turn a managed flag off. `credential_files` together with `fixed_args` `--always-approve`, without the proxy and without that opt-in, is denied before the hourly slot.
 - Child `PATH` is pinned to system directories (`/usr/local/sbin`, `/usr/local/bin`, `/usr/sbin`, `/usr/bin`, `/sbin`, `/bin` as they exist). Workspace and credential-home directories are never on `PATH`.
-- Bot argv cannot pass `--always-approve` or `--sandbox` (blocked like `login` / `config`). Policy `fixed_args` and `fixed_env` are prepended by the daemon and are not taken from the bot. Flags not listed in `value_flags` are boolean, so they cannot swallow the next word; blocked-word checks apply to values and to `--flag=value`.
+- Bot argv cannot pass `--always-approve` or `--sandbox` (blocked like `login` / `config`). Policy `fixed_args` and `fixed_env` are prepended by the daemon and are not taken from the bot. The daemon does not prepend `--sandbox` and does not write `sandbox.toml`. Grok's own sandbox is not a second layer on this path. Flags not listed in `value_flags` are boolean, so they cannot swallow the next word; blocked-word checks apply to values and to `--flag=value`.
 - Path allowlist checks remain as defense in depth. They are TOCTOU against a process that can still `open` after `stat`; the sandbox is the filesystem boundary.
 - Output redaction (`audit.RedactText`, credential-home paths, secret values scanned from the home) is a backstop for logs and replies. It is not the control that keeps credentials out of the bot jail or the inner CLI filesystem.
 
@@ -110,11 +117,11 @@ The first slice is a host CLI invoked from the bot jail through the lgb spool. T
 
 Grok has no `--setting-sources` / `--strict-mcp-config` equivalent. For a `tools.cli` entry named `grok` the daemon:
 
-- Writes `sandbox.toml` with `[profiles.lgb] extends = "strict"` into the private HOME `.grok` (not into the host credential home). Policy may put `--sandbox lgb` in `fixed_args`.
-- Sets `GROK_HOME` to that private `.grok`, `GROK_DISABLE_AUTOUPDATER=1`, and every `GROK_CLAUDE_*_ENABLED`, `GROK_CURSOR_*_ENABLED`, `GROK_CODEX_*_ENABLED`, plus `GROK_MANAGED_MCPS_ENABLED`, to `false`.
-- Drops `GROK_CONFIG`, `GROK_CONFIG_PATH`, and `GROK_SANDBOX`. It never passes `--trust`.
+- Sets `GROK_HOME` to the private HOME `.grok`, `GROK_DISABLE_AUTOUPDATER=1`, and every `GROK_CLAUDE_*_ENABLED`, `GROK_CURSOR_*_ENABLED`, `GROK_CODEX_*_ENABLED`, plus `GROK_MANAGED_MCPS_ENABLED`, to `false`.
+- Drops `GROK_CONFIG`, `GROK_CONFIG_PATH`, and `GROK_SANDBOX`. It never passes `--trust` and never writes `sandbox.toml`.
+- For chat, set `proxy_hosts` to the host the CLI actually calls. The observed default chat base is `cli-chat-proxy.grok.com`. `api.x.ai` is a separate API host. One reverse proxy has one upstream: the first `proxy_hosts` entry. Extra names are accepted by the allowlist check but are not separate upstreams.
 
-On Ubuntu with `apparmor_restrict_unprivileged_userns=1`, Grok's own bubblewrap cannot start a nested user namespace inside the daemon bwrap. Passing `--sandbox lgb` then fails closed (Grok refuses). The daemon bwrap is the filesystem boundary; Grok `--sandbox` is optional `fixed_args` for hosts that allow nested userns. `--always-approve` stays blocked on bot argv. Headless edits on this host needed daemon `fixed_args = ["--always-approve"]` (`--permission-mode acceptEdits` returned text but did not write the file). Inner Grok `restrict_network` is left false in the written profile so a nested sandbox, when it can start, can still reach the model API.
+`--always-approve` stays blocked on bot argv. Headless edits need daemon `fixed_args = ["--always-approve"]` (`--permission-mode acceptEdits` returned text but did not write the file). With `proxy_hosts` set, that flag does not put the login file in the jail. Without `proxy_hosts`, the same flag requires managed `allow_jail_credentials`.
 
 `sandbox_bin` (absolute) is a test/ops hook that replaces `bwrap` / `sandbox-exec`. An invalid path denies the call as `coi_sandbox_unavailable`.
 

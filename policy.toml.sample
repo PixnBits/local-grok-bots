@@ -105,10 +105,21 @@ imminent_timer_minutes = 2
 # [tools]
 # Host CLIs the daemon runs for a sandboxed bot. The bot calls
 # `.lgb/bin/coi <name> ...` or `lgb coi <name> ...`. The real binary runs in
-# bwrap (Linux) or sandbox-exec (macOS): workspace writable, system dirs and
-# the CLI file read-only. credential_home is absolute and outside the
-# workspace; it is never mounted. credential_files are relative paths copied
-# into a private HOME for the call (for example ".grok/auth.json").
+# bwrap (Linux) or sandbox-exec (macOS). That jail is the only sandbox for
+# this path. The daemon does not write sandbox.toml and does not pass
+# --sandbox. Workspace is writable, except <workspace>/.lgb, which is hidden.
+# System dirs and the CLI file are read-only. Host /run is not mounted.
+# Network is unshared. The jail reaches the network only through proxy_hosts.
+# credential_home is absolute and outside the workspace; it is never mounted.
+# credential_files are relative paths (for example ".grok/auth.json"). The
+# jail gets a placeholder, not those bytes. The host proxy reads the real
+# file and sets Authorization on the way out. The first proxy_hosts entry is
+# the TLS upstream (Grok chat: cli-chat-proxy.grok.com).
+# allow_jail_credentials = true is managed-only. It copies the real files
+# into the jail and logs a warning. Local policy cannot turn it on.
+# credential_files plus fixed_args --always-approve, without proxy_hosts and
+# without that opt-in, is denied. If the proxy cannot start, the call is
+# denied and audited as coi_proxy_unavailable.
 # allowed_args lists subcommands and flags. value_flags lists flags that take
 # a value; every other flag is boolean. Anything else is denied, and
 # config/auth/login/logout/whoami/token/env/update/--print-config/--debug/
@@ -120,9 +131,10 @@ imminent_timer_minutes = 2
 # Output redaction is a backstop, not the control.
 # Managed policy can lock an entry (lock = true) or ban a name (cli_ban).
 # cli_allow_local = false drops local-only names. Local policy can only narrow
-# a managed entry: fewer args, fewer bots, lower limits, fewer value_flags and
-# credential_files. It cannot change the path, credential home, sandbox_bin,
-# fixed_args, or fixed_env. The daemon re-reads this on each call.
+# a managed entry: fewer args, fewer bots, lower limits, fewer value_flags,
+# credential_files, and proxy_hosts. It cannot change the path, credential
+# home, sandbox_bin, fixed_args, or fixed_env. The daemon re-reads this on
+# each call.
 # cli_ban = ["curl"]
 # cli_allow_local = true
 # [[tools.cli]]
@@ -130,6 +142,7 @@ imminent_timer_minutes = 2
 # path = "/home/pixnbits/.grok/bin/grok"
 # credential_home = "/var/lib/local-grok-bots/coi/grok"
 # credential_files = [".grok/auth.json"]
+# proxy_hosts = ["cli-chat-proxy.grok.com"]
 # bots = ["bot-id-or-name"]
 # allowed_args = ["-p", "--cwd", "--max-turns", "--no-auto-update"]
 # value_flags = ["-p", "--cwd", "--max-turns"]
