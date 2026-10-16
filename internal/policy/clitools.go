@@ -14,6 +14,11 @@ type CLITool struct {
 	Name            string
 	Path            string
 	AllowedArgs     []string
+	ValueFlags      []string
+	CredentialFiles []string
+	FixedArgs       []string
+	FixedEnv        []string
+	SandboxBin      string
 	CredentialHome  string
 	Bots            []string
 	Timeout         time.Duration

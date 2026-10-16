@@ -18,21 +18,31 @@ var (
 	ErrOutside = errors.New("path is outside the workspace")
 	// ErrNoArgs is an empty invocation. The allowlist is deny-by-default.
 	ErrNoArgs = errors.New("no arguments allowed")
+	// ErrSandboxUnavailable means the inner CLI jail could not start.
+	ErrSandboxUnavailable = errors.New("sandbox is not available")
 )
 
-// blockedWord is a whole word that prints or changes credentials.
+// blockedWord is a whole token or split word that prints or changes credentials.
+// --always-approve and --sandbox are blocked even when listed; the daemon may
+// still prepend them through fixed_args. update is blocked as a token so the
+// CLI cannot self-update; --no-auto-update is also blocked here and belongs in
+// fixed_args.
 var blockedWord = map[string]bool{
 	"config": true, "auth": true, "login": true, "logout": true,
 	"whoami": true, "token": true, "tokens": true, "env": true,
 	"credential": true, "credentials": true, "secret": true, "secrets": true,
 	"password": true, "passwd": true, "debug": true,
+	"update": true, "always-approve": true, "sandbox": true,
 }
 
 // CheckArgs allows only listed subcommands and flags.
 // The first positional and every flag must be listed. Later positionals are
 // operands. Blocked words and the credential home lose even when listed.
-// A path operand or flag value must stay inside the workspace.
-func CheckArgs(allowed, args []string, workspace, credHome string) error {
+// Flags in valueFlags take the next word as a value; every other flag is
+// boolean and does not swallow the next word. Values, including --flag=value,
+// get the blocked-word check. Path operands are still checked as defense in
+// depth; the inner CLI sandbox is the real filesystem boundary.
+func CheckArgs(allowed, args []string, workspace, credHome string, valueFlags []string) error {
 	if len(allowed) == 0 || len(args) == 0 {
 		return ErrNoArgs
 	}
@@ -40,13 +50,20 @@ func CheckArgs(allowed, args []string, workspace, credHome string) error {
 	for _, a := range allowed {
 		allow[strings.ToLower(strings.TrimSpace(a))] = true
 	}
-	flags, positionals, err := splitArgs(args)
+	value := map[string]bool{}
+	for _, a := range valueFlags {
+		a = strings.ToLower(strings.TrimSpace(a))
+		if a != "" {
+			value[a] = true
+		}
+	}
+	flags, positionals, err := splitArgs(args, value)
 	if err != nil {
 		return err
 	}
 	saw := false
 	for _, f := range flags {
-		if argBlocked(f.name) {
+		if argBlocked(f.name) || argBlocked(f.value) {
 			return ErrBlocked
 		}
 		if !allow[strings.ToLower(f.name)] {
@@ -82,7 +99,7 @@ type flagArg struct {
 	value string
 }
 
-func splitArgs(args []string) ([]flagArg, []string, error) {
+func splitArgs(args []string, valueFlags map[string]bool) ([]flagArg, []string, error) {
 	var flags []flagArg
 	var pos []string
 	for i := 0; i < len(args); i++ {
@@ -108,7 +125,7 @@ func splitArgs(args []string) ([]flagArg, []string, error) {
 		f := flagArg{name: name}
 		if has {
 			f.value = val
-		} else if i+1 < len(args) && args[i+1] != "--" && !strings.HasPrefix(args[i+1], "-") {
+		} else if valueFlags[strings.ToLower(name)] && i+1 < len(args) && args[i+1] != "--" && !strings.HasPrefix(args[i+1], "-") {
 			i++
 			f.value = args[i]
 		}
@@ -118,6 +135,13 @@ func splitArgs(args []string) ([]flagArg, []string, error) {
 }
 
 func argBlocked(s string) bool {
+	if s == "" {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimLeft(s, "-"))
+	if blockedWord[lower] {
+		return true
+	}
 	for _, w := range words(s) {
 		if blockedWord[w] {
 			return true

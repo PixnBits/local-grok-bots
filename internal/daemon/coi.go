@@ -81,7 +81,7 @@ func (r *lgbRun) execCOI(ctx context.Context, args []string) (int, string) {
 	// and does not consume an hourly slot.
 	secrets, secErr := coi.ReadSecrets(tool.CredentialHome)
 	ws := filepath.Dir(r.root)
-	if err := coi.CheckArgs(tool.AllowedArgs, rest, ws, tool.CredentialHome); err != nil {
+	if err := coi.CheckArgs(tool.AllowedArgs, rest, ws, tool.CredentialHome, tool.ValueFlags); err != nil {
 		r.auditCOI(name, rest, coi.StatusDenied, err.Error(), tool.CredentialHome, secrets, 0, false)
 		return 1, "coi: " + coi.RedactOutput(err.Error(), []string{tool.CredentialHome}, secrets)
 	}

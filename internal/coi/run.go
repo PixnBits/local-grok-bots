@@ -114,7 +114,7 @@ func Run(ctx context.Context, c Call) Result {
 		return Result{Code: 1, Status: StatusDenied, Err: err.Error()}
 	}
 	for _, home := range []string{c.Tool.CredentialHome, tool.CredentialHome} {
-		if err := CheckArgs(tool.AllowedArgs, c.Args, c.Workspace, home); err != nil {
+		if err := CheckArgs(tool.AllowedArgs, c.Args, c.Workspace, home, tool.ValueFlags); err != nil {
 			return Result{Code: 1, Status: StatusDenied, Err: err.Error()}
 		}
 	}
