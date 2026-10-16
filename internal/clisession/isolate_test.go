@@ -185,6 +185,109 @@ func TestPrepareIsolationGrok(t *testing.T) {
 	}
 }
 
+func TestPrepareIsolationGrokDropsDaemonMarkers(t *testing.T) {
+	// Production builds do not copy LGB_* from the daemon. This test checks
+	// that path. Test binaries still pass other LGB_* names so fakes can log.
+	prev := passInheritedLGB
+	passInheritedLGB = false
+	t.Cleanup(func() { passInheritedLGB = prev })
+	user := t.TempDir()
+	state := t.TempDir()
+	home := filepath.Join(state, "home")
+	const (
+		token     = "fake-admin-token-value"
+		secret    = "fake-secret-canary"
+		adminPath = "/tmp/lgb-admin-token-canary"
+		canary    = "canary-var-value"
+		gate      = "unit-gate-token-bbbb"
+	)
+	iso, err := PrepareIsolation(IsolationOptions{
+		Backend: "grok", StateDir: state, Home: home, UserHome: user,
+		ProxyBase: "http://127.0.0.1:9", ProxyGate: gate,
+		Secrets: []string{token},
+		Base: []string{
+			"PATH=/usr/bin:/bin",
+			"TERM=xterm-256color",
+			"LANG=C.UTF-8",
+			"HOME=/home/daemon",
+			"USER=daemon",
+			"LOGNAME=daemon",
+			"SHELL=/bin/bash",
+			"TZ=UTC",
+			"TMPDIR=/tmp",
+			"HTTP_PROXY=http://proxy.example",
+			"HTTPS_PROXY=http://proxy.example",
+			"LC_ALL=C",
+			"SSL_CERT_FILE=/etc/ssl/cert.pem",
+			"NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem",
+			"AUTH_TOKEN=" + token,
+			"LGB_FAKE_SECRET=" + secret,
+			"LGB_ADMIN_TOKEN_PATH=" + adminPath,
+			"LGB_CANARY_VAR=" + canary,
+			"DAEMON_CANARY=" + canary,
+			"GROK_CONFIG={\"x\":1}",
+			"GROK_SANDBOX=off",
+			"ANTHROPIC_API_KEY=k",
+		},
+		Extra: map[string]string{
+			"LGB_TOKEN": "lgbr_run",
+			"LGB_SPOOL": filepath.Join(home, ".lgb"),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := envMap(iso.Env)
+	want := map[string]string{
+		"PATH":                         "/usr/bin:/bin",
+		"TERM":                         "xterm-256color",
+		"LANG":                         "C.UTF-8",
+		"HOME":                         home,
+		"XAI_API_KEY":                  gate,
+		"GROK_CLI_CHAT_PROXY_BASE_URL": "http://127.0.0.1:9/v1",
+		"GROK_XAI_API_BASE_URL":        "http://127.0.0.1:9/v1",
+		"XAI_API_BASE_URL":             "http://127.0.0.1:9/v1",
+		"LGB_TOKEN":                    "lgbr_run",
+		"LGB_SPOOL":                    filepath.Join(home, ".lgb"),
+		"GROK_HOME":                    filepath.Join(home, ".grok"),
+		"GROK_DISABLE_AUTOUPDATER":     "1",
+		"GROK_CLAUDE_MCPS_ENABLED":     "false",
+	}
+	for k, v := range want {
+		if env[k] != v {
+			t.Errorf("%s=%q", k, env[k])
+		}
+	}
+	allowed := map[string]bool{
+		"PATH": true, "TERM": true, "LANG": true, "HOME": true,
+		"XAI_API_KEY": true, "XAI_API_BASE_URL": true,
+		"GROK_CLI_CHAT_PROXY_BASE_URL": true, "GROK_XAI_API_BASE_URL": true,
+		"LGB_TOKEN": true, "LGB_SPOOL": true,
+	}
+	for k := range env {
+		if allowed[k] || strings.HasPrefix(k, "GROK_") {
+			continue
+		}
+		t.Errorf("unexpected %s", k)
+	}
+	for _, k := range []string{
+		"USER", "LOGNAME", "SHELL", "TZ", "TMPDIR", "HTTP_PROXY", "HTTPS_PROXY",
+		"LC_ALL", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "AUTH_TOKEN",
+		"LGB_FAKE_SECRET", "LGB_ADMIN_TOKEN_PATH", "LGB_CANARY_VAR", "DAEMON_CANARY",
+		"GROK_CONFIG", "GROK_SANDBOX", "ANTHROPIC_API_KEY",
+	} {
+		if _, ok := env[k]; ok {
+			t.Errorf("%s reached the cli", k)
+		}
+	}
+	flat := strings.Join(iso.Env, "\n")
+	for _, v := range []string{token, secret, adminPath, canary, "/home/daemon"} {
+		if strings.Contains(flat, v) {
+			t.Fatal("daemon value reached the cli")
+		}
+	}
+}
+
 func TestPrepareIsolationDropsInheritedLGB(t *testing.T) {
 	state := t.TempDir()
 	base := []string{

@@ -86,8 +86,11 @@ the proxy variables, `SSL_CERT_FILE`/`SSL_CERT_DIR`/`NODE_EXTRA_CA_CERTS`,
 and the backend credential
 (`ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` for Claude). For Grok the
 daemon sets `XAI_API_KEY` to a per-run proxy secret, not a host key, and
-points the chat base URLs at its loopback proxy. `LGB_*` from the daemon
-process is not copied. The daemon sets
+points the chat base URLs at its loopback proxy. Grok does not keep the
+rest of that inherited list. Its launch environment is `PATH`, `LANG`,
+`TERM`, `HOME`, the per-run `XAI_API_KEY`, the proxy base URLs,
+`LGB_SPOOL`, `LGB_TOKEN`, and the `GROK_*` variables this isolation sets.
+`LGB_*` from the daemon process is not copied. The daemon sets
 `LGB_SPOOL` and `LGB_TOKEN` for that run. Every other `ANTHROPIC_*`,
 `CLAUDE_*`, and `GROK_*` variable is dropped, including
 `ANTHROPIC_BASE_URL`, `CLAUDE_CONFIG_DIR`, `GROK_CONFIG`, and

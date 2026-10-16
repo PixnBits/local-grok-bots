@@ -97,6 +97,12 @@ var passEnv = map[string]bool{
 	"SSL_CERT_FILE": true, "SSL_CERT_DIR": true, "NODE_EXTRA_CA_CERTS": true,
 }
 
+// grokBaseEnv is the daemon environment a Grok launch may keep.
+// HOME and the turn's own variables are set separately.
+var grokBaseEnv = map[string]bool{
+	"PATH": true, "LANG": true, "TERM": true,
+}
+
 // credEnv names the only backend variables kept: credentials, not overrides.
 // Grok does not keep XAI_API_KEY. The daemon sets a placeholder and the
 // proxy replaces the bearer.
@@ -219,12 +225,20 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 		}
 		// LGB_SPOOL and LGB_TOKEN are set by the daemon for one run. Other
 		// LGB_* names are not inherited. Tests and the lgbtest tag opt in.
-		if passEnv[k] || strings.HasPrefix(k, "LC_") || keepInheritedLGB(k) {
+		// Grok keeps only PATH, LANG, and TERM from the daemon. The per-run
+		// key, proxy URLs, HOME, and GROK_* variables are set below.
+		keep := passEnv[k] || strings.HasPrefix(k, "LC_") || keepInheritedLGB(k)
+		if backend == "grok" {
+			keep = grokBaseEnv[k] || keepInheritedLGB(k)
+		}
+		if keep {
 			env[k] = v
 		}
-		for _, c := range credEnv[backend] {
-			if k == c {
-				env[k] = v
+		if backend != "grok" {
+			for _, c := range credEnv[backend] {
+				if k == c {
+					env[k] = v
+				}
 			}
 		}
 	}

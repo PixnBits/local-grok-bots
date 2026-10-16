@@ -112,13 +112,30 @@ func TestCLIOverrideRefuseFailsClosed(t *testing.T) {
 
 func TestCLIGrokMCPJSONRefusedEvenWhenIgnoring(t *testing.T) {
 	app, _, bot, envLog := isolationApp(t, "grok", "")
+	t.Setenv("AUTH_TOKEN", "fake-admin-token-value")
+	t.Setenv("DAEMON_CANARY", "canary-var-value")
 	ws := filepath.Join(app.ws, "bots", bot.ID)
 	_ = os.MkdirAll(ws, 0o700)
 	_ = os.WriteFile(filepath.Join(ws, "AGENTS.md"), []byte("x"), 0o644)
 	got := postAndWait(t, app, bot.ID)
 	env := readArgv(t, envLog)
-	if !strings.Contains(env, "GROK_HOME=") || !strings.Contains(env, "GROK_CLAUDE_MCPS_ENABLED=false") || strings.Contains(env, "GROK_CONFIG=") {
-		t.Fatalf("grok env:\n%s", env)
+	if strings.Contains(env, "fake-admin-token-value") || strings.Contains(env, "canary-var-value") {
+		t.Fatal("daemon value reached the cli")
+	}
+	for _, line := range strings.Split(env, "\n") {
+		name, _, _ := strings.Cut(line, "=")
+		switch name {
+		case "AUTH_TOKEN", "DAEMON_CANARY", "USER", "HTTP_PROXY", "LC_ALL", "SSL_CERT_FILE":
+			t.Fatalf("daemon env reached the cli: %s", name)
+		}
+	}
+	for _, name := range []string{"GROK_HOME=", "GROK_CLAUDE_MCPS_ENABLED=false", "XAI_API_KEY=", "PATH=", "HOME="} {
+		if !strings.Contains(env, name) {
+			t.Fatalf("missing %s", name)
+		}
+	}
+	if strings.Contains(env, "GROK_CONFIG=") {
+		t.Fatal("GROK_CONFIG reached the cli")
 	}
 	_ = got
 	_ = os.WriteFile(filepath.Join(ws, ".mcp.json"), []byte(`{}`), 0o644)
