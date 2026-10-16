@@ -55,11 +55,14 @@ func CheckArgs(allowed, args []string, workspace, credHome string, valueFlags []
 	}
 	allow := map[string]bool{}
 	for _, a := range allowed {
-		allow[strings.ToLower(strings.TrimSpace(a))] = true
+		a = strings.TrimSpace(a)
+		if a != "" {
+			allow[a] = true
+		}
 	}
 	value := map[string]bool{}
 	for _, a := range valueFlags {
-		a = strings.ToLower(strings.TrimSpace(a))
+		a = strings.TrimSpace(a)
 		if a != "" {
 			value[a] = true
 		}
@@ -74,7 +77,7 @@ func CheckArgs(allowed, args []string, workspace, credHome string, valueFlags []
 		if argBlocked(f.name) || argBlocked(f.value) {
 			return ErrBlocked
 		}
-		if !allow[strings.ToLower(f.name)] {
+		if !allow[f.name] {
 			return ErrNotAllowed
 		}
 		saw = true
@@ -90,7 +93,7 @@ func CheckArgs(allowed, args []string, workspace, credHome string, valueFlags []
 			return ErrBlocked
 		}
 		if i == 0 {
-			if !allow[strings.ToLower(p)] {
+			if !allow[p] {
 				return ErrNotAllowed
 			}
 			saw = true
@@ -142,7 +145,7 @@ func splitArgs(args []string, valueFlags map[string]bool) ([]flagArg, []string, 
 		f := flagArg{name: name}
 		if has {
 			f.value = val
-		} else if valueFlags[strings.ToLower(name)] && i+1 < len(args) && args[i+1] != "--" && !strings.HasPrefix(args[i+1], "-") {
+		} else if valueFlags[name] && i+1 < len(args) && args[i+1] != "--" && !strings.HasPrefix(args[i+1], "-") {
 			i++
 			f.value = args[i]
 		}

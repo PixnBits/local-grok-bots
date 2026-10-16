@@ -76,7 +76,7 @@ func TestEgressPathAllowlistSkipsUpstream(t *testing.T) {
 	var calls atomic.Int32
 	trip := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls.Add(1)
-		if r.URL == nil || (r.URL.Path != "/v1/ping" && r.URL.Path != "/v1/responses") {
+		if r.URL == nil || (r.URL.Path != "/v1/ping" && r.URL.Path != "/v1/responses" && r.URL.Path != "/V1/ping") {
 			t.Errorf("upstream path %v", r.URL)
 		}
 		return &http.Response{
@@ -89,7 +89,10 @@ func TestEgressPathAllowlistSkipsUpstream(t *testing.T) {
 	if code := rawStatus(t, addr, "/v1/ping"); code != 204 {
 		t.Fatalf("allow status %d", code)
 	}
-	if calls.Load() != 1 {
+	if code := rawStatus(t, addr, "/v1/ping?x=1"); code != 204 {
+		t.Fatalf("query status %d", code)
+	}
+	if calls.Load() != 2 {
 		t.Fatalf("upstream calls %d", calls.Load())
 	}
 	for _, path := range []string{
@@ -104,6 +107,13 @@ func TestEgressPathAllowlistSkipsUpstream(t *testing.T) {
 		"/v1/%2fping",
 		"/v10",
 		"/v1/..%2fx",
+		"/v1/ping?x=..",
+		"/v1/ping?x=%2e%2e",
+		"/v1/ping?x=%2E%2E",
+		"/v1/ping?x=%252e%252e",
+		"/v1/ping?x=%2fetc",
+		"/v1/ping?x=%5cetc",
+		"/V1/ping",
 	} {
 		before := calls.Load()
 		code := rawStatus(t, addr, path)
@@ -133,6 +143,15 @@ func TestEgressPathAllowlistSkipsUpstream(t *testing.T) {
 	before = calls.Load()
 	if code := rawStatus(t, noneAddr, "/v1/ping"); code != http.StatusForbidden || calls.Load() != before {
 		t.Fatalf("empty prefixes code %d calls %d", code, calls.Load())
+	}
+	upper, upperAddr := startBridge(t, []string{"/V1"}, trip)
+	defer upper.Close()
+	if code := rawStatus(t, upperAddr, "/V1/ping"); code != 204 {
+		t.Fatalf("stored case %d", code)
+	}
+	before = calls.Load()
+	if code := rawStatus(t, upperAddr, "/v1/ping"); code != http.StatusForbidden || calls.Load() != before {
+		t.Fatalf("folded path code %d calls %d", code, calls.Load())
 	}
 }
 

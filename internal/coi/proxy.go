@@ -188,7 +188,7 @@ func resolvePrefixes(in []string) ([]string, error) {
 }
 
 func (e *Egress) allowPath(r *http.Request) bool {
-	if e == nil || r == nil {
+	if e == nil || r == nil || queryTraversal(r) {
 		return false
 	}
 	cands := pathCandidates(r)
@@ -321,6 +321,53 @@ func keepForwardHeaders(h http.Header) {
 		delete(h, k)
 		h.Del(k)
 	}
+}
+
+func queryTraversal(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	var qs []string
+	if r.URL != nil && r.URL.RawQuery != "" {
+		qs = append(qs, r.URL.RawQuery)
+	}
+	if r.RequestURI != "" {
+		if i := strings.IndexByte(r.RequestURI, '?'); i >= 0 {
+			q := r.RequestURI[i+1:]
+			if j := strings.IndexByte(q, '#'); j >= 0 {
+				q = q[:j]
+			}
+			qs = append(qs, q)
+		}
+	}
+	for _, q := range qs {
+		if badQuery(q) {
+			return true
+		}
+	}
+	return false
+}
+
+func badQuery(q string) bool {
+	cur := q
+	for i := 0; i < 3; i++ {
+		if strings.Contains(cur, "..") {
+			return true
+		}
+		lower := strings.ToLower(cur)
+		if strings.Contains(lower, "%2e%2e") || strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") {
+			return true
+		}
+		next, err := url.QueryUnescape(cur)
+		if err != nil || next == cur {
+			return false
+		}
+		cur = next
+		if strings.ContainsAny(cur, `/\`) {
+			return true
+		}
+	}
+	return strings.Contains(cur, "..")
 }
 
 func badProxyPath(s string) bool {

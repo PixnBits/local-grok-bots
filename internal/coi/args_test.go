@@ -137,6 +137,23 @@ func TestCheckArgsTreatsBareNamesAsPaths(t *testing.T) {
 	}
 }
 
+func TestCheckArgsAllowlistIsCaseSensitive(t *testing.T) {
+	ws := t.TempDir()
+	cred := filepath.Join(t.TempDir(), "creds")
+	if err := os.Mkdir(cred, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckArgs([]string{"edit"}, []string{"Edit"}, ws, cred, nil); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("folded subcommand: %v", err)
+	}
+	if err := CheckArgs([]string{"Edit"}, []string{"Edit"}, ws, cred, nil); err != nil {
+		t.Fatalf("stored case: %v", err)
+	}
+	if err := CheckArgs([]string{"-p", "edit"}, []string{"-P", "edit"}, ws, cred, []string{"-p"}); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("folded flag: %v", err)
+	}
+}
+
 func TestCheckArgsRejectsUnlistedFlag(t *testing.T) {
 	ws := t.TempDir()
 	if err := CheckArgs([]string{"edit"}, []string{"edit", "--force"}, ws, "/var/empty-cred", nil); !errors.Is(err, ErrNotAllowed) {
