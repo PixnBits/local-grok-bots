@@ -208,3 +208,14 @@ Data under `~/lgb-dev-data/coi-check/r4`, binary `/tmp/lgb-coi-check` built at `
 | Leak scan (workspace, audit log, daemon log, database) | 4 token values and 7 other login strings checked. 0 hits for each. |
 
 Stop: SIGTERM to the 8139 pid only, after confirming the command. Nothing listens on 8139. Ports 8080, 8090, and 8095 were left running. The r4 credential copy was deleted. `~/.grok/auth.json` has the same inode, size, and SHA-256 as before the run (the hash is not recorded). The CLI-backend outer home (not the COI broker) hardlinks the user's login into its data dir, as noted in round 1. That throwaway link was removed after the check.
+
+## Round 5
+
+Date: 2026-10-16. Data under `~/lgb-dev-data/coi-check/r5`, binary `/tmp/lgb-coi-check` built from this worktree, bind `127.0.0.1:8139` only. The credential copy was a new inode, mode 0600, with only `expires_at` pinned far in the future so nothing refreshed the real login. The outer turn used the claude backend and an isolated home, and the daemon's home was an empty directory, so the user's login was not hard-linked into the data directory. Managed policy turned the outer sandbox requirement off because this host has no outer sandbox helper; the brokered CLI still ran in the daemon jail.
+
+| Case | Result |
+|---|---|
+| Grok edit through the broker and the proxy | bwrap exit 0, broker `coi_call` status `ok`. `hello.txt` is exactly `hello-from-coi` plus a newline (15 bytes). |
+| Leak scan (workspace, audit log, daemon log, database) | 4 token values and 7 other login strings checked. 0 hits for each. No run token in the audit log or the daemon log. |
+
+While the daemon was still up, `~/.grok/auth.json` had the same inode, link count, and SHA-256 as before the copy (the hash is not recorded), and nothing under the r5 tree shared that inode.
