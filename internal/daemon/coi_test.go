@@ -141,7 +141,7 @@ func (f *coiFix) manual() {
 	<-f.run.done
 }
 
-func (f *coiFix) post(t *testing.T, token string, args ...string) (int, string) {
+func (f *coiFix) drop(t *testing.T, token string, args ...string) string {
 	t.Helper()
 	f.n++
 	name := fmt.Sprintf("%032x", f.n)
@@ -155,20 +155,39 @@ func (f *coiFix) post(t *testing.T, token string, args ...string) (int, string) 
 	if err := os.WriteFile(filepath.Join(f.ws, ".lgb", "req", name), []byte(b.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	return name
+}
+
+func (f *coiFix) waitResp(t *testing.T, name string, d time.Duration) (int, string) {
+	t.Helper()
+	path := filepath.Join(f.ws, ".lgb", "resp", name)
+	deadline := time.Now().Add(d)
+	for {
+		raw, err := os.ReadFile(path)
+		if err == nil {
+			line, rest, ok := strings.Cut(string(raw), "\n")
+			if !ok {
+				t.Fatalf("response %q", raw)
+			}
+			code, err := strconv.Atoi(line)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return code, strings.TrimRight(rest, "\n")
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no response for %s: %v", name, err)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func (f *coiFix) post(t *testing.T, token string, args ...string) (int, string) {
+	t.Helper()
+	name := f.drop(t, token, args...)
 	f.run.drain(context.Background())
-	raw, err := os.ReadFile(filepath.Join(f.ws, ".lgb", "resp", name))
-	if err != nil {
-		t.Fatal(err)
-	}
-	line, rest, ok := strings.Cut(string(raw), "\n")
-	if !ok {
-		t.Fatalf("response %q", raw)
-	}
-	code, err := strconv.Atoi(line)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return code, strings.TrimRight(rest, "\n")
+	f.run.waitCOI()
+	return f.waitResp(t, name, time.Second)
 }
 
 func (f *coiFix) coi(t *testing.T, args ...string) (int, string) {
@@ -549,6 +568,28 @@ func (f *coiFix) assertPrompt(t *testing.T, source, rule string) {
 	}
 	if !found {
 		t.Fatalf("run tools %+v", tools[f.run.runID])
+	}
+}
+
+func TestCOIDoesNotBlockLGB(t *testing.T) {
+	f := setupCOI(t, 5, nil)
+	start := time.Now()
+	slow := f.drop(t, f.run.token, "coi", "fake", "--sleep")
+	mem := f.drop(t, f.run.token, "memory", "set", "color", "blue")
+	code, out := f.waitResp(t, mem, 2*time.Second)
+	if time.Since(start) > 1500*time.Millisecond {
+		t.Fatalf("lgb waited on coi: %s %d %q", time.Since(start), code, out)
+	}
+	if code != 0 {
+		t.Fatalf("lgb %d %q", code, out)
+	}
+	got, err := f.app.st.ListMemory(f.bot.ID)
+	if err != nil || len(got) != 1 || got[0].Key != "color" || got[0].Value != "blue" {
+		t.Fatalf("memory %+v %v", got, err)
+	}
+	code, out = f.waitResp(t, slow, 8*time.Second)
+	if code != 0 || !strings.Contains(out, "slept") {
+		t.Fatalf("coi %d %q", code, out)
 	}
 }
 

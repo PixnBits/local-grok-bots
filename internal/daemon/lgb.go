@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/coi"
@@ -29,10 +30,11 @@ import (
 // in the daemon; the script only passes argv.
 
 const (
-	lgbDirName  = ".lgb"
-	lgbMaxReq   = 64 << 10
-	lgbPoll     = 100 * time.Millisecond
-	lgbMaxCalls = 200
+	lgbDirName       = ".lgb"
+	lgbMaxReq        = 64 << 10
+	lgbPoll          = 100 * time.Millisecond
+	lgbMaxCalls      = 200
+	coiMaxConcurrent = 4
 )
 
 var errSpoolFile = errors.New("lgb: bad spool file")
@@ -102,7 +104,10 @@ type lgbRun struct {
 	resp   *spoolDir
 	cancel context.CancelFunc
 	done   chan struct{}
+	mu     sync.Mutex
 	calls  int
+	coiWG  sync.WaitGroup
+	coiSem chan struct{}
 }
 
 // startLGB prepares DATA_DIR/workspace/<bot>/.lgb and starts answering. It
@@ -145,7 +150,7 @@ func (a *App) startLGB(ctx context.Context, bot store.Bot, runID, ws string) (*l
 	}
 	cctx, cancel := context.WithCancel(ctx)
 	r := &lgbRun{a: a, bot: bot, runID: runID, token: "lgbr_" + hex.EncodeToString(buf), root: root,
-		req: req, resp: resp, cancel: cancel, done: make(chan struct{})}
+		req: req, resp: resp, cancel: cancel, done: make(chan struct{}), coiSem: make(chan struct{}, coiMaxConcurrent)}
 	a.noteRunToken(r.token, bot.ID, runID)
 	go r.loop(cctx)
 	env := map[string]string{
@@ -220,6 +225,7 @@ func (r *lgbRun) stop() {
 	}
 	r.cancel()
 	<-r.done
+	r.coiWG.Wait()
 	r.token = ""
 	r.req.close()
 	r.resp.close()
@@ -251,6 +257,10 @@ func (r *lgbRun) drain(ctx context.Context) {
 		}
 		body, err := r.req.read(name, lgbMaxReq)
 		r.req.remove(name)
+		if err == nil && peekCOI(body) {
+			r.spawnCOI(ctx, name, body)
+			continue
+		}
 		var code int
 		var out string
 		if err != nil {
@@ -263,6 +273,31 @@ func (r *lgbRun) drain(ctx context.Context) {
 		}
 		_ = r.resp.write(name, []byte(fmt.Sprintf("%d\n%s\n", code, strings.TrimRight(out, "\n"))))
 	}
+}
+
+func peekCOI(body []byte) bool {
+	parts := bytes.Split(bytes.TrimSuffix(body, []byte{0}), []byte{0})
+	return len(parts) > 1 && string(parts[1]) == "coi"
+}
+
+func (r *lgbRun) spawnCOI(ctx context.Context, name string, body []byte) {
+	r.coiWG.Add(1)
+	go func() {
+		defer r.coiWG.Done()
+		select {
+		case r.coiSem <- struct{}{}:
+			defer func() { <-r.coiSem }()
+		case <-ctx.Done():
+			_ = r.resp.write(name, []byte("1\ncoi: timed out\n"))
+			return
+		}
+		code, out := r.handle(ctx, body)
+		_ = r.resp.write(name, []byte(fmt.Sprintf("%d\n%s\n", code, strings.TrimRight(out, "\n"))))
+	}()
+}
+
+func (r *lgbRun) waitCOI() {
+	r.coiWG.Wait()
 }
 
 // handle checks the token and runs one command. Every call is logged and
@@ -286,8 +321,11 @@ func (r *lgbRun) handle(ctx context.Context, body []byte) (int, string) {
 		r.audit(fields)
 		return 2, "lgb: not authorized"
 	}
+	r.mu.Lock()
 	r.calls++
-	if r.calls > lgbMaxCalls {
+	n := r.calls
+	r.mu.Unlock()
+	if n > lgbMaxCalls {
 		if coiCall {
 			r.auditCOI(coiName(args), coiRest(args), coi.StatusDenied, "call limit", "", nil, 0, false)
 			return 2, "coi: call limit for this turn reached"
