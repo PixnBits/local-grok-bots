@@ -97,7 +97,7 @@ Internal LGB COIs (timers, etc.) already follow the daemon-mediated pattern. Use
 
 ### Host CLI broker (`tools.cli` / `.lgb/bin/coi`)
 
-The first slice is a host CLI invoked from the bot jail through the lgb spool. The bot never receives `credential_home`. The inner CLI is still untrusted relative to those credentials, so the daemon runs it in its own OS sandbox:
+The first slice is a host CLI invoked from the bot jail through the lgb spool. The jail gets only a placeholder. The real file stays in `credential_home` on the host and is read by the daemon proxy. With managed `allow_jail_credentials` opt-in, a copy is staged into the jail. The inner CLI is still untrusted relative to those credentials, so the daemon runs it in its own OS sandbox:
 
 - Linux: bubblewrap (`bwrap`) with `--unshare-user`, `--unshare-pid`, `--unshare-uts`, `--unshare-ipc`, `--unshare-net`, and `--new-session`. Missing or failed `bwrap` denies the call and audits `coi_sandbox_unavailable`. There is no unshare fallback. Host `/run` and `/var/run` are not mounted. With the network namespace empty, the jail has no `resolv.conf` bind; the host proxy resolves DNS.
 - macOS: `sandbox-exec` with a generated Seatbelt profile. Missing `sandbox-exec` is the same denial. The profile denies network-outbound except localhost and, when a proxy is in use, the proxy unix socket. It also denies read and write of `<workspace>/.lgb`. That profile is untested on macOS; it still compiles.
