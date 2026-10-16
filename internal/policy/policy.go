@@ -112,6 +112,10 @@ type Policy struct {
 	LGBMaxSchedPerHour int
 	// CLIEnv is added to the scrubbed CLI environment. Only managed policy sets it.
 	CLIEnv map[string]string
+	// CLITools are host CLIs the credential broker may run. Empty denies every coi call.
+	CLITools []CLITool
+	// cliLocal is the local file's CLI table before managed merge.
+	cliLocal []cliEntry
 
 	TimersEnabled     bool
 	SandboxFailClosed bool
@@ -212,6 +216,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 		path = strings.TrimSpace(p.ManagedPath)
 	}
 	if path == "" {
+		p.dropIncompleteCLI()
 		return p, nil
 	}
 	body, err := readPolicy(path)
@@ -254,6 +259,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 		return Policy{}, err
 	}
 	base.DaemonJail = !base.UsesCLI()
+	base.dropIncompleteCLI()
 	return base, nil
 }
 
@@ -719,6 +725,7 @@ type document struct {
 	Timers   timersDoc   `toml:"timers" json:"timers"`
 	Security securityDoc `toml:"security" json:"security"`
 	Managed  managedDoc  `toml:"managed" json:"managed"`
+	Tools    toolsDoc    `toml:"tools" json:"tools"`
 }
 
 type daemonDoc struct {
@@ -1062,6 +1069,9 @@ func (p *Policy) apply(doc document, trusted bool) error {
 			}
 		}
 		p.AuditLog = v
+	}
+	if err := p.applyCLITools(doc.Tools, trusted); err != nil {
+		return err
 	}
 	if doc.Managed.Path != nil {
 		v := strings.TrimSpace(*doc.Managed.Path)

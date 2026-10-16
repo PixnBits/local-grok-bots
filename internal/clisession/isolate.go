@@ -26,6 +26,8 @@ type Isolation struct {
 	GrokDisallow []string
 	// ClaudeSandbox is whether the settings file turns Claude's sandbox on.
 	ClaudeSandbox bool
+	// Protect is the path deny list written into this turn's settings.
+	Protect []string
 }
 
 // IsolationOptions builds an Isolation.

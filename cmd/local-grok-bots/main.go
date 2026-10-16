@@ -7,12 +7,16 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/PixnBits/local-grok-bots/internal/coi"
 	"github.com/PixnBits/local-grok-bots/internal/config"
 	"github.com/PixnBits/local-grok-bots/internal/daemon"
 	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 )
 
 func main() {
+	if coi.HandleForward(os.Args[1:]) {
+		return
+	}
 	if sandbox.HandleArgs(os.Args[1:]) {
 		return
 	}
