@@ -102,6 +102,31 @@ imminent_timer_minutes = 2
 #   { path = "/usr/local/bin/claude", sha256 = "..." },
 # ]
 
+# [tools]
+# Host CLIs the daemon runs for a sandboxed bot. The bot calls
+# `.lgb/bin/coi <name> ...` or `lgb coi <name> ...`. The real binary runs on
+# the host. credential_home is absolute and outside the workspace; it is never
+# mounted into the jail. allowed_args lists subcommands and flags. Anything
+# else is denied, and config/auth/login/logout/whoami/token/env/--print-config/
+# --debug style arguments are denied even when listed. A timeout, max_output,
+# or max_calls_per_hour of 0 denies the call.
+# Managed policy can lock an entry (lock = true) or ban a name (cli_ban).
+# cli_allow_local = false drops local-only names. Local policy can only narrow
+# a managed entry: fewer args, fewer bots, lower limits. It cannot change the
+# path or the credential home. The daemon re-reads this on each call.
+# cli_ban = ["curl"]
+# cli_allow_local = true
+# [[tools.cli]]
+# name = "grok"
+# path = "/home/pixnbits/.grok/bin/grok"
+# credential_home = "/var/lib/local-grok-bots/coi/grok"
+# bots = ["bot-id-or-name"]
+# allowed_args = ["-p", "--prompt", "--model", "edit"]
+# timeout = "2m"
+# max_output = 65536
+# max_calls_per_hour = 30
+# lock = true
+
 [timers]
 # Daemon-owned scheduler. On fire, injects a [scheduled] prompt into
 # the bot's active CLI session (or starts a new one if idle).
