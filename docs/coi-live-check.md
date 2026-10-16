@@ -196,3 +196,15 @@ The one strict hit is the public OIDC client id (36 characters) in `model-copy/l
 ## Gates
 
 Run from the worktree after the stop. `gofmt -l .` printed nothing (`gofmt_lines` 0). `go vet ./...` exited 0. `go test -race ./...` exited 0 (`internal/coi` 2.296s, `internal/daemon` 83.574s; unchanged packages were cache hits). `GOOS=darwin GOARCH=arm64 go build ./...` exited 0. The Seatbelt profile was not executed on this Linux host.
+
+## Round 3 (path allowlist and header strip)
+
+Data under `~/lgb-dev-data/coi-check/r4`, binary `/tmp/lgb-coi-check` built at `c860009`, bind `127.0.0.1:8139` only. The credential copy was a new inode, mode 0600, with only `expires_at` pinned far in the future so nothing refreshed the real login. The default `proxy_path_prefixes` is `/v1`.
+
+| Case | Result |
+|---|---|
+| Path probe from inside the jail through the forwarder | `/v2/x` 403, `/admin` 403, `/v1/../x` 403. While this ran, the daemon held no socket to port 443 (`peak 0` over 347 samples), so the upstream was not contacted. |
+| Grok edit through the shim with the allowlist on | bwrap exit 0, `coi_call` status `ok`. `hello.txt` is exactly `hello-from-coi` plus a newline (15 bytes). The daemon opened one upstream socket on 443 (`peak 1`). |
+| Leak scan (workspace, audit log, daemon log, database) | 4 token values and 7 other login strings checked. 0 hits for each. |
+
+Stop: SIGTERM to the 8139 pid only, after confirming the command. Nothing listens on 8139. Ports 8080, 8090, and 8095 were left running. The r4 credential copy was deleted. `~/.grok/auth.json` has the same inode, size, and SHA-256 as before the run (the hash is not recorded). The CLI-backend outer home (not the COI broker) hardlinks the user's login into its data dir, as noted in round 1. That throwaway link was removed after the check.
