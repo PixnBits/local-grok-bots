@@ -41,6 +41,58 @@ The daemon is a thin orchestrator: it spawns or resumes the CLI headless, inject
 
 Nested jails are avoided. The daemon does not attempt to re-jail a CLI that already has its own sandbox.
 
+## COIs (connectors) and credential brokering
+
+User-configured connectors (COIs) — for example a Grok COI that can edit a project, or any authenticated HTTP/MCP/CLI integration — must be callable from a bot without ever placing credentials inside the sandbox. The LLM, Ollama process, or any code it runs must not be able to read, log, or exfiltrate those credentials for other purposes.
+
+This follows the same principle already used for git and SSH: the daemon mediates. Credentials stay on the host. The sandbox sees either a structured tool call or a narrow call site.
+
+### Primary path: first-class daemon tools
+
+In Ollama mode most tools (files, memory, timers, DMs, bot management) already execute outside the jail. Only `run_shell` is sandboxed. COIs use the same pattern.
+
+- The user adds a COI (name, type, credential reference, allowed operations/scopes) via the web UI or API.
+- The daemon injects the corresponding tool schema into the Ollama tools list for bots that have been granted that COI. The tool list can change between runs; it is not compiled in.
+- On a tool call the daemon holds the real credential (from an OS keyring or an encrypted host-side store), performs the upstream call, and returns the result. The sandbox process never sees the secret.
+- Example: `coi_grok_edit` or a generic `coi_call` with structured arguments. The daemon applies patches or returns diffs inside the workspace.
+
+This is the cleanest path for CISO review: no network required inside the jail for these actions, full audit, least privilege via per-bot grants, fail-closed by default.
+
+### Secondary path: in-sandbox call site
+
+When generated code, a shell script, or a tool running inside the jail must invoke a COI:
+
+- **Unix-domain socket** (preferred on Linux). The daemon listens on a host socket and bind-mounts it into the workspace at a fixed path such as `/work/.lgb/coi.sock` (bwrap `--bind`). A small helper or `curl --unix-socket` / `nc` talks to it. The daemon authenticates the request (bot identity, granted COI, allowlisted operation), injects credentials, and proxies. Socket permissions are 0600 and owned by the daemon user.
+- **File-based IPC** (more portable when sockets are restricted). The sandbox writes a JSON request into a watched subdirectory (`/work/.lgb/requests/<id>.json`); the daemon responds with a result file. Short TTL, every exchange logged. Same pattern used by some credential proxies for Seatbelt/bwrap constraints.
+
+Either call site is a thin stub. The real COI client (Grok CLI wrapper, MCP client, HTTP client, etc.) runs only on the host.
+
+### Tertiary path: credential-injecting egress proxy
+
+Extends the existing `net` grant proxy. For pure HTTP COIs the sandbox uses a placeholder token or omits the Authorization header. The proxy (outside the jail) matches allowlisted hosts, paths, and methods and injects the real credential on the way out. Requests that do not match a binding are blocked or forwarded without credentials. This reuses the preload that redirects non-loopback TCP connects to the daemon proxy socket.
+
+### Dynamic configuration
+
+COIs are not compiled in.
+
+- Stored in SQLite (new table or extension of existing state): name, type (`http` | `cli` | `mcp` | `custom`), credential_ref, allowed operations/scopes, optional rate limits or resource filters.
+- Per-bot grants (or an allowlist on the bot profile) control which COIs a bot can see, matching the existing capability-grant model.
+- Web UI (bot profile or a dedicated COIs page) + API for add/remove/update on the fly. The daemon reloads tool schemas for the next run without a restart.
+- Credentials live only on the host: OS keyring where practical, or an age-encrypted / mode-0600 file outside the workspace, referenced by name. Never mounted into the jail, never present in the sandbox environment.
+
+### Security properties
+
+- Credentials never enter the sandbox address space, filesystem, or environment.
+- Least privilege: explicit per-bot grants + operation/host/path allowlists. Missing grant fails closed and is logged.
+- Full audit: every COI call and denial is a log event with bot ID, operation, redacted arguments, and status.
+- Short-lived or narrowly scoped tokens preferred when the upstream supports them.
+- Trust-handoff vectors remain blocked (no `.git/hooks`, no host shell rc, no executable config the daemon later trusts).
+- Dynamic but user-controlled; the agent cannot self-grant or invent new COIs.
+- Small TCB: only the daemon holds credentials and performs the real call.
+- Optional surface in the thread for high-impact actions, consistent with irreversible grants today.
+
+Internal LGB COIs (timers, etc.) already follow the daemon-mediated pattern. User-defined COIs reuse the same mechanism.
+
 ## Out
 
 - Per-bot microVMs.
