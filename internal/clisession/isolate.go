@@ -153,6 +153,24 @@ func grokProfileHome(o IsolationOptions) (string, error) {
 	return filepath.Join(o.StateDir, "grok-home"), nil
 }
 
+// ensureGrokState creates the state directory when it is the trusted root.
+// A symlink at that final component is refused. Callers that already have a
+// trusted parent create the rest of the path while writing.
+func ensureGrokState(o IsolationOptions) error {
+	if strings.TrimSpace(o.CredRoot) != "" || o.Home != "" {
+		return nil
+	}
+	state, err := absClean(o.StateDir)
+	if err != nil {
+		return err
+	}
+	parent := filepath.Dir(state)
+	if parent == state {
+		return fmt.Errorf("credential root must be absolute")
+	}
+	return mkdirNoFollow(parent, filepath.Base(state))
+}
+
 // PrepareIsolation creates the per-bot home, links credentials, writes the
 // Claude settings file, and builds the scrubbed environment.
 func PrepareIsolation(o IsolationOptions) (Isolation, error) {
@@ -244,6 +262,9 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 		// (that directory is not ~/.grok, so the user's sandbox.toml is untouched).
 		grokHome, err := grokProfileHome(o)
 		if err != nil {
+			return Isolation{}, err
+		}
+		if err := ensureGrokState(o); err != nil {
 			return Isolation{}, err
 		}
 		env["GROK_HOME"] = grokHome
