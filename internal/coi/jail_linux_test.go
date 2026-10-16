@@ -189,6 +189,81 @@ func TestLinuxJailHidesHostRunAndNet(t *testing.T) {
 	}
 }
 
+func TestLinuxJailHidesHostProcEnviron(t *testing.T) {
+	bwrap, err := exec.LookPath("bwrap")
+	if err != nil {
+		t.Skip(err)
+	}
+	// An unrelated host process. The jail should not see its pid.
+	host := exec.Command("/usr/bin/sleep", "30")
+	if err := host.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if host.Process != nil {
+			_ = host.Process.Kill()
+			_, _ = host.Process.Wait()
+		}
+	})
+	// The launcher marker is inherited by bubblewrap and is not passed in with --setenv.
+	t.Setenv("LGB_HOST_PROC_MARKER", "host-marker-value")
+	root := t.TempDir()
+	ws := filepath.Join(root, "ws")
+	home := filepath.Join(root, "home")
+	if err := os.MkdirAll(ws, 0o755); err != nil || os.MkdirAll(home, 0o755) != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(root, "probe")
+	body := "#!/bin/sh\n" +
+		"pid=$1\n" +
+		"if [ -n \"$pid\" ] && [ -e \"/proc/$pid/environ\" ]; then echo HOST_PID=visible; else echo HOST_PID=hidden; fi\n" +
+		"if [ -n \"$LGB_HOST_PROC_MARKER\" ]; then echo SELF_HAS_HOST=1; else echo SELF_HAS_HOST=0; fi\n" +
+		"if [ -n \"$LGB_JAIL_PROC_MARKER\" ]; then echo SELF_HAS_JAIL=1; else echo SELF_HAS_JAIL=0; fi\n" +
+		"echo PID1_COMM=$(cat /proc/1/comm 2>/dev/null)\n" +
+		"echo SELF_BYTES=$(wc -c < /proc/self/environ)\n" +
+		"if tr '\\0' '\\n' < /proc/1/environ | cut -d= -f1 | grep -qx LGB_HOST_PROC_MARKER; then echo PID1_HOST_MARKER=1; else echo PID1_HOST_MARKER=0; fi\n" +
+		"if tr '\\0' '\\n' < /proc/1/environ | cut -d= -f1 | grep -qx LGB_JAIL_PROC_MARKER; then echo PID1_JAIL_MARKER=1; else echo PID1_JAIL_MARKER=0; fi\n" +
+		"echo PIDS=$(ls -1 /proc | grep -E '^[0-9]+$' | tr '\\n' ' ')\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	args, err := linuxBwrapArgs(jailSpec{
+		Bin: script, Args: []string{strconv.Itoa(host.Process.Pid)},
+		Workspace: ws, Home: home,
+		Env: []string{"PATH=/usr/bin:/bin", "LGB_JAIL_PROC_MARKER=jail-marker-value"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(bwrap, args...)
+	cmd.Env = os.Environ()
+	out, err := cmd.CombinedOutput()
+	text := string(out)
+	if strings.Contains(text, "host-marker-value") || strings.Contains(text, "jail-marker-value") {
+		t.Fatal("probe printed an environment value")
+	}
+	if err != nil {
+		t.Fatalf("bwrap: %v\n%s", err, text)
+	}
+	for _, want := range []string{
+		"HOST_PID=hidden",
+		"SELF_HAS_HOST=0",
+		"SELF_HAS_JAIL=1",
+		"PID1_COMM=bwrap",
+		"SELF_BYTES=0",
+		"PID1_HOST_MARKER=1",
+		"PID1_JAIL_MARKER=0",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("probe missing %s:\n%s", want, text)
+		}
+	}
+	pidText := strconv.Itoa(host.Process.Pid)
+	if strings.Contains(text, "PIDS="+pidText) || strings.Contains(text, " "+pidText+" ") || strings.HasSuffix(strings.TrimSpace(text), pidText) {
+		t.Fatalf("host pid listed:\n%s", text)
+	}
+}
+
 func makeSpool(t *testing.T, ws string) (string, uint64, uint64) {
 	t.Helper()
 	spool := filepath.Join(ws, "run-spool")
