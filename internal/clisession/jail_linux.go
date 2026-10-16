@@ -81,6 +81,25 @@ func grokBwrapArgs(bin string, args []string, spec Spec) ([]string, error) {
 		out = append(out, "--bind", dir, dir)
 		seen[dir] = true
 	}
+	for _, e := range env {
+		k, v, ok := strings.Cut(e, "=")
+		if !ok || !hostJailLogKey(k) {
+			continue
+		}
+		v = filepath.Clean(v)
+		if !filepath.IsAbs(v) || seen[v] {
+			continue
+		}
+		if st, err := os.Stat(v); err != nil {
+			if err := os.WriteFile(v, nil, 0o600); err != nil {
+				continue
+			}
+		} else if st.IsDir() {
+			continue
+		}
+		out = append(out, "--bind", v, v)
+		seen[v] = true
+	}
 	out = append(out, "--setenv", "PATH", "/usr/bin:/bin", "--setenv", "PWD", ws, "--setenv", "TMPDIR", "/tmp")
 	for _, e := range env {
 		k, v, ok := strings.Cut(e, "=")
@@ -120,6 +139,14 @@ func stripSandboxFlag(args []string) []string {
 		out = append(out, a)
 	}
 	return out
+}
+
+func hostJailLogKey(k string) bool {
+	switch k {
+	case "LGB_ENV_LOG", "LGB_ARGV_LOG", "LGB_FIXTURE", "LGB_AUTH_LOG":
+		return true
+	}
+	return false
 }
 
 func envVal(env []string, key string) string {
