@@ -9,6 +9,7 @@ import (
 )
 
 const sandboxExecDefault = "/usr/bin/sandbox-exec"
+const defaultSandboxBin = sandboxExecDefault
 
 func wrapCommand(spec jailSpec) (*exec.Cmd, error) {
 	exe, err := sandboxBinary(spec.SandboxBin, sandboxExecDefault)

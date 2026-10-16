@@ -10,6 +10,7 @@ import (
 )
 
 const jailHomeInside = "/tmp/" + jailHomeName
+const defaultSandboxBin = "bwrap"
 
 func wrapCommand(spec jailSpec) (*exec.Cmd, error) {
 	bwrap, err := sandboxBinary(spec.SandboxBin, "bwrap")

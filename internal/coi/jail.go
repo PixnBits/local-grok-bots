@@ -166,6 +166,13 @@ func pinnedEnv(k string) bool {
 	return strings.HasPrefix(k, "LGB_") || k == "AUTH_TOKEN"
 }
 
+// SandboxReady reports whether the inner CLI jail can start. A missing
+// bwrap or sandbox-exec is a denial before the hourly slot is taken.
+func SandboxReady(override string) error {
+	_, err := sandboxBinary(override, defaultSandboxBin)
+	return err
+}
+
 func sandboxBinary(override, fallback string) (string, error) {
 	path := strings.TrimSpace(override)
 	if path == "" {

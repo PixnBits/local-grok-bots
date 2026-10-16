@@ -97,12 +97,16 @@ func (r *lgbRun) execCOI(ctx context.Context, args []string) (int, string) {
 		r.auditCOI(name, rest, coi.StatusDenied, "credential home is not available", tool.CredentialHome, nil, 0, false)
 		return 1, "coi: credential home is not available"
 	}
+	paths := []string{tool.CredentialHome, ready.CredentialHome}
+	if err := coi.SandboxReady(ready.SandboxBin); err != nil {
+		r.auditSandbox(name, rest, ready.CredentialHome, secrets)
+		return 1, "coi: " + coi.RedactOutput(coi.ErrSandboxUnavailable.Error(), paths, secrets)
+	}
 	if !r.a.coiCounter().Take(bot.ID, tool.Name, tool.MaxCallsPerHour) {
 		r.auditCOI(name, rest, coi.StatusDenied, "hourly cap reached", tool.CredentialHome, secrets, 0, false)
 		return 1, "coi: hourly cap reached"
 	}
 	perm := pol.Permission()
-	paths := []string{tool.CredentialHome, ready.CredentialHome}
 	res := coi.Run(ctx, coi.Call{
 		Tool:      ready,
 		Args:      rest,
