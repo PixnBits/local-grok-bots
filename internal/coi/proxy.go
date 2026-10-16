@@ -29,6 +29,7 @@ type Egress struct {
 	dir         string
 	sock        string
 	ln          net.Listener
+	unixLn      net.Listener
 	srv         *http.Server
 	token       string
 	bearer      func() (string, error)
@@ -118,9 +119,10 @@ func StartEgress(parent string, hosts, prefixes []string, token string, trip htt
 // StartEgress. bearer is called per accepted request and is not logged.
 // The listener injects that bearer only after Admit has registered the
 // presented placeholder for this bot run. Any other client is rejected.
-// The Grok CLI speaks HTTP, so the chat client needs a TCP origin. A unix
-// socket is what the jailed COI forwarder uses; this listener is for a
-// process that shares the host network namespace.
+// The Grok CLI speaks HTTP, so the chat client needs a TCP origin. The Grok
+// jail does not share the host network. ListenUnix publishes this same proxy
+// on a unix socket the jail bind-mounts. This TCP listener stays for host-side
+// callers.
 func StartLoopback(hosts, prefixes []string, bearer func() (string, error), trip http.RoundTripper) (*Egress, error) {
 	if bearer == nil || len(hosts) == 0 {
 		return nil, ErrProxyUnavailable
@@ -446,7 +448,58 @@ func (e *Egress) Sock() string {
 	if e == nil {
 		return ""
 	}
+	e.gateMu.Lock()
+	defer e.gateMu.Unlock()
 	return e.sock
+}
+
+// ListenUnix serves this proxy on a second listener: a mode-0600 socket named
+// sock in a 0700 directory under parent. The filename does not end in .sock.
+// A second call keeps the first socket. The TCP listener, when there is one,
+// keeps serving.
+func (e *Egress) ListenUnix(parent string) error {
+	if e == nil || e.srv == nil {
+		return ErrProxyUnavailable
+	}
+	parent = filepath.Clean(parent)
+	if !filepath.IsAbs(parent) {
+		return ErrProxyUnavailable
+	}
+	e.gateMu.Lock()
+	defer e.gateMu.Unlock()
+	if e.sock != "" {
+		return nil
+	}
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return ErrProxyUnavailable
+	}
+	if err := os.Chmod(parent, 0o700); err != nil {
+		return ErrProxyUnavailable
+	}
+	dir, err := os.MkdirTemp(parent, "call-")
+	if err != nil {
+		return ErrProxyUnavailable
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		return ErrProxyUnavailable
+	}
+	sock := filepath.Join(dir, "sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return ErrProxyUnavailable
+	}
+	if err := os.Chmod(sock, 0o600); err != nil {
+		_ = ln.Close()
+		_ = os.RemoveAll(dir)
+		return ErrProxyUnavailable
+	}
+	e.dir = dir
+	e.sock = sock
+	e.unixLn = ln
+	go func() { _ = e.srv.Serve(ln) }()
+	return nil
 }
 
 func (e *Egress) Close() {
@@ -460,6 +513,9 @@ func (e *Egress) Close() {
 	}
 	if e.ln != nil {
 		_ = e.ln.Close()
+	}
+	if e.unixLn != nil {
+		_ = e.unixLn.Close()
 	}
 	if e.dir != "" {
 		_ = os.RemoveAll(e.dir)

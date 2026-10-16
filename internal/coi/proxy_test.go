@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -776,6 +778,75 @@ func rawStatus(t *testing.T, addr, target string) int {
 	if _, err := io.WriteString(conn, "GET "+target+" HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"); err != nil {
 		t.Fatal(err)
 	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode
+}
+
+func TestLoopbackServesUnixSocket(t *testing.T) {
+	eg, err := StartLoopback([]string{GrokChatHost}, nil, func() (string, error) {
+		return "real-token-value", nil
+	}, roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 204, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eg.Close()
+	if err := eg.ListenUnix(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := eg.ListenUnix(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	sock := eg.Sock()
+	if sock == "" || filepath.Base(sock) != "sock" || strings.HasSuffix(sock, ".sock") {
+		t.Fatalf("sock %q", sock)
+	}
+	st, err := os.Stat(sock)
+	if err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v %v", st, err)
+	}
+	dir, err := os.Stat(filepath.Dir(sock))
+	if err != nil || dir.Mode().Perm() != 0o700 {
+		t.Fatalf("dir %v %v", dir, err)
+	}
+	if !strings.HasPrefix(eg.Base(), "http://127.0.0.1:") {
+		t.Fatalf("tcp base %q", eg.Base())
+	}
+	code := unixStatus(t, sock, "/v1/ping", "")
+	if code != http.StatusForbidden {
+		t.Fatalf("ungated %d", code)
+	}
+	const gate = "unit-unix-gate-value"
+	drop := eg.Admit("bot1", "run1", gate)
+	defer drop()
+	code = unixStatus(t, sock, "/bots/bot1/runs/run1/v1/ping", "Bearer "+gate)
+	if code != http.StatusNoContent {
+		t.Fatalf("gated status %d", code)
+	}
+}
+
+func unixStatus(t *testing.T, sock, path, auth string) int {
+	t.Helper()
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	req := "GET " + path + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+	if auth != "" {
+		req += "Authorization: " + auth + "\r\n"
+	}
+	req += "\r\n"
+	if _, err := io.WriteString(conn, req); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
 	if err != nil {
 		t.Fatal(err)
