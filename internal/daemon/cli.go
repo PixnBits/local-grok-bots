@@ -76,7 +76,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		a.failCLI(bot.ID, runID, backend, err)
 		return
 	}
-	iso, err := a.cliIsolation(bot, backend, ws)
+	iso, err := a.cliIsolation(bot, backend, ws, runID)
 	if err != nil {
 		if fresh {
 			_ = a.st.SetBotSession(bot.ID, "")
@@ -327,7 +327,7 @@ func (a *App) finishCLIInterrupted(botID, runID, text string) {
 // daemon-owned CLI environment. A file the launch cannot neutralize, or any
 // file under overrides = "refuse", fails the turn closed. Each detection is
 // audited.
-func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isolation, error) {
+func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisession.Isolation, error) {
 	botID := bot.ID
 	isolated := a.policy.CLIHome != policy.HomeUser
 	found := clisession.ScanOverrides(ws)
@@ -367,6 +367,7 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isola
 		Secrets:  []string{a.cfg.AuthToken},
 		Grants:   botGrants(bot),
 		Protect:  a.daemonSecrets(),
+		CredRoot: a.cfg.DataDir,
 	}
 	if strings.EqualFold(backend, "claude") && a.policy.CLIClaudeSandbox != policy.SandboxOff {
 		if missing := claudeSandboxMissing(); len(missing) > 0 {
@@ -415,6 +416,9 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isola
 		a.credMu.Unlock()
 	} else {
 		iso, err = clisession.PrepareIsolation(opts)
+	}
+	if errors.Is(err, clisession.ErrCredSymlink) {
+		a.auditCredSymlink(bot.ID, runID)
 	}
 	if err != nil {
 		var se *clisession.SandboxError
@@ -526,6 +530,21 @@ func (a *App) closeGrokProxy() {
 	a.grokMu.Unlock()
 	if eg != nil {
 		eg.Close()
+	}
+}
+
+func (a *App) auditCredSymlink(botID, runID string) {
+	fields := map[string]any{}
+	if runID != "" {
+		fields["run_id"] = runID
+	}
+	a.log(botID, "cli_cred_symlink_refused", fields)
+	if a.audit != nil && a.audit.Enabled() {
+		rec := map[string]any{"event": "cli_cred_symlink_refused", "bot_id": botID}
+		for k, v := range fields {
+			rec[k] = v
+		}
+		a.audit.Write(rec)
 	}
 }
 

@@ -227,7 +227,7 @@ func TestTurnDeniesCredentialHomeAddedAfterStartup(t *testing.T) {
 		t.Fatal(err)
 	}
 	bot := store.Bot{ID: "b1"}
-	iso, err := app.cliIsolation(bot, "claude", ws)
+	iso, err := app.cliIsolation(bot, "claude", ws, "run-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +241,7 @@ func TestTurnDeniesCredentialHomeAddedAfterStartup(t *testing.T) {
 	if !coiListed(iso.Protect, homeB) {
 		t.Fatalf("turn protect %v lacks %s", iso.Protect, homeB)
 	}
-	giso, err := app.cliIsolation(bot, "grok", ws)
+	giso, err := app.cliIsolation(bot, "grok", ws, "run-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +282,7 @@ func TestClaudeSandboxUnavailableFailsClosed(t *testing.T) {
 	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))
 	ws := filepath.Join(dir, "ws")
 	_ = os.MkdirAll(ws, 0o755)
-	_, err := app.cliIsolation(store.Bot{ID: "b1"}, "claude", ws)
+	_, err := app.cliIsolation(store.Bot{ID: "b1"}, "claude", ws, "run-1")
 	if err == nil || !strings.Contains(err.Error(), "missing socat") || !strings.Contains(err.Error(), "claude_sandbox") {
 		t.Fatalf("want fail-closed sandbox error, got %v", err)
 	}
@@ -294,7 +294,7 @@ func TestClaudeSandboxUnavailableFailsClosed(t *testing.T) {
 		t.Fatalf("log events %s", b)
 	}
 	// Grok is unaffected.
-	if _, err := app.cliIsolation(store.Bot{ID: "b1"}, "grok", ws); err != nil {
+	if _, err := app.cliIsolation(store.Bot{ID: "b1"}, "grok", ws, "run-1"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -311,7 +311,7 @@ func TestClaudeSandboxManagedOffSkipsCheckAndBlock(t *testing.T) {
 	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))
 	ws := filepath.Join(dir, "ws")
 	_ = os.MkdirAll(ws, 0o755)
-	iso, err := app.cliIsolation(store.Bot{ID: "b1", Grants: []string{"net"}, NetAllow: []string{"pypi.org"}}, "claude", ws)
+	iso, err := app.cliIsolation(store.Bot{ID: "b1", Grants: []string{"net"}, NetAllow: []string{"pypi.org"}}, "claude", ws, "run-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +351,7 @@ func TestUserSandboxSurvivesManagedOff(t *testing.T) {
 	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))
 	ws := filepath.Join(dir, "ws")
 	_ = os.MkdirAll(ws, 0o755)
-	iso, err := app.cliIsolation(store.Bot{ID: "b1"}, "claude", ws)
+	iso, err := app.cliIsolation(store.Bot{ID: "b1"}, "claude", ws, "run-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +392,7 @@ func TestUnparseableUserSettingsRefusesAndAudits(t *testing.T) {
 	app.audit = lg
 	ws := filepath.Join(dir, "ws")
 	_ = os.MkdirAll(ws, 0o755)
-	_, err = app.cliIsolation(store.Bot{ID: "b1"}, "claude", ws)
+	_, err = app.cliIsolation(store.Bot{ID: "b1"}, "claude", ws, "run-1")
 	if err == nil || !strings.Contains(err.Error(), "refused") || strings.Contains(err.Error(), "claude_sandbox") {
 		t.Fatalf("err %v", err)
 	}
@@ -421,7 +421,7 @@ func TestGrokUserHomeUsesFailClosedProfile(t *testing.T) {
 	app.rtMu.Unlock()
 	ws := filepath.Join(dir, "ws")
 	_ = os.MkdirAll(ws, 0o755)
-	iso, err := app.cliIsolation(store.Bot{ID: "b1"}, "grok", ws)
+	iso, err := app.cliIsolation(store.Bot{ID: "b1"}, "grok", ws, "run-1")
 	if err != nil {
 		t.Fatal(err)
 	}

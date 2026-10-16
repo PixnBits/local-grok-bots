@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -50,7 +51,7 @@ func TestGrokIsolationUsesLoopbackProxy(t *testing.T) {
 	if err := os.MkdirAll(ws, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	iso, err := app.cliIsolation(store.Bot{ID: "b1"}, "grok", ws)
+	iso, err := app.cliIsolation(store.Bot{ID: "b1"}, "grok", ws, "run-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,11 +153,11 @@ func TestGrokProxyGateIsPerBotRun(t *testing.T) {
 	if err := os.MkdirAll(ws, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	first, err := app.cliIsolation(store.Bot{ID: "b1"}, "grok", ws)
+	first, err := app.cliIsolation(store.Bot{ID: "b1"}, "grok", ws, "run-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := app.cliIsolation(store.Bot{ID: "b2"}, "grok", ws)
+	second, err := app.cliIsolation(store.Bot{ID: "b2"}, "grok", ws, "run-2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,6 +327,57 @@ func TestDeleteBotRemovesGrokLogin(t *testing.T) {
 	}
 }
 
+func TestSymlinkParentIsAudited(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := t.TempDir()
+	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))
+	outside := t.TempDir()
+	canary := filepath.Join(outside, "canary")
+	if err := os.WriteFile(canary, []byte("canary-keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	botHome := filepath.Join(dir, "cli", "b1", "home")
+	if err := os.MkdirAll(filepath.Dir(botHome), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, botHome); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "audit.log")
+	lg, err := audit.Open(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.audit = lg
+	ws := filepath.Join(dir, "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err = app.cliIsolation(store.Bot{ID: "b1"}, "grok", ws, "run-9")
+	if !errors.Is(err, clisession.ErrCredSymlink) {
+		t.Fatalf("err %v", err)
+	}
+	if err := lg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"event":"cli_cred_symlink_refused"`) || !strings.Contains(text, `"bot_id":"b1"`) || !strings.Contains(text, `"run_id":"run-9"`) {
+		t.Fatalf("audit %s", text)
+	}
+	if strings.Contains(text, outside) || strings.Contains(text, "canary-keep") {
+		t.Fatalf("audit names the link: %s", text)
+	}
+	got, err := os.ReadFile(canary)
+	if err != nil || string(got) != "canary-keep" {
+		t.Fatalf("canary %q %v", got, err)
+	}
+}
+
 func TestExpiredGrokLoginRefusesProxy(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -348,7 +400,7 @@ func TestExpiredGrokLoginRefusesProxy(t *testing.T) {
 	app.audit = lg
 	ws := filepath.Join(dir, "ws")
 	_ = os.MkdirAll(ws, 0o755)
-	if _, err := app.cliIsolation(store.Bot{ID: "b1"}, "grok", ws); err == nil {
+	if _, err := app.cliIsolation(store.Bot{ID: "b1"}, "grok", ws, "run-1"); err == nil {
 		t.Fatal("expired login started a turn")
 	}
 	evs, err := app.st.ListLog("b1", "cli_proxy_unavailable", "", 10)

@@ -1,6 +1,7 @@
 package clisession
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -62,6 +63,11 @@ type IsolationOptions struct {
 	ClaudeSandbox bool
 	// Protect are extra absolute paths both CLIs are denied (daemon secrets).
 	Protect []string
+	// CredRoot is the trusted directory the Grok login walk starts at.
+	// Empty uses StateDir when the bot home is inside it, otherwise the
+	// parent of Home. Components below the root are not followed when they
+	// are symlinks.
+	CredRoot string
 }
 
 // passInheritedLGB is false in a production build. Test binaries and the
@@ -144,11 +150,7 @@ func grokProfileHome(o IsolationOptions) (string, error) {
 	if !filepath.IsAbs(o.StateDir) {
 		return "", &SandboxError{Backend: "grok", Err: fmt.Errorf("Grok's sandbox profile needs an absolute state dir, so the turn was refused")}
 	}
-	dir := filepath.Join(o.StateDir, "grok-home")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", &SandboxError{Backend: "grok", Err: fmt.Errorf("Grok's sandbox profile could not be written (%v), so the turn was refused", err)}
-	}
-	return dir, nil
+	return filepath.Join(o.StateDir, "grok-home"), nil
 }
 
 // PrepareIsolation creates the per-bot home, links credentials, writes the
@@ -172,8 +174,16 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 			return Isolation{}, fmt.Errorf("cli home must be absolute")
 		}
 		home = o.Home
+		root, err := isolationRoot(o)
+		if err != nil {
+			return Isolation{}, err
+		}
 		for _, d := range []string{".claude", ".grok"} {
-			if err := os.MkdirAll(filepath.Join(o.Home, d), 0o700); err != nil {
+			rel, err := relUnder(root, filepath.Join(o.Home, d))
+			if err != nil {
+				return Isolation{}, err
+			}
+			if err := mkdirNoFollow(root, rel); err != nil {
 				return Isolation{}, err
 			}
 		}
@@ -237,10 +247,25 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 			return Isolation{}, err
 		}
 		env["GROK_HOME"] = grokHome
-		if err := placeGrokPlaceholder(o.UserHome, grokHome, grokKey); err != nil {
+		root, err := isolationRoot(o)
+		if err != nil {
 			return Isolation{}, err
 		}
-		if err := os.WriteFile(filepath.Join(grokHome, "sandbox.toml"), []byte(grokSandboxTOML(o)), 0o600); err != nil {
+		authRel, err := relUnder(root, filepath.Join(grokHome, "auth.json"))
+		if err != nil {
+			return Isolation{}, err
+		}
+		if err := placeGrokPlaceholder(o.UserHome, root, authRel, grokKey); err != nil {
+			return Isolation{}, err
+		}
+		tomlRel, err := relUnder(root, filepath.Join(grokHome, "sandbox.toml"))
+		if err != nil {
+			return Isolation{}, err
+		}
+		if err := writeFileNoFollow(root, tomlRel, []byte(grokSandboxTOML(o)), 0o600); err != nil {
+			if errors.Is(err, ErrCredSymlink) {
+				return Isolation{}, err
+			}
 			return Isolation{}, &SandboxError{Backend: "grok", Err: fmt.Errorf("Grok's sandbox profile could not be written (%v), so the turn was refused", err)}
 		}
 		iso.GrokSandbox = GrokProfile
@@ -291,13 +316,74 @@ func linkCred(src, dst string) {
 // placeGrokPlaceholder writes the synthetic login into GROK_HOME. It never
 // writes the user's ~/.grok/auth.json and never links that file in.
 // key is the placeholder bearer. The shared constant is used when the CLI
-// is not pointed at the loopback proxy.
-func placeGrokPlaceholder(userHome, grokHome, key string) error {
-	dst := filepath.Join(grokHome, "auth.json")
+// is not pointed at the loopback proxy. root is the trusted directory and
+// rel is the login path below it.
+func placeGrokPlaceholder(userHome, root, rel, key string) error {
+	dst := filepath.Join(root, rel)
 	if userHome != "" && filepath.Clean(dst) == filepath.Clean(filepath.Join(userHome, ".grok", "auth.json")) {
 		return fmt.Errorf("refusing to replace the user grok login")
 	}
-	return writeGrokAuth(dst, key)
+	return writeGrokAuth(root, rel, key)
+}
+
+func isolationRoot(o IsolationOptions) (string, error) {
+	if r := strings.TrimSpace(o.CredRoot); r != "" {
+		return absClean(r)
+	}
+	if o.Home != "" {
+		home, err := absClean(o.Home)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(o.StateDir) != "" {
+			if state, err := absClean(o.StateDir); err == nil && isWithin(state, home) {
+				return state, nil
+			}
+		}
+		return filepath.Dir(home), nil
+	}
+	if strings.TrimSpace(o.StateDir) == "" {
+		return "", fmt.Errorf("credential root must be absolute")
+	}
+	return absClean(o.StateDir)
+}
+
+func absClean(p string) (string, error) {
+	if strings.TrimSpace(p) == "" {
+		return "", fmt.Errorf("credential root must be absolute")
+	}
+	if !filepath.IsAbs(p) {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return "", err
+		}
+		p = abs
+	}
+	return filepath.Clean(p), nil
+}
+
+func isWithin(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel))
+}
+
+func relUnder(root, path string) (string, error) {
+	root, err := absClean(root)
+	if err != nil {
+		return "", err
+	}
+	path, err = absClean(path)
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", fmt.Errorf("refusing a credential path outside its root")
+	}
+	return rel, nil
 }
 
 func validGrokGate(s string) bool {
@@ -324,24 +410,18 @@ const GrokPlaceholderAuth = `{"https://auth.x.ai::00000000-0000-4000-8000-000000
 // XAI_API_KEY. The host proxy replaces it and never forwards it.
 const GrokPlaceholderToken = "coi-placeholder-token"
 
-// writeGrokAuth replaces path with a regular file whose key is the placeholder
-// bearer. Remove drops a hard link or a symlink and does not follow it, so
-// the target file stays.
-func writeGrokAuth(path, key string) error {
+// writeGrokAuth replaces root/rel with a regular file whose key is the
+// placeholder bearer. A hard link is unlinked, so the other name stays.
+// A symlink component, including a symlink auth.json, is refused.
+func writeGrokAuth(root, rel, key string) error {
 	if key == "" {
 		key = GrokPlaceholderToken
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
 	}
 	body := GrokPlaceholderAuth
 	if key != GrokPlaceholderToken {
 		body = strings.Replace(GrokPlaceholderAuth, `"`+GrokPlaceholderToken+`"`, `"`+key+`"`, 1)
 	}
-	return os.WriteFile(path, []byte(body), 0o600)
+	return writeFileNoFollow(root, rel, []byte(body), 0o600)
 }
 
 // overrideNames are workspace files a CLI would read as configuration.

@@ -94,7 +94,7 @@ func TestPrepareIsolationGrok(t *testing.T) {
 	before := nlink(t, real)
 	state := t.TempDir()
 	home := filepath.Join(state, "home")
-	// A planted hard link and a planted symlink must both become a regular placeholder.
+	// A planted hard link becomes a regular placeholder. A symlink is refused.
 	plant := filepath.Join(home, ".grok")
 	if err := os.MkdirAll(plant, 0o700); err != nil {
 		t.Fatal(err)

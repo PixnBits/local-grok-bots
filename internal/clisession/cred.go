@@ -1,13 +1,11 @@
 package clisession
 
 import (
-	"bytes"
 	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 )
 
 // grokAuthRel are the login paths under a bot's cli directory.
@@ -21,141 +19,46 @@ var grokAuthRel = []string{
 // refresh token. A file that does not match, including a placeholder, is
 // left in place. realPath itself is never removed. The only remaining name
 // of that inode is not unlinked. An empty cli directory does not read realPath.
+// A symlink directory is not entered.
 func ScrubStaleGrokAuth(dataDir, realPath string) error {
-	cli := filepath.Join(dataDir, "cli")
-	bots, err := os.ReadDir(cli)
-	if os.IsNotExist(err) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	realPath = filepath.Clean(realPath)
-	var realInfo os.FileInfo
-	var realBytes []byte
-	var secrets []string
-	if realPath != "" && realPath != "." {
-		if st, err := os.Stat(realPath); err == nil && st.Mode().IsRegular() {
-			realInfo = st
-			if b, err := readLimited(realPath); err == nil {
-				realBytes = b
-				secrets = loginSecrets(b)
-			}
-		}
-	}
-	var first error
-	for _, bot := range bots {
-		if !safeBotID(bot.Name()) {
-			continue
-		}
-		botDir := filepath.Join(cli, bot.Name())
-		lst, err := os.Lstat(botDir)
-		if err != nil || !lst.IsDir() || lst.Mode()&os.ModeSymlink != 0 {
-			continue
-		}
-		for _, rel := range grokAuthRel {
-			p := filepath.Join(botDir, rel)
-			if realPath != "" && filepath.Clean(p) == realPath {
-				continue
-			}
-			if !staleGrokAuth(p, realPath, realInfo, realBytes, secrets) {
-				continue
-			}
-			if err := os.Remove(p); err != nil && !os.IsNotExist(err) && first == nil {
-				first = err
-			}
-		}
-	}
-	return first
+	return scrubTree(dataDir, realPath)
 }
 
 // RemoveBotGrokAuth deletes the bot's Grok login files, including a
-// placeholder. A hard link is unlinked. A symlink is removed without
-// following it. An unsafe id does nothing.
+// placeholder. A hard link is unlinked. A final symlink is removed without
+// following it. A symlink directory on the way there fails with
+// ErrCredSymlink. An unsafe id does nothing.
 func RemoveBotGrokAuth(dataDir, botID string) error {
 	if !safeBotID(botID) {
 		return nil
 	}
 	var first error
 	for _, rel := range grokAuthRel {
-		p := filepath.Join(dataDir, "cli", botID, rel)
-		if err := os.Remove(p); err != nil && !os.IsNotExist(err) && first == nil {
+		p := filepath.Join("cli", botID, rel)
+		err := removeFileNoFollow(dataDir, p)
+		if err != nil && !os.IsNotExist(err) && first == nil {
 			first = err
 		}
 	}
 	return first
 }
 
+// RemoveBotCLI removes dataDir/cli/<botID>. A symlink entry is unlinked and
+// is not entered. A symlink in a parent of that directory fails with
+// ErrCredSymlink. An unsafe id does nothing. A missing directory is success.
+func RemoveBotCLI(dataDir, botID string) error {
+	if !safeBotID(botID) {
+		return nil
+	}
+	err := removeTreeNoFollow(dataDir, filepath.Join("cli", botID))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func safeBotID(id string) bool {
 	return id != "" && id == filepath.Base(id) && !strings.Contains(id, "..") && !strings.ContainsAny(id, `/\`)
-}
-
-func staleGrokAuth(path, realPath string, realInfo os.FileInfo, realBytes []byte, secrets []string) bool {
-	lst, err := os.Lstat(path)
-	if err != nil {
-		return false
-	}
-	if lst.Mode()&os.ModeSymlink != 0 && (linkPointsAt(path, realPath) || sameFile(realInfo, path)) {
-		return true
-	}
-	// A hard link has another name (nlink > 1). The last name is the user's
-	// file, including a bind of that inode, and must stay.
-	if lst.Mode().IsRegular() && sameFile(realInfo, path) {
-		st, err := os.Stat(path)
-		return err == nil && linkCount(st) > 1
-	}
-	if lst.Mode()&os.ModeSymlink == 0 && !lst.Mode().IsRegular() {
-		return false
-	}
-	b, err := readLimited(path)
-	if err != nil {
-		return false
-	}
-	if len(realBytes) > 0 && bytes.Equal(b, realBytes) {
-		return true
-	}
-	for _, s := range secrets {
-		if s != "" && bytes.Contains(b, []byte(s)) {
-			return true
-		}
-	}
-	return false
-}
-
-func sameFile(real os.FileInfo, path string) bool {
-	if real == nil {
-		return false
-	}
-	st, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-	return os.SameFile(real, st)
-}
-
-func linkCount(st os.FileInfo) uint64 {
-	if st == nil {
-		return 0
-	}
-	sys, ok := st.Sys().(*syscall.Stat_t)
-	if !ok {
-		return 0
-	}
-	return uint64(sys.Nlink)
-}
-
-func linkPointsAt(link, real string) bool {
-	if real == "" {
-		return false
-	}
-	target, err := os.Readlink(link)
-	if err != nil {
-		return false
-	}
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(filepath.Dir(link), target)
-	}
-	return filepath.Clean(target) == filepath.Clean(real)
 }
 
 func loginSecrets(b []byte) []string {

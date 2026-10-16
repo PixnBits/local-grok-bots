@@ -109,7 +109,7 @@ func TestCLIEnvNeverCarriesAdminToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, backend := range []string{"claude", "grok"} {
-		iso, err := app.cliIsolation(store.Bot{ID: "bot1"}, backend, ws)
+		iso, err := app.cliIsolation(store.Bot{ID: "bot1"}, backend, ws, "run-1")
 		if err != nil {
 			t.Fatal(err)
 		}
