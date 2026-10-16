@@ -90,6 +90,111 @@ func TestGrokIsolationUsesLoopbackProxy(t *testing.T) {
 	}
 }
 
+func TestStartupRemovesStaleGrokLogin(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	real := filepath.Join(home, ".grok", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(real), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"https://auth.x.ai::x":{"key":"unit-real-marker-value","refresh_token":"unit-refresh-value"}}`)
+	if err := os.WriteFile(real, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	hard := filepath.Join(dir, "cli", "old", "home", ".grok", "auth.json")
+	sym := filepath.Join(dir, "cli", "old2", "grok-home", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(hard), 0o700); err != nil || os.MkdirAll(filepath.Dir(sym), 0o700) != nil {
+		t.Fatal("mkdir")
+	}
+	if err := os.Link(real, hard); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, sym); err != nil {
+		t.Fatal(err)
+	}
+	copied := filepath.Join(dir, "cli", "old3", "home", ".grok", "auth.json")
+	keep := filepath.Join(dir, "cli", "keep", "home", ".grok", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(copied), 0o700); err != nil || os.MkdirAll(filepath.Dir(keep), 0o700) != nil {
+		t.Fatal("mkdir")
+	}
+	if err := os.WriteFile(copied, []byte(`{"note":"unit-refresh-value leaked"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keep, []byte(clisession.GrokPlaceholderAuth), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = newApp(t, dir, nil)
+	if _, err := os.Lstat(hard); !os.IsNotExist(err) {
+		t.Fatalf("hardlink remains: %v", err)
+	}
+	if _, err := os.Lstat(sym); !os.IsNotExist(err) {
+		t.Fatalf("symlink remains: %v", err)
+	}
+	if _, err := os.Lstat(copied); !os.IsNotExist(err) {
+		t.Fatalf("copy remains: %v", err)
+	}
+	kept, err := os.ReadFile(keep)
+	if err != nil || string(kept) != clisession.GrokPlaceholderAuth {
+		t.Fatalf("placeholder removed: %q %v", kept, err)
+	}
+	fi, err := os.Stat(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || st.Nlink != 1 {
+		t.Fatalf("nlink %v", st)
+	}
+	got, err := os.ReadFile(real)
+	if err != nil || string(got) != string(body) {
+		t.Fatal("user login changed")
+	}
+}
+
+func TestDeleteBotRemovesGrokLogin(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	real := filepath.Join(home, ".grok", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(real), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(real, []byte("not-json-but-regular\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app := newApp(t, "", nil)
+	srv := serve(t, app)
+	bot := createBot(t, srv.URL, "Cred")
+	hard := filepath.Join(app.cfg.DataDir, "cli", bot.ID, "home", ".grok", "auth.json")
+	sym := filepath.Join(app.cfg.DataDir, "cli", bot.ID, "grok-home", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(hard), 0o700); err != nil || os.MkdirAll(filepath.Dir(sym), 0o700) != nil {
+		t.Fatal("mkdir")
+	}
+	if err := os.Link(real, hard); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, sym); err != nil {
+		t.Fatal(err)
+	}
+	res, b := do(t, http.MethodDelete, srv.URL+"/api/bots/"+bot.ID, nil, "")
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete %d %s", res.StatusCode, b)
+	}
+	for _, p := range []string{hard, sym} {
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s remains: %v", p, err)
+		}
+	}
+	fi, err := os.Stat(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || st.Nlink != 1 {
+		t.Fatalf("nlink %v", st)
+	}
+}
+
 func TestExpiredGrokLoginRefusesProxy(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

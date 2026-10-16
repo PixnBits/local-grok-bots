@@ -70,6 +70,10 @@ type App struct {
 	noGrokProxy bool
 	grokMu      sync.Mutex
 	grokProxy   *coi.Egress
+	// credMu serializes a Grok placeholder write with deletion of that file.
+	credMu sync.Mutex
+	// goneBots are ids that must not get a new Grok login file.
+	goneBots sync.Map
 	// runner, when set, replaces the real CLI exec. Tests use it.
 	runner clisession.Runner
 	// cliTTY, when set, overrides /dev/tty detection for permission prompts.
@@ -185,6 +189,12 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		},
 	})
 	coi.CleanStaleHomes(cfg.DataDir)
+	if err := scrubHostGrokLogins(cfg.DataDir); err != nil {
+		st.Close()
+		_ = aud.Close()
+		cancel()
+		return nil, err
+	}
 	if err := mkdirWorkspace(a.ws); err != nil {
 		st.Close()
 		_ = aud.Close()

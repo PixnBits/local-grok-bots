@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 	"github.com/PixnBits/local-grok-bots/web"
 )
@@ -427,7 +428,16 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleDeleteBot(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	a.goneBots.Store(id, struct{}{})
 	a.cancelBot(id)
+	a.credMu.Lock()
+	err := clisession.RemoveBotGrokAuth(a.cfg.DataDir, id)
+	a.credMu.Unlock()
+	if err != nil {
+		a.goneBots.Delete(id)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not remove the bot login file"})
+		return
+	}
 	if err := a.st.DeleteBot(id, "user"); err != nil {
 		writeErr(w, err)
 		return

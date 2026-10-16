@@ -370,6 +370,9 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isola
 		opts.ClaudeSandbox = true
 	}
 	opts.UserHome, _ = os.UserHomeDir()
+	if a.botDeleted(bot.ID) {
+		return nil, fmt.Errorf("bot was deleted")
+	}
 	if strings.EqualFold(backend, "grok") {
 		base, err := a.ensureGrokProxy(opts.UserHome)
 		if err != nil {
@@ -387,7 +390,19 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isola
 	if ownHome {
 		opts.Home = filepath.Join(state, "home")
 	}
-	iso, err := clisession.PrepareIsolation(opts)
+	var iso clisession.Isolation
+	var err error
+	if strings.EqualFold(backend, "grok") {
+		a.credMu.Lock()
+		if a.botDeleted(bot.ID) {
+			a.credMu.Unlock()
+			return nil, fmt.Errorf("bot was deleted")
+		}
+		iso, err = clisession.PrepareIsolation(opts)
+		a.credMu.Unlock()
+	} else {
+		iso, err = clisession.PrepareIsolation(opts)
+	}
 	if err != nil {
 		var se *clisession.SandboxError
 		if errors.As(err, &se) {
@@ -403,6 +418,23 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isola
 		}
 	}
 	return &iso, nil
+}
+
+func (a *App) botDeleted(id string) bool {
+	if a == nil || id == "" {
+		return false
+	}
+	_, ok := a.goneBots.Load(id)
+	return ok
+}
+
+func scrubHostGrokLogins(dataDir string) error {
+	home, err := os.UserHomeDir()
+	real := ""
+	if err == nil && home != "" {
+		real = filepath.Join(home, ".grok", "auth.json")
+	}
+	return clisession.ScrubStaleGrokAuth(dataDir, real)
 }
 
 // ensureGrokProxy starts the loopback credential proxy once. It reads the
