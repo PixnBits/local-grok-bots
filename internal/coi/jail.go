@@ -117,22 +117,7 @@ func copyCredentialFiles(credHome, destHome string, rels []string) error {
 }
 
 func daemonArgs(tool policy.CLITool) []string {
-	out := append([]string{}, tool.FixedArgs...)
-	if tool.Name == "grok" && !flagPresent(out, "--sandbox") {
-		out = append([]string{"--sandbox", "lgb"}, out...)
-	}
-	return out
-}
-
-func flagPresent(args []string, name string) bool {
-	name = strings.ToLower(name)
-	for _, a := range args {
-		n, _, _ := strings.Cut(a, "=")
-		if strings.ToLower(n) == name {
-			return true
-		}
-	}
-	return false
+	return append([]string{}, tool.FixedArgs...)
 }
 
 func applyFixedEnv(env, extra []string) []string {

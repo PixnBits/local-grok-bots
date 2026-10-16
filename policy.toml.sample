@@ -133,7 +133,7 @@ imminent_timer_minutes = 2
 # bots = ["bot-id-or-name"]
 # allowed_args = ["-p", "--cwd", "--max-turns", "--no-auto-update"]
 # value_flags = ["-p", "--cwd", "--max-turns"]
-# fixed_args = ["--sandbox", "lgb", "--permission-mode", "acceptEdits", "--no-auto-update"]
+# fixed_args = ["--always-approve"]
 # fixed_env = ["GROK_CLAUDE_MCPS_ENABLED=false"]
 # timeout = "2m"
 # max_output = 65536

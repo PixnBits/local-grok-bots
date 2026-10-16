@@ -110,12 +110,11 @@ The first slice is a host CLI invoked from the bot jail through the lgb spool. T
 
 Grok has no `--setting-sources` / `--strict-mcp-config` equivalent. For a `tools.cli` entry named `grok` the daemon:
 
-- Writes `sandbox.toml` with `[profiles.lgb] extends = "strict"` into the private HOME `.grok` (not into the host credential home).
-- Prepends `--sandbox lgb` unless `fixed_args` already contains `--sandbox`.
+- Writes `sandbox.toml` with `[profiles.lgb] extends = "strict"` into the private HOME `.grok` (not into the host credential home). Policy may put `--sandbox lgb` in `fixed_args`.
 - Sets `GROK_HOME` to that private `.grok`, `GROK_DISABLE_AUTOUPDATER=1`, and every `GROK_CLAUDE_*_ENABLED`, `GROK_CURSOR_*_ENABLED`, `GROK_CODEX_*_ENABLED`, plus `GROK_MANAGED_MCPS_ENABLED`, to `false`.
-- Drops `GROK_CONFIG`, `GROK_CONFIG_PATH`, and `GROK_SANDBOX` (the flag selects the profile). It never passes `--trust`.
+- Drops `GROK_CONFIG`, `GROK_CONFIG_PATH`, and `GROK_SANDBOX`. It never passes `--trust`.
 
-Policy should list `value_flags` the CLI actually uses (`-p`, `--cwd`, `--max-turns`, …) and may add `fixed_args` such as `--permission-mode acceptEdits` and `--no-auto-update`. `--always-approve` stays blocked on bot argv; if a headless edit cannot proceed without an approval mode, that mode belongs in daemon `fixed_args` because the OS sandbox is now the boundary. Inner Grok `restrict_network` is left false so the model API still works; file isolation is the control.
+On Ubuntu with `apparmor_restrict_unprivileged_userns=1`, Grok's own bubblewrap cannot start a nested user namespace inside the daemon bwrap. Passing `--sandbox lgb` then fails closed (Grok refuses). The daemon bwrap is the filesystem boundary; Grok `--sandbox` is optional `fixed_args` for hosts that allow nested userns. `--always-approve` stays blocked on bot argv. Headless edits on this host needed daemon `fixed_args = ["--always-approve"]` (`--permission-mode acceptEdits` returned text but did not write the file). Inner Grok `restrict_network` is left false in the written profile so a nested sandbox, when it can start, can still reach the model API.
 
 `sandbox_bin` (absolute) is a test/ops hook that replaces `bwrap` / `sandbox-exec`. An invalid path denies the call as `coi_sandbox_unavailable`.
 
