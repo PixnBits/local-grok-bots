@@ -60,6 +60,11 @@ type cliEntry struct {
 	callsSet   bool
 	pathSet    bool
 	homeSet    bool
+	valuesSet  bool
+	filesSet   bool
+	fixedSet   bool
+	envSet     bool
+	binSet     bool
 }
 
 type toolsDoc struct {
@@ -76,6 +81,11 @@ type cliToolDoc struct {
 	Name            string   `toml:"name" json:"name"`
 	Path            string   `toml:"path" json:"path"`
 	AllowedArgs     []string `toml:"allowed_args" json:"allowed_args"`
+	ValueFlags      []string `toml:"value_flags" json:"value_flags"`
+	CredentialFiles []string `toml:"credential_files" json:"credential_files"`
+	FixedArgs       []string `toml:"fixed_args" json:"fixed_args"`
+	FixedEnv        []string `toml:"fixed_env" json:"fixed_env"`
+	SandboxBin      string   `toml:"sandbox_bin" json:"sandbox_bin"`
 	CredentialHome  string   `toml:"credential_home" json:"credential_home"`
 	Bots            []string `toml:"bots" json:"bots"`
 	Timeout         *string  `toml:"timeout" json:"timeout"`
@@ -202,6 +212,46 @@ func parseCLITool(row cliToolDoc, requireComplete bool) (cliEntry, error) {
 		e.tool.AllowedArgs = args
 		e.argsSet = true
 	}
+	if row.ValueFlags != nil {
+		flags, err := normCLIArgs(name, row.ValueFlags)
+		if err != nil {
+			return cliEntry{}, err
+		}
+		e.tool.ValueFlags = flags
+		e.valuesSet = true
+	}
+	if row.CredentialFiles != nil {
+		files, err := normRelFiles(name, "credential_files", row.CredentialFiles)
+		if err != nil {
+			return cliEntry{}, err
+		}
+		e.tool.CredentialFiles = files
+		e.filesSet = true
+	}
+	if row.FixedArgs != nil {
+		args, err := normFixedArgs(name, row.FixedArgs)
+		if err != nil {
+			return cliEntry{}, err
+		}
+		e.tool.FixedArgs = args
+		e.fixedSet = true
+	}
+	if row.FixedEnv != nil {
+		env, err := normFixedEnv(name, row.FixedEnv)
+		if err != nil {
+			return cliEntry{}, err
+		}
+		e.tool.FixedEnv = env
+		e.envSet = true
+	}
+	if strings.TrimSpace(row.SandboxBin) != "" {
+		bin, err := absPolicyPath("tools.cli "+name+" sandbox_bin", row.SandboxBin)
+		if err != nil {
+			return cliEntry{}, err
+		}
+		e.tool.SandboxBin = bin
+		e.binSet = true
+	}
 	if row.Bots != nil {
 		bots, err := normCLIBots(name, row.Bots)
 		if err != nil {
@@ -283,6 +333,79 @@ func normCLIArgs(name string, in []string) ([]string, error) {
 		out = append(out, a)
 	}
 	return out, nil
+}
+
+func normRelFiles(name, field string, in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, a := range in {
+		a = strings.TrimSpace(a)
+		if a == "" || strings.ContainsRune(a, 0) {
+			return nil, fmt.Errorf("tools.cli %q has an empty %s path", name, field)
+		}
+		a = filepath.ToSlash(a)
+		clean := filepath.ToSlash(filepath.Clean(a))
+		if filepath.IsAbs(a) || filepath.IsAbs(clean) || clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.Contains(clean, "/../") {
+			return nil, fmt.Errorf("tools.cli %q %s %q must be a relative path inside the credential home", name, field, a)
+		}
+		k := strings.ToLower(clean)
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, clean)
+	}
+	return out, nil
+}
+
+func normFixedArgs(name string, in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	for _, a := range in {
+		a = strings.TrimSpace(a)
+		if a == "" || strings.ContainsRune(a, 0) {
+			return nil, fmt.Errorf("tools.cli %q has an empty fixed argument", name)
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+func normFixedEnv(name string, in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, a := range in {
+		a = strings.TrimSpace(a)
+		k, v, ok := strings.Cut(a, "=")
+		if !ok || k == "" || strings.ContainsRune(a, 0) {
+			return nil, fmt.Errorf("tools.cli %q fixed_env %q must be KEY=VALUE", name, a)
+		}
+		if strings.ContainsAny(k, " \t\r\n") {
+			return nil, fmt.Errorf("tools.cli %q fixed_env key %q is not a name", name, k)
+		}
+		uk := strings.ToUpper(k)
+		if strings.HasPrefix(uk, "LGB_") || uk == "AUTH_TOKEN" {
+			return nil, fmt.Errorf("tools.cli %q fixed_env cannot set %s", name, k)
+		}
+		lk := strings.ToLower(k)
+		if seen[lk] {
+			continue
+		}
+		seen[lk] = true
+		out = append(out, k+"="+v)
+	}
+	return out, nil
+}
+
+func sameFold(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if strings.ToLower(a[i]) != strings.ToLower(b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func normCLIBots(name string, in []string) ([]string, error) {
@@ -392,6 +515,15 @@ func narrowCLI(managed, local cliEntry, warns *[]string) CLITool {
 	if local.homeSet && local.tool.CredentialHome != managed.tool.CredentialHome {
 		*warns = append(*warns, fmt.Sprintf("tools.cli %q credential_home ignored; local policy cannot change a managed cli", name))
 	}
+	if local.binSet && local.tool.SandboxBin != managed.tool.SandboxBin {
+		*warns = append(*warns, fmt.Sprintf("tools.cli %q sandbox_bin ignored; local policy cannot change a managed cli", name))
+	}
+	if local.fixedSet && !sameFold(local.tool.FixedArgs, managed.tool.FixedArgs) {
+		*warns = append(*warns, fmt.Sprintf("tools.cli %q fixed_args ignored; local policy cannot change a managed cli", name))
+	}
+	if local.envSet && !sameFold(local.tool.FixedEnv, managed.tool.FixedEnv) {
+		*warns = append(*warns, fmt.Sprintf("tools.cli %q fixed_env ignored; local policy cannot change a managed cli", name))
+	}
 	if local.argsSet {
 		kept, extra := narrowList(managed.tool.AllowedArgs, local.tool.AllowedArgs, true)
 		out.AllowedArgs = kept
@@ -404,6 +536,20 @@ func narrowCLI(managed, local cliEntry, warns *[]string) CLITool {
 		out.Bots = kept
 		if len(extra) > 0 {
 			*warns = append(*warns, fmt.Sprintf("tools.cli %q bots %s ignored; local policy can only narrow managed policy", name, strings.Join(extra, ", ")))
+		}
+	}
+	if local.valuesSet {
+		kept, extra := narrowList(managed.tool.ValueFlags, local.tool.ValueFlags, true)
+		out.ValueFlags = kept
+		if len(extra) > 0 {
+			*warns = append(*warns, fmt.Sprintf("tools.cli %q value_flags %s ignored; local policy can only narrow managed policy", name, strings.Join(extra, ", ")))
+		}
+	}
+	if local.filesSet {
+		kept, extra := narrowList(managed.tool.CredentialFiles, local.tool.CredentialFiles, true)
+		out.CredentialFiles = kept
+		if len(extra) > 0 {
+			*warns = append(*warns, fmt.Sprintf("tools.cli %q credential_files %s ignored; local policy can only narrow managed policy", name, strings.Join(extra, ", ")))
 		}
 	}
 	if local.timeoutSet {

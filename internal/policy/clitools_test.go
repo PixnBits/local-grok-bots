@@ -306,3 +306,86 @@ credential_home = "/var/lib/lgb/grok"
 		t.Fatalf("warnings %v", p.Warnings)
 	}
 }
+
+func TestCLIPolicyPinsAndFiles(t *testing.T) {
+	local := writePol(t, "policy.toml", `
+[[tools.cli]]
+name = "grok"
+path = "/tmp/evil"
+credential_home = "/tmp/evil-home"
+sandbox_bin = "/tmp/evil-bwrap"
+allowed_args = ["-p", "--cwd"]
+value_flags = ["-p", "--cwd", "--extra"]
+credential_files = [".grok/auth.json", "token"]
+fixed_args = ["--sandbox", "off"]
+fixed_env = ["GROK_HOME=/tmp/evil"]
+bots = ["ada"]
+timeout = "30s"
+max_output = 100
+max_calls_per_hour = 2
+`)
+	managed := writePol(t, "managed.json", `{
+	  "tools": {"cli": [{
+	    "name": "grok",
+	    "path": "/usr/bin/grok",
+	    "credential_home": "/var/lib/lgb/grok",
+	    "sandbox_bin": "/usr/bin/bwrap",
+	    "allowed_args": ["-p", "--cwd", "--max-turns"],
+	    "value_flags": ["-p", "--cwd", "--max-turns"],
+	    "credential_files": [".grok/auth.json"],
+	    "fixed_args": ["--sandbox", "lgb", "--permission-mode", "acceptEdits"],
+	    "fixed_env": ["GROK_CLAUDE_MCPS_ENABLED=false"],
+	    "bots": ["ada"],
+	    "timeout": "1m",
+	    "max_output": 8000,
+	    "max_calls_per_hour": 20
+	  }]}
+	}`)
+	p, err := Load(Options{Path: local, ManagedPath: managed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grok, ok := p.COI("grok")
+	if !ok {
+		t.Fatal(p.Warnings)
+	}
+	if grok.SandboxBin != "/usr/bin/bwrap" {
+		t.Fatalf("sandbox_bin %+v", grok)
+	}
+	if strings.Join(grok.FixedArgs, ",") != "--sandbox,lgb,--permission-mode,acceptEdits" {
+		t.Fatalf("fixed_args %v", grok.FixedArgs)
+	}
+	if strings.Join(grok.FixedEnv, ",") != "GROK_CLAUDE_MCPS_ENABLED=false" {
+		t.Fatalf("fixed_env %v", grok.FixedEnv)
+	}
+	if strings.Join(grok.ValueFlags, ",") != "-p,--cwd" {
+		t.Fatalf("value_flags %v", grok.ValueFlags)
+	}
+	if strings.Join(grok.CredentialFiles, ",") != ".grok/auth.json" {
+		t.Fatalf("credential_files %v", grok.CredentialFiles)
+	}
+	text := strings.Join(p.Warnings, "\n")
+	for _, want := range []string{"sandbox_bin ignored", "fixed_args ignored", "fixed_env ignored", "value_flags", "credential_files"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("warnings lack %q:\n%s", want, text)
+		}
+	}
+
+	bad := writePol(t, "bad.toml", `
+[[tools.cli]]
+name = "grok"
+path = "/usr/bin/grok"
+credential_home = "/var/lib/lgb/grok"
+credential_files = ["../auth.json"]
+timeout = "1s"
+max_output = 1
+max_calls_per_hour = 1
+`)
+	p, err = Load(Options{Path: bad})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Loaded || len(p.CLITools) != 0 {
+		t.Fatalf("escaped credential file did not fail closed: %+v %v", p.CLITools, p.Warnings)
+	}
+}
