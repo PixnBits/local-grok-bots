@@ -31,3 +31,19 @@ Other strings from that file: the public issuer `https://auth.x.ai` and the `oid
 ## Stop
 
 `SIGTERM` to pid 922082 only, after `ps` confirmed the command was `/tmp/lgb-cred-check`. The process exited. Nothing listens on port 8139. Ports 8080, 8090, and 8095 were still listening. Pid 287544 was still `/tmp/lgb-dev`. Pid 510125 was still `lgb-voice-bin`.
+
+## Round 2
+
+Date: 2026-10-16. Same binary path and port. Fresh data dir `/home/pixnbits/lgb-dev-data/cred-check2`. `env -i` again, with `HOME`, `PATH`, `USER`, `LOGNAME`, and `LANG` only. No `AUTH_TOKEN`, `XAI_API_KEY`, or `GROK_*`. Policy bind and `BIND_ADDR` were `127.0.0.1:8139`. Backend `grok`. Timers off. `ui_prompts` false. Managed policy set `bypassPermissions`.
+
+The turn finished `done` with an empty error. `workspace/bots/<id>/hello.txt` is 6 bytes and is `hello` plus one newline. The audit log has 9 `cli_proxy_request` rows. Each carried bot id, run id, path, and status, except one rejected row whose bot id, run id, and path were empty and whose status was 403. Paths were under `/v1`. The rows have no header and no body. A scan of the data dir for the user login's token strings was 0 hits, including `audit.log`. The strings `Authorization`, `Bearer`, and `lgb_` did not occur in that log.
+
+`~/.grok/auth.json` was not a symlink. Across the turn and the later delete it kept the same inode, the same SHA-256, and `nlink` 1. A poll every 0.2 seconds during the turn recorded 382 samples, and every sample was 1.
+
+The first `DELETE /api/bots/<id>` returned 500 and left `cli/<id>` in place. The tree contained a directory whose mode did not allow listing. Removal now sets that directory's mode and then deletes it, without following a symlink. A second delete, on the same data dir and a rebuilt listener, returned 204 with an empty body. `cli/<id>` was gone. The user login file was unchanged. `SIGTERM` went only to the `/tmp/lgb-cred-check` pid. Port 8139 was free. Ports 8080, 8090, and 8095 were still listening. Pid 287544 was still `/tmp/lgb-dev`. Pid 510125 was still `lgb-voice-bin`.
+
+## Process environment
+
+The COI bubblewrap jail hides an unrelated host pid. The jailed command does not keep the launcher's marker. Pid 1 in that jail is `bwrap`, and that process's environment file still contains the launcher's variable names. The command's own `/proc/self/environ` file was empty.
+
+On the live Grok turn, `/proc/1` was `systemd` and its environment names were empty. The daemon pid was visible. Its environment names were not returned. The turn's own environment names included the proxy variables and ordinary host names. No environment values were recorded.
