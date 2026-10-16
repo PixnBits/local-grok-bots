@@ -84,16 +84,21 @@ Every CLI turn gets a fresh environment. Nothing is inherited except
 `PATH`, `LANG`, `LC_*`, `TERM`, `TZ`, `USER`, `LOGNAME`, `SHELL`, `TMPDIR`,
 the proxy variables, `SSL_CERT_FILE`/`SSL_CERT_DIR`/`NODE_EXTRA_CA_CERTS`,
 and the backend credential
-(`ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` for Claude, `XAI_API_KEY` for
-Grok). `LGB_*` from the daemon process is not copied. The daemon sets
+(`ANTHROPIC_API_KEY`/`CLAUDE_CODE_OAUTH_TOKEN` for Claude). For Grok the
+daemon sets `XAI_API_KEY` to a per-run proxy secret, not a host key, and
+points the chat base URLs at its loopback proxy. `LGB_*` from the daemon
+process is not copied. The daemon sets
 `LGB_SPOOL` and `LGB_TOKEN` for that run. Every other `ANTHROPIC_*`,
 `CLAUDE_*`, and `GROK_*` variable is dropped, including
 `ANTHROPIC_BASE_URL`, `CLAUDE_CONFIG_DIR`, `GROK_CONFIG`, and
 `GROK_SANDBOX`. Managed `cli.isolation.env` is applied last.
 
-With `home = "isolated"`, `HOME` is `DATA_DIR/cli/<bot>/home`. The only file
-shared with the user's home is a symlink to the login credential
-(`~/.claude/.credentials.json`, `~/.grok/auth.json`). Settings, hooks, MCP
+With `home = "isolated"`, `HOME` is `DATA_DIR/cli/<bot>/home`. For Claude,
+the only file shared with the user's home is a symlink to
+`~/.claude/.credentials.json`. Grok does not link or copy
+`~/.grok/auth.json`. It writes a placeholder and sends chat traffic to a
+daemon reverse proxy on `127.0.0.1`
+([Grok CLI login live check](cred-hardlink-check.md)). Settings, hooks, MCP
 servers, skills, memory, and folder-trust grants stay behind. Sessions live in
 the per-bot home, so a session started before this change cannot be resumed;
 the bot starts a fresh one.
@@ -167,10 +172,13 @@ Grok has no flag to skip setting sources. The daemon:
   a built-in name (`off`, `workspace`, `devbox`, `read-only`, `strict`), is
   refused before the process starts: those profiles run unenforced, with a
   warning, when Grok cannot apply them;
-- hard links `~/.grok/auth.json` into that `GROK_HOME` (Grok 1.0.52 says
-  "Not signed in" when it is a symlink); it relinks when the user's file is
-  replaced, and falls back to a symlink across filesystems, so keep DATA_DIR
-  on the same filesystem as HOME;
+- writes a placeholder `auth.json` into that `GROK_HOME` and sets
+  `XAI_API_KEY` to a per-run secret. The daemon admits that secret on a
+  `127.0.0.1` reverse proxy, which injects the bearer it reads from the
+  user's `~/.grok/auth.json`. The user file is not linked, copied, refreshed,
+  or rewritten. Any other bearer, path, or header is rejected. The secret is
+  dropped when the turn ends
+  ([Grok CLI login live check](cred-hardlink-check.md));
 - sets every `GROK_CLAUDE_*_ENABLED` and `GROK_CURSOR_*_ENABLED` to `false`;
 - drops `GROK_CONFIG`/`GROK_CONFIG_PATH`.
 
@@ -276,8 +284,9 @@ and passes `--sandbox lgb` plus `--disallowed-tools web_fetch,web_search`
 unless `net`. A custom profile fails closed: Grok refuses to start if it can't
 apply it (unknown profile, bad `sandbox.toml`, or no `bwrap` for a deny list on
 Linux). Only existing paths are listed, since Grok also refuses a deny path it
-can't bind. A `ssh` grant drops `~/.ssh` from the list. Grok's own
-`auth.json` is not denied.
+can't bind. A `ssh` grant drops `~/.ssh` from the list. The user's
+`~/.grok/auth.json` is denied when that path exists. The placeholder in this
+turn's `GROK_HOME` is not on the list, because Grok must read it.
 `DATA_DIR/cli` is not denied whole, because the bot's own `HOME` or
 `GROK_HOME` is under it and Grok must write there (a whole-directory deny
 made it exit at start). Instead every existing entry under it is denied
@@ -522,7 +531,9 @@ Under `overrides = "refuse"` every hit fails the turn with
 - Fake-CLI tests check argv, the child environment, the per-bot home,
   credential links, the scan, and refuse/ignore.
 - Real Grok 1.0.52 on Linux, 2026-10-14: a symlinked `auth.json` gave "Not
-  signed in"; a hard link authenticated. Through `PrepareIsolation` and
+  signed in"; a hard link authenticated. That hard link is no longer how a
+  turn authenticates
+  ([Grok CLI login live check](cred-hardlink-check.md)). Through `PrepareIsolation` and
   `Args`, the `lgb` profile blocked `curl https://example.com` (could not
   resolve host), denied `cat` of the admin token and `ls ~/.ssh`, denied a
   write outside the workspace, allowed one inside, and `web_fetch`/`web_search`
