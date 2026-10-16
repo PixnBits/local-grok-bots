@@ -12,6 +12,7 @@ import (
 
 	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
+	"github.com/PixnBits/local-grok-bots/internal/coi"
 	"github.com/PixnBits/local-grok-bots/internal/config"
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
@@ -54,8 +55,12 @@ type App struct {
 	permTokens map[string]permBind
 	// lgbLive holds per-run lgb tokens until that run's spool stops.
 	// They are not the admin token and cannot decide a permission card.
+	// The value is the bot and run the token was issued for.
 	lgbMu   sync.Mutex
-	lgbLive map[string]struct{}
+	lgbLive map[string]lgbCred
+	// coiCap counts brokered host-CLI calls per bot.
+	coiOnce sync.Once
+	coiCap  *coi.HourCap
 	// runner, when set, replaces the real CLI exec. Tests use it.
 	runner clisession.Runner
 	// cliTTY, when set, overrides /dev/tty detection for permission prompts.

@@ -394,12 +394,12 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isola
 	return &iso, nil
 }
 
-// lgbAllow approves only the lgb command. Other shell commands still ask.
+// lgbAllow approves the lgb and coi spool commands. Other shell commands still ask.
 func lgbAllow(env map[string]string) []string {
 	if env == nil {
 		return nil
 	}
-	return []string{"Bash(lgb)", "Bash(lgb *)"}
+	return []string{"Bash(lgb)", "Bash(lgb *)", "Bash(coi)", "Bash(coi *)"}
 }
 
 // withLGBEnv puts lgb first on PATH and adds its spool and run token.

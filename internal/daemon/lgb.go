@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/coi"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
@@ -66,6 +67,30 @@ rm -f "$d/resp/$id"
 exit "$code"
 `
 
+// coiScript is the same spool client as lgb, with the command fixed to "coi".
+// It waits up to an hour so a policy timeout inside that hour can finish.
+const coiScript = `#!/bin/sh
+# coi: host CLI broker for this bot. Written by local-grok-bots each run.
+d="${LGB_SPOOL:-}"
+if [ -z "$d" ] || [ -z "${LGB_TOKEN:-}" ] || [ ! -d "$d/req" ]; then
+  echo "coi: not available in this run" >&2; exit 2
+fi
+id=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
+tmp="$d/req/.$id"
+{ printf '%s\0' "$LGB_TOKEN"; printf '%s\0' coi; for a in "$@"; do printf '%s\0' "$a"; done; } > "$tmp" || exit 2
+mv "$tmp" "$d/req/$id" || exit 2
+i=0
+while [ ! -f "$d/resp/$id" ]; do
+  i=$((i+1))
+  if [ "$i" -gt 36000 ]; then echo "coi: the daemon did not answer" >&2; exit 2; fi
+  sleep 0.1
+done
+code=$(head -n 1 "$d/resp/$id")
+tail -n +2 "$d/resp/$id"
+rm -f "$d/resp/$id"
+exit "$code"
+`
+
 // lgbRun is one run's spool. stop() ends it and invalidates the token.
 type lgbRun struct {
 	a      *App
@@ -100,6 +125,9 @@ func (a *App) startLGB(ctx context.Context, bot store.Bot, runID, ws string) (*l
 	if err := os.WriteFile(filepath.Join(root, "bin", "lgb"), []byte(lgbScript), 0o700); err != nil {
 		return nil, nil, err
 	}
+	if err := os.WriteFile(filepath.Join(root, "bin", "coi"), []byte(coiScript), 0o700); err != nil {
+		return nil, nil, err
+	}
 	req, err := openSpoolDir(filepath.Join(root, "req"))
 	if err != nil {
 		return nil, nil, err
@@ -118,7 +146,7 @@ func (a *App) startLGB(ctx context.Context, bot store.Bot, runID, ws string) (*l
 	cctx, cancel := context.WithCancel(ctx)
 	r := &lgbRun{a: a, bot: bot, runID: runID, token: "lgbr_" + hex.EncodeToString(buf), root: root,
 		req: req, resp: resp, cancel: cancel, done: make(chan struct{})}
-	a.noteRunToken(r.token)
+	a.noteRunToken(r.token, bot.ID, runID)
 	go r.loop(cctx)
 	env := map[string]string{
 		"LGB_SPOOL": root,
@@ -127,16 +155,22 @@ func (a *App) startLGB(ctx context.Context, bot store.Bot, runID, ws string) (*l
 	return r, env, nil
 }
 
-func (a *App) noteRunToken(token string) {
+// lgbCred is the bot and run a live per-run token belongs to.
+type lgbCred struct {
+	botID string
+	runID string
+}
+
+func (a *App) noteRunToken(token, botID, runID string) {
 	if a == nil || token == "" {
 		return
 	}
 	a.lgbMu.Lock()
 	defer a.lgbMu.Unlock()
 	if a.lgbLive == nil {
-		a.lgbLive = map[string]struct{}{}
+		a.lgbLive = map[string]lgbCred{}
 	}
-	a.lgbLive[token] = struct{}{}
+	a.lgbLive[token] = lgbCred{botID: botID, runID: runID}
 }
 
 func (a *App) forgetRunToken(token string) {
@@ -146,6 +180,20 @@ func (a *App) forgetRunToken(token string) {
 	a.lgbMu.Lock()
 	delete(a.lgbLive, token)
 	a.lgbMu.Unlock()
+}
+
+// tokenOK reports whether tok is this run's live token for this bot.
+func (r *lgbRun) tokenOK(tok string) bool {
+	if r == nil || r.a == nil || r.token == "" || tok == "" {
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(tok), []byte(r.token)) != 1 {
+		return false
+	}
+	r.a.lgbMu.Lock()
+	defer r.a.lgbMu.Unlock()
+	live, ok := r.a.lgbLive[tok]
+	return ok && live.botID == r.bot.ID && live.runID == r.runID
 }
 
 func (a *App) lgbTokens() []string {
@@ -227,7 +275,12 @@ func (r *lgbRun) handle(ctx context.Context, body []byte) (int, string) {
 		args = append(args, string(p))
 	}
 	fields := map[string]any{"run_id": r.runID, "command": lgbCommand(args)}
-	if r.token == "" || subtle.ConstantTimeCompare([]byte(tok), []byte(r.token)) != 1 {
+	coiCall := len(args) > 0 && args[0] == "coi"
+	if !r.tokenOK(tok) {
+		if coiCall {
+			r.auditCOI(coiName(args), coiRest(args), coi.StatusDenied, "bad token", "", nil, 0, false)
+			return 2, "coi: not authorized"
+		}
 		fields["ok"] = false
 		fields["error"] = "bad token"
 		r.audit(fields)
@@ -235,10 +288,17 @@ func (r *lgbRun) handle(ctx context.Context, body []byte) (int, string) {
 	}
 	r.calls++
 	if r.calls > lgbMaxCalls {
+		if coiCall {
+			r.auditCOI(coiName(args), coiRest(args), coi.StatusDenied, "call limit", "", nil, 0, false)
+			return 2, "coi: call limit for this turn reached"
+		}
 		fields["ok"] = false
 		fields["error"] = "call limit"
 		r.audit(fields)
 		return 2, "lgb: call limit for this turn reached"
+	}
+	if coiCall {
+		return r.execCOI(ctx, args[1:])
 	}
 	tool, targs, out, err := r.a.lgbParse(r.bot, args)
 	if err == nil && tool != "" {
@@ -329,6 +389,8 @@ const lgbHelp = `lgb: daemon tools for this bot. Output is text; exit 0 on succe
   lgb dm <name|id> <message...> send a direct message
   lgb bot create <name> <description...> [--label LABEL]   if policy allows
   lgb bot update <name|id> [--name N] [--label L] [--description D]   if policy allows
+  lgb coi <name> [args...]      run a granted host CLI; credentials stay on the host
+  coi <name> [args...]          same command, from .lgb/bin
 
 A timer's prompt comes back to you as a [scheduled] message.
 Run each lgb command as its own shell call; a chained command (;, &&, |) asks for approval.`
