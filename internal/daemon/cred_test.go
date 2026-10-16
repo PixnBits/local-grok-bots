@@ -1,17 +1,24 @@
 package daemon
 
 import (
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
+
+type captureTrip func(*http.Request) (*http.Response, error)
+
+func (f captureTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
 func TestGrokIsolationUsesLoopbackProxy(t *testing.T) {
 	home := t.TempDir()
@@ -28,6 +35,16 @@ func TestGrokIsolationUsesLoopbackProxy(t *testing.T) {
 	dir := t.TempDir()
 	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))
 	app.noGrokProxy = false
+	var gotAuth string
+	var calls atomic.Int32
+	app.grokTrip = captureTrip(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		gotAuth = r.Header.Get("Authorization")
+		if r.Header.Get("Cookie") != "" || r.Header.Get("X-Secret") != "" {
+			t.Errorf("forwarded a stripped header")
+		}
+		return &http.Response{StatusCode: 204, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
+	})
 	t.Setenv("XAI_API_KEY", marker)
 	ws := filepath.Join(dir, "ws")
 	if err := os.MkdirAll(ws, 0o755); err != nil {
@@ -37,23 +54,22 @@ func TestGrokIsolationUsesLoopbackProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if iso.ReleaseGate != nil {
+		t.Cleanup(iso.ReleaseGate)
+	}
 	env := strings.Join(iso.Env, "\n")
 	if strings.Contains(env, marker) {
 		t.Fatal("real marker reached the cli env")
 	}
-	if !strings.Contains("\n"+env+"\n", "\nXAI_API_KEY="+clisession.GrokPlaceholderToken+"\n") {
-		t.Fatal("placeholder key missing")
+	key := envValue(iso.Env, "XAI_API_KEY")
+	if len(key) < 16 || key == marker || key == clisession.GrokPlaceholderToken || strings.Contains(key, "unit-refresh") {
+		t.Fatalf("gate %q", key)
 	}
-	var base string
-	for _, kv := range iso.Env {
-		k, v, _ := strings.Cut(kv, "=")
-		if k == "GROK_CLI_CHAT_PROXY_BASE_URL" {
-			base = v
-		}
-		if k == "GROK_XAI_API_BASE_URL" || k == "XAI_API_BASE_URL" {
-			if v == "" || !strings.HasPrefix(v, "http://127.0.0.1:") || !strings.HasSuffix(v, "/v1") {
-				t.Fatalf("%s=%q", k, v)
-			}
+	base := envValue(iso.Env, "GROK_CLI_CHAT_PROXY_BASE_URL")
+	for _, name := range []string{"GROK_XAI_API_BASE_URL", "XAI_API_BASE_URL"} {
+		v := envValue(iso.Env, name)
+		if v == "" || !strings.HasPrefix(v, "http://127.0.0.1:") || !strings.HasSuffix(v, "/v1") {
+			t.Fatalf("%s=%q", name, v)
 		}
 	}
 	if !strings.HasPrefix(base, "http://127.0.0.1:") || !strings.HasSuffix(base, "/v1") {
@@ -73,21 +89,136 @@ func TestGrokIsolationUsesLoopbackProxy(t *testing.T) {
 		t.Fatalf("bot auth %v %v", dst, err)
 	}
 	got, err := os.ReadFile(botAuth)
-	if err != nil || string(got) != clisession.GrokPlaceholderAuth || strings.Contains(string(got), marker) {
-		t.Fatal("bot auth is not the placeholder")
+	if err != nil || strings.Contains(string(got), marker) || strings.Contains(string(got), clisession.GrokPlaceholderToken) || !strings.Contains(string(got), key) {
+		t.Fatal("bot auth is not the per-run placeholder")
 	}
 	user, err := os.ReadFile(real)
 	if err != nil || string(user) != body {
 		t.Fatal("user login changed")
 	}
-	resp, err := http.Get(strings.TrimSuffix(base, "/v1") + "/admin")
+	origin := strings.TrimSuffix(base, "/v1")
+	client := &http.Client{Timeout: 2 * time.Second}
+	for _, auth := range []string{"", "Bearer " + clisession.GrokPlaceholderToken, "Bearer " + marker, "Bearer nope-not-the-gate"} {
+		code, respBody := proxyDo(t, client, origin+"/v1/ping", auth)
+		if code != http.StatusForbidden || strings.Contains(respBody, marker) || strings.Contains(respBody, key) {
+			t.Fatalf("auth %q status %d body %s", auth, code, respBody)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatal("rejected client reached upstream")
+	}
+	code, respBody := proxyDo(t, client, origin+"/admin", "Bearer "+key)
+	if code != http.StatusForbidden || calls.Load() != 0 {
+		t.Fatalf("admin %d calls %d body %s", code, calls.Load(), respBody)
+	}
+	code, respBody = proxyDo(t, client, origin+"/v1/ping", "Bearer "+key)
+	if code != http.StatusNoContent || calls.Load() != 1 {
+		t.Fatalf("allow %d calls %d body %s", code, calls.Load(), respBody)
+	}
+	if gotAuth != "Bearer "+marker || strings.Contains(gotAuth, key) {
+		t.Fatalf("upstream auth %q", gotAuth)
+	}
+	iso.ReleaseGate()
+	code, _ = proxyDo(t, client, origin+"/v1/ping", "Bearer "+key)
+	if code != http.StatusForbidden || calls.Load() != 1 {
+		t.Fatalf("revoked %d calls %d", code, calls.Load())
+	}
+}
+
+func TestGrokProxyGateIsPerBotRun(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	real := filepath.Join(home, ".grok", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(real), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const marker = "unit-real-marker-value"
+	body := `{"https://auth.x.ai::x":{"key":"` + marker + `","expires_at":"2099-01-01T00:00:00Z"}}`
+	if err := os.WriteFile(real, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))
+	app.noGrokProxy = false
+	var calls atomic.Int32
+	app.grokTrip = captureTrip(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		if r.Header.Get("Authorization") != "Bearer "+marker {
+			t.Errorf("upstream auth %q", r.Header.Get("Authorization"))
+		}
+		return &http.Response{StatusCode: 204, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
+	})
+	ws := filepath.Join(dir, "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	first, err := app.cliIsolation(store.Bot{ID: "b1"}, "grok", ws)
 	if err != nil {
 		t.Fatal(err)
 	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("admin %d", resp.StatusCode)
+	second, err := app.cliIsolation(store.Bot{ID: "b2"}, "grok", ws)
+	if err != nil {
+		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if first.ReleaseGate != nil {
+			first.ReleaseGate()
+		}
+		if second.ReleaseGate != nil {
+			second.ReleaseGate()
+		}
+	})
+	k1 := envValue(first.Env, "XAI_API_KEY")
+	k2 := envValue(second.Env, "XAI_API_KEY")
+	if k1 == "" || k2 == "" || k1 == k2 || k1 == clisession.GrokPlaceholderToken {
+		t.Fatalf("gates %q %q", k1, k2)
+	}
+	origin := strings.TrimSuffix(envValue(first.Env, "GROK_CLI_CHAT_PROXY_BASE_URL"), "/v1")
+	client := &http.Client{Timeout: 2 * time.Second}
+	if code, _ := proxyDo(t, client, origin+"/v1/ping", "Bearer "+k1); code != http.StatusNoContent {
+		t.Fatalf("first %d", code)
+	}
+	if code, _ := proxyDo(t, client, origin+"/v1/ping", "Bearer "+k2); code != http.StatusNoContent {
+		t.Fatalf("second %d", code)
+	}
+	first.ReleaseGate()
+	if code, _ := proxyDo(t, client, origin+"/v1/ping", "Bearer "+k1); code != http.StatusForbidden {
+		t.Fatalf("first still admitted %d", code)
+	}
+	if code, _ := proxyDo(t, client, origin+"/v1/ping", "Bearer "+k2); code != http.StatusNoContent {
+		t.Fatalf("second revoked with first %d", code)
+	}
+	if calls.Load() != 3 {
+		t.Fatalf("upstream calls %d", calls.Load())
+	}
+}
+
+func envValue(env []string, name string) string {
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		if k == name {
+			return v
+		}
+	}
+	return ""
+}
+
+func proxyDo(t *testing.T, client *http.Client, url, auth string) (int, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, string(b)
 }
 
 func TestStartupRemovesStaleGrokLogin(t *testing.T) {

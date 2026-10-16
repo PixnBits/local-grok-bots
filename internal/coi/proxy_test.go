@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -96,11 +97,29 @@ func TestLoopbackReplacesBearer(t *testing.T) {
 	if !strings.HasPrefix(base, "http://127.0.0.1:") {
 		t.Fatalf("base %q", base)
 	}
+	host, port, err := net.SplitHostPort(strings.TrimPrefix(base, "http://"))
+	if err != nil || host != "127.0.0.1" || port == "" || port == "0" {
+		t.Fatalf("listen %q", base)
+	}
+	ifaces, _ := net.InterfaceAddrs()
+	for _, addr := range ifaces {
+		ipnet, ok := addr.(*net.IPNet)
+		if !ok || ipnet.IP == nil || ipnet.IP.IsLoopback() || ipnet.IP.To4() == nil {
+			continue
+		}
+		conn, dialErr := net.DialTimeout("tcp", ipnet.IP.String()+":"+port, 200*time.Millisecond)
+		if dialErr == nil {
+			conn.Close()
+			t.Fatalf("proxy accepted %s", ipnet.IP)
+		}
+	}
+	const gate = "unit-loopback-gate1"
+	stop := eg.Admit(gate)
 	req, err := http.NewRequest(http.MethodGet, base+"/v1/ping", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	req.Header.Set("Authorization", "Bearer "+PlaceholderToken)
+	req.Header.Set("Authorization", "Bearer "+gate)
 	req.Header.Set("X-Secret", "nope")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -111,14 +130,38 @@ func TestLoopbackReplacesBearer(t *testing.T) {
 	if resp.StatusCode != 200 || string(body) != "ok" || calls.Load() != 1 {
 		t.Fatalf("status %d body %s calls %d", resp.StatusCode, body, calls.Load())
 	}
-	if gotAuth != "Bearer real-token-value" || strings.Contains(gotAuth, PlaceholderToken) {
+	if gotAuth != "Bearer real-token-value" || strings.Contains(gotAuth, gate) || strings.Contains(gotAuth, PlaceholderToken) {
 		t.Fatalf("auth replaced incorrectly")
+	}
+	before := calls.Load()
+	beforeReads := reads
+	for _, auth := range []string{"", "Bearer " + PlaceholderToken, "Bearer real-token-value", "Token " + gate} {
+		deny, err := http.NewRequest(http.MethodGet, base+"/v1/ping", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if auth != "" {
+			deny.Header.Set("Authorization", auth)
+		}
+		resp, err = http.DefaultClient.Do(deny)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden || strings.Contains(string(body), "real-token-value") || strings.Contains(string(body), gate) {
+			t.Fatalf("auth %q status %d body %s", auth, resp.StatusCode, body)
+		}
+	}
+	if calls.Load() != before || reads != beforeReads {
+		t.Fatalf("rejected client reached upstream calls=%d reads=%d", calls.Load(), reads)
 	}
 	for _, p := range []string{"/admin", "/v1/../x", "/v2/x"} {
 		deny, err := http.NewRequest(http.MethodGet, base+p, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
+		deny.Header.Set("Authorization", "Bearer "+gate)
 		resp, err = http.DefaultClient.Do(deny)
 		if err != nil {
 			t.Fatal(err)
@@ -131,9 +174,24 @@ func TestLoopbackReplacesBearer(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("denied path reached upstream: %d", calls.Load())
 	}
-	if reads < 2 {
+	if reads != 2 {
 		t.Fatalf("bearer reads %d", reads)
 	}
+	stop()
+	revoked, err := http.NewRequest(http.MethodGet, base+"/v1/ping", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked.Header.Set("Authorization", "Bearer "+gate)
+	resp, err = http.DefaultClient.Do(revoked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || calls.Load() != 1 || reads != 2 {
+		t.Fatalf("revoked status %d calls %d reads %d", resp.StatusCode, calls.Load(), reads)
+	}
+	stop()
 }
 
 func TestEgressPathAllowlistSkipsUpstream(t *testing.T) {

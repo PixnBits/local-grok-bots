@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -81,6 +83,9 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		}
 		a.failCLI(bot.ID, runID, backend, err)
 		return
+	}
+	if iso != nil && iso.ReleaseGate != nil {
+		defer iso.ReleaseGate()
 	}
 	lgb, lgbEnv, lerr := a.startLGB(ctx, bot, runID, ws)
 	if lerr != nil {
@@ -380,6 +385,14 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isola
 			return nil, err
 		}
 		opts.ProxyBase = base
+		if base != "" {
+			gate, gerr := newProxyGate()
+			if gerr != nil {
+				a.recordGrokProxy(botID, errGrokProxy)
+				return nil, errGrokProxy
+			}
+			opts.ProxyGate = gate
+		}
 	}
 	ownHome := isolated
 	if strings.EqualFold(backend, "claude") {
@@ -411,6 +424,9 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isola
 		return nil, err
 	}
 	iso.Protect = append([]string(nil), opts.Protect...)
+	if opts.ProxyGate != "" {
+		iso.ReleaseGate = a.admitGrokGate(opts.ProxyGate)
+	}
 	a.noteBotProtect(botID, iso.Protect)
 	if strings.EqualFold(backend, "claude") {
 		if _, seen := a.loginChecked.LoadOrStore(botID, true); !seen {
@@ -426,6 +442,27 @@ func (a *App) botDeleted(id string) bool {
 	}
 	_, ok := a.goneBots.Load(id)
 	return ok
+}
+
+func newProxyGate() (string, error) {
+	var buf [32]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return "lgb_" + hex.EncodeToString(buf[:]), nil
+}
+
+func (a *App) admitGrokGate(secret string) func() {
+	if a == nil {
+		return func() {}
+	}
+	a.grokMu.Lock()
+	eg := a.grokProxy
+	a.grokMu.Unlock()
+	if eg == nil {
+		return func() {}
+	}
+	return eg.Admit(secret)
 }
 
 func scrubHostGrokLogins(dataDir string) error {
@@ -469,7 +506,7 @@ func (a *App) ensureGrokProxy(userHome string) (string, error) {
 	}
 	eg, err := coi.StartLoopback([]string{coi.GrokChatHost}, nil, func() (string, error) {
 		return coi.ReadBearer(path)
-	}, nil)
+	}, a.grokTrip)
 	if err != nil {
 		return "", errGrokProxy
 	}

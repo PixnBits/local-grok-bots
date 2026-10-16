@@ -147,9 +147,16 @@ func TestPrepareIsolationGrok(t *testing.T) {
 	// Replacing the user file does not relink it into the bot home.
 	_ = os.WriteFile(real+".new", []byte(`{"v":2,"key":"second-marker-value"}`), 0o600)
 	_ = os.Rename(real+".new", real)
+	const gate = "unit-gate-token-aaaa"
 	if _, err := PrepareIsolation(IsolationOptions{
 		Backend: "grok", StateDir: state, Home: home, UserHome: user,
 		ProxyBase: "http://127.0.0.1:9",
+	}); err == nil {
+		t.Fatal("proxy without a per-run key")
+	}
+	if _, err := PrepareIsolation(IsolationOptions{
+		Backend: "grok", StateDir: state, Home: home, UserHome: user,
+		ProxyBase: "http://127.0.0.1:9", ProxyGate: gate,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -157,18 +164,20 @@ func TestPrepareIsolationGrok(t *testing.T) {
 		t.Fatalf("link count after replace %d", nlink(t, real))
 	}
 	b, _ = os.ReadFile(dstPath)
-	if strings.Contains(string(b), "second-marker-value") || string(b) != GrokPlaceholderAuth {
+	if strings.Contains(string(b), "second-marker-value") || strings.Contains(string(b), GrokPlaceholderToken) || !strings.Contains(string(b), gate) {
 		t.Fatalf("bot auth followed the user file: %s", b)
 	}
-	env = envMap(iso.Env)
 	iso2, err := PrepareIsolation(IsolationOptions{
 		Backend: "grok", StateDir: state, Home: home, UserHome: user,
-		ProxyBase: "http://127.0.0.1:9",
+		ProxyBase: "http://127.0.0.1:9", ProxyGate: gate,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	env = envMap(iso2.Env)
+	if env["XAI_API_KEY"] != gate {
+		t.Fatalf("key %q", env["XAI_API_KEY"])
+	}
 	for _, k := range []string{"GROK_CLI_CHAT_PROXY_BASE_URL", "GROK_XAI_API_BASE_URL", "XAI_API_BASE_URL"} {
 		if env[k] != "http://127.0.0.1:9/v1" {
 			t.Fatalf("%s=%q", k, env[k])

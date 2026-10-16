@@ -70,6 +70,9 @@ type App struct {
 	noGrokProxy bool
 	grokMu      sync.Mutex
 	grokProxy   *coi.Egress
+	// grokTrip, when set, replaces the loopback proxy's outbound transport.
+	// Tests use it. Production leaves it nil.
+	grokTrip http.RoundTripper
 	// credMu serializes a Grok placeholder write with deletion of that file.
 	credMu sync.Mutex
 	// goneBots are ids that must not get a new Grok login file.

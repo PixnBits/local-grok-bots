@@ -28,6 +28,9 @@ type Isolation struct {
 	ClaudeSandbox bool
 	// Protect is the path deny list written into this turn's settings.
 	Protect []string
+	// ReleaseGate drops this turn's loopback proxy gate. Nil is fine.
+	// Calling it more than once is safe.
+	ReleaseGate func()
 }
 
 // IsolationOptions builds an Isolation.
@@ -52,6 +55,9 @@ type IsolationOptions struct {
 	// Empty means the CLI is not pointed at the proxy. The value is an origin
 	// with no path. The daemon appends /v1.
 	ProxyBase string
+	// ProxyGate is the per-run placeholder bearer. The loopback proxy
+	// replaces it and rejects any other bearer. Required when ProxyBase is set.
+	ProxyGate string
 	// ClaudeSandbox turns on Claude's Bash sandbox, fail closed.
 	ClaudeSandbox bool
 	// Protect are extra absolute paths both CLIs are denied (daemon secrets).
@@ -154,6 +160,13 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 	}
 	iso := Isolation{Home: o.Home}
 	home := o.UserHome
+	grokKey := GrokPlaceholderToken
+	if strings.EqualFold(strings.TrimSpace(o.Backend), "grok") && strings.TrimSpace(o.ProxyBase) != "" {
+		grokKey = strings.TrimSpace(o.ProxyGate)
+		if !validGrokGate(grokKey) {
+			return Isolation{}, fmt.Errorf("grok proxy requires a per-run placeholder key")
+		}
+	}
 	if o.Home != "" {
 		if !filepath.IsAbs(o.Home) {
 			return Isolation{}, fmt.Errorf("cli home must be absolute")
@@ -224,7 +237,7 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 			return Isolation{}, err
 		}
 		env["GROK_HOME"] = grokHome
-		if err := placeGrokPlaceholder(o.UserHome, grokHome); err != nil {
+		if err := placeGrokPlaceholder(o.UserHome, grokHome, grokKey); err != nil {
 			return Isolation{}, err
 		}
 		if err := os.WriteFile(filepath.Join(grokHome, "sandbox.toml"), []byte(grokSandboxTOML(o)), 0o600); err != nil {
@@ -237,7 +250,7 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 	}
 	if backend == "grok" {
 		// Policy env must not put a real key or the real API origin back.
-		env["XAI_API_KEY"] = GrokPlaceholderToken
+		env["XAI_API_KEY"] = grokKey
 		if base := strings.TrimRight(strings.TrimSpace(o.ProxyBase), "/"); base != "" {
 			chat := base + "/v1"
 			env["GROK_CLI_CHAT_PROXY_BASE_URL"] = chat
@@ -277,12 +290,29 @@ func linkCred(src, dst string) {
 
 // placeGrokPlaceholder writes the synthetic login into GROK_HOME. It never
 // writes the user's ~/.grok/auth.json and never links that file in.
-func placeGrokPlaceholder(userHome, grokHome string) error {
+// key is the placeholder bearer. The shared constant is used when the CLI
+// is not pointed at the loopback proxy.
+func placeGrokPlaceholder(userHome, grokHome, key string) error {
 	dst := filepath.Join(grokHome, "auth.json")
 	if userHome != "" && filepath.Clean(dst) == filepath.Clean(filepath.Join(userHome, ".grok", "auth.json")) {
 		return fmt.Errorf("refusing to replace the user grok login")
 	}
-	return writeGrokPlaceholder(dst)
+	return writeGrokAuth(dst, key)
+}
+
+func validGrokGate(s string) bool {
+	if len(s) < 16 || len(s) > 128 || s == GrokPlaceholderToken {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // GrokPlaceholderAuth is a synthetic login file. It contains no value from
@@ -294,16 +324,24 @@ const GrokPlaceholderAuth = `{"https://auth.x.ai::00000000-0000-4000-8000-000000
 // XAI_API_KEY. The host proxy replaces it and never forwards it.
 const GrokPlaceholderToken = "coi-placeholder-token"
 
-// writeGrokPlaceholder replaces path with a regular file. Remove drops a hard
-// link or a symlink and does not follow it, so the target file stays.
-func writeGrokPlaceholder(path string) error {
+// writeGrokAuth replaces path with a regular file whose key is the placeholder
+// bearer. Remove drops a hard link or a symlink and does not follow it, so
+// the target file stays.
+func writeGrokAuth(path, key string) error {
+	if key == "" {
+		key = GrokPlaceholderToken
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	return os.WriteFile(path, []byte(GrokPlaceholderAuth), 0o600)
+	body := GrokPlaceholderAuth
+	if key != GrokPlaceholderToken {
+		body = strings.Replace(GrokPlaceholderAuth, `"`+GrokPlaceholderToken+`"`, `"`+key+`"`, 1)
+	}
+	return os.WriteFile(path, []byte(body), 0o600)
 }
 
 // overrideNames are workspace files a CLI would read as configuration.

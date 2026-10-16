@@ -2,6 +2,7 @@ package coi
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/policy"
@@ -24,15 +26,18 @@ type egressToken struct{}
 // sets Authorization. A CONNECT proxy would hide that header inside TLS,
 // so it cannot inject the credential.
 type Egress struct {
-	dir      string
-	sock     string
-	ln       net.Listener
-	srv      *http.Server
-	token    string
-	bearer   func() (string, error)
-	hosts    map[string]bool
-	first    string
-	prefixes []string
+	dir         string
+	sock        string
+	ln          net.Listener
+	srv         *http.Server
+	token       string
+	bearer      func() (string, error)
+	hosts       map[string]bool
+	first       string
+	prefixes    []string
+	requireGate bool
+	gateMu      sync.Mutex
+	gates       map[string]struct{}
 }
 
 // StartEgress listens on a unix socket in a private 0700 directory under parent.
@@ -93,10 +98,12 @@ func StartEgress(parent string, hosts, prefixes []string, token string, trip htt
 }
 
 // StartLoopback listens on 127.0.0.1 and serves the same reverse proxy as
-// StartEgress. bearer is called per request and is not logged. The Grok CLI
-// speaks HTTP, so the chat client needs a TCP origin. A unix socket is what
-// the jailed COI forwarder uses; this listener is for a process that shares
-// the host network namespace.
+// StartEgress. bearer is called per accepted request and is not logged.
+// The listener injects that bearer only after Admit has registered the
+// presented placeholder for this bot run. Any other client is rejected.
+// The Grok CLI speaks HTTP, so the chat client needs a TCP origin. A unix
+// socket is what the jailed COI forwarder uses; this listener is for a
+// process that shares the host network namespace.
 func StartLoopback(hosts, prefixes []string, bearer func() (string, error), trip http.RoundTripper) (*Egress, error) {
 	if bearer == nil || len(hosts) == 0 {
 		return nil, ErrProxyUnavailable
@@ -132,9 +139,79 @@ func StartLoopback(hosts, prefixes []string, bearer func() (string, error), trip
 		_ = ln.Close()
 		return nil, ErrProxyUnavailable
 	}
-	eg := &Egress{ln: ln, bearer: bearer, hosts: allow, first: first, prefixes: resolved}
+	eg := &Egress{ln: ln, bearer: bearer, hosts: allow, first: first, prefixes: resolved, requireGate: true}
 	eg.serve(trip)
 	return eg, nil
+}
+
+// Admit registers one per-run placeholder bearer. The loopback proxy
+// replaces that bearer and rejects every other one, including the
+// well-known placeholder. The returned function removes it and is safe
+// to call more than once. A unix-socket proxy does not consult this set.
+func (e *Egress) Admit(secret string) func() {
+	if e == nil || !acceptableGate(secret) {
+		return func() {}
+	}
+	e.gateMu.Lock()
+	if e.gates == nil {
+		e.gates = map[string]struct{}{}
+	}
+	e.gates[secret] = struct{}{}
+	e.gateMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			if e == nil {
+				return
+			}
+			e.gateMu.Lock()
+			delete(e.gates, secret)
+			e.gateMu.Unlock()
+		})
+	}
+}
+
+func (e *Egress) admits(presented string) bool {
+	if e == nil || presented == "" {
+		return false
+	}
+	e.gateMu.Lock()
+	defer e.gateMu.Unlock()
+	ok := 0
+	pb := []byte(presented)
+	for g := range e.gates {
+		if subtle.ConstantTimeCompare(pb, []byte(g)) == 1 {
+			ok = 1
+		}
+	}
+	return ok == 1
+}
+
+func acceptableGate(s string) bool {
+	if len(s) < 16 || len(s) > 128 || s == PlaceholderToken {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func presentedBearer(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	h := r.Header.Get("Authorization")
+	const prefix = "bearer "
+	if len(h) < len(prefix) || !strings.EqualFold(h[:len(prefix)], prefix) {
+		return ""
+	}
+	return strings.TrimSpace(h[len(prefix):])
 }
 
 func (e *Egress) serve(trip http.RoundTripper) {
@@ -163,6 +240,10 @@ func (e *Egress) serve(trip http.RoundTripper) {
 	e.srv = &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !e.allowRequest(r) || !e.allowPath(r) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			if e.requireGate && !e.admits(presentedBearer(r)) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
