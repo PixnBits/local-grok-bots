@@ -187,4 +187,12 @@ Three `coi_call` rows are status `ok` with an empty error (probe, edit, copy). T
 
 The one strict hit is the public OIDC client id (36 characters) in `model-copy/logs/unified.jsonl`, six times, on Grok's `AuthManager::new` scope line. It is the client id compiled into Grok 1.0.52. The jail placeholder uses a different synthetic id, and the line records `GROK_AUTH` unset. The access token, the refresh token, the email, and the other private `auth.json` strings were absent from the workspace, `audit.log`, `daemon.log`, `state.db`, `state.db-wal`, and `state.db-shm`. `audit.log` `lgbr_` count is 0.
 
-The check daemon was still pid 703436 on `127.0.0.1:8139` when this section was written. The stop, credential-copy deletion, and post-stop gates follow.
+## Stop
+
+`SIGTERM` to pid 703436 only, after `ps` confirmed the command was `/tmp/lgb-coi-check`. The process exited. `ss -ltn` shows no listener on port 8139. Ports 8080, 8090, and 8095 were still listening. Pid 287544 was still `/tmp/lgb-dev`. Pid 510125 was still `lgb-voice-bin`.
+
+`r3/grok-home/.grok/auth.json` was removed after its inode was confirmed different from `/home/pixnbits/.grok/auth.json`. The user file was still there afterward, same inode, same size (1758 bytes), mode unchanged, nlink unchanged. There was no `auth.json.off`.
+
+## Gates
+
+Run from the worktree after the stop. `gofmt -l .` printed nothing (`gofmt_lines` 0). `go vet ./...` exited 0. `go test -race ./...` exited 0 (`internal/coi` 2.296s, `internal/daemon` 83.574s; unchanged packages were cache hits). `GOOS=darwin GOARCH=arm64 go build ./...` exited 0. The Seatbelt profile was not executed on this Linux host.
