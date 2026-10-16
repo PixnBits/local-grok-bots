@@ -28,6 +28,9 @@ func hasControllingTTY() bool {
 	return true
 }
 
+// PermissionPrompt reports a CLI asking a person for approval.
+func PermissionPrompt(line string) bool { return permissionText(line) }
+
 // permissionText reports a CLI asking a person for approval.
 // Structured stream events and a few plain prompt lines count.
 // Ordinary model text stays inside JSON token events and does not match.
