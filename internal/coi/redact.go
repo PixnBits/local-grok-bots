@@ -13,7 +13,10 @@ import (
 )
 
 const (
-	maxSecretFiles = 256
+	// A grok credential home holds bundled assets and session files after one
+	// launch, well past a few hundred files. A home larger than this is
+	// refused so redaction is never partial.
+	maxSecretFiles = 16384
 	maxSecretFile  = 64 << 10
 	minSecretLen   = 8
 )
