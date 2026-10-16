@@ -47,3 +47,17 @@ The first `DELETE /api/bots/<id>` returned 500 and left `cli/<id>` in place. The
 The COI bubblewrap jail hides an unrelated host pid. The jailed command does not keep the launcher's marker. Pid 1 in that jail is `bwrap`, and that process's environment file still contains the launcher's variable names. The command's own `/proc/self/environ` file was empty.
 
 On the live Grok turn, `/proc/1` was `systemd` and its environment names were empty. The daemon pid was visible. Its environment names were not returned. The turn's own environment names included the proxy variables and ordinary host names. No environment values were recorded.
+
+## Supervisor environment
+
+Date: 2026-10-16. Binary `/tmp/lgb-cred-check`. Listen address `127.0.0.1:8139`. Fresh data dir `/home/pixnbits/lgb-dev-data/cred-check3`. The daemon was started with `env -i`, a `PATH` that includes the Grok binary directory, and canary variables. It did not receive `AUTH_TOKEN`, `XAI_API_KEY`, or `GROK_*`. Listeners on 8080, 8090, and 8095, including pid 287544 (`/tmp/lgb-dev`), were left running.
+
+The COI jail's pid 1 was `bwrap`. Its environment names were only `PATH`. The forwarder and the probe carried the scrubbed child names: `HOME`, `LANG`, `LOGNAME`, `PATH`, `PWD`, `TMPDIR`, `USER`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME`. The probe also had `COI_FORWARD_URL`. No canary name and no daemon data or policy name was readable from any `/proc/*/environ` in that jail.
+
+A brokered `coi grok` call exited 0. `hello-from-coi.txt` is `hello-from-coi` plus one newline. Both `coi_call` rows were `ok`. The outer turn finished `done` and wrote `hello.txt` as `hello` plus one newline. Its environment names did not include the canaries or `AUTH_TOKEN`. They included `PATH`, `HOME`, `LANG`, `TERM`, `LGB_SPOOL`, `LGB_TOKEN`, `LGB_SESSION_MARKER`, `XAI_API_KEY`, the three proxy base URL names, and the `GROK_*` names this isolation sets. Grok's own sandbox also added pager, git, and cargo names.
+
+`secret_hits` was 0. A poll of the user login file recorded 101 samples, each with `nlink` 1. The credential copy was a new regular file, mode `0600`, a different inode, and it was deleted after the check. The user file kept the same inode and the same SHA-256.
+
+`SIGTERM` went only to the `/tmp/lgb-cred-check` pid. Port 8139 was free afterward. The other listeners were unchanged.
+
+The unix-socket egress used by the jailed forwarder is still outside the loopback per-run gate and is not recorded as `cli_proxy_request`.
