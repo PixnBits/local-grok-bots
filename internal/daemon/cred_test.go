@@ -204,6 +204,144 @@ func TestGrokProxyGateIsPerBotRun(t *testing.T) {
 	}
 }
 
+func TestDeleteBotReleasesProxySecret(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	real := filepath.Join(home, ".grok", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(real), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const marker = "unit-real-marker-value"
+	body := `{"https://auth.x.ai::x":{"key":"` + marker + `","expires_at":"2099-01-01T00:00:00Z"}}`
+	if err := os.WriteFile(real, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app := newApp(t, "", nil)
+	app.noGrokProxy = false
+	var calls atomic.Int32
+	app.grokTrip = captureTrip(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		return &http.Response{StatusCode: 204, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
+	})
+	srv := serve(t, app)
+	b1 := createBot(t, srv.URL, "One")
+	b2 := createBot(t, srv.URL, "Two")
+	ws := filepath.Join(app.cfg.DataDir, "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	first, err := app.cliIsolation(b1, "grok", ws, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := app.cliIsolation(b2, "grok", ws, "run-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if first.ReleaseGate != nil {
+			first.ReleaseGate()
+		}
+		if second.ReleaseGate != nil {
+			second.ReleaseGate()
+		}
+	})
+	k1 := envValue(first.Env, "XAI_API_KEY")
+	k2 := envValue(second.Env, "XAI_API_KEY")
+	origin1 := strings.TrimSuffix(envValue(first.Env, "GROK_CLI_CHAT_PROXY_BASE_URL"), "/v1")
+	origin2 := strings.TrimSuffix(envValue(second.Env, "GROK_CLI_CHAT_PROXY_BASE_URL"), "/v1")
+	client := &http.Client{Timeout: 2 * time.Second}
+	if code, _ := proxyDo(t, client, origin1+"/v1/ping", "Bearer "+k1); code != http.StatusNoContent {
+		t.Fatalf("before delete %d", code)
+	}
+	res, raw := do(t, http.MethodDelete, srv.URL+"/api/bots/"+b1.ID, nil, "")
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete %d %s", res.StatusCode, raw)
+	}
+	if _, err := os.Lstat(filepath.Join(app.cfg.DataDir, "cli", b1.ID)); !os.IsNotExist(err) {
+		t.Fatalf("cli dir remains: %v", err)
+	}
+	if code, _ := proxyDo(t, client, origin1+"/v1/ping", "Bearer "+k1); code != http.StatusForbidden {
+		t.Fatalf("secret still admitted after delete %d", code)
+	}
+	if code, _ := proxyDo(t, client, origin2+"/v1/ping", "Bearer "+k2); code != http.StatusNoContent {
+		t.Fatalf("other bot %d", code)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("upstream calls %d", calls.Load())
+	}
+	user, err := os.ReadFile(real)
+	if err != nil || string(user) != body {
+		t.Fatal("user login changed")
+	}
+}
+
+func TestDeleteBotReleasesProxySecretWhenRemoveFails(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	real := filepath.Join(home, ".grok", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(real), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const marker = "unit-real-marker-value"
+	if err := os.WriteFile(real, []byte(`{"https://auth.x.ai::x":{"key":"`+marker+`","expires_at":"2099-01-01T00:00:00Z"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app := newApp(t, "", nil)
+	app.noGrokProxy = false
+	app.grokTrip = captureTrip(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 204, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
+	})
+	srv := serve(t, app)
+	bot := createBot(t, srv.URL, "Kept")
+	ws := filepath.Join(app.cfg.DataDir, "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	iso, err := app.cliIsolation(bot, "grok", ws, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if iso.ReleaseGate != nil {
+			iso.ReleaseGate()
+		}
+	})
+	key := envValue(iso.Env, "XAI_API_KEY")
+	origin := strings.TrimSuffix(envValue(iso.Env, "GROK_CLI_CHAT_PROXY_BASE_URL"), "/v1")
+	kept := filepath.Join(app.cfg.DataDir, "cli-kept")
+	if err := os.Rename(filepath.Join(app.cfg.DataDir, "cli"), kept); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	canary := filepath.Join(outside, "canary")
+	if err := os.WriteFile(canary, []byte("canary-keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(app.cfg.DataDir, "cli")); err != nil {
+		t.Fatal(err)
+	}
+	res, raw := do(t, http.MethodDelete, srv.URL+"/api/bots/"+bot.ID, nil, "")
+	if res.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("delete %d %s", res.StatusCode, raw)
+	}
+	client := &http.Client{Timeout: 2 * time.Second}
+	if code, _ := proxyDo(t, client, origin+"/v1/ping", "Bearer "+key); code != http.StatusForbidden {
+		t.Fatalf("secret still admitted after failed delete %d", code)
+	}
+	got, err := os.ReadFile(canary)
+	if err != nil || string(got) != "canary-keep" {
+		t.Fatalf("canary %q %v", got, err)
+	}
+	auth := filepath.Join(kept, bot.ID, "home", ".grok", "auth.json")
+	if _, err := os.Lstat(auth); err != nil {
+		t.Fatalf("login tree %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(app.cfg.DataDir, "cli")); err != nil {
+		t.Fatalf("symlink parent %v", err)
+	}
+}
+
 func envValue(env []string, name string) string {
 	for _, kv := range env {
 		k, v, _ := strings.Cut(kv, "=")

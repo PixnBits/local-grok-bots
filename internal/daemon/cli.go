@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/audit"
@@ -418,6 +419,9 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 			return nil, fmt.Errorf("bot was deleted")
 		}
 		iso, err = clisession.PrepareIsolation(opts)
+		if err == nil && opts.ProxyGate != "" {
+			iso.ReleaseGate = a.trackGrokGate(bot.ID, runID, opts.ProxyGate)
+		}
 		a.credMu.Unlock()
 	} else {
 		iso, err = clisession.PrepareIsolation(opts)
@@ -433,9 +437,6 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 		return nil, err
 	}
 	iso.Protect = append([]string(nil), opts.Protect...)
-	if opts.ProxyGate != "" {
-		iso.ReleaseGate = a.admitGrokGate(bot.ID, runID, opts.ProxyGate)
-	}
 	a.noteBotProtect(botID, iso.Protect)
 	if strings.EqualFold(backend, "claude") {
 		if _, seen := a.loginChecked.LoadOrStore(botID, true); !seen {
@@ -461,7 +462,15 @@ func newProxyGate() (string, error) {
 	return "lgb_" + hex.EncodeToString(buf[:]), nil
 }
 
-func (a *App) admitGrokGate(botID, runID, secret string) func() {
+// gateHold is one admitted loopback secret. drop is safe to call twice.
+type gateHold struct {
+	drop func()
+}
+
+// trackGrokGate admits the secret and remembers it until the turn ends or
+// the bot is deleted. The caller holds credMu, which is also held across
+// releaseBotGates, so a delete cannot miss a secret admitted after it starts.
+func (a *App) trackGrokGate(botID, runID, secret string) func() {
 	if a == nil {
 		return func() {}
 	}
@@ -471,7 +480,57 @@ func (a *App) admitGrokGate(botID, runID, secret string) func() {
 	if eg == nil {
 		return func() {}
 	}
-	return eg.Admit(botID, runID, secret)
+	release := eg.Admit(botID, runID, secret)
+	hold := &gateHold{}
+	var once sync.Once
+	hold.drop = func() {
+		once.Do(func() {
+			release()
+			a.untrackGrokGate(botID, hold)
+		})
+	}
+	a.grokMu.Lock()
+	if a.grokGates == nil {
+		a.grokGates = map[string][]*gateHold{}
+	}
+	a.grokGates[botID] = append(a.grokGates[botID], hold)
+	a.grokMu.Unlock()
+	return hold.drop
+}
+
+func (a *App) untrackGrokGate(botID string, hold *gateHold) {
+	if a == nil || hold == nil {
+		return
+	}
+	a.grokMu.Lock()
+	defer a.grokMu.Unlock()
+	holds := a.grokGates[botID]
+	for i, h := range holds {
+		if h != hold {
+			continue
+		}
+		a.grokGates[botID] = append(holds[:i], holds[i+1:]...)
+		break
+	}
+	if len(a.grokGates[botID]) == 0 {
+		delete(a.grokGates, botID)
+	}
+}
+
+// releaseBotGates rejects every live secret for botID. The caller holds credMu.
+func (a *App) releaseBotGates(botID string) {
+	if a == nil || botID == "" {
+		return
+	}
+	a.grokMu.Lock()
+	holds := a.grokGates[botID]
+	delete(a.grokGates, botID)
+	a.grokMu.Unlock()
+	for _, h := range holds {
+		if h != nil && h.drop != nil {
+			h.drop()
+		}
+	}
 }
 
 func scrubHostGrokLogins(dataDir string) error {

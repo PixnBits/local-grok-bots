@@ -431,6 +431,8 @@ func (a *App) handleDeleteBot(w http.ResponseWriter, r *http.Request) {
 	a.goneBots.Store(id, struct{}{})
 	a.cancelBot(id)
 	a.credMu.Lock()
+	// Release before removal so a failed delete still rejects the secret.
+	a.releaseBotGates(id)
 	err := clisession.RemoveBotCLI(a.cfg.DataDir, id)
 	a.credMu.Unlock()
 	if err != nil {

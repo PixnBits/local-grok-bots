@@ -70,6 +70,9 @@ type App struct {
 	noGrokProxy bool
 	grokMu      sync.Mutex
 	grokProxy   *coi.Egress
+	// grokGates are live loopback secrets for each bot. credMu is held while
+	// a gate is added and while a bot's gates are released.
+	grokGates map[string][]*gateHold
 	// grokTrip, when set, replaces the loopback proxy's outbound transport.
 	// Tests use it. Production leaves it nil.
 	grokTrip http.RoundTripper
