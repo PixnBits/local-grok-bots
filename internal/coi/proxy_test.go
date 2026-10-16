@@ -136,20 +136,27 @@ func TestEgressPathAllowlistSkipsUpstream(t *testing.T) {
 	}
 }
 
-func TestStripCredentialHeaders(t *testing.T) {
+func TestForwardHeaderAllowlist(t *testing.T) {
 	h := http.Header{
-		"Authorization":       {"Bearer jail-authorization"},
-		"x-api-key":           {"jail-api-key"},
-		"Api-Key":             {"jail-api-key-2"},
-		"Cookie":              {"jail-cookie"},
-		"X-Custom-Token":      {"jail-custom-token"},
-		"X-Auth-Extra":        {"jail-auth-extra"},
-		"Proxy-Authorization": {"Basic jail-proxy"},
-		"X-Xai-Token-Auth":    {"jail-xai"},
-		"X-Request-Id":        {"keep-me"},
+		"Authorization":         {"Bearer jail-authorization"},
+		"x-api-key":             {"jail-api-key"},
+		"Api-Key":               {"jail-api-key-2"},
+		"Cookie":                {"jail-cookie"},
+		"X-Custom-Token":        {"jail-custom-token"},
+		"X-Auth-Extra":          {"jail-auth-extra"},
+		"Proxy-Authorization":   {"Basic jail-proxy"},
+		"X-Xai-Token-Auth":      {"jail-xai"},
+		"X-Request-Id":          {"drop-me"},
+		"Content-Type":          {"application/json"},
+		"Accept":                {"text/event-stream"},
+		"User-Agent":            {"grok-cli"},
+		"X-Grok-Model-Override": {"grok-build"},
 	}
-	stripCredentialHeaders(h)
-	if len(h) != 1 || h.Get("X-Request-Id") != "keep-me" {
+	keepForwardHeaders(h)
+	if h.Get("Content-Type") != "application/json" || h.Get("Accept") != "text/event-stream" || h.Get("User-Agent") != "grok-cli" || h.Get("X-Grok-Model-Override") != "grok-build" {
+		t.Fatalf("kept %v", h)
+	}
+	if len(h) != 4 {
 		t.Fatalf("left %v", h)
 	}
 }
@@ -180,7 +187,11 @@ func TestEgressStripsJailAuthHeaders(t *testing.T) {
 		"X-Xai-Token-Auth: jail-xai\r\n" +
 		"X-Custom-Token: jail-custom-token\r\n" +
 		"X-Auth-Extra: jail-auth-extra\r\n" +
-		"X-Request-Id: keep-me\r\n" +
+		"X-Request-Id: drop-me\r\n" +
+		"Content-Type: application/json\r\n" +
+		"Accept: text/event-stream\r\n" +
+		"User-Agent: grok-cli\r\n" +
+		"X-Grok-Model-Override: grok-build\r\n" +
 		"Connection: close\r\n\r\n"
 	if _, err := io.WriteString(conn, req); err != nil {
 		t.Fatal(err)
@@ -198,7 +209,10 @@ func TestEgressStripsJailAuthHeaders(t *testing.T) {
 	if got.Get("Authorization") != "Bearer real-token-value" {
 		t.Fatalf("auth %q", got.Get("Authorization"))
 	}
-	if got.Get("X-Request-Id") != "keep-me" {
+	if got.Get("Content-Type") != "application/json" || got.Get("Accept") != "text/event-stream" || got.Get("User-Agent") != "grok-cli" || got.Get("X-Grok-Model-Override") != "grok-build" {
+		t.Fatalf("forwarded headers %v", got)
+	}
+	if got.Get("X-Request-Id") != "" {
 		t.Fatalf("request id %q", got.Get("X-Request-Id"))
 	}
 	blob := fmt.Sprint(got)

@@ -92,7 +92,7 @@ func StartEgress(parent string, hosts, prefixes []string, token string, trip htt
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(&url.URL{Scheme: "https", Host: eg.first})
 			pr.Out.Host = eg.first
-			stripCredentialHeaders(pr.Out.Header)
+			keepForwardHeaders(pr.Out.Header)
 			pr.Out.Header.Set("Authorization", "Bearer "+eg.token)
 		},
 		Transport: transport,
@@ -286,17 +286,34 @@ func normalizeProxyPath(raw string) (string, bool) {
 	return trimmed, true
 }
 
-// stripCredentialHeaders removes caller credentials before the proxy sets
-// the real bearer. Matching is case-insensitive. A header whose name
-// contains "token" or "auth" is treated as a credential, along with the
-// common key and cookie names that do not.
-func stripCredentialHeaders(h http.Header) {
+// forwardHeaders are copied from the caller. Authorization is not one of
+// them; the proxy sets that itself. Names match without regard to case.
+var forwardHeaders = map[string]bool{
+	"content-type":             true,
+	"content-length":           true,
+	"accept":                   true,
+	"accept-encoding":          true,
+	"user-agent":               true,
+	"x-grok-model-override":    true,
+	"x-grok-client-version":    true,
+	"x-grok-client-mode":       true,
+	"x-grok-client-identifier": true,
+	"x-grok-experiments":       true,
+	"x-grok-conv-id":           true,
+	"x-grok-req-id":            true,
+	"x-grok-session-id":        true,
+	"x-grok-agent-id":          true,
+	"x-grok-turn-id":           true,
+	"x-grok-transient-retry":   true,
+}
+
+func keepForwardHeaders(h http.Header) {
 	if len(h) == 0 {
 		return
 	}
 	var drop []string
 	for k := range h {
-		if credentialHeader(k) {
+		if !forwardHeaders[strings.ToLower(strings.TrimSpace(k))] {
 			drop = append(drop, k)
 		}
 	}
@@ -304,15 +321,6 @@ func stripCredentialHeaders(h http.Header) {
 		delete(h, k)
 		h.Del(k)
 	}
-}
-
-func credentialHeader(name string) bool {
-	n := strings.ToLower(strings.TrimSpace(name))
-	switch n {
-	case "cookie", "api-key", "x-api-key":
-		return true
-	}
-	return strings.Contains(n, "token") || strings.Contains(n, "auth")
 }
 
 func badProxyPath(s string) bool {
