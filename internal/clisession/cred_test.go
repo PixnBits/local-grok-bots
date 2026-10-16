@@ -220,6 +220,31 @@ func TestRemoveBotCLIUnlinksSymlinks(t *testing.T) {
 	assertCanary(t, canary, body)
 }
 
+func TestRemoveBotCLIChmodsUnreadableDir(t *testing.T) {
+	data := t.TempDir()
+	blocked := filepath.Join(data, "cli", "bot1", "home", "blocked")
+	if err := os.MkdirAll(blocked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(blocked, "inside")
+	if err := os.WriteFile(marker, []byte("inside"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(blocked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o700) })
+	if err := RemoveBotCLI(data, "bot1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(data, "cli", "bot1")); !os.IsNotExist(err) {
+		t.Fatalf("bot dir remains: %v", err)
+	}
+	if _, err := os.Lstat(marker); !os.IsNotExist(err) {
+		t.Fatalf("unreadable child remains: %v", err)
+	}
+}
+
 func TestGrokHomeSymlinkRefused(t *testing.T) {
 	data := t.TempDir()
 	outside := t.TempDir()

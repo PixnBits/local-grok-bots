@@ -283,6 +283,17 @@ func (d *dirFD) removeEntry(name string) error {
 		return errors.New("bad path component")
 	}
 	child, err := d.openDir(name)
+	if err != nil && errors.Is(err, unix.EACCES) {
+		// A mode 000 directory is still owned by this process. chmod does not
+		// follow the entry; openDir already rejected a symlink.
+		ch := unix.Fchmodat(d.fd, name, 0o700, unix.AT_SYMLINK_NOFOLLOW)
+		if errors.Is(ch, unix.EOPNOTSUPP) || errors.Is(ch, unix.ENOSYS) {
+			ch = unix.Fchmodat(d.fd, name, 0o700, 0)
+		}
+		if ch == nil {
+			child, err = d.openDir(name)
+		}
+	}
 	if err != nil {
 		if errors.Is(err, ErrCredSymlink) || errors.Is(err, unix.ENOTDIR) {
 			uerr := unix.Unlinkat(d.fd, name, 0)
