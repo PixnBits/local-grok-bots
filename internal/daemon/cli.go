@@ -386,6 +386,8 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isola
 		}
 		return nil, err
 	}
+	iso.Protect = append([]string(nil), opts.Protect...)
+	a.noteBotProtect(botID, iso.Protect)
 	if strings.EqualFold(backend, "claude") {
 		if _, seen := a.loginChecked.LoadOrStore(botID, true); !seen {
 			a.recordClaudeLogin(botID, ws, iso, ownHome)
@@ -448,10 +450,18 @@ func botGrants(bot store.Bot) clisession.Grants {
 // daemonSecrets are paths no CLI tool or shell may read: the admin token,
 // the database, policy.toml, DATA_DIR/cli (MCP tokens and CLI state),
 // DATA_DIR/coi (staged jail homes and the proxy socket), and each tools.cli
-// credential_home from the loaded policy. The workspace is not included.
-// DATA_DIR/cli and DATA_DIR/coi are created so Grok, which only denies paths
-// that exist, still binds those directories.
+// credential_home from the policy read for this call. The workspace is not
+// included. DATA_DIR/cli and DATA_DIR/coi are created so Grok, which only
+// denies paths that exist, still binds those directories.
 func (a *App) daemonSecrets() []string {
+	pol := a.policy
+	if fresh, err := a.policyNow(); err == nil && (strings.TrimSpace(a.cfg.PolicyPath) == "" || fresh.Loaded) {
+		pol = fresh
+	}
+	return a.secretsFrom(pol)
+}
+
+func (a *App) secretsFrom(pol policy.Policy) []string {
 	dir, err := filepath.Abs(a.cfg.DataDir)
 	if err != nil {
 		return nil
@@ -476,7 +486,7 @@ func (a *App) daemonSecrets() []string {
 	for _, p := range out {
 		seen[filepath.Clean(p)] = true
 	}
-	for _, tool := range a.policy.CLITools {
+	for _, tool := range pol.CLITools {
 		home := filepath.Clean(strings.TrimSpace(tool.CredentialHome))
 		if home == "" || home == "." || !filepath.IsAbs(home) || seen[home] {
 			continue
@@ -485,6 +495,33 @@ func (a *App) daemonSecrets() []string {
 		out = append(out, home)
 	}
 	return out
+}
+
+// noteBotProtect stores the deny list just written for this bot's turn.
+func (a *App) noteBotProtect(botID string, paths []string) {
+	if a == nil || botID == "" {
+		return
+	}
+	a.protectMu.Lock()
+	defer a.protectMu.Unlock()
+	if a.protectByBot == nil {
+		a.protectByBot = map[string][]string{}
+	}
+	a.protectByBot[botID] = append([]string(nil), paths...)
+}
+
+// botProtect is the deny list noted for this bot, if a turn wrote one.
+func (a *App) botProtect(botID string) ([]string, bool) {
+	if a == nil || botID == "" {
+		return nil, false
+	}
+	a.protectMu.Lock()
+	defer a.protectMu.Unlock()
+	paths, ok := a.protectByBot[botID]
+	if !ok {
+		return nil, false
+	}
+	return append([]string(nil), paths...), true
 }
 
 // claudeSandboxMissing lists what Claude's sandbox needs and this host lacks.

@@ -191,6 +191,89 @@ max_calls_per_hour = 1
 	}
 }
 
+func TestTurnDeniesCredentialHomeAddedAfterStartup(t *testing.T) {
+	old := claudeSandboxMissing
+	claudeSandboxMissing = func() []string { return nil }
+	t.Cleanup(func() { claudeSandboxMissing = old })
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	homeA := filepath.Join(dir, "homes", "grok")
+	homeB := filepath.Join(dir, "homes", "later")
+	if err := os.MkdirAll(homeA, 0o700); err != nil || os.MkdirAll(homeB, 0o700) != nil {
+		t.Fatal(err)
+	}
+	policyPath := filepath.Join(dir, "policy.toml")
+	write := func(homes ...string) {
+		t.Helper()
+		var b strings.Builder
+		b.WriteString("[backend]\nbackend = \"claude\"\n[timers]\nenabled = false\n")
+		for i, home := range homes {
+			fmt.Fprintf(&b, "[[tools.cli]]\nname = %q\npath = \"/usr/bin/tool%d\"\ncredential_home = %q\ntimeout = \"1s\"\nmax_output = 1\nmax_calls_per_hour = 1\n",
+				[]string{"grok", "later"}[i], i, home)
+		}
+		if err := os.WriteFile(policyPath, []byte(b.String()), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(homeA)
+	app := newCLIApp(t, dir, policyPath)
+	before := app.daemonSecrets()
+	if !strings.Contains("\n"+strings.Join(before, "\n")+"\n", "\n"+homeA+"\n") || strings.Contains("\n"+strings.Join(before, "\n")+"\n", "\n"+homeB+"\n") {
+		t.Fatalf("startup secrets = %v", before)
+	}
+	write(homeA, homeB)
+	ws := filepath.Join(dir, "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bot := store.Bot{ID: "b1"}
+	iso, err := app.cliIsolation(bot, "claude", ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(iso.SettingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "Read(/"+homeB+")") {
+		t.Fatalf("claude settings omit the new home: %s", raw)
+	}
+	if !coiListed(iso.Protect, homeB) {
+		t.Fatalf("turn protect %v lacks %s", iso.Protect, homeB)
+	}
+	giso, err := app.cliIsolation(bot, "grok", ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	toml, err := os.ReadFile(filepath.Join(dir, "cli", "b1", "home", ".grok", "sandbox.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(toml), strconv.Quote(homeB)) {
+		t.Fatalf("grok deny omits the new home:\n%s", toml)
+	}
+	if !coiListed(giso.Protect, homeB) {
+		t.Fatalf("grok turn protect %v lacks %s", giso.Protect, homeB)
+	}
+	run, _, err := app.startLGB(context.Background(), bot, "run1", ws)
+	if err != nil || run == nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(run.stop)
+	if !run.protectSet || !coiListed(run.protect, homeB) {
+		t.Fatalf("run deny list %v set=%v", run.protect, run.protectSet)
+	}
+}
+
+func coiListed(paths []string, home string) bool {
+	for _, p := range paths {
+		if p == home {
+			return true
+		}
+	}
+	return false
+}
+
 func TestClaudeSandboxUnavailableFailsClosed(t *testing.T) {
 	old := claudeSandboxMissing
 	claudeSandboxMissing = func() []string { return []string{"socat"} }

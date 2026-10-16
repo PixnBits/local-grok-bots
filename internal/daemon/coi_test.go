@@ -582,6 +582,28 @@ func (f *coiFix) assertPrompt(t *testing.T, source, rule string) {
 	}
 }
 
+func TestCOIRefusesCredentialHomeOutsideTurn(t *testing.T) {
+	f := setupCOI(t, 5, nil)
+	f.run.protect = f.app.daemonSecrets()
+	f.run.protectSet = true
+	if !coi.Covers(f.run.protect, f.cred) {
+		t.Fatalf("snapshot %v lacks %s", f.run.protect, f.cred)
+	}
+	later := filepath.Join(f.dir, "later-home")
+	if err := os.MkdirAll(later, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.writeTools(t, f.entry("fake", f.bin, f.cred, f.bots, 5)+f.entry("later", f.bin, later, f.bots, 5))
+	code, out := f.coi(t, "later", "--version")
+	if code != 1 || out != "coi: credential home is not allowed" || f.ran() {
+		t.Fatalf("later %d %q ran=%v", code, out, f.ran())
+	}
+	code, out = f.coi(t, "fake", "--version")
+	if code != 0 || !f.ran() {
+		t.Fatalf("original %d %q", code, out)
+	}
+}
+
 func TestCOIDoesNotBlockLGB(t *testing.T) {
 	f := setupCOI(t, 5, nil)
 	start := time.Now()

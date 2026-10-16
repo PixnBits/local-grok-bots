@@ -275,3 +275,31 @@ func Overlaps(a, b string) bool {
 	}
 	return hasPathPrefix(a, b) || hasPathPrefix(b, a)
 }
+
+// Covers reports whether path is a root or a path inside one.
+// A symlink is covered when its target is.
+func Covers(roots []string, path string) bool {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "" || path == "." || !filepath.IsAbs(path) {
+		return false
+	}
+	cands := []string{path}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		resolved = filepath.Clean(resolved)
+		if resolved != path {
+			cands = append(cands, resolved)
+		}
+	}
+	for _, root := range roots {
+		root = filepath.Clean(strings.TrimSpace(root))
+		if root == "" || root == "." || root == string(filepath.Separator) || !filepath.IsAbs(root) {
+			continue
+		}
+		for _, cand := range cands {
+			if hasPathPrefix(root, cand) {
+				return true
+			}
+		}
+	}
+	return false
+}

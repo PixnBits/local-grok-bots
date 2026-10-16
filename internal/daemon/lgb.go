@@ -95,19 +95,21 @@ exit "$code"
 
 // lgbRun is one run's spool. stop() ends it and invalidates the token.
 type lgbRun struct {
-	a      *App
-	bot    store.Bot
-	runID  string
-	token  string
-	root   string
-	req    *spoolDir
-	resp   *spoolDir
-	cancel context.CancelFunc
-	done   chan struct{}
-	mu     sync.Mutex
-	calls  int
-	coiWG  sync.WaitGroup
-	coiSem chan struct{}
+	a          *App
+	bot        store.Bot
+	runID      string
+	token      string
+	root       string
+	req        *spoolDir
+	resp       *spoolDir
+	cancel     context.CancelFunc
+	done       chan struct{}
+	mu         sync.Mutex
+	calls      int
+	coiWG      sync.WaitGroup
+	coiSem     chan struct{}
+	protect    []string
+	protectSet bool
 }
 
 // startLGB prepares DATA_DIR/workspace/<bot>/.lgb and starts answering. It
@@ -151,6 +153,10 @@ func (a *App) startLGB(ctx context.Context, bot store.Bot, runID, ws string) (*l
 	cctx, cancel := context.WithCancel(ctx)
 	r := &lgbRun{a: a, bot: bot, runID: runID, token: "lgbr_" + hex.EncodeToString(buf), root: root,
 		req: req, resp: resp, cancel: cancel, done: make(chan struct{}), coiSem: make(chan struct{}, coiMaxConcurrent)}
+	if paths, ok := a.botProtect(bot.ID); ok {
+		r.protect = paths
+		r.protectSet = true
+	}
 	a.noteRunToken(r.token, bot.ID, runID)
 	go r.loop(cctx)
 	env := map[string]string{

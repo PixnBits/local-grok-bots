@@ -80,6 +80,12 @@ func (r *lgbRun) execCOI(ctx context.Context, args []string) (int, string) {
 		r.auditCOI(name, rest, coi.StatusDenied, "not granted", tool.CredentialHome, nil, 0, false)
 		return 1, "coi: not granted"
 	}
+	// The turn's deny list is fixed when its settings were written. A home
+	// that was not on that list is not read.
+	if !r.allowsCredentialHome(tool.CredentialHome) {
+		r.auditCOI(name, rest, coi.StatusDenied, "credential home is not allowed", tool.CredentialHome, nil, 0, false)
+		return 1, "coi: credential home is not allowed"
+	}
 	// Best-effort secret list so a denial still redacts values from the
 	// credential home. A read failure is denied below, after arg checks,
 	// and does not consume an hourly slot.
@@ -152,6 +158,15 @@ func (r *lgbRun) execCOI(ctx context.Context, args []string) (int, string) {
 	}
 	r.auditCOI(name, rest, res.Status, msg, ready.CredentialHome, secrets, 0, false)
 	return 1, "coi: " + coi.RedactOutput(msg, paths, secrets)
+}
+
+// allowsCredentialHome reports whether this turn's deny list includes home.
+// A run that never wrote settings does not have a list.
+func (r *lgbRun) allowsCredentialHome(home string) bool {
+	if r == nil || !r.protectSet {
+		return true
+	}
+	return coi.Covers(r.protect, home)
 }
 
 func (r *lgbRun) auditSandbox(name string, args []string, credHome string, secrets []string) {

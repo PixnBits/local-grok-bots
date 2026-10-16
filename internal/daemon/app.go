@@ -58,6 +58,10 @@ type App struct {
 	// The value is the bot and run the token was issued for.
 	lgbMu   sync.Mutex
 	lgbLive map[string]lgbCred
+	// protectByBot is the path deny list written for the bot's current turn.
+	// The broker will not use a credential home that is absent from it.
+	protectMu    sync.Mutex
+	protectByBot map[string][]string
 	// coiCap counts brokered host-CLI calls per bot.
 	coiOnce sync.Once
 	coiCap  *coi.HourCap
