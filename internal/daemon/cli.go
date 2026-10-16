@@ -578,8 +578,24 @@ func (a *App) ensureGrokProxy(userHome string) (string, error) {
 	if err != nil {
 		return "", errGrokProxy
 	}
+	eg.SetAudit(func(botID, runID, path string, status int) {
+		a.auditProxyRequest(botID, runID, path, status)
+	})
 	a.grokProxy = eg
 	return eg.Base(), nil
+}
+
+func (a *App) auditProxyRequest(botID, runID, path string, status int) {
+	if a == nil || a.audit == nil || !a.audit.Enabled() {
+		return
+	}
+	a.audit.Write(map[string]any{
+		"event":  "cli_proxy_request",
+		"bot_id": botID,
+		"run_id": runID,
+		"path":   path,
+		"status": status,
+	})
 }
 
 var errGrokProxy = errors.New("grok credential proxy is not available, so the turn was refused")

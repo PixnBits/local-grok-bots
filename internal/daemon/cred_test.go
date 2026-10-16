@@ -342,6 +342,87 @@ func TestDeleteBotReleasesProxySecretWhenRemoveFails(t *testing.T) {
 	}
 }
 
+func TestGrokProxyRequestIsAudited(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	real := filepath.Join(home, ".grok", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(real), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const marker = "unit-real-marker-value"
+	if err := os.WriteFile(real, []byte(`{"https://auth.x.ai::x":{"key":"`+marker+`","expires_at":"2099-01-01T00:00:00Z"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))
+	app.noGrokProxy = false
+	app.grokTrip = captureTrip(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 204, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
+	})
+	logPath := filepath.Join(dir, "audit.log")
+	lg, err := audit.Open(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.audit = lg
+	ws := filepath.Join(dir, "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	iso, err := app.cliIsolation(store.Bot{ID: "b1"}, "grok", ws, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if iso.ReleaseGate != nil {
+			iso.ReleaseGate()
+		}
+	})
+	key := envValue(iso.Env, "XAI_API_KEY")
+	origin := strings.TrimSuffix(envValue(iso.Env, "GROK_CLI_CHAT_PROXY_BASE_URL"), "/v1")
+	const headerMark = "unit-header-marker"
+	const bodyMark = "unit-body-marker"
+	const queryMark = "unit-query-marker"
+	req, err := http.NewRequest(http.MethodPost, origin+"/v1/ping?q="+queryMark, strings.NewReader(bodyMark))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("X-Secret", headerMark)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	if err := lg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	for _, want := range []string{
+		`"event":"cli_proxy_request"`,
+		`"bot_id":"b1"`,
+		`"run_id":"run-1"`,
+		`"path":"/v1/ping"`,
+		`"status":204`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %s", want)
+		}
+	}
+	for _, bad := range []string{key, marker, headerMark, bodyMark, queryMark, "Authorization", "X-Secret"} {
+		if strings.Contains(text, bad) {
+			t.Fatal("audit contains a secret or header")
+		}
+	}
+}
+
 func envValue(env []string, name string) string {
 	for _, kv := range env {
 		k, v, _ := strings.Cut(kv, "=")

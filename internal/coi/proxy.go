@@ -38,6 +38,9 @@ type Egress struct {
 	requireGate bool
 	gateMu      sync.Mutex
 	gates       map[string]gateBinding
+	// onAudit records one loopback request. It is not used for a unix socket.
+	// The callback receives the bot, the run, the normalized path, and the status.
+	onAudit func(botID, runID, path string, status int)
 }
 
 // gateBinding is the bot and run a placeholder bearer was admitted for.
@@ -178,6 +181,30 @@ func (e *Egress) Admit(botID, runID, secret string) func() {
 	}
 }
 
+// SetAudit registers the loopback request record. A nil function disables it.
+// The callback must not expect headers, a body, or the presented bearer.
+func (e *Egress) SetAudit(fn func(botID, runID, path string, status int)) {
+	if e == nil {
+		return
+	}
+	e.gateMu.Lock()
+	e.onAudit = fn
+	e.gateMu.Unlock()
+}
+
+func (e *Egress) note(botID, runID, path string, status int) {
+	if e == nil || !e.requireGate {
+		return
+	}
+	e.gateMu.Lock()
+	fn := e.onAudit
+	e.gateMu.Unlock()
+	if fn == nil {
+		return
+	}
+	fn(botID, runID, path, status)
+}
+
 func (e *Egress) admits(botID, runID, presented string) bool {
 	if e == nil || presented == "" || botID == "" || runID == "" {
 		return false
@@ -265,25 +292,69 @@ func (e *Egress) serve(trip http.RoundTripper) {
 	}
 	e.srv = &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			botID, runID, _, fwd, ok := e.prepare(r)
+			botID, runID, norm, fwd, ok := e.prepare(r)
 			if !ok || fwd == nil {
 				http.Error(w, "forbidden", http.StatusForbidden)
+				e.note(botID, runID, norm, http.StatusForbidden)
 				return
 			}
 			if e.requireGate && !e.admits(botID, runID, presentedBearer(r)) {
 				http.Error(w, "forbidden", http.StatusForbidden)
+				e.note(botID, runID, norm, http.StatusForbidden)
 				return
 			}
 			tok, err := e.currentToken()
 			if err != nil || tok == "" {
 				http.Error(w, "proxy is not available", http.StatusServiceUnavailable)
+				e.note(botID, runID, norm, http.StatusServiceUnavailable)
 				return
 			}
-			proxy.ServeHTTP(w, fwd.WithContext(context.WithValue(fwd.Context(), egressToken{}, tok)))
+			dst := w
+			var sw *statusWriter
+			if e.requireGate {
+				sw = &statusWriter{ResponseWriter: w}
+				dst = sw
+			}
+			proxy.ServeHTTP(dst, fwd.WithContext(context.WithValue(fwd.Context(), egressToken{}, tok)))
+			if sw != nil {
+				e.note(botID, runID, norm, sw.status())
+			}
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() { _ = e.srv.Serve(e.ln) }()
+}
+
+// statusWriter records the response status. Unwrap lets the reverse proxy flush.
+type statusWriter struct {
+	http.ResponseWriter
+	code int
+	set  bool
+}
+
+func (s *statusWriter) WriteHeader(code int) {
+	if s.set {
+		return
+	}
+	s.set = true
+	s.code = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusWriter) Write(p []byte) (int, error) {
+	if !s.set {
+		s.WriteHeader(http.StatusOK)
+	}
+	return s.ResponseWriter.Write(p)
+}
+
+func (s *statusWriter) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
+func (s *statusWriter) status() int {
+	if !s.set || s.code == 0 {
+		return http.StatusOK
+	}
+	return s.code
 }
 
 func (e *Egress) currentToken() (string, error) {
