@@ -22,6 +22,7 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/id"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
+	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
@@ -290,10 +291,14 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		if fresh && strings.TrimSpace(res.SessionID) == "" {
 			_ = a.st.SetBotSession(bot.ID, "")
 		}
-		// A sandbox that cannot be applied must not continue. Claude's
+		// A bridge that cannot be applied must not continue. A sandbox that
+		// cannot be applied must not continue either. Claude's
 		// failIfUnavailable exits at startup. Grok does the same for a custom
 		// profile, and a built-in profile is refused before the process starts.
-		if iso != nil && strings.TrimSpace(res.Text) == "" && cliSandboxFailed(backend, iso, err) {
+		var bridge *clisession.BridgeError
+		if errors.As(err, &bridge) {
+			a.recordBridge(bot.ID)
+		} else if iso != nil && strings.TrimSpace(res.Text) == "" && cliSandboxFailed(backend, iso, err) {
 			why := audit.RedactText(err.Error())
 			a.recordSandboxRefusal(bot.ID, backend, why)
 			if strings.EqualFold(backend, "grok") {
@@ -435,6 +440,15 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 			a.recordSandboxRefusal(botID, se.Backend, se.Error())
 		}
 		return nil, err
+	}
+	if strings.EqualFold(backend, "grok") && runtime.GOOS == "linux" {
+		if berr := a.attachGrokBridge(&iso, bot, runID, opts.Grants); berr != nil {
+			if iso.ReleaseGate != nil {
+				iso.ReleaseGate()
+			}
+			a.recordBridge(botID)
+			return nil, berr
+		}
 	}
 	iso.Protect = append([]string(nil), opts.Protect...)
 	a.noteBotProtect(botID, iso.Protect)
@@ -653,6 +667,117 @@ func (a *App) auditCredSymlink(botID, runID string) {
 	a.log(botID, "cli_cred_symlink_refused", fields)
 	if a.audit != nil && a.audit.Enabled() {
 		rec := map[string]any{"event": "cli_cred_symlink_refused", "bot_id": botID}
+		for k, v := range fields {
+			rec[k] = v
+		}
+		a.audit.Write(rec)
+	}
+}
+
+// attachGrokBridge points a Linux Grok jail at the credential proxy and, when
+// the bot has a net grant, at an allowlisting HTTP proxy. Both are unix
+// sockets. The in-jail forwarder publishes them on 127.0.0.1. A failure here
+// refuses the turn.
+func (a *App) attachGrokBridge(iso *clisession.Isolation, bot store.Bot, runID string, grants clisession.Grants) error {
+	if a == nil || iso == nil || runtime.GOOS != "linux" {
+		return nil
+	}
+	needCred := envHasPrefix(iso.Env, "GROK_CLI_CHAT_PROXY_BASE_URL=http")
+	if !needCred && !grants.Net {
+		return nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return bridgeErr(err)
+	}
+	args := []string{"--coi-forward"}
+	var binds [][2]string
+	if needCred {
+		if err := a.ensureGrokUnix(); err != nil {
+			return bridgeErr(err)
+		}
+		a.grokMu.Lock()
+		eg := a.grokProxy
+		a.grokMu.Unlock()
+		if eg == nil || eg.Sock() == "" {
+			return bridgeErr(nil)
+		}
+		binds = append(binds, [2]string{eg.Sock(), clisession.JailProxySock})
+		args = append(args,
+			"--sock", clisession.JailProxySock,
+			"--keep-key",
+			"--env", "GROK_CLI_CHAT_PROXY_BASE_URL",
+			"--env", "GROK_XAI_API_BASE_URL",
+			"--env", "XAI_API_BASE_URL",
+			"--prefix", "/bots/"+bot.ID+"/runs/"+runID+"/v1",
+		)
+	}
+	var egress *sandbox.HTTPAllow
+	if grants.Net {
+		parent, err := filepath.Abs(filepath.Join(a.cfg.DataDir, "cli-egress"))
+		if err != nil {
+			return bridgeErr(err)
+		}
+		egress, err = sandbox.StartHTTPAllowProxy(parent, grants.NetAllow, nil)
+		if err != nil {
+			return bridgeErr(err)
+		}
+		binds = append(binds, [2]string{egress.Sock(), clisession.JailEgressSock})
+		args = append(args, "--http-sock", clisession.JailEgressSock)
+	}
+	iso.ForwardBin = exe
+	iso.ForwardArgs = args
+	iso.ExtraBinds = binds
+	if egress != nil {
+		prev := iso.ReleaseGate
+		iso.ReleaseGate = func() {
+			egress.Close()
+			if prev != nil {
+				prev()
+			}
+		}
+	}
+	return nil
+}
+
+func (a *App) ensureGrokUnix() error {
+	if a == nil {
+		return errGrokProxy
+	}
+	a.grokMu.Lock()
+	defer a.grokMu.Unlock()
+	if a.grokProxy == nil {
+		return errGrokProxy
+	}
+	parent, err := filepath.Abs(filepath.Join(a.cfg.DataDir, "cli-proxy"))
+	if err != nil {
+		return err
+	}
+	return a.grokProxy.ListenUnix(parent)
+}
+
+func bridgeErr(err error) error {
+	if err == nil {
+		err = errors.New("credential bridge is not available")
+	}
+	return &clisession.BridgeError{Err: err}
+}
+
+func envHasPrefix(env []string, prefix string) bool {
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) recordBridge(botID string) {
+	const why = "credential bridge is not available"
+	fields := map[string]any{"backend": "grok", "reason": why}
+	a.log(botID, "cli_bridge_unavailable", fields)
+	if a.audit != nil && a.audit.Enabled() {
+		rec := map[string]any{"event": "cli_bridge_unavailable", "bot_id": botID}
 		for k, v := range fields {
 			rec[k] = v
 		}

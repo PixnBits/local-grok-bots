@@ -4,6 +4,7 @@ package clisession
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -20,6 +21,10 @@ func wrapGrokJail(ctx context.Context, bin string, args []string, spec Spec) (*e
 	}
 	bargs, err := grokBwrapArgs(bin, args, spec)
 	if err != nil {
+		var bridge *BridgeError
+		if errors.As(err, &bridge) {
+			return nil, err
+		}
 		return nil, &SandboxError{Backend: "grok", Err: err}
 	}
 	cmd := exec.CommandContext(ctx, bwrap, bargs...)
@@ -43,10 +48,11 @@ func grokBwrapArgs(bin string, args []string, spec Spec) ([]string, error) {
 	args = stripSandboxFlag(args)
 	// Nested Grok bwrap cannot create a user namespace when unprivileged
 	// user namespaces are restricted. This jail is the pid boundary.
-	// Network is shared so the loopback credential proxy stays reachable.
+	// The network namespace is empty. Host sockets are bind-mounted and an
+	// in-jail forwarder publishes them on 127.0.0.1.
 	out := []string{
 		"--unshare-user", "--unshare-pid", "--unshare-uts", "--unshare-ipc",
-		"--die-with-parent", "--clearenv",
+		"--unshare-net", "--die-with-parent", "--new-session", "--clearenv",
 	}
 	for _, dir := range []string{"/usr", "/bin", "/lib", "/lib64", "/etc"} {
 		out = roBindDir(out, dir)
@@ -103,7 +109,7 @@ func grokBwrapArgs(bin string, args []string, spec Spec) ([]string, error) {
 	out = append(out, "--setenv", "PATH", "/usr/bin:/bin", "--setenv", "PWD", ws, "--setenv", "TMPDIR", "/tmp")
 	for _, e := range env {
 		k, v, ok := strings.Cut(e, "=")
-		if !ok || k == "" {
+		if !ok || k == "" || dropJailProxyEnv(k) {
 			continue
 		}
 		if k == "TMPDIR" {
@@ -111,9 +117,70 @@ func grokBwrapArgs(bin string, args []string, spec Spec) ([]string, error) {
 		}
 		out = append(out, "--setenv", k, v)
 	}
-	out = append(out, "--", resolved)
-	out = append(out, args...)
+	entry := resolved
+	entryArgs := append([]string{}, args...)
+	if spec.Isolate != nil && strings.TrimSpace(spec.Isolate.ForwardBin) != "" {
+		fwd, ferr := resolvePlainFile(spec.Isolate.ForwardBin)
+		if ferr != nil || len(spec.Isolate.ForwardArgs) == 0 {
+			return nil, &BridgeError{Err: fmt.Errorf("credential bridge is not available")}
+		}
+		if err := appendExtraBinds(&out, spec.Isolate.ExtraBinds); err != nil {
+			return nil, &BridgeError{Err: err}
+		}
+		if fwd != resolved {
+			out = append(out, "--ro-bind", fwd, fwd)
+		}
+		entry = fwd
+		entryArgs = append(append([]string{}, spec.Isolate.ForwardArgs...), "--", resolved)
+		entryArgs = append(entryArgs, args...)
+	}
+	out = append(out, "--", entry)
+	out = append(out, entryArgs...)
 	return out, nil
+}
+
+func dropJailProxyEnv(k string) bool {
+	switch strings.ToUpper(k) {
+	case "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY":
+		return true
+	default:
+		return false
+	}
+}
+
+func resolvePlainFile(path string) (string, error) {
+	clean := filepath.Clean(path)
+	if !filepath.IsAbs(clean) {
+		return "", fmt.Errorf("bridge binary is not available")
+	}
+	st, err := os.Lstat(clean)
+	if err != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() {
+		return "", fmt.Errorf("bridge binary is not available")
+	}
+	return clean, nil
+}
+
+func appendExtraBinds(out *[]string, binds [][2]string) error {
+	if len(binds) == 0 {
+		return fmt.Errorf("bridge socket is not available")
+	}
+	seen := map[string]bool{}
+	for _, pair := range binds {
+		host, jail := pair[0], pair[1]
+		if (jail != JailProxySock && jail != JailEgressSock) || seen[jail] || !filepath.IsAbs(host) {
+			return fmt.Errorf("bridge socket is not available")
+		}
+		seen[jail] = true
+		st, err := os.Lstat(host)
+		if err != nil || st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("bridge socket is not available")
+		}
+		if !st.Mode().IsRegular() && st.Mode()&os.ModeSocket == 0 {
+			return fmt.Errorf("bridge socket is not available")
+		}
+		*out = append(*out, "--bind", host, jail)
+	}
+	return nil
 }
 
 func (s Spec) IsolateHome() string {

@@ -4,6 +4,7 @@ package clisession
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -84,7 +85,7 @@ func TestGrokJailHidesHostProc(t *testing.T) {
 	}
 }
 
-func TestGrokBwrapArgsShareNetAndSkipSandbox(t *testing.T) {
+func TestGrokBwrapArgsUnshareNetAndSkipSandbox(t *testing.T) {
 	if _, err := exec.LookPath("bwrap"); err != nil {
 		t.Skip(err)
 	}
@@ -96,7 +97,9 @@ func TestGrokBwrapArgsShareNetAndSkipSandbox(t *testing.T) {
 	}
 	args, err := grokBwrapArgs(bin, []string{"-p", "hi", "--sandbox", "lgb", "--cwd", ws}, Spec{
 		Workspace: ws,
-		Isolate:   &Isolation{Home: home, Env: []string{"HOME=" + home, "PATH=/usr/bin"}},
+		Isolate: &Isolation{Home: home, Env: []string{
+			"HOME=" + home, "PATH=/usr/bin", "HTTP_PROXY=http://127.0.0.1:9", "https_proxy=http://127.0.0.1:9",
+		}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -105,13 +108,77 @@ func TestGrokBwrapArgsShareNetAndSkipSandbox(t *testing.T) {
 	if !strings.Contains(joined, "--unshare-pid") || !strings.Contains(joined, "--proc\n/proc") {
 		t.Fatalf("pid ns %v", args)
 	}
-	if strings.Contains(joined, "--unshare-net") {
-		t.Fatal("unshared net")
+	if !strings.Contains(joined, "--unshare-net") || !strings.Contains(joined, "--new-session") {
+		t.Fatal("missing net or session isolation")
 	}
-	if strings.Contains(joined, "--sandbox") {
-		t.Fatal("nested sandbox flag")
+	if strings.Contains(joined, "--sandbox") || strings.Contains(joined, "HTTP_PROXY") || strings.Contains(joined, "https_proxy") {
+		t.Fatalf("sandbox flag or host proxy env leaked:\n%s", joined)
 	}
 	if !strings.Contains(joined, "--bind\n"+ws+"\n"+ws) {
 		t.Fatalf("workspace bind %v", args)
+	}
+}
+
+func TestGrokBwrapForwarderBindsSockets(t *testing.T) {
+	ws := t.TempDir()
+	home := t.TempDir()
+	bin := filepath.Join(ws, "grok")
+	fwd := filepath.Join(t.TempDir(), "lgb")
+	cred := filepath.Join(t.TempDir(), "sock")
+	egress := filepath.Join(t.TempDir(), "sock")
+	for _, p := range []string{bin, fwd, cred, egress} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	args, err := grokBwrapArgs(bin, []string{"-p", "hi"}, Spec{
+		Workspace: ws,
+		Isolate: &Isolation{
+			Home:        home,
+			Env:         []string{"HOME=" + home},
+			ForwardBin:  fwd,
+			ForwardArgs: []string{"--coi-forward", "--sock", JailProxySock, "--keep-key", "--http-sock", JailEgressSock},
+			ExtraBinds:  [][2]string{{cred, JailProxySock}, {egress, JailEgressSock}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, "\n")
+	for _, want := range []string{
+		"--unshare-net", "--new-session", "--coi-forward", "--keep-key",
+		"--bind\n" + cred + "\n" + JailProxySock,
+		"--bind\n" + egress + "\n" + JailEgressSock,
+		"--ro-bind\n" + fwd + "\n" + fwd,
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "/run") {
+		t.Fatalf("host run leaked\n%s", joined)
+	}
+}
+
+func TestGrokBwrapRejectsMissingBridge(t *testing.T) {
+	ws := t.TempDir()
+	bin := filepath.Join(ws, "grok")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := grokBwrapArgs(bin, []string{"-p", "hi"}, Spec{
+		Workspace: ws,
+		Isolate: &Isolation{
+			ForwardBin:  filepath.Join(t.TempDir(), "missing"),
+			ForwardArgs: []string{"--coi-forward"},
+			ExtraBinds:  [][2]string{{filepath.Join(t.TempDir(), "sock"), JailProxySock}},
+		},
+	})
+	var bridge *BridgeError
+	if !errors.As(err, &bridge) {
+		t.Fatalf("err %v", err)
 	}
 }

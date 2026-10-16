@@ -452,6 +452,12 @@ func (sandboxFailRunner) Run(context.Context, clisession.Spec, func(clisession.E
 	return clisession.Result{}, fmt.Errorf("sandbox profile lgb could not be applied")
 }
 
+type bridgeFailRunner struct{}
+
+func (bridgeFailRunner) Run(context.Context, clisession.Spec, func(clisession.Event)) (clisession.Result, error) {
+	return clisession.Result{}, &clisession.BridgeError{}
+}
+
 type okRunner struct{}
 
 func (okRunner) Run(context.Context, clisession.Spec, func(clisession.Event)) (clisession.Result, error) {
@@ -610,6 +616,44 @@ func TestGrokSandboxFailureIsAudited(t *testing.T) {
 	}
 	raw, err := os.ReadFile(logPath)
 	if err != nil || !strings.Contains(string(raw), `"event":"cli_sandbox_unavailable"`) || !strings.Contains(string(raw), `"backend":"grok"`) {
+		t.Fatalf("audit %s %v", raw, err)
+	}
+}
+
+func TestGrokBridgeRefusalIsAudited(t *testing.T) {
+	dir := t.TempDir()
+	app := newApp(t, dir, nil)
+	logPath := filepath.Join(dir, "audit.log")
+	lg, err := audit.Open(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.audit = lg
+	app.runner = bridgeFailRunner{}
+	app.rtMu.Lock()
+	app.policy = policy.Policy{Backend: "grok", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute}
+	app.rtMu.Unlock()
+	srv := serve(t, app)
+	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Geo", "description": "g"}, "")
+	if res.StatusCode != 201 && res.StatusCode != 200 {
+		t.Fatalf("create %d %s", res.StatusCode, b)
+	}
+	var bot store.Bot
+	decodeJSON(t, b, &bot)
+	res, b = do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "go"}, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("post %d %s", res.StatusCode, b)
+	}
+	waitIdle(t, srv.URL, bot.ID, "")
+	evs, err := app.st.ListLog(bot.ID, "cli_bridge_unavailable", "", 10)
+	if err != nil || len(evs) != 1 || !strings.Contains(string(evs[0].Detail), `"backend":"grok"`) {
+		t.Fatalf("log %v %v", evs, err)
+	}
+	if err := lg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil || !strings.Contains(string(raw), `"event":"cli_bridge_unavailable"`) || !strings.Contains(string(raw), `"backend":"grok"`) {
 		t.Fatalf("audit %s %v", raw, err)
 	}
 }

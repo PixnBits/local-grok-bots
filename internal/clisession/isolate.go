@@ -28,9 +28,40 @@ type Isolation struct {
 	ClaudeSandbox bool
 	// Protect is the path deny list written into this turn's settings.
 	Protect []string
-	// ReleaseGate drops this turn's loopback proxy gate. Nil is fine.
-	// Calling it more than once is safe.
+	// ReleaseGate drops this turn's loopback proxy gate and, on Linux, the
+	// per-turn egress proxy. Nil is fine. Calling it more than once is safe.
 	ReleaseGate func()
+	// ForwardBin is the in-jail process that bridges host unix sockets onto
+	// 127.0.0.1. Empty means the CLI is started directly.
+	ForwardBin string
+	// ForwardArgs are that process's arguments. The jail appends "--" and the
+	// CLI argv.
+	ForwardArgs []string
+	// ExtraBinds are host path, jail path pairs. Jail paths are JailProxySock
+	// and JailEgressSock.
+	ExtraBinds [][2]string
+}
+
+// JailProxySock is the credential proxy inside the Grok network namespace.
+const JailProxySock = "/cli-proxy.sock"
+
+// JailEgressSock is the net-grant HTTP proxy inside that namespace.
+const JailEgressSock = "/cli-egress.sock"
+
+// BridgeError is a fail-closed refusal when the jail cannot reach the
+// credential proxy or the net-grant egress proxy. The daemon audits it as
+// cli_bridge_unavailable.
+type BridgeError struct{ Err error }
+
+func (e *BridgeError) Error() string {
+	return "credential bridge is not available, so the turn was refused"
+}
+
+func (e *BridgeError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 // IsolationOptions builds an Isolation.
