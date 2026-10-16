@@ -80,6 +80,63 @@ func TestCheckArgsAllowAndBlock(t *testing.T) {
 	}
 }
 
+func TestCheckArgsTreatsBareNamesAsPaths(t *testing.T) {
+	root := t.TempDir()
+	ws := filepath.Join(root, "ws")
+	cred := filepath.Join(root, "cred")
+	coiDir := filepath.Join(root, "data", "coi")
+	outside := filepath.Join(root, "outside.txt")
+	for _, d := range []string{ws, cred, coiDir, filepath.Dir(outside)} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(outside, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "notes"), []byte("n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, link := range []struct{ name, dest string }{
+		{"outlink", outside},
+		{"credlink", cred},
+		{"coidir", coiDir},
+		{"alias", filepath.Join(ws, "notes")},
+	} {
+		if err := os.Symlink(link.dest, filepath.Join(ws, link.name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	allow := []string{"edit", "-p"}
+	values := []string{"-p"}
+	ok := [][]string{
+		{"edit", "notes"},
+		{"edit", "alias"},
+		{"edit", "newfile"},
+		{"-p", "fix the bug"},
+	}
+	for _, args := range ok {
+		if err := CheckArgs(allow, args, ws, cred, values, coiDir); err != nil {
+			t.Fatalf("%v: %v", args, err)
+		}
+	}
+	if err := CheckArgs(allow, []string{"edit", "outlink"}, ws, cred, values, coiDir); !errors.Is(err, ErrOutside) {
+		t.Fatalf("outside link: %v", err)
+	}
+	if err := CheckArgs(allow, []string{"edit", "credlink"}, ws, cred, values, coiDir); !errors.Is(err, ErrCredHome) {
+		t.Fatalf("credential link: %v", err)
+	}
+	if err := CheckArgs(allow, []string{"edit", "coidir"}, ws, cred, values, coiDir); !errors.Is(err, ErrCredHome) {
+		t.Fatalf("coi link: %v", err)
+	}
+	if err := CheckArgs(allow, []string{"edit", "sub/../notes"}, ws, cred, values, coiDir); !errors.Is(err, ErrOutside) {
+		t.Fatalf("parent segment: %v", err)
+	}
+	if err := CheckArgs(allow, []string{"-p", `foo\..\notes`}, ws, cred, values, coiDir); !errors.Is(err, ErrOutside) {
+		t.Fatalf("backslash parent: %v", err)
+	}
+}
+
 func TestCheckArgsRejectsUnlistedFlag(t *testing.T) {
 	ws := t.TempDir()
 	if err := CheckArgs([]string{"edit"}, []string{"edit", "--force"}, ws, "/var/empty-cred", nil); !errors.Is(err, ErrNotAllowed) {

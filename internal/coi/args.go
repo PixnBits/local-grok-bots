@@ -46,9 +46,10 @@ var blockedWord = map[string]bool{
 // operands. Blocked words and the credential home lose even when listed.
 // Flags in valueFlags take the next word as a value; every other flag is
 // boolean and does not swallow the next word. Values, including --flag=value,
-// get the blocked-word check. Path operands are still checked as defense in
-// depth; the inner CLI sandbox is the real filesystem boundary.
-func CheckArgs(allowed, args []string, workspace, credHome string, valueFlags []string) error {
+// get the blocked-word check. Every value is also resolved as a path from the
+// workspace. protected are extra roots, such as other credential homes and
+// the COI data directory. The inner CLI sandbox is the real filesystem boundary.
+func CheckArgs(allowed, args []string, workspace, credHome string, valueFlags []string, protected ...string) error {
 	if len(allowed) == 0 || len(args) == 0 {
 		return ErrNoArgs
 	}
@@ -63,6 +64,7 @@ func CheckArgs(allowed, args []string, workspace, credHome string, valueFlags []
 			value[a] = true
 		}
 	}
+	roots := protectedRoots(credHome, protected)
 	flags, positionals, err := splitArgs(args, value)
 	if err != nil {
 		return err
@@ -76,12 +78,12 @@ func CheckArgs(allowed, args []string, workspace, credHome string, valueFlags []
 			return ErrNotAllowed
 		}
 		saw = true
-		if err := vetValue(f.value, workspace, credHome); err != nil {
+		if err := vetValue(f.value, workspace, roots); err != nil {
 			return err
 		}
 	}
 	for i, p := range positionals {
-		if err := vetValue(p, workspace, credHome); err != nil {
+		if err := vetValue(p, workspace, roots); err != nil {
 			return err
 		}
 		if argBlocked(p) {
@@ -98,6 +100,15 @@ func CheckArgs(allowed, args []string, workspace, credHome string, valueFlags []
 		return ErrNoArgs
 	}
 	return nil
+}
+
+func protectedRoots(credHome string, extra []string) []string {
+	out := make([]string, 0, 1+len(extra))
+	if home := strings.TrimSpace(credHome); home != "" {
+		out = append(out, home)
+	}
+	out = append(out, extra...)
+	return out
 }
 
 type flagArg struct {
@@ -163,30 +174,58 @@ func words(s string) []string {
 	})
 }
 
-func vetValue(v, workspace, credHome string) error {
+func vetValue(v, workspace string, roots []string) error {
 	if v == "" {
 		return nil
 	}
-	if strings.HasPrefix(v, "~") {
+	if strings.HasPrefix(v, "~") || hasDotDot(v) {
 		return ErrOutside
 	}
-	if mentionsCred(v, credHome) {
+	if mentionsAny(v, roots) {
 		return ErrCredHome
 	}
-	if !looksLikePath(v) {
-		return nil
-	}
-	if !pathInside(workspace, v) {
+	resolved, ok := resolvePath(workspace, v)
+	if !ok {
 		return ErrOutside
 	}
-	if resolved, ok := resolvePath(workspace, v); ok && mentionsCred(resolved, credHome) {
+	if mentionsAny(resolved, roots) || insideAny(resolved, roots) {
 		return ErrCredHome
+	}
+	if !hasPathPrefix(workspace, resolved) {
+		return ErrOutside
 	}
 	return nil
 }
 
-func looksLikePath(s string) bool {
-	return strings.HasPrefix(s, "/") || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../") || strings.ContainsAny(s, `/\`)
+func hasDotDot(v string) bool {
+	for _, seg := range strings.FieldsFunc(v, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func mentionsAny(v string, roots []string) bool {
+	for _, root := range roots {
+		if mentionsCred(v, root) {
+			return true
+		}
+	}
+	return false
+}
+
+func insideAny(path string, roots []string) bool {
+	for _, root := range roots {
+		root = filepath.Clean(root)
+		if root == "" || root == "." || root == string(filepath.Separator) || !filepath.IsAbs(root) {
+			continue
+		}
+		if hasPathPrefix(root, path) {
+			return true
+		}
+	}
+	return false
 }
 
 func mentionsCred(v, credHome string) bool {
@@ -198,26 +237,6 @@ func mentionsCred(v, credHome string) bool {
 		return true
 	}
 	return false
-}
-
-func pathInside(workspace, raw string) bool {
-	workspace = filepath.Clean(workspace)
-	if !filepath.IsAbs(workspace) {
-		return false
-	}
-	full := raw
-	if !filepath.IsAbs(full) {
-		full = filepath.Join(workspace, full)
-	}
-	full = filepath.Clean(full)
-	if !hasPathPrefix(workspace, full) {
-		return false
-	}
-	resolved, ok := resolveExisting(full)
-	if !ok {
-		return false
-	}
-	return hasPathPrefix(workspace, resolved)
 }
 
 func resolvePath(workspace, raw string) (string, bool) {

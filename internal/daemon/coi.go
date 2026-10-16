@@ -91,7 +91,8 @@ func (r *lgbRun) execCOI(ctx context.Context, args []string) (int, string) {
 	// and does not consume an hourly slot.
 	secrets, secErr := coi.ReadSecrets(tool.CredentialHome)
 	ws := filepath.Dir(r.root)
-	if err := coi.CheckArgs(tool.AllowedArgs, rest, ws, tool.CredentialHome, tool.ValueFlags); err != nil {
+	roots := r.argRoots(pol)
+	if err := coi.CheckArgs(tool.AllowedArgs, rest, ws, tool.CredentialHome, tool.ValueFlags, roots...); err != nil {
 		r.auditCOI(name, rest, coi.StatusDenied, err.Error(), tool.CredentialHome, secrets, 0, false)
 		return 1, "coi: " + coi.RedactOutput(err.Error(), []string{tool.CredentialHome}, secrets)
 	}
@@ -131,6 +132,7 @@ func (r *lgbRun) execCOI(ctx context.Context, args []string) (int, string) {
 		Workspace: ws,
 		BaseEnv:   os.Environ(),
 		Paths:     paths,
+		Protected: roots,
 		StateDir:  r.a.cfg.DataDir,
 		OnPrompt: func(pctx context.Context) {
 			red := make([]string, len(rest))
@@ -162,6 +164,24 @@ func (r *lgbRun) execCOI(ctx context.Context, args []string) (int, string) {
 
 // allowsCredentialHome reports whether this turn's deny list includes home.
 // A run that never wrote settings does not have a list.
+func (r *lgbRun) argRoots(pol policy.Policy) []string {
+	var roots []string
+	if r != nil && r.a != nil {
+		if dir, err := filepath.Abs(r.a.cfg.DataDir); err == nil {
+			roots = append(roots, filepath.Join(dir, "coi"))
+		}
+	}
+	for _, tool := range pol.CLITools {
+		if home := strings.TrimSpace(tool.CredentialHome); home != "" {
+			roots = append(roots, home)
+		}
+	}
+	if r != nil && r.protectSet {
+		roots = append(roots, r.protect...)
+	}
+	return roots
+}
+
 func (r *lgbRun) allowsCredentialHome(home string) bool {
 	if r == nil || !r.protectSet {
 		return true

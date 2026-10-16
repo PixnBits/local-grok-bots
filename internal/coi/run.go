@@ -31,6 +31,8 @@ type Call struct {
 	BaseEnv   []string
 	// Paths are redacted in addition to the resolved credential home.
 	Paths []string
+	// Protected are extra roots a value must not resolve into.
+	Protected []string
 	// StateDir is the daemon data directory. Jail homes and proxy sockets
 	// are created under it, not in the host temp directory.
 	StateDir string
@@ -117,7 +119,7 @@ func Run(ctx context.Context, c Call) Result {
 		return Result{Code: 1, Status: StatusDenied, Err: err.Error()}
 	}
 	for _, home := range []string{c.Tool.CredentialHome, tool.CredentialHome} {
-		if err := CheckArgs(tool.AllowedArgs, c.Args, c.Workspace, home, tool.ValueFlags); err != nil {
+		if err := CheckArgs(tool.AllowedArgs, c.Args, c.Workspace, home, tool.ValueFlags, c.Protected...); err != nil {
 			return Result{Code: 1, Status: StatusDenied, Err: err.Error()}
 		}
 	}
