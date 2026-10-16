@@ -33,6 +33,10 @@ type Call struct {
 	Paths []string
 	// Protected are extra roots a value must not resolve into.
 	Protected []string
+	// Spool is the run spool directory. SpoolDev and SpoolIno identify it.
+	Spool    string
+	SpoolDev uint64
+	SpoolIno uint64
 	// StateDir is the daemon data directory. Jail homes and proxy sockets
 	// are created under it, not in the host temp directory.
 	StateDir string
@@ -167,6 +171,9 @@ func Run(ctx context.Context, c Call) Result {
 		Env:        env,
 		Home:       home,
 		SandboxBin: tool.SandboxBin,
+		Spool:      c.Spool,
+		SpoolDev:   c.SpoolDev,
+		SpoolIno:   c.SpoolIno,
 	}
 	if egress != nil {
 		exe, err := os.Executable()

@@ -133,6 +133,9 @@ func (r *lgbRun) execCOI(ctx context.Context, args []string) (int, string) {
 		BaseEnv:   os.Environ(),
 		Paths:     paths,
 		Protected: roots,
+		Spool:     r.root,
+		SpoolDev:  r.spoolDev,
+		SpoolIno:  r.spoolIno,
 		StateDir:  r.a.cfg.DataDir,
 		OnPrompt: func(pctx context.Context) {
 			red := make([]string, len(rest))

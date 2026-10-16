@@ -49,6 +49,11 @@ type jailSpec struct {
 	ProxySock  string
 	BaseEnvs   []string
 	BasePrefix string
+	// Spool is the run spool directory. SpoolDev and SpoolIno are its
+	// identity when the run opened it. The jail hides that directory.
+	Spool    string
+	SpoolDev uint64
+	SpoolIno uint64
 }
 
 // HomesDir is the private parent for per-call jail homes.

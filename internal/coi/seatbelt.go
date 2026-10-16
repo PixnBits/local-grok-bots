@@ -11,11 +11,12 @@ import (
 // home is not listed, so deny-default hides it. Outbound network is denied
 // except localhost (the in-jail forwarder) and the proxy unix socket.
 // This profile is untested on darwin; it must still compile.
-func coiSeatbeltProfile(workspace, home, bin, proxySock string, extra []string) (string, error) {
+func coiSeatbeltProfile(workspace, home, bin, proxySock string, spools, extra []string) (string, error) {
 	paths := []string{workspace, home, bin}
 	if proxySock != "" {
 		paths = append(paths, proxySock)
 	}
+	paths = append(paths, spools...)
 	paths = append(paths, extra...)
 	for _, p := range paths {
 		if err := checkSBPath(p); err != nil {
@@ -49,7 +50,9 @@ func coiSeatbeltProfile(workspace, home, bin, proxySock string, extra []string) 
 		fmt.Fprintf(&b, "(allow file-read* (literal %s))\n", sbQuote(p))
 	}
 	fmt.Fprintf(&b, "(allow file-read* file-write* (subpath %s) (subpath %s))\n", sbQuote(workspace), sbQuote(home))
-	fmt.Fprintf(&b, "(deny file-read* file-write* (subpath %s))\n", sbQuote(filepath.Join(workspace, ".lgb")))
+	for _, spool := range spools {
+		fmt.Fprintf(&b, "(deny file-read* file-write* (subpath %s))\n", sbQuote(spool))
+	}
 	b.WriteString("(allow file-write* (literal \"/dev/null\") (literal \"/dev/tty\"))\n")
 	b.WriteString("(allow system-socket)\n")
 	b.WriteString("(allow network-bind (local ip \"localhost:*\"))\n")

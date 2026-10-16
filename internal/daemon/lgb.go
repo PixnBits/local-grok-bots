@@ -110,6 +110,8 @@ type lgbRun struct {
 	coiSem     chan struct{}
 	protect    []string
 	protectSet bool
+	spoolDev   uint64
+	spoolIno   uint64
 }
 
 // startLGB prepares DATA_DIR/workspace/<bot>/.lgb and starts answering. It
@@ -151,8 +153,15 @@ func (a *App) startLGB(ctx context.Context, bot store.Bot, runID, ws string) (*l
 		return nil, nil, err
 	}
 	cctx, cancel := context.WithCancel(ctx)
+	dev, ino, err := coi.DirIdentity(root)
+	if err != nil {
+		req.close()
+		resp.close()
+		return nil, nil, err
+	}
 	r := &lgbRun{a: a, bot: bot, runID: runID, token: "lgbr_" + hex.EncodeToString(buf), root: root,
-		req: req, resp: resp, cancel: cancel, done: make(chan struct{}), coiSem: make(chan struct{}, coiMaxConcurrent)}
+		req: req, resp: resp, cancel: cancel, done: make(chan struct{}), coiSem: make(chan struct{}, coiMaxConcurrent),
+		spoolDev: dev, spoolIno: ino}
 	if paths, ok := a.botProtect(bot.ID); ok {
 		r.protect = paths
 		r.protectSet = true

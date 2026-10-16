@@ -26,9 +26,12 @@ func TestLinuxBwrapArgsBindBinaryNotHome(t *testing.T) {
 	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	spool, dev, ino := makeSpool(t, ws)
 	args, err := linuxBwrapArgs(jailSpec{
 		Bin: bin, Args: []string{"--version"}, Workspace: ws, Home: home,
-		Env: []string{"HOME=" + home, "PATH=/usr/bin:/bin", "GROK_HOME=" + filepath.Join(home, ".grok")},
+		Env:      []string{"HOME=" + home, "PATH=/usr/bin:/bin", "GROK_HOME=" + filepath.Join(home, ".grok")},
+		Spool:    spool,
+		SpoolDev: dev, SpoolIno: ino,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -52,10 +55,11 @@ func TestLinuxBwrapArgsBindBinaryNotHome(t *testing.T) {
 		t.Fatalf("resolv bind:\n%s", joined)
 	}
 	assertNoSockMounts(t, args, "")
-	if !strings.Contains(joined, "--tmpfs\n"+filepath.Join(ws, ".lgb")) && !strings.Contains(joined, "--tmpfs "+filepath.Join(ws, ".lgb")) {
-		if !hasArgPair(args, "--tmpfs", filepath.Join(ws, ".lgb")) {
-			t.Fatalf("lgb not covered:\n%s", joined)
-		}
+	if !hasArgPair(args, "--tmpfs", spool) {
+		t.Fatalf("spool not covered:\n%s", joined)
+	}
+	if strings.Contains(joined, ".lgb") {
+		t.Fatalf("args name a fixed spool directory:\n%s", joined)
 	}
 	wantHome := false
 	for i, a := range args {
@@ -136,16 +140,21 @@ func TestLinuxJailHidesHostRunAndNet(t *testing.T) {
 	root := t.TempDir()
 	ws := filepath.Join(root, "ws")
 	home := filepath.Join(root, "home")
-	if err := os.MkdirAll(filepath.Join(ws, ".lgb"), 0o755); err != nil || os.MkdirAll(home, 0o755) != nil {
+	if err := os.MkdirAll(home, 0o755); err != nil || os.MkdirAll(filepath.Join(ws, ".lgb"), 0o755) != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(ws, ".lgb", "tok"), []byte("host-lgb-marker\n"), 0o600); err != nil {
+	spool, dev, ino := makeSpool(t, ws)
+	if err := os.WriteFile(filepath.Join(spool, "tok"), []byte("host-spool-marker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".lgb", "decoy"), []byte("decoy-marker\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	script := filepath.Join(root, "probe")
 	body := "#!/bin/sh\n" +
 		"if [ -d /run ] || [ -d /var/run ] || [ -e /run/docker.sock ]; then echo RUN; else echo NO_RUN; fi\n" +
-		"if [ -f .lgb/tok ]; then echo LGB; else echo NO_LGB; fi\n" +
+		"if [ -f run-spool/tok ]; then echo SPOOL; else echo NO_SPOOL; fi\n" +
+		"if [ -f .lgb/decoy ]; then echo DECOY; else echo NO_DECOY; fi\n" +
 		"if timeout 1 bash -c 'echo >/dev/tcp/127.0.0.1/" + strconv.Itoa(tcp.Port) + "'; then echo LOOP; else echo NO_LOOP; fi\n" +
 		"if timeout 1 bash -c 'echo >/dev/tcp/192.0.2.1/80'; then echo LAN; else echo NO_LAN; fi\n"
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
@@ -153,7 +162,8 @@ func TestLinuxJailHidesHostRunAndNet(t *testing.T) {
 	}
 	args, err := linuxBwrapArgs(jailSpec{
 		Bin: script, Workspace: ws, Home: home,
-		Env: []string{"PATH=/usr/bin:/bin"},
+		Env:   []string{"PATH=/usr/bin:/bin"},
+		Spool: spool, SpoolDev: dev, SpoolIno: ino,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -164,19 +174,32 @@ func TestLinuxJailHidesHostRunAndNet(t *testing.T) {
 		t.Fatalf("bwrap: %v\n%s", err, out)
 	}
 	text := string(out)
-	for _, want := range []string{"NO_RUN", "NO_LGB", "NO_LOOP", "NO_LAN"} {
+	for _, want := range []string{"NO_RUN", "NO_SPOOL", "DECOY", "NO_LOOP", "NO_LAN"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("probe missing %s:\n%s", want, text)
 		}
 	}
-	for _, bad := range []string{"\nRUN\n", "\nLGB\n", "\nLOOP\n", "\nLAN\n", "open", "host-lgb-marker"} {
+	for _, bad := range []string{"\nRUN\n", "\nSPOOL\n", "\nLOOP\n", "\nLAN\n", "open", "host-spool-marker"} {
 		if strings.Contains(text, bad) {
 			t.Fatalf("probe leaked %q:\n%s", bad, text)
 		}
 	}
-	if b, err := os.ReadFile(filepath.Join(ws, ".lgb", "tok")); err != nil || string(b) != "host-lgb-marker\n" {
-		t.Fatal("host lgb file changed")
+	if b, err := os.ReadFile(filepath.Join(spool, "tok")); err != nil || string(b) != "host-spool-marker\n" {
+		t.Fatal("host spool file changed")
 	}
+}
+
+func makeSpool(t *testing.T, ws string) (string, uint64, uint64) {
+	t.Helper()
+	spool := filepath.Join(ws, "run-spool")
+	if err := os.MkdirAll(spool, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dev, ino, err := DirIdentity(spool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return spool, dev, ino
 }
 
 func hasBind(args []string, src, dst string) bool {

@@ -40,7 +40,11 @@ func wrapCommand(spec jailSpec) (*exec.Cmd, error) {
 			return nil, ErrSandboxUnavailable
 		}
 	}
-	prof, err := coiSeatbeltProfile(filepath.Clean(ws), filepath.Clean(home), filepath.Clean(entryBin), spec.ProxySock, extras)
+	mounts, err := spoolMounts(ws, spec.Spool, spec.SpoolDev, spec.SpoolIno)
+	if err != nil {
+		return nil, ErrSandboxUnavailable
+	}
+	prof, err := coiSeatbeltProfile(filepath.Clean(ws), filepath.Clean(home), filepath.Clean(entryBin), spec.ProxySock, mounts, extras)
 	if err != nil {
 		return nil, ErrSandboxUnavailable
 	}

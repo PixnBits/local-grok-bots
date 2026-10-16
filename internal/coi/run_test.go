@@ -304,7 +304,7 @@ func TestRunProxyKeepsHostTokenOut(t *testing.T) {
 }
 
 func TestSeatbeltProfileHidesHome(t *testing.T) {
-	prof, err := coiSeatbeltProfile("/work", "/tmp/coi-home-1", "/usr/bin/grok", "/coi-proxy.sock", nil)
+	prof, err := coiSeatbeltProfile("/work", "/tmp/coi-home-1", "/usr/bin/grok", "/coi-proxy.sock", []string{"/work/run-spool"}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,10 @@ func TestSeatbeltProfileHidesHome(t *testing.T) {
 	if !strings.Contains(prof, `path-literal "/coi-proxy.sock"`) || !strings.Contains(prof, `localhost:*`) {
 		t.Fatalf("proxy path missing:\n%s", prof)
 	}
-	if !strings.Contains(prof, `(subpath "/work/.lgb")`) {
-		t.Fatalf("lgb not hidden:\n%s", prof)
+	if !strings.Contains(prof, `(subpath "/work/run-spool")`) {
+		t.Fatalf("spool not hidden:\n%s", prof)
+	}
+	if strings.Contains(prof, ".lgb") {
+		t.Fatalf("profile names a fixed spool directory:\n%s", prof)
 	}
 }

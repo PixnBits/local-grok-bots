@@ -63,10 +63,16 @@ func linuxBwrapArgs(spec jailSpec) ([]string, error) {
 		"--tmpfs", "/tmp",
 		"--bind", home, jailHomeInside,
 		"--bind", ws, ws,
-		"--tmpfs", filepath.Join(ws, ".lgb"),
 		"--ro-bind", entryBin, entryBin,
 		"--chdir", ws,
 	)
+	mounts, err := spoolMounts(ws, spec.Spool, spec.SpoolDev, spec.SpoolIno)
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range mounts {
+		args = append(args, "--tmpfs", m)
+	}
 	if orig := filepath.Clean(entry); orig != entryBin {
 		args = append(args, "--ro-bind", entryBin, orig)
 	}
