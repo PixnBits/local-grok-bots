@@ -490,3 +490,94 @@ max_calls_per_hour = 1
 		t.Fatalf("bad proxy host did not fail closed: %+v", p.CLITools)
 	}
 }
+
+func TestProxyPathPrefixesDefaultAndNarrow(t *testing.T) {
+	omitted := writePol(t, "omit.toml", `
+[[tools.cli]]
+name = "grok"
+path = "/usr/bin/grok"
+credential_home = "/var/lib/lgb/grok"
+proxy_hosts = ["cli-chat-proxy.grok.com"]
+timeout = "1s"
+max_output = 1
+max_calls_per_hour = 1
+`)
+	p, err := Load(Options{Path: omitted})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grok, ok := p.COI("grok")
+	if !ok || strings.Join(grok.ProxyPathPrefixes, ",") != DefaultProxyPathPrefix {
+		t.Fatalf("default prefixes %+v warnings %v", grok.ProxyPathPrefixes, p.Warnings)
+	}
+
+	local := writePol(t, "wide.toml", `
+[[tools.cli]]
+name = "grok"
+path = "/usr/bin/grok"
+credential_home = "/var/lib/lgb/grok"
+proxy_path_prefixes = ["/v1", "/admin"]
+timeout = "1s"
+max_output = 1
+max_calls_per_hour = 1
+`)
+	managed := writePol(t, "managed.json", `{
+	  "tools": {"cli": [{
+	    "name": "grok",
+	    "path": "/usr/bin/grok",
+	    "credential_home": "/var/lib/lgb/grok",
+	    "proxy_path_prefixes": ["/v1", "/v1/responses"],
+	    "timeout": "1s",
+	    "max_output": 1,
+	    "max_calls_per_hour": 1
+	  }]}
+	}`)
+	p, err = Load(Options{Path: local, ManagedPath: managed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grok, ok = p.COI("grok")
+	if !ok || strings.Join(grok.ProxyPathPrefixes, ",") != "/v1" {
+		t.Fatalf("narrowed %+v", grok.ProxyPathPrefixes)
+	}
+	if !strings.Contains(strings.Join(p.Warnings, "\n"), "proxy_path_prefixes") {
+		t.Fatalf("warnings %v", p.Warnings)
+	}
+
+	empty := writePol(t, "empty.toml", `
+[[tools.cli]]
+name = "grok"
+path = "/usr/bin/grok"
+credential_home = "/var/lib/lgb/grok"
+proxy_path_prefixes = []
+timeout = "1s"
+max_output = 1
+max_calls_per_hour = 1
+`)
+	p, err = Load(Options{Path: empty})
+	if err != nil {
+		t.Fatal(err)
+	}
+	grok, ok = p.COI("grok")
+	if !ok || grok.ProxyPathPrefixes == nil || len(grok.ProxyPathPrefixes) != 0 {
+		t.Fatalf("explicit empty %+v", grok.ProxyPathPrefixes)
+	}
+
+	bad := writePol(t, "bad-prefix.toml", `
+[[tools.cli]]
+name = "grok"
+path = "/usr/bin/grok"
+credential_home = "/var/lib/lgb/grok"
+proxy_path_prefixes = ["/v1/../admin"]
+timeout = "1s"
+max_output = 1
+max_calls_per_hour = 1
+`)
+	p, err = Load(Options{Path: bad})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Loaded || len(p.CLITools) != 0 {
+		t.Fatalf("bad prefix did not fail closed: %+v %v", p.CLITools, p.Warnings)
+	}
+}

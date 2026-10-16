@@ -140,7 +140,7 @@ func Run(ctx context.Context, c Call) Result {
 		if err != nil {
 			return Result{Code: 1, Status: StatusDenied, Err: ErrProxyUnavailable.Error()}
 		}
-		egress, err = StartEgress(filepath.Join(c.StateDir, "coi", "proxy"), tool.ProxyHosts, tok, nil)
+		egress, err = StartEgress(filepath.Join(c.StateDir, "coi", "proxy"), tool.ProxyHosts, tool.ProxyPathPrefixes, tok, nil)
 		if err != nil {
 			return Result{Code: 1, Status: StatusDenied, Err: ErrProxyUnavailable.Error()}
 		}
@@ -243,7 +243,7 @@ func forwardEnvNames(name string) []string {
 
 func forwardPrefix(name string) string {
 	if strings.EqualFold(name, "grok") {
-		return "/v1"
+		return policy.DefaultProxyPathPrefix
 	}
 	return ""
 }

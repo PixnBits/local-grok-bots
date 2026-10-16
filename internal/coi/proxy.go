@@ -8,9 +8,12 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
 
 // Egress is the host-side reverse proxy. The jail speaks plain HTTP to a
@@ -18,19 +21,25 @@ import (
 // sets Authorization. A CONNECT proxy would hide that header inside TLS,
 // so it cannot inject the credential.
 type Egress struct {
-	dir   string
-	sock  string
-	ln    net.Listener
-	srv   *http.Server
-	token string
-	hosts map[string]bool
-	first string
+	dir      string
+	sock     string
+	ln       net.Listener
+	srv      *http.Server
+	token    string
+	hosts    map[string]bool
+	first    string
+	prefixes []string
 }
 
 // StartEgress listens on a unix socket in a private 0700 directory under parent.
-// trip, when set, replaces the outbound transport (tests).
-func StartEgress(parent string, hosts []string, token string, trip http.RoundTripper) (*Egress, error) {
+// prefixes nil means policy.DefaultProxyPathPrefix (/v1). An empty non-nil
+// list allows no path. trip, when set, replaces the outbound transport (tests).
+func StartEgress(parent string, hosts, prefixes []string, token string, trip http.RoundTripper) (*Egress, error) {
 	if token == "" || len(hosts) == 0 {
+		return nil, ErrProxyUnavailable
+	}
+	resolved, err := resolvePrefixes(prefixes)
+	if err != nil {
 		return nil, ErrProxyUnavailable
 	}
 	parent = filepath.Clean(parent)
@@ -74,7 +83,7 @@ func StartEgress(parent string, hosts []string, token string, trip http.RoundTri
 		return nil, ErrProxyUnavailable
 	}
 	_ = os.Chmod(sock, 0o600)
-	eg := &Egress{dir: dir, sock: sock, ln: ln, token: token, hosts: allow, first: first}
+	eg := &Egress{dir: dir, sock: sock, ln: ln, token: token, hosts: allow, first: first, prefixes: resolved}
 	var transport http.RoundTripper = allowTransport(allow)
 	if trip != nil {
 		transport = trip
@@ -93,7 +102,7 @@ func StartEgress(parent string, hosts []string, token string, trip http.RoundTri
 	}
 	eg.srv = &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !eg.allowRequest(r) {
+			if !eg.allowRequest(r) || !eg.allowPath(r) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
@@ -156,6 +165,144 @@ func (e *Egress) allowRequest(r *http.Request) bool {
 		}
 	}
 	return e.hosts[e.first]
+}
+
+func resolvePrefixes(in []string) ([]string, error) {
+	if in == nil {
+		return []string{policy.DefaultProxyPathPrefix}, nil
+	}
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, p := range in {
+		n, ok := normalizeProxyPath(p)
+		if !ok || n == "/" {
+			return nil, ErrProxyUnavailable
+		}
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+func (e *Egress) allowPath(r *http.Request) bool {
+	if e == nil || r == nil {
+		return false
+	}
+	cands := pathCandidates(r)
+	if len(cands) == 0 || len(e.prefixes) == 0 {
+		return false
+	}
+	var norm string
+	for i, c := range cands {
+		n, ok := normalizeProxyPath(c)
+		if !ok {
+			return false
+		}
+		if i == 0 {
+			norm = n
+			continue
+		}
+		if n != norm {
+			return false
+		}
+	}
+	for _, p := range e.prefixes {
+		if norm == p || strings.HasPrefix(norm, p+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+func pathCandidates(r *http.Request) []string {
+	var out []string
+	if r.RequestURI != "" {
+		out = append(out, r.RequestURI)
+	}
+	if r.URL != nil {
+		if r.URL.RawPath != "" {
+			out = append(out, r.URL.RawPath)
+		}
+		if r.URL.Path != "" {
+			out = append(out, r.URL.Path)
+		}
+	}
+	return out
+}
+
+// normalizeProxyPath returns a decoded absolute path with no dot segments,
+// empty segments, or encoded separators. ok is false for traversal.
+func normalizeProxyPath(raw string) (string, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", false
+	}
+	if i := strings.IndexAny(raw, "?#"); i >= 0 {
+		raw = raw[:i]
+	}
+	if strings.Contains(raw, "://") {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return "", false
+		}
+		if u.RawPath != "" {
+			raw = u.RawPath
+		} else if u.EscapedPath() != "" {
+			raw = u.EscapedPath()
+		} else {
+			raw = u.Path
+		}
+	}
+	cur := raw
+	for i := 0; i < 4; i++ {
+		if badProxyPath(cur) {
+			return "", false
+		}
+		if !strings.Contains(cur, "%") {
+			break
+		}
+		next, err := url.PathUnescape(cur)
+		if err != nil || next == cur {
+			if err != nil {
+				return "", false
+			}
+			break
+		}
+		cur = next
+	}
+	if strings.Contains(cur, "%") || badProxyPath(cur) {
+		return "", false
+	}
+	trimmed := strings.TrimRight(cur, "/")
+	if trimmed == "" {
+		trimmed = "/"
+	}
+	if path.Clean(trimmed) != trimmed {
+		return "", false
+	}
+	return trimmed, true
+}
+
+func badProxyPath(s string) bool {
+	if s == "" || !strings.HasPrefix(s, "/") || strings.ContainsAny(s, "\\?#\x00") {
+		return true
+	}
+	lower := strings.ToLower(s)
+	if strings.Contains(lower, "%2e") || strings.Contains(lower, "%2f") || strings.Contains(lower, "%5c") || strings.Contains(lower, "%00") {
+		return true
+	}
+	if strings.Contains(s, "//") {
+		return true
+	}
+	for _, seg := range strings.Split(strings.TrimRight(s, "/"), "/") {
+		if seg == "." || seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func allowTransport(allow map[string]bool) *http.Transport {

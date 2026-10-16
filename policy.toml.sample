@@ -115,6 +115,9 @@ imminent_timer_minutes = 2
 # jail gets a placeholder, not those bytes. The host proxy reads the real
 # file and sets Authorization on the way out. The first proxy_hosts entry is
 # the TLS upstream (Grok chat: cli-chat-proxy.grok.com).
+# proxy_path_prefixes limits which paths receive that bearer. Omitted means
+# /v1, the prefix Grok uses on that host. Any other path is 403 and is not
+# forwarded. Local policy can only narrow the list.
 # allow_jail_credentials = true is managed-only. It copies the real files
 # into the jail and logs a warning. Local policy cannot turn it on.
 # credential_files plus fixed_args --always-approve, without proxy_hosts and
@@ -132,7 +135,7 @@ imminent_timer_minutes = 2
 # Managed policy can lock an entry (lock = true) or ban a name (cli_ban).
 # cli_allow_local = false drops local-only names. Local policy can only narrow
 # a managed entry: fewer args, fewer bots, lower limits, fewer value_flags,
-# credential_files, and proxy_hosts. It cannot change the path, credential
+# credential_files, proxy_hosts, and proxy_path_prefixes. It cannot change the path, credential
 # home, sandbox_bin, fixed_args, or fixed_env. The daemon re-reads this on
 # each call.
 # cli_ban = ["curl"]
@@ -143,6 +146,7 @@ imminent_timer_minutes = 2
 # credential_home = "/var/lib/local-grok-bots/coi/grok"
 # credential_files = [".grok/auth.json"]
 # proxy_hosts = ["cli-chat-proxy.grok.com"]
+# proxy_path_prefixes = ["/v1"]
 # bots = ["bot-id-or-name"]
 # allowed_args = ["-p", "--cwd", "--max-turns", "--no-auto-update"]
 # value_flags = ["-p", "--cwd", "--max-turns"]

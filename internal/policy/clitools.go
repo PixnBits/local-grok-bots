@@ -2,11 +2,18 @@ package policy
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// DefaultProxyPathPrefix is the path Grok's chat client uses on
+// cli-chat-proxy.grok.com. The forwarder sets the chat base URL to
+// http://127.0.0.1:<port>/v1. An omitted proxy_path_prefixes list means
+// this prefix, so the real bearer is not sent anywhere else.
+const DefaultProxyPathPrefix = "/v1"
 
 // CLITool is one host CLI the credential broker may run.
 // A zero Timeout, MaxOutput, or MaxCallsPerHour denies every call.
@@ -20,6 +27,7 @@ type CLITool struct {
 	FixedEnv             []string
 	SandboxBin           string
 	ProxyHosts           []string
+	ProxyPathPrefixes    []string
 	AllowJailCredentials bool
 	CredentialHome       string
 	Bots                 []string
@@ -54,21 +62,22 @@ func (p Policy) COI(name string) (CLITool, bool) {
 // cliEntry is a parsed [[tools.cli]] row. Set flags distinguish an omitted
 // field from an explicit zero so local policy can leave a managed value alone.
 type cliEntry struct {
-	tool       CLITool
-	argsSet    bool
-	botsSet    bool
-	timeoutSet bool
-	outputSet  bool
-	callsSet   bool
-	pathSet    bool
-	homeSet    bool
-	valuesSet  bool
-	filesSet   bool
-	fixedSet   bool
-	envSet     bool
-	binSet     bool
-	hostsSet   bool
-	jailSet    bool
+	tool        CLITool
+	argsSet     bool
+	botsSet     bool
+	timeoutSet  bool
+	outputSet   bool
+	callsSet    bool
+	pathSet     bool
+	homeSet     bool
+	valuesSet   bool
+	filesSet    bool
+	fixedSet    bool
+	envSet      bool
+	binSet      bool
+	hostsSet    bool
+	prefixesSet bool
+	jailSet     bool
 }
 
 type toolsDoc struct {
@@ -91,6 +100,7 @@ type cliToolDoc struct {
 	FixedEnv             []string `toml:"fixed_env" json:"fixed_env"`
 	SandboxBin           string   `toml:"sandbox_bin" json:"sandbox_bin"`
 	ProxyHosts           []string `toml:"proxy_hosts" json:"proxy_hosts"`
+	ProxyPathPrefixes    []string `toml:"proxy_path_prefixes" json:"proxy_path_prefixes"`
 	AllowJailCredentials *bool    `toml:"allow_jail_credentials" json:"allow_jail_credentials"`
 	CredentialHome       string   `toml:"credential_home" json:"credential_home"`
 	Bots                 []string `toml:"bots" json:"bots"`
@@ -130,7 +140,7 @@ func (p *Policy) applyCLITools(doc toolsDoc, trusted bool) error {
 			}
 		}
 		p.cliLocal = entries
-		p.CLITools = resolvedCLI(entries)
+		p.CLITools = fillProxyPrefixes(resolvedCLI(entries))
 		return nil
 	}
 	allowLocal := true
@@ -139,7 +149,7 @@ func (p *Policy) applyCLITools(doc toolsDoc, trusted bool) error {
 	}
 	merged, warns := mergeCLITools(entries, p.cliLocal, normBan(doc.Ban), allowLocal)
 	p.Warnings = append(p.Warnings, warns...)
-	p.CLITools = merged
+	p.CLITools = fillProxyPrefixes(merged)
 	return nil
 }
 
@@ -272,6 +282,14 @@ func parseCLITool(row cliToolDoc, requireComplete bool) (cliEntry, error) {
 		e.tool.ProxyHosts = hosts
 		e.hostsSet = true
 	}
+	if row.ProxyPathPrefixes != nil {
+		prefs, err := normProxyPrefixes(name, row.ProxyPathPrefixes)
+		if err != nil {
+			return cliEntry{}, err
+		}
+		e.tool.ProxyPathPrefixes = prefs
+		e.prefixesSet = true
+	}
 	if row.AllowJailCredentials != nil {
 		e.tool.AllowJailCredentials = *row.AllowJailCredentials
 		e.jailSet = true
@@ -380,6 +398,51 @@ func normRelFiles(name, field string, in []string) ([]string, error) {
 		out = append(out, clean)
 	}
 	return out, nil
+}
+
+func normProxyPrefixes(name string, in []string) ([]string, error) {
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, p := range in {
+		p = strings.TrimSpace(p)
+		n, ok := cleanProxyPrefix(p)
+		if !ok {
+			return nil, fmt.Errorf("tools.cli %q proxy_path_prefixes %q must be an absolute path prefix", name, p)
+		}
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// cleanProxyPrefix accepts a slash path the proxy can match as a prefix.
+// It rejects a bare "/", traversal, empty segments, and encoded characters.
+func cleanProxyPrefix(p string) (string, bool) {
+	if p == "" || p == "/" || !strings.HasPrefix(p, "/") {
+		return "", false
+	}
+	if strings.ContainsAny(p, "\\?# \t%") || strings.Contains(p, "://") {
+		return "", false
+	}
+	p = strings.TrimRight(p, "/")
+	if p == "" || p == "/" || path.Clean(p) != p {
+		return "", false
+	}
+	return p, true
+}
+
+// fillProxyPrefixes sets the Grok chat prefix when the field was omitted.
+// An explicit empty list stays empty so a narrowed policy denies every path.
+func fillProxyPrefixes(tools []CLITool) []CLITool {
+	for i := range tools {
+		if tools[i].ProxyPathPrefixes == nil {
+			tools[i].ProxyPathPrefixes = []string{DefaultProxyPathPrefix}
+		}
+	}
+	return tools
 }
 
 func normProxyHosts(name string, in []string) ([]string, error) {
@@ -598,6 +661,17 @@ func narrowCLI(managed, local cliEntry, warns *[]string) CLITool {
 		out.ProxyHosts = kept
 		if len(extra) > 0 {
 			*warns = append(*warns, fmt.Sprintf("tools.cli %q proxy_hosts %s ignored; local policy can only narrow managed policy", name, strings.Join(extra, ", ")))
+		}
+	}
+	if local.prefixesSet {
+		base := managed.tool.ProxyPathPrefixes
+		if !managed.prefixesSet {
+			base = []string{DefaultProxyPathPrefix}
+		}
+		kept, extra := narrowList(base, local.tool.ProxyPathPrefixes, false)
+		out.ProxyPathPrefixes = kept
+		if len(extra) > 0 {
+			*warns = append(*warns, fmt.Sprintf("tools.cli %q proxy_path_prefixes %s ignored; local policy can only narrow managed policy", name, strings.Join(extra, ", ")))
 		}
 	}
 	if local.jailSet {
