@@ -65,6 +65,21 @@ type App struct {
 	// coiCap counts brokered host-CLI calls per bot.
 	coiOnce sync.Once
 	coiCap  *coi.HourCap
+	// noGrokProxy skips the Grok CLI credential proxy. Tests set it so they
+	// do not read the host login. Production leaves it false.
+	noGrokProxy bool
+	grokMu      sync.Mutex
+	grokProxy   *coi.Egress
+	// grokGates are live loopback secrets for each bot. credMu is held while
+	// a gate is added and while a bot's gates are released.
+	grokGates map[string][]*gateHold
+	// grokTrip, when set, replaces the loopback proxy's outbound transport.
+	// Tests use it. Production leaves it nil.
+	grokTrip http.RoundTripper
+	// credMu serializes a Grok placeholder write with deletion of that file.
+	credMu sync.Mutex
+	// goneBots are ids that must not get a new Grok login file.
+	goneBots sync.Map
 	// runner, when set, replaces the real CLI exec. Tests use it.
 	runner clisession.Runner
 	// cliTTY, when set, overrides /dev/tty detection for permission prompts.
@@ -180,6 +195,12 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		},
 	})
 	coi.CleanStaleHomes(cfg.DataDir)
+	if err := scrubHostGrokLogins(cfg.DataDir); err != nil {
+		st.Close()
+		_ = aud.Close()
+		cancel()
+		return nil, err
+	}
 	if err := mkdirWorkspace(a.ws); err != nil {
 		st.Close()
 		_ = aud.Close()
@@ -216,6 +237,7 @@ func (a *App) Shutdown() {
 	a.rtMu.Unlock()
 	a.cancel()
 	a.wg.Wait()
+	a.closeGrokProxy()
 	_ = a.st.FailRunning("shutdown")
 	_ = a.st.AddLog("", "daemon_stop", map[string]any{})
 	_ = a.st.Close()

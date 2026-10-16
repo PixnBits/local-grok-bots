@@ -2,6 +2,7 @@ package coi
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"net"
 	"net/http"
@@ -11,24 +12,41 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
+
+// egressToken is the bearer for one request. It is not logged.
+type egressToken struct{}
 
 // Egress is the host-side reverse proxy. The jail speaks plain HTTP to a
 // loopback forwarder; this process dials TLS to the allowlisted host and
 // sets Authorization. A CONNECT proxy would hide that header inside TLS,
 // so it cannot inject the credential.
 type Egress struct {
-	dir      string
-	sock     string
-	ln       net.Listener
-	srv      *http.Server
-	token    string
-	hosts    map[string]bool
-	first    string
-	prefixes []string
+	dir         string
+	sock        string
+	ln          net.Listener
+	srv         *http.Server
+	token       string
+	bearer      func() (string, error)
+	hosts       map[string]bool
+	first       string
+	prefixes    []string
+	requireGate bool
+	gateMu      sync.Mutex
+	gates       map[string]gateBinding
+	// onAudit records one loopback request. It is not used for a unix socket.
+	// The callback receives the bot, the run, the normalized path, and the status.
+	onAudit func(botID, runID, path string, status int)
+}
+
+// gateBinding is the bot and run a placeholder bearer was admitted for.
+type gateBinding struct {
+	botID string
+	runID string
 }
 
 // StartEgress listens on a unix socket in a private 0700 directory under parent.
@@ -84,34 +102,284 @@ func StartEgress(parent string, hosts, prefixes []string, token string, trip htt
 	}
 	_ = os.Chmod(sock, 0o600)
 	eg := &Egress{dir: dir, sock: sock, ln: ln, token: token, hosts: allow, first: first, prefixes: resolved}
-	var transport http.RoundTripper = allowTransport(allow)
+	eg.serve(trip)
+	return eg, nil
+}
+
+// StartLoopback listens on 127.0.0.1 and serves the same reverse proxy as
+// StartEgress. bearer is called per accepted request and is not logged.
+// The listener injects that bearer only after Admit has registered the
+// presented placeholder for this bot run. Any other client is rejected.
+// The Grok CLI speaks HTTP, so the chat client needs a TCP origin. A unix
+// socket is what the jailed COI forwarder uses; this listener is for a
+// process that shares the host network namespace.
+func StartLoopback(hosts, prefixes []string, bearer func() (string, error), trip http.RoundTripper) (*Egress, error) {
+	if bearer == nil || len(hosts) == 0 {
+		return nil, ErrProxyUnavailable
+	}
+	if _, err := bearer(); err != nil {
+		return nil, ErrProxyUnavailable
+	}
+	resolved, err := resolvePrefixes(prefixes)
+	if err != nil {
+		return nil, ErrProxyUnavailable
+	}
+	allow := map[string]bool{}
+	var first string
+	for _, h := range hosts {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" {
+			continue
+		}
+		if first == "" {
+			first = h
+		}
+		allow[h] = true
+	}
+	if first == "" || !allow[first] {
+		return nil, ErrProxyUnavailable
+	}
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		return nil, ErrProxyUnavailable
+	}
+	tcp, ok := ln.Addr().(*net.TCPAddr)
+	if !ok || tcp.IP == nil || !tcp.IP.IsLoopback() {
+		_ = ln.Close()
+		return nil, ErrProxyUnavailable
+	}
+	eg := &Egress{ln: ln, bearer: bearer, hosts: allow, first: first, prefixes: resolved, requireGate: true}
+	eg.serve(trip)
+	return eg, nil
+}
+
+// Admit registers one placeholder bearer for one bot and one run. The
+// loopback proxy replaces that bearer only when the request names the same
+// bot and run. Every other bearer is rejected, including the well-known
+// placeholder. The returned function removes it and is safe to call more
+// than once. A unix-socket proxy does not consult this set.
+func (e *Egress) Admit(botID, runID, secret string) func() {
+	if e == nil || !e.requireGate || !acceptableGate(secret) || !SafeRouteID(botID) || !SafeRouteID(runID) {
+		return func() {}
+	}
+	e.gateMu.Lock()
+	if e.gates == nil {
+		e.gates = map[string]gateBinding{}
+	}
+	e.gates[secret] = gateBinding{botID: botID, runID: runID}
+	e.gateMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			if e == nil {
+				return
+			}
+			e.gateMu.Lock()
+			delete(e.gates, secret)
+			e.gateMu.Unlock()
+		})
+	}
+}
+
+// SetAudit registers the loopback request record. A nil function disables it.
+// The callback must not expect headers, a body, or the presented bearer.
+func (e *Egress) SetAudit(fn func(botID, runID, path string, status int)) {
+	if e == nil {
+		return
+	}
+	e.gateMu.Lock()
+	e.onAudit = fn
+	e.gateMu.Unlock()
+}
+
+func (e *Egress) note(botID, runID, path string, status int) {
+	if e == nil || !e.requireGate {
+		return
+	}
+	e.gateMu.Lock()
+	fn := e.onAudit
+	e.gateMu.Unlock()
+	if fn == nil {
+		return
+	}
+	fn(botID, runID, path, status)
+}
+
+func (e *Egress) admits(botID, runID, presented string) bool {
+	if e == nil || presented == "" || botID == "" || runID == "" {
+		return false
+	}
+	e.gateMu.Lock()
+	defer e.gateMu.Unlock()
+	ok := 0
+	pb := []byte(presented)
+	bb := []byte(botID)
+	rb := []byte(runID)
+	for secret, g := range e.gates {
+		match := subtle.ConstantTimeCompare(pb, []byte(secret))
+		botOK := subtle.ConstantTimeCompare(bb, []byte(g.botID))
+		runOK := subtle.ConstantTimeCompare(rb, []byte(g.runID))
+		ok |= match & botOK & runOK
+	}
+	return ok == 1
+}
+
+// SafeRouteID reports whether id can be one path segment of a proxy route.
+func SafeRouteID(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func acceptableGate(s string) bool {
+	if len(s) < 16 || len(s) > 128 || s == PlaceholderToken {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func presentedBearer(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	h := r.Header.Get("Authorization")
+	const prefix = "bearer "
+	if len(h) < len(prefix) || !strings.EqualFold(h[:len(prefix)], prefix) {
+		return ""
+	}
+	return strings.TrimSpace(h[len(prefix):])
+}
+
+func (e *Egress) serve(trip http.RoundTripper) {
+	var transport http.RoundTripper = allowTransport(e.hosts)
 	if trip != nil {
 		transport = trip
 	}
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetURL(&url.URL{Scheme: "https", Host: eg.first})
-			pr.Out.Host = eg.first
+			pr.SetURL(&url.URL{Scheme: "https", Host: e.first})
+			pr.Out.Host = e.first
 			keepForwardHeaders(pr.Out.Header)
-			pr.Out.Header.Set("Authorization", "Bearer "+eg.token)
+			tok, _ := pr.In.Context().Value(egressToken{}).(string)
+			if tok == "" {
+				tok = e.token
+			}
+			if tok != "" {
+				pr.Out.Header.Set("Authorization", "Bearer "+tok)
+			}
 		},
 		Transport: transport,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 		},
 	}
-	eg.srv = &http.Server{
+	e.srv = &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !eg.allowRequest(r) || !eg.allowPath(r) {
+			botID, runID, norm, fwd, ok := e.prepare(r)
+			if !ok || fwd == nil {
 				http.Error(w, "forbidden", http.StatusForbidden)
+				e.note(botID, runID, norm, http.StatusForbidden)
 				return
 			}
-			proxy.ServeHTTP(w, r)
+			if e.requireGate && !e.admits(botID, runID, presentedBearer(r)) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				e.note(botID, runID, norm, http.StatusForbidden)
+				return
+			}
+			tok, err := e.currentToken()
+			if err != nil || tok == "" {
+				http.Error(w, "proxy is not available", http.StatusServiceUnavailable)
+				e.note(botID, runID, norm, http.StatusServiceUnavailable)
+				return
+			}
+			dst := w
+			var sw *statusWriter
+			if e.requireGate {
+				sw = &statusWriter{ResponseWriter: w}
+				dst = sw
+			}
+			proxy.ServeHTTP(dst, fwd.WithContext(context.WithValue(fwd.Context(), egressToken{}, tok)))
+			if sw != nil {
+				e.note(botID, runID, norm, sw.status())
+			}
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	go func() { _ = eg.srv.Serve(ln) }()
-	return eg, nil
+	go func() { _ = e.srv.Serve(e.ln) }()
+}
+
+// statusWriter records the response status. Unwrap lets the reverse proxy flush.
+type statusWriter struct {
+	http.ResponseWriter
+	code int
+	set  bool
+}
+
+func (s *statusWriter) WriteHeader(code int) {
+	if s.set {
+		return
+	}
+	s.set = true
+	s.code = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusWriter) Write(p []byte) (int, error) {
+	if !s.set {
+		s.WriteHeader(http.StatusOK)
+	}
+	return s.ResponseWriter.Write(p)
+}
+
+func (s *statusWriter) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+
+func (s *statusWriter) status() int {
+	if !s.set || s.code == 0 {
+		return http.StatusOK
+	}
+	return s.code
+}
+
+func (e *Egress) currentToken() (string, error) {
+	if e == nil {
+		return "", ErrProxyUnavailable
+	}
+	if e.bearer != nil {
+		tok, err := e.bearer()
+		if err != nil || tok == "" {
+			return "", ErrProxyUnavailable
+		}
+		return tok, nil
+	}
+	if e.token == "" {
+		return "", ErrProxyUnavailable
+	}
+	return e.token, nil
+}
+
+// Base is the loopback origin, with no path. It is empty for a unix-socket proxy.
+func (e *Egress) Base() string {
+	if e == nil || e.ln == nil || e.ln.Addr() == nil || e.ln.Addr().Network() != "tcp" {
+		return ""
+	}
+	return "http://" + e.ln.Addr().String()
 }
 
 func (e *Egress) Sock() string {
@@ -136,6 +404,72 @@ func (e *Egress) Close() {
 	if e.dir != "" {
 		_ = os.RemoveAll(e.dir)
 	}
+}
+
+func (e *Egress) prepare(r *http.Request) (botID, runID, path string, fwd *http.Request, ok bool) {
+	if e == nil || r == nil {
+		return "", "", "", nil, false
+	}
+	if !e.requireGate {
+		if e.allowRequest(r) && e.allowPath(r) {
+			p := ""
+			if r.URL != nil {
+				p, _ = normalizeProxyPath(r.URL.Path)
+			}
+			return "", "", p, r, true
+		}
+		return "", "", "", nil, false
+	}
+	if r.URL == nil {
+		return "", "", "", nil, false
+	}
+	botID, runID, rest, split := splitBotRun(r.URL.Path)
+	if !split {
+		return "", "", "", nil, false
+	}
+	norm, normOK := normalizeProxyPath(rest)
+	if !normOK {
+		return botID, runID, "", nil, false
+	}
+	fwd = requestWithPath(r, norm)
+	if !e.allowRequest(fwd) || !e.allowPath(fwd) {
+		return botID, runID, norm, nil, false
+	}
+	return botID, runID, norm, fwd, true
+}
+
+func splitBotRun(p string) (botID, runID, rest string, ok bool) {
+	const bots = "/bots/"
+	if !strings.HasPrefix(p, bots) {
+		return "", "", "", false
+	}
+	botID, after, found := strings.Cut(p[len(bots):], "/")
+	if !found || !SafeRouteID(botID) {
+		return "", "", "", false
+	}
+	const runs = "runs/"
+	if !strings.HasPrefix(after, runs) {
+		return "", "", "", false
+	}
+	runID, tail, found := strings.Cut(after[len(runs):], "/")
+	if !found || !SafeRouteID(runID) || tail == "" {
+		return "", "", "", false
+	}
+	return botID, runID, "/" + tail, true
+}
+
+func requestWithPath(r *http.Request, path string) *http.Request {
+	c := r.Clone(r.Context())
+	u := *c.URL
+	u.Path = path
+	u.RawPath = ""
+	c.URL = &u
+	if u.RawQuery == "" {
+		c.RequestURI = path
+	} else {
+		c.RequestURI = path + "?" + u.RawQuery
+	}
+	return c
 }
 
 func (e *Egress) allowRequest(r *http.Request) bool {

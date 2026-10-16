@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,10 +12,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
+	"github.com/PixnBits/local-grok-bots/internal/coi"
 	"github.com/PixnBits/local-grok-bots/internal/dlp"
 	"github.com/PixnBits/local-grok-bots/internal/id"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
@@ -73,13 +77,16 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		a.failCLI(bot.ID, runID, backend, err)
 		return
 	}
-	iso, err := a.cliIsolation(bot, backend, ws)
+	iso, err := a.cliIsolation(bot, backend, ws, runID)
 	if err != nil {
 		if fresh {
 			_ = a.st.SetBotSession(bot.ID, "")
 		}
 		a.failCLI(bot.ID, runID, backend, err)
 		return
+	}
+	if iso != nil && iso.ReleaseGate != nil {
+		defer iso.ReleaseGate()
 	}
 	lgb, lgbEnv, lerr := a.startLGB(ctx, bot, runID, ws)
 	if lerr != nil {
@@ -321,7 +328,7 @@ func (a *App) finishCLIInterrupted(botID, runID, text string) {
 // daemon-owned CLI environment. A file the launch cannot neutralize, or any
 // file under overrides = "refuse", fails the turn closed. Each detection is
 // audited.
-func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isolation, error) {
+func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisession.Isolation, error) {
 	botID := bot.ID
 	isolated := a.policy.CLIHome != policy.HomeUser
 	found := clisession.ScanOverrides(ws)
@@ -361,6 +368,7 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isola
 		Secrets:  []string{a.cfg.AuthToken},
 		Grants:   botGrants(bot),
 		Protect:  a.daemonSecrets(),
+		CredRoot: a.cfg.DataDir,
 	}
 	if strings.EqualFold(backend, "claude") && a.policy.CLIClaudeSandbox != policy.SandboxOff {
 		if missing := claudeSandboxMissing(); len(missing) > 0 {
@@ -369,6 +377,30 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isola
 		opts.ClaudeSandbox = true
 	}
 	opts.UserHome, _ = os.UserHomeDir()
+	if a.botDeleted(bot.ID) {
+		return nil, fmt.Errorf("bot was deleted")
+	}
+	if strings.EqualFold(backend, "grok") {
+		base, err := a.ensureGrokProxy(opts.UserHome)
+		if err != nil {
+			a.recordGrokProxy(botID, err)
+			return nil, err
+		}
+		opts.ProxyBase = base
+		if base != "" {
+			if runID == "" || !coi.SafeRouteID(bot.ID) || !coi.SafeRouteID(runID) {
+				a.recordGrokProxy(botID, errGrokProxy)
+				return nil, errGrokProxy
+			}
+			gate, gerr := newProxyGate()
+			if gerr != nil {
+				a.recordGrokProxy(botID, errGrokProxy)
+				return nil, errGrokProxy
+			}
+			opts.ProxyGate = gate
+			opts.ProxyBase = base + "/bots/" + bot.ID + "/runs/" + runID
+		}
+	}
 	ownHome := isolated
 	if strings.EqualFold(backend, "claude") {
 		// On macOS Claude's login is in the Keychain, found through the real
@@ -378,7 +410,25 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isola
 	if ownHome {
 		opts.Home = filepath.Join(state, "home")
 	}
-	iso, err := clisession.PrepareIsolation(opts)
+	var iso clisession.Isolation
+	var err error
+	if strings.EqualFold(backend, "grok") {
+		a.credMu.Lock()
+		if a.botDeleted(bot.ID) {
+			a.credMu.Unlock()
+			return nil, fmt.Errorf("bot was deleted")
+		}
+		iso, err = clisession.PrepareIsolation(opts)
+		if err == nil && opts.ProxyGate != "" {
+			iso.ReleaseGate = a.trackGrokGate(bot.ID, runID, opts.ProxyGate)
+		}
+		a.credMu.Unlock()
+	} else {
+		iso, err = clisession.PrepareIsolation(opts)
+	}
+	if errors.Is(err, clisession.ErrCredSymlink) {
+		a.auditCredSymlink(bot.ID, runID)
+	}
 	if err != nil {
 		var se *clisession.SandboxError
 		if errors.As(err, &se) {
@@ -394,6 +444,204 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isola
 		}
 	}
 	return &iso, nil
+}
+
+func (a *App) botDeleted(id string) bool {
+	if a == nil || id == "" {
+		return false
+	}
+	_, ok := a.goneBots.Load(id)
+	return ok
+}
+
+func newProxyGate() (string, error) {
+	var buf [32]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return "lgb_" + hex.EncodeToString(buf[:]), nil
+}
+
+// gateHold is one admitted loopback secret. drop is safe to call twice.
+type gateHold struct {
+	drop func()
+}
+
+// trackGrokGate admits the secret and remembers it until the turn ends or
+// the bot is deleted. The caller holds credMu, which is also held across
+// releaseBotGates, so a delete cannot miss a secret admitted after it starts.
+func (a *App) trackGrokGate(botID, runID, secret string) func() {
+	if a == nil {
+		return func() {}
+	}
+	a.grokMu.Lock()
+	eg := a.grokProxy
+	a.grokMu.Unlock()
+	if eg == nil {
+		return func() {}
+	}
+	release := eg.Admit(botID, runID, secret)
+	hold := &gateHold{}
+	var once sync.Once
+	hold.drop = func() {
+		once.Do(func() {
+			release()
+			a.untrackGrokGate(botID, hold)
+		})
+	}
+	a.grokMu.Lock()
+	if a.grokGates == nil {
+		a.grokGates = map[string][]*gateHold{}
+	}
+	a.grokGates[botID] = append(a.grokGates[botID], hold)
+	a.grokMu.Unlock()
+	return hold.drop
+}
+
+func (a *App) untrackGrokGate(botID string, hold *gateHold) {
+	if a == nil || hold == nil {
+		return
+	}
+	a.grokMu.Lock()
+	defer a.grokMu.Unlock()
+	holds := a.grokGates[botID]
+	for i, h := range holds {
+		if h != hold {
+			continue
+		}
+		a.grokGates[botID] = append(holds[:i], holds[i+1:]...)
+		break
+	}
+	if len(a.grokGates[botID]) == 0 {
+		delete(a.grokGates, botID)
+	}
+}
+
+// releaseBotGates rejects every live secret for botID. The caller holds credMu.
+func (a *App) releaseBotGates(botID string) {
+	if a == nil || botID == "" {
+		return
+	}
+	a.grokMu.Lock()
+	holds := a.grokGates[botID]
+	delete(a.grokGates, botID)
+	a.grokMu.Unlock()
+	for _, h := range holds {
+		if h != nil && h.drop != nil {
+			h.drop()
+		}
+	}
+}
+
+func scrubHostGrokLogins(dataDir string) error {
+	home, err := os.UserHomeDir()
+	real := ""
+	if err == nil && home != "" {
+		real = filepath.Join(home, ".grok", "auth.json")
+	}
+	return clisession.ScrubStaleGrokAuth(dataDir, real)
+}
+
+// ensureGrokProxy starts the loopback credential proxy once. It reads the
+// bearer from the user login file and does not write that file. No usable
+// login means the CLI keeps the placeholder and is not pointed at a proxy.
+// An expired login fails the turn instead of refreshing the user file.
+func (a *App) ensureGrokProxy(userHome string) (string, error) {
+	if a == nil || a.noGrokProxy {
+		return "", nil
+	}
+	a.grokMu.Lock()
+	defer a.grokMu.Unlock()
+	if a.grokProxy != nil {
+		return a.grokProxy.Base(), nil
+	}
+	userHome = strings.TrimSpace(userHome)
+	if userHome == "" {
+		return "", nil
+	}
+	path := filepath.Join(userHome, ".grok", "auth.json")
+	if _, err := os.Lstat(path); err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", errGrokProxy
+	}
+	if _, err := coi.ReadBearer(path); err != nil {
+		if errors.Is(err, coi.ErrLoginUnusable) {
+			return "", err
+		}
+		return "", nil
+	}
+	eg, err := coi.StartLoopback([]string{coi.GrokChatHost}, nil, func() (string, error) {
+		return coi.ReadBearer(path)
+	}, a.grokTrip)
+	if err != nil {
+		return "", errGrokProxy
+	}
+	eg.SetAudit(func(botID, runID, path string, status int) {
+		a.auditProxyRequest(botID, runID, path, status)
+	})
+	a.grokProxy = eg
+	return eg.Base(), nil
+}
+
+func (a *App) auditProxyRequest(botID, runID, path string, status int) {
+	if a == nil || a.audit == nil || !a.audit.Enabled() {
+		return
+	}
+	a.audit.Write(map[string]any{
+		"event":  "cli_proxy_request",
+		"bot_id": botID,
+		"run_id": runID,
+		"path":   path,
+		"status": status,
+	})
+}
+
+var errGrokProxy = errors.New("grok credential proxy is not available, so the turn was refused")
+
+func (a *App) closeGrokProxy() {
+	if a == nil {
+		return
+	}
+	a.grokMu.Lock()
+	eg := a.grokProxy
+	a.grokProxy = nil
+	a.grokMu.Unlock()
+	if eg != nil {
+		eg.Close()
+	}
+}
+
+func (a *App) auditCredSymlink(botID, runID string) {
+	fields := map[string]any{}
+	if runID != "" {
+		fields["run_id"] = runID
+	}
+	a.log(botID, "cli_cred_symlink_refused", fields)
+	if a.audit != nil && a.audit.Enabled() {
+		rec := map[string]any{"event": "cli_cred_symlink_refused", "bot_id": botID}
+		for k, v := range fields {
+			rec[k] = v
+		}
+		a.audit.Write(rec)
+	}
+}
+
+func (a *App) recordGrokProxy(botID string, err error) {
+	why := errGrokProxy.Error()
+	if errors.Is(err, coi.ErrLoginUnusable) {
+		why = coi.ErrLoginUnusable.Error()
+	}
+	fields := map[string]any{"backend": "grok", "reason": why}
+	a.log(botID, "cli_proxy_unavailable", fields)
+	if a.audit != nil && a.audit.Enabled() {
+		rec := map[string]any{"event": "cli_proxy_unavailable", "bot_id": botID}
+		for k, v := range fields {
+			rec[k] = v
+		}
+		a.audit.Write(rec)
+	}
 }
 
 // lgbAllow approves the lgb and coi spool commands. Other shell commands still ask.

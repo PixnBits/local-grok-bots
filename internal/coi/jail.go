@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
 
@@ -30,11 +31,6 @@ var grokCompatOff = []string{
 	"GROK_CODEX_RULES_ENABLED", "GROK_CODEX_SKILLS_ENABLED", "GROK_CODEX_SESSIONS_ENABLED",
 	"GROK_MANAGED_MCPS_ENABLED",
 }
-
-// grokPlaceholder is a synthetic login file. It contains no value from the
-// host credential file. Grok reads it; the proxy overwrites Authorization.
-const grokPlaceholder = `{"https://auth.x.ai::00000000-0000-4000-8000-000000000001":{"key":"` + PlaceholderToken + `","auth_mode":"oidc","expires_at":"2099-01-01T00:00:00.000000000Z","refresh_token":"coi-placeholder-refresh","oidc_issuer":"https://auth.x.ai","oidc_client_id":"00000000-0000-4000-8000-000000000001"}}
-`
 
 type jailSpec struct {
 	Bin        string
@@ -231,7 +227,7 @@ func writePlaceholderFiles(home string, tool policy.CLITool) error {
 		}
 		body := []byte(`{"token":"` + PlaceholderToken + `"}` + "\n")
 		if strings.EqualFold(tool.Name, "grok") && filepath.Base(dst) == "auth.json" {
-			body = []byte(grokPlaceholder)
+			body = []byte(clisession.GrokPlaceholderAuth)
 		}
 		if err := os.WriteFile(dst, body, 0o600); err != nil {
 			return ErrSandboxUnavailable

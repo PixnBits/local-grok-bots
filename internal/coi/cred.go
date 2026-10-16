@@ -17,6 +17,34 @@ import (
 // tokenEndpoint is the OIDC refresh URL for auth.x.ai. Tests may replace it.
 var tokenEndpoint = "https://auth.x.ai/oauth2/token"
 
+// ErrLoginUnusable means the login file has a bearer that is already expired.
+// Callers must not refresh or rewrite that file. Refresh rotates the refresh
+// token, and this path reads the user login in place.
+var ErrLoginUnusable = errors.New("grok login is expired, so the turn was refused")
+
+// GrokChatHost is the TLS upstream for the Grok CLI chat client.
+const GrokChatHost = "cli-chat-proxy.grok.com"
+
+// ReadBearer returns the access token in path. It does not refresh and it
+// does not write the file. A missing file, a file with no key, or an expired
+// key is an error. A key with no expiry is returned as-is.
+func ReadBearer(path string) (string, error) {
+	cred, err := parseGrokAuth(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", err
+		}
+		return "", ErrProxyUnavailable
+	}
+	if cred.key == "" {
+		return "", ErrProxyUnavailable
+	}
+	if !cred.expires.IsZero() && !cred.expires.After(time.Now()) {
+		return "", ErrLoginUnusable
+	}
+	return cred.key, nil
+}
+
 // ProxyRequired reports whether the call must go through the egress proxy.
 func ProxyRequired(tool policy.CLITool) bool {
 	return len(tool.ProxyHosts) > 0

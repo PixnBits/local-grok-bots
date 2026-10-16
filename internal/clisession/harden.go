@@ -20,15 +20,11 @@ type Grants struct {
 }
 
 // credentialPaths are under the user's real HOME. Both CLIs' tools and
-// shells are denied them; the CLI process itself still finds its login.
+// shells are denied them. Grok's bot home holds a placeholder, not this file.
 var credentialPaths = []string{
 	".ssh", ".aws", ".gnupg", ".config/gh", ".netrc", ".docker/config.json",
 	".kube", ".config/gcloud", ".azure", ".claude/.credentials.json", ".grok/auth.json",
 }
-
-// grokSkipDeny are credential paths a Grok deny list leaves out: Grok reads
-// its own login from them.
-var grokSkipDeny = map[string]bool{".grok/auth.json": true}
 
 // protectedPaths lists absolute paths to deny, from the user's HOME and the
 // daemon's own secrets.
@@ -614,9 +610,6 @@ const GrokProfile = "lgb"
 func grokSandboxTOML(o IsolationOptions) string {
 	var deny []string
 	skip := map[string]bool{}
-	for k := range grokSkipDeny {
-		skip[k] = true
-	}
 	if o.Grants.SSH {
 		skip[".ssh"] = true
 	}
