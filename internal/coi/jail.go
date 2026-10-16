@@ -56,13 +56,13 @@ func HomesDir(dataDir string) string {
 	return filepath.Join(dataDir, "coi", "homes")
 }
 
-// CleanStaleHomes removes leftover coi-home-* directories under the daemon
-// data dir and, from older builds, under the host temp dir.
+// CleanStaleHomes removes leftover coi-home-* directories under
+// <data>/coi/homes. It does not scan the host temp directory.
 func CleanStaleHomes(dataDir string) {
-	if strings.TrimSpace(dataDir) != "" {
-		removeStaleHomes(HomesDir(dataDir))
+	if strings.TrimSpace(dataDir) == "" {
+		return
 	}
-	removeStaleHomes(os.TempDir())
+	removeStaleHomes(HomesDir(dataDir))
 }
 
 func removeStaleHomes(dir string) {

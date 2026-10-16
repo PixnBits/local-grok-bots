@@ -78,15 +78,28 @@ func TestCleanStaleHomes(t *testing.T) {
 	}
 	stale := filepath.Join(dir, "coi-home-old")
 	keep := filepath.Join(dir, "keep")
-	if err := os.MkdirAll(stale, 0o700); err != nil || os.MkdirAll(keep, 0o700) != nil {
+	sibling := filepath.Join(root, "coi", "coi-home-sibling")
+	if err := os.MkdirAll(stale, 0o700); err != nil || os.MkdirAll(keep, 0o700) != nil || os.MkdirAll(sibling, 0o700) != nil {
 		t.Fatal(err)
 	}
+	hostStale := filepath.Join(os.TempDir(), "coi-home-leave-"+filepath.Base(root))
+	if err := os.MkdirAll(hostStale, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(hostStale) })
 	CleanStaleHomes(root)
+	CleanStaleHomes("")
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Fatal("stale home remains")
 	}
 	if _, err := os.Stat(keep); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(sibling); err != nil {
+		t.Fatal("cleaned outside the homes directory")
+	}
+	if _, err := os.Stat(hostStale); err != nil {
+		t.Fatal("cleaned the host temp directory")
 	}
 }
 
