@@ -47,6 +47,48 @@ Each decision emits `permission_decision` and, when audit is on, one audit recor
 
 `POST /api/bots/{id}/runs/{run_id}/permissions/{req_id}` accepts `{"decision":"allow_once"|"deny"|"allow_session"}`, or `{"decision":"answer","answers":{...}}` with optional `annotations` for a question. The request must belong to that bot and run. `answer` on any other request, or `allow_once` or `allow_session` on a question, is 400 and leaves it pending. A free-text answer longer than 4 KiB is 400 and leaves the question pending. A second decision is 409. A live `lgbr_` token or MCP permission token is 403 on this route. The admin token, as a Bearer or the `lgb_auth` cookie, still decides. Other routes return 401 for a run token.
 
+## Durable user auto-grants and analysis (planned)
+
+The existing allow/ask/deny rules and session grants are the foundation. The next layer reduces prompt toil for repeated low-risk patterns while keeping the user (and a CISO) in control.
+
+### User-controlled durable patterns
+
+A user (via the web profile) can persist allow/ask/deny patterns that survive sessions. Patterns use the same shape the broker already understands: tool + optional glob on the argument string (`Bash(gh pr view *)`, `Read(./src/**)`, `deny Bash(*push*)`, `deny Read(**/.env)`).
+
+- Scope: permanent (until revoked), project-scoped, or time-bounded. Session grants remain as they are (managed-only for the session offer).
+- Hard floors that user rules cannot override:
+  - Any write, redirect, or command that is not statically recognised as read-only.
+  - Network, credential paths, irreversible actions (`push`, package install, `rm -rf`, etc.).
+  - Managed policy can still pin stronger denies or ceilings.
+- Every auto-decision records the matched rule id, classification, and redacted command in the existing audit path (`run_tools` kind `permission`).
+
+Accepting a pattern is an explicit user action that appears in the log with the exact pattern and the risk label shown at acceptance time.
+
+### Analysis and suggestion layer
+
+Every permission request is already logged. An analyser (on demand or after a threshold of similar requests) classifies them and proposes candidate rules:
+
+- Static classification first (deterministic, CISO-friendly):
+  - Known read-only command prefixes or tools (`git status`, `git log`, `gh pr view`, `gh pr diff`, `cat`, `ls`, `head`, `grep` without write flags, etc.).
+  - Path containment (stays inside workspace / granted additional directories).
+  - Absence of redirection, pipes to writers, or known mutating subcommands.
+  - Sensitivity label: project-local data vs home/credential/system paths.
+- Optional second pass with a small local model only for ambiguous cases, never as the sole authority.
+- Output is a suggested rule plus a short risk card: “12 prior `Bash(gh pr view *)` requests, all classified read-only / project data. Suggest permanent allow? Risk: low (reads pull-request metadata already visible to anyone with repo access).”
+- Special call-out for mixed or deceptive cases: “Command contains both a read and a write; classification refused auto-allow.”
+
+The user reviews suggestions in the portal (risk badge, example commands, “promote / edit / dismiss”). Accepting writes the rule into the same store the broker evaluates. Nothing is auto-applied.
+
+### COI vs daemon: enforcement and audit
+
+The preferred middle path keeps the CLI’s own sandbox and native rules as the enforcement boundary (already reviewed by many CISOs) while the daemon owns the decision record and the suggestion surface:
+
+- Generate or update the CLI’s native allow/ask/deny rules (Claude `settings.json`, Grok permission rules / `sandbox.toml`) from the user’s accepted patterns, so the same rules apply when the user runs the CLI directly.
+- Always attach the permission host so residual asks still surface in the portal and every decision (including those the CLI reports) is audited with the same redaction and retention.
+- Treat pure always-approve / bypass modes as managed-only, exactly as the policy file already does.
+
+Full deferral to the COI without ingestion loses the fine-grained unified permission-decision audit that the broker currently provides. The daemon still logs outer events (login source, sandbox status, override detections, and any `permission_denied` the CLI reports), but the internal match and “always allow” grants stay inside the CLI’s own session logs unless deliberately collected. The middle path above preserves both the reviewed boundary and a single complete audit trail inside the bot system.
+
 ## Claude transport
 
 | | `mcp` | `stream_control` | `none` |
