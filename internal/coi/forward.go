@@ -61,12 +61,21 @@ func RunForward(args []string) int {
 	go serveBridge(ln, sock)
 	env := os.Environ()
 	base := "http://127.0.0.1:" + itoa(tcp.Port) + prefix
+	grok := false
 	for _, name := range envs {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			continue
 		}
-		env = append(env, name+"="+base)
+		if name == "GROK_CLI_CHAT_PROXY_BASE_URL" || name == "XAI_API_BASE_URL" || name == "GROK_XAI_API_BASE_URL" {
+			grok = true
+		}
+		env = setEnv(env, name, base)
+	}
+	// Grok 1.0.52 does not treat a synthetic auth.json as a session. It does
+	// send Authorization: Bearer from XAI_API_KEY. The host proxy replaces that.
+	if grok {
+		env = setEnv(env, "XAI_API_KEY", PlaceholderToken)
 	}
 	cmd := exec.Command(cli[0], cli[1:]...)
 	cmd.Env = env
@@ -118,6 +127,18 @@ func bridge(left, right net.Conn) {
 		wg.Done()
 	}()
 	wg.Wait()
+}
+
+func setEnv(env []string, key, val string) []string {
+	prefix := key + "="
+	out := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return append(out, prefix+val)
 }
 
 func itoa(n int) string {
