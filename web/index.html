@@ -404,10 +404,6 @@
           <h2 class="profile-head" aria-label="Profile"><span class="mark" id="profile-head-mark" aria-hidden="true"></span><span class="name" id="profile-head-name">Profile</span></h2>
           <button type="button" id="profile-back" class="ghost">Back</button>
         </div>
-        <div class="row" style="align-items:center">
-          <span class="mark" id="profile-mark" data-shape="circle" style="--c:#1b654c"></span>
-          <strong>Mark</strong>
-        </div>
         <div class="shapes" id="shape-picker" role="group" aria-label="Mark shape"></div>
         <div class="swatches" id="color-picker" role="group" aria-label="Mark colour"></div>
         <label class="color-custom">Custom colour<input type="color" id="color-custom" value="#1b654c"></label>
@@ -1655,7 +1651,6 @@ function paintMarkPicker() {
     b.addEventListener("click", () => { state.mark.color = color; paintMarkPicker(); });
     colors.append(b);
   }
-  paintMark($("#profile-mark"), state.mark);
   paintMark($("#profile-head-mark"), state.mark);
   $("#color-custom").value = state.mark.color;
 }
