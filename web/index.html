@@ -101,25 +101,51 @@
   }
   .bot-copy small { color: var(--muted); }
   .bot.dim { opacity: .55; }
+  /* clip-path removes an inset box-shadow, so the edge is a full-size
+     underlay and the fill is inset inside the same silhouette. */
   .mark {
     display: inline-block; vertical-align: middle;
+    position: relative;
     width: 28px; height: 28px; flex: none;
-    background: var(--c, var(--accent));
-    /* A thin inner edge keeps light colours visible on the paper background. */
-    box-shadow: inset 0 0 0 1px rgba(0,0,0,.22);
   }
-  .mark[data-shape="circle"] { border-radius: 99px; }
-  .mark[data-shape="square"] { border-radius: 4px; }
-  .mark[data-shape="diamond"] { width: 20px; height: 20px; margin: 4px; border-radius: 3px; transform: rotate(45deg); }
-  .mark[data-shape="triangle"] { clip-path: polygon(50% 0, 100% 100%, 0 100%); }
-  .mark[data-shape="hex"] { clip-path: polygon(25% 6%, 75% 6%, 100% 50%, 75% 94%, 25% 94%, 0 50%); }
-  .swatches, .shapes { display: flex; gap: 8px; flex-wrap: wrap; }
+  .mark::before,
+  .mark::after { content: ""; position: absolute; inset: 0; }
+  .mark::before { background: rgba(29, 25, 20, .7); }
+  .mark::after { inset: 2px; background: var(--c, var(--accent)); }
+  .mark[data-shape="circle"]::before,
+  .mark[data-shape="circle"]::after { border-radius: 99px; }
+  .mark[data-shape="square"]::before { border-radius: 4px; }
+  .mark[data-shape="square"]::after { border-radius: 2px; }
+  .mark[data-shape="diamond"] { width: 20px; height: 20px; margin: 4px; transform: rotate(45deg); }
+  .mark[data-shape="diamond"]::before { border-radius: 3px; }
+  .mark[data-shape="diamond"]::after { border-radius: 1px; }
+  .mark[data-shape="triangle"]::before,
+  .mark[data-shape="triangle"]::after { clip-path: polygon(50% 0, 100% 100%, 0 100%); }
+  .mark[data-shape="hex"]::before,
+  .mark[data-shape="hex"]::after { clip-path: polygon(25% 6%, 75% 6%, 100% 50%, 75% 94%, 25% 94%, 0 50%); }
+  .swatches, .shapes { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .swatch, .shape-btn { width: 32px; height: 32px; padding: 0; border-radius: 8px; }
   .mark[hidden] { display: none; }
   .shape-btn { display: inline-flex; align-items: center; justify-content: center; }
   .swatch { box-shadow: inset 0 0 0 1px rgba(0,0,0,.22); }
-  .color-custom { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
-  .color-custom input { width: 32px; height: 32px; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: none; }
+  .colours { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+  #color-picker { display: contents; }
+  .color-custom { font-size: 13px; color: var(--muted); }
+  #color-custom { width: 32px; height: 32px; padding: 0; border: 1px solid var(--line); border-radius: 8px; background: none; }
+  /* At 390px, eight 32px presets leave no room for the custom swatch.
+     The label takes the line above; the input shares the preset grid. */
+  @media (max-width: 540px) {
+    .colours {
+      display: grid;
+      grid-template-columns: repeat(9, minmax(0, 1fr));
+      gap: 6px 4px;
+      align-items: center;
+    }
+    .colours:has(.swatch:nth-child(9)) { grid-template-columns: repeat(10, minmax(0, 1fr)); }
+    .color-custom { order: -1; grid-column: 1 / -1; }
+    #color-custom { width: 100%; height: auto; aspect-ratio: 1; min-width: 0; }
+    .colours .swatch { width: 100%; height: auto; aspect-ratio: 1; min-width: 0; }
+  }
   .profile-head { display: flex; align-items: center; gap: 10px; min-width: 0; margin: 0; }
   .profile-head .name { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .thread-bar > .mark { flex: none; }
@@ -401,12 +427,15 @@
     <section class="view" id="view-profile">
       <form class="panel profile" id="profile-form">
         <div class="row" style="justify-content:space-between;align-items:center">
-          <h2 class="profile-head" aria-label="Profile"><span class="mark" id="profile-head-mark" aria-hidden="true"></span><span class="name" id="profile-head-name">Profile</span></h2>
+          <h2 class="profile-head"><span class="mark" id="profile-head-mark" aria-hidden="true"></span><span class="name" id="profile-head-name">Profile</span></h2>
           <button type="button" id="profile-back" class="ghost">Back</button>
         </div>
         <div class="shapes" id="shape-picker" role="group" aria-label="Mark shape"></div>
-        <div class="swatches" id="color-picker" role="group" aria-label="Mark colour"></div>
-        <label class="color-custom">Custom colour<input type="color" id="color-custom" value="#1b654c"></label>
+        <div class="colours" role="group" aria-label="Mark colour">
+          <div class="swatches" id="color-picker"></div>
+          <label class="color-custom" for="color-custom">Custom colour</label>
+          <input type="color" id="color-custom" value="#1b654c">
+        </div>
         <label>Name<input id="profile-name" autocomplete="off"></label>
         <label>Label<input id="profile-label" placeholder="Short role line" autocomplete="off"></label>
         <label>Description<textarea id="profile-description" placeholder="Standing prompt. This is what the model is given."></textarea></label>
@@ -1654,6 +1683,11 @@ function paintMarkPicker() {
   paintMark($("#profile-head-mark"), state.mark);
   $("#color-custom").value = state.mark.color;
 }
+function syncProfileHeadingName() {
+  const name = $("#profile-name").value.trim();
+  $("#profile-head-name").textContent = name || "Profile";
+}
+$("#profile-name").addEventListener("input", syncProfileHeadingName);
 $("#color-custom").addEventListener("input", (e) => {
   const v = String(e.target.value || "").toLowerCase();
   if (/^#[0-9a-f]{6}$/.test(v)) { state.mark.color = v; paintMarkPicker(); }
@@ -1666,7 +1700,7 @@ async function openProfile(id) {
   if (i >= 0) state.bots[i] = b; else state.bots.push(b);
   state.mark = {shape: (b.mark && b.mark.shape) || "circle", color: (b.mark && b.mark.color) || "#1b654c"};
   $("#profile-name").value = b.name || "";
-  $("#profile-head-name").textContent = b.name || "Profile";
+  syncProfileHeadingName();
   $("#profile-label").value = b.label || "";
   $("#profile-description").value = b.description || "";
   $("#profile-model").value = b.model || "";
