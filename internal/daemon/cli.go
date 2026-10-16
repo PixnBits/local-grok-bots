@@ -387,12 +387,17 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 		}
 		opts.ProxyBase = base
 		if base != "" {
+			if runID == "" || !coi.SafeRouteID(bot.ID) || !coi.SafeRouteID(runID) {
+				a.recordGrokProxy(botID, errGrokProxy)
+				return nil, errGrokProxy
+			}
 			gate, gerr := newProxyGate()
 			if gerr != nil {
 				a.recordGrokProxy(botID, errGrokProxy)
 				return nil, errGrokProxy
 			}
 			opts.ProxyGate = gate
+			opts.ProxyBase = base + "/bots/" + bot.ID + "/runs/" + runID
 		}
 	}
 	ownHome := isolated
@@ -429,7 +434,7 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 	}
 	iso.Protect = append([]string(nil), opts.Protect...)
 	if opts.ProxyGate != "" {
-		iso.ReleaseGate = a.admitGrokGate(opts.ProxyGate)
+		iso.ReleaseGate = a.admitGrokGate(bot.ID, runID, opts.ProxyGate)
 	}
 	a.noteBotProtect(botID, iso.Protect)
 	if strings.EqualFold(backend, "claude") {
@@ -456,7 +461,7 @@ func newProxyGate() (string, error) {
 	return "lgb_" + hex.EncodeToString(buf[:]), nil
 }
 
-func (a *App) admitGrokGate(secret string) func() {
+func (a *App) admitGrokGate(botID, runID, secret string) func() {
 	if a == nil {
 		return func() {}
 	}
@@ -466,7 +471,7 @@ func (a *App) admitGrokGate(secret string) func() {
 	if eg == nil {
 		return func() {}
 	}
-	return eg.Admit(secret)
+	return eg.Admit(botID, runID, secret)
 }
 
 func scrubHostGrokLogins(dataDir string) error {

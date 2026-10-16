@@ -79,6 +79,9 @@ func TestLoopbackReplacesBearer(t *testing.T) {
 	trip := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls.Add(1)
 		gotAuth = r.Header.Get("Authorization")
+		if r.URL == nil || r.URL.Path != "/v1/ping" {
+			t.Errorf("upstream path %v", r.URL)
+		}
 		if r.Header.Get("X-Secret") != "" || r.Header.Get("Cookie") != "" {
 			t.Errorf("forwarded a stripped header")
 		}
@@ -114,8 +117,8 @@ func TestLoopbackReplacesBearer(t *testing.T) {
 		}
 	}
 	const gate = "unit-loopback-gate1"
-	stop := eg.Admit(gate)
-	req, err := http.NewRequest(http.MethodGet, base+"/v1/ping", nil)
+	stop := eg.Admit("bot-a", "run-1", gate)
+	req, err := http.NewRequest(http.MethodGet, base+"/bots/bot-a/runs/run-1/v1/ping", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +139,7 @@ func TestLoopbackReplacesBearer(t *testing.T) {
 	before := calls.Load()
 	beforeReads := reads
 	for _, auth := range []string{"", "Bearer " + PlaceholderToken, "Bearer real-token-value", "Token " + gate} {
-		deny, err := http.NewRequest(http.MethodGet, base+"/v1/ping", nil)
+		deny, err := http.NewRequest(http.MethodGet, base+"/bots/bot-a/runs/run-1/v1/ping", nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -178,7 +181,7 @@ func TestLoopbackReplacesBearer(t *testing.T) {
 		t.Fatalf("bearer reads %d", reads)
 	}
 	stop()
-	revoked, err := http.NewRequest(http.MethodGet, base+"/v1/ping", nil)
+	revoked, err := http.NewRequest(http.MethodGet, base+"/bots/bot-a/runs/run-1/v1/ping", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,6 +195,76 @@ func TestLoopbackReplacesBearer(t *testing.T) {
 		t.Fatalf("revoked status %d calls %d reads %d", resp.StatusCode, calls.Load(), reads)
 	}
 	stop()
+}
+
+func TestLoopbackRejectsMismatchedBotRun(t *testing.T) {
+	var calls atomic.Int32
+	var gotPath string
+	trip := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		if r.URL != nil {
+			gotPath = r.URL.Path
+		}
+		return &http.Response{StatusCode: 204, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(""))}, nil
+	})
+	eg, err := StartLoopback([]string{GrokChatHost}, nil, func() (string, error) {
+		return "real-token-value", nil
+	}, trip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eg.Close()
+	base := eg.Base()
+	const a = "unit-gate-bot-a-0001"
+	const b = "unit-gate-bot-b-0002"
+	stopA := eg.Admit("bot-a", "run-1", a)
+	stopB := eg.Admit("bot-b", "run-2", b)
+	defer stopB()
+	client := &http.Client{Timeout: 2 * time.Second}
+	code := func(url, bearer string) int {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, url, strings.NewReader("secret-body"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+bearer)
+		req.Header.Set("X-Secret", bearer)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		buf, _ := io.ReadAll(resp.Body)
+		if strings.Contains(string(buf), bearer) || strings.Contains(string(buf), "real-token-value") {
+			t.Fatalf("body leaked %s", buf)
+		}
+		return resp.StatusCode
+	}
+	if code(base+"/bots/bot-a/runs/run-1/v1/ping", a) != 204 {
+		t.Fatal("matched bot run rejected")
+	}
+	if gotPath != "/v1/ping" {
+		t.Fatalf("upstream path %s", gotPath)
+	}
+	if code(base+"/bots/bot-b/runs/run-2/v1/ping", a) != http.StatusForbidden {
+		t.Fatal("bot mismatch admitted")
+	}
+	if code(base+"/bots/bot-a/runs/run-2/v1/ping", a) != http.StatusForbidden {
+		t.Fatal("run mismatch admitted")
+	}
+	if code(base+"/v1/ping", a) != http.StatusForbidden {
+		t.Fatal("unscoped path admitted")
+	}
+	stopA()
+	if code(base+"/bots/bot-a/runs/run-1/v1/ping", a) != http.StatusForbidden {
+		t.Fatal("ended run admitted")
+	}
+	if code(base+"/bots/bot-b/runs/run-2/v1/ping", b) != 204 {
+		t.Fatal("other run revoked")
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("upstream calls %d", calls.Load())
+	}
 }
 
 func TestEgressPathAllowlistSkipsUpstream(t *testing.T) {

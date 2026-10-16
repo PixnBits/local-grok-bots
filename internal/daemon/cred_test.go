@@ -174,19 +174,29 @@ func TestGrokProxyGateIsPerBotRun(t *testing.T) {
 	if k1 == "" || k2 == "" || k1 == k2 || k1 == clisession.GrokPlaceholderToken {
 		t.Fatalf("gates %q %q", k1, k2)
 	}
-	origin := strings.TrimSuffix(envValue(first.Env, "GROK_CLI_CHAT_PROXY_BASE_URL"), "/v1")
+	origin1 := strings.TrimSuffix(envValue(first.Env, "GROK_CLI_CHAT_PROXY_BASE_URL"), "/v1")
+	origin2 := strings.TrimSuffix(envValue(second.Env, "GROK_CLI_CHAT_PROXY_BASE_URL"), "/v1")
+	if origin1 == origin2 || !strings.Contains(origin1, "/bots/b1/runs/run-1") || !strings.Contains(origin2, "/bots/b2/runs/run-2") {
+		t.Fatalf("origins %q %q", origin1, origin2)
+	}
 	client := &http.Client{Timeout: 2 * time.Second}
-	if code, _ := proxyDo(t, client, origin+"/v1/ping", "Bearer "+k1); code != http.StatusNoContent {
+	if code, _ := proxyDo(t, client, origin1+"/v1/ping", "Bearer "+k1); code != http.StatusNoContent {
 		t.Fatalf("first %d", code)
 	}
-	if code, _ := proxyDo(t, client, origin+"/v1/ping", "Bearer "+k2); code != http.StatusNoContent {
+	if code, _ := proxyDo(t, client, origin2+"/v1/ping", "Bearer "+k2); code != http.StatusNoContent {
 		t.Fatalf("second %d", code)
 	}
+	if code, _ := proxyDo(t, client, origin2+"/v1/ping", "Bearer "+k1); code != http.StatusForbidden {
+		t.Fatalf("first secret on second run %d", code)
+	}
+	if code, _ := proxyDo(t, client, origin1+"/v1/ping", "Bearer "+k2); code != http.StatusForbidden {
+		t.Fatalf("second secret on first run %d", code)
+	}
 	first.ReleaseGate()
-	if code, _ := proxyDo(t, client, origin+"/v1/ping", "Bearer "+k1); code != http.StatusForbidden {
+	if code, _ := proxyDo(t, client, origin1+"/v1/ping", "Bearer "+k1); code != http.StatusForbidden {
 		t.Fatalf("first still admitted %d", code)
 	}
-	if code, _ := proxyDo(t, client, origin+"/v1/ping", "Bearer "+k2); code != http.StatusNoContent {
+	if code, _ := proxyDo(t, client, origin2+"/v1/ping", "Bearer "+k2); code != http.StatusNoContent {
 		t.Fatalf("second revoked with first %d", code)
 	}
 	if calls.Load() != 3 {

@@ -37,7 +37,13 @@ type Egress struct {
 	prefixes    []string
 	requireGate bool
 	gateMu      sync.Mutex
-	gates       map[string]struct{}
+	gates       map[string]gateBinding
+}
+
+// gateBinding is the bot and run a placeholder bearer was admitted for.
+type gateBinding struct {
+	botID string
+	runID string
 }
 
 // StartEgress listens on a unix socket in a private 0700 directory under parent.
@@ -144,19 +150,20 @@ func StartLoopback(hosts, prefixes []string, bearer func() (string, error), trip
 	return eg, nil
 }
 
-// Admit registers one per-run placeholder bearer. The loopback proxy
-// replaces that bearer and rejects every other one, including the
-// well-known placeholder. The returned function removes it and is safe
-// to call more than once. A unix-socket proxy does not consult this set.
-func (e *Egress) Admit(secret string) func() {
-	if e == nil || !acceptableGate(secret) {
+// Admit registers one placeholder bearer for one bot and one run. The
+// loopback proxy replaces that bearer only when the request names the same
+// bot and run. Every other bearer is rejected, including the well-known
+// placeholder. The returned function removes it and is safe to call more
+// than once. A unix-socket proxy does not consult this set.
+func (e *Egress) Admit(botID, runID, secret string) func() {
+	if e == nil || !e.requireGate || !acceptableGate(secret) || !SafeRouteID(botID) || !SafeRouteID(runID) {
 		return func() {}
 	}
 	e.gateMu.Lock()
 	if e.gates == nil {
-		e.gates = map[string]struct{}{}
+		e.gates = map[string]gateBinding{}
 	}
-	e.gates[secret] = struct{}{}
+	e.gates[secret] = gateBinding{botID: botID, runID: runID}
 	e.gateMu.Unlock()
 	var once sync.Once
 	return func() {
@@ -171,20 +178,39 @@ func (e *Egress) Admit(secret string) func() {
 	}
 }
 
-func (e *Egress) admits(presented string) bool {
-	if e == nil || presented == "" {
+func (e *Egress) admits(botID, runID, presented string) bool {
+	if e == nil || presented == "" || botID == "" || runID == "" {
 		return false
 	}
 	e.gateMu.Lock()
 	defer e.gateMu.Unlock()
 	ok := 0
 	pb := []byte(presented)
-	for g := range e.gates {
-		if subtle.ConstantTimeCompare(pb, []byte(g)) == 1 {
-			ok = 1
-		}
+	bb := []byte(botID)
+	rb := []byte(runID)
+	for secret, g := range e.gates {
+		match := subtle.ConstantTimeCompare(pb, []byte(secret))
+		botOK := subtle.ConstantTimeCompare(bb, []byte(g.botID))
+		runOK := subtle.ConstantTimeCompare(rb, []byte(g.runID))
+		ok |= match & botOK & runOK
 	}
 	return ok == 1
+}
+
+// SafeRouteID reports whether id can be one path segment of a proxy route.
+func SafeRouteID(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func acceptableGate(s string) bool {
@@ -239,11 +265,12 @@ func (e *Egress) serve(trip http.RoundTripper) {
 	}
 	e.srv = &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !e.allowRequest(r) || !e.allowPath(r) {
+			botID, runID, _, fwd, ok := e.prepare(r)
+			if !ok || fwd == nil {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
-			if e.requireGate && !e.admits(presentedBearer(r)) {
+			if e.requireGate && !e.admits(botID, runID, presentedBearer(r)) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
@@ -252,7 +279,7 @@ func (e *Egress) serve(trip http.RoundTripper) {
 				http.Error(w, "proxy is not available", http.StatusServiceUnavailable)
 				return
 			}
-			proxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), egressToken{}, tok)))
+			proxy.ServeHTTP(w, fwd.WithContext(context.WithValue(fwd.Context(), egressToken{}, tok)))
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -306,6 +333,72 @@ func (e *Egress) Close() {
 	if e.dir != "" {
 		_ = os.RemoveAll(e.dir)
 	}
+}
+
+func (e *Egress) prepare(r *http.Request) (botID, runID, path string, fwd *http.Request, ok bool) {
+	if e == nil || r == nil {
+		return "", "", "", nil, false
+	}
+	if !e.requireGate {
+		if e.allowRequest(r) && e.allowPath(r) {
+			p := ""
+			if r.URL != nil {
+				p, _ = normalizeProxyPath(r.URL.Path)
+			}
+			return "", "", p, r, true
+		}
+		return "", "", "", nil, false
+	}
+	if r.URL == nil {
+		return "", "", "", nil, false
+	}
+	botID, runID, rest, split := splitBotRun(r.URL.Path)
+	if !split {
+		return "", "", "", nil, false
+	}
+	norm, normOK := normalizeProxyPath(rest)
+	if !normOK {
+		return botID, runID, "", nil, false
+	}
+	fwd = requestWithPath(r, norm)
+	if !e.allowRequest(fwd) || !e.allowPath(fwd) {
+		return botID, runID, norm, nil, false
+	}
+	return botID, runID, norm, fwd, true
+}
+
+func splitBotRun(p string) (botID, runID, rest string, ok bool) {
+	const bots = "/bots/"
+	if !strings.HasPrefix(p, bots) {
+		return "", "", "", false
+	}
+	botID, after, found := strings.Cut(p[len(bots):], "/")
+	if !found || !SafeRouteID(botID) {
+		return "", "", "", false
+	}
+	const runs = "runs/"
+	if !strings.HasPrefix(after, runs) {
+		return "", "", "", false
+	}
+	runID, tail, found := strings.Cut(after[len(runs):], "/")
+	if !found || !SafeRouteID(runID) || tail == "" {
+		return "", "", "", false
+	}
+	return botID, runID, "/" + tail, true
+}
+
+func requestWithPath(r *http.Request, path string) *http.Request {
+	c := r.Clone(r.Context())
+	u := *c.URL
+	u.Path = path
+	u.RawPath = ""
+	c.URL = &u
+	if u.RawQuery == "" {
+		c.RequestURI = path
+	} else {
+		c.RequestURI = path + "?" + u.RawQuery
+	}
+	return c
 }
 
 func (e *Egress) allowRequest(r *http.Request) bool {
