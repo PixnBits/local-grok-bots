@@ -47,7 +47,8 @@ type Call struct {
 	BotID string
 	RunID string
 	// OnProxy records one unix-socket request. Headers and bodies are omitted.
-	OnProxy func(botID, runID, path string, status int)
+	// suppressed is how many 403 rows were skipped since the previous 403 row.
+	OnProxy func(botID, runID, path string, status int, suppressed int)
 }
 
 // Result is the broker's decision. Output is set only when Status is ok.

@@ -265,7 +265,7 @@ func (r *lgbRun) noteInnerPrompt(ctx context.Context, pol policy.Permission, nam
 	_ = r.a.perm.Evaluate(ctx, pol, req)
 }
 
-func (r *lgbRun) auditCOIProxy(botID, runID, path string, status int) {
+func (r *lgbRun) auditCOIProxy(botID, runID, path string, status int, suppressed int) {
 	if r == nil || r.a == nil || r.a.audit == nil || !r.a.audit.Enabled() {
 		return
 	}
@@ -284,6 +284,9 @@ func (r *lgbRun) auditCOIProxy(botID, runID, path string, status int) {
 	}
 	if status == 403 {
 		rec["auth"] = "none"
+		if suppressed > 0 {
+			rec["suppressed"] = suppressed
+		}
 	}
 	r.a.audit.Write(rec)
 }

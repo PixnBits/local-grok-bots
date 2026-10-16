@@ -603,14 +603,14 @@ func (a *App) ensureGrokProxy(userHome string) (string, error) {
 	if err != nil {
 		return "", errGrokProxy
 	}
-	eg.SetAudit(func(botID, runID, path string, status int) {
-		a.auditProxyRequest(botID, runID, path, status)
+	eg.SetAudit(func(botID, runID, path string, status int, suppressed int) {
+		a.auditProxyRequest(botID, runID, path, status, suppressed)
 	})
 	a.grokProxy = eg
 	return eg.Base(), nil
 }
 
-func (a *App) auditProxyRequest(botID, runID, path string, status int) {
+func (a *App) auditProxyRequest(botID, runID, path string, status int, suppressed int) {
 	if a == nil || a.audit == nil || !a.audit.Enabled() {
 		return
 	}
@@ -623,6 +623,9 @@ func (a *App) auditProxyRequest(botID, runID, path string, status int) {
 	}
 	if status == 403 {
 		rec["auth"] = "none"
+		if suppressed > 0 {
+			rec["suppressed"] = suppressed
+		}
 	}
 	a.audit.Write(rec)
 }

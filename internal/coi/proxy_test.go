@@ -292,7 +292,7 @@ func TestLoopbackAuditsRequest(t *testing.T) {
 	const queryMark = "unit-query-marker"
 	var mu sync.Mutex
 	var lines []string
-	eg.SetAudit(func(botID, runID, path string, status int) {
+	eg.SetAudit(func(botID, runID, path string, status int, suppressed int) {
 		mu.Lock()
 		lines = append(lines, fmt.Sprintf("bot=%s run=%s path=%s status=%d", botID, runID, path, status))
 		mu.Unlock()
@@ -393,7 +393,7 @@ func TestEgressAuditsUnixSocketRequest(t *testing.T) {
 	var mu sync.Mutex
 	var lines []string
 	eg.BindRoute("bot-coi", "run-coi")
-	eg.SetAudit(func(botID, runID, path string, status int) {
+	eg.SetAudit(func(botID, runID, path string, status int, suppressed int) {
 		mu.Lock()
 		lines = append(lines, fmt.Sprintf("bot=%s run=%s path=%s status=%d", botID, runID, path, status))
 		mu.Unlock()
@@ -448,7 +448,7 @@ func TestForbiddenProxyAuditIsRateLimited(t *testing.T) {
 	eg, addr := startBridge(t, nil, nil)
 	var mu sync.Mutex
 	var n int
-	eg.SetAudit(func(botID, runID, path string, status int) {
+	eg.SetAudit(func(botID, runID, path string, status int, suppressed int) {
 		mu.Lock()
 		n++
 		mu.Unlock()
@@ -479,7 +479,7 @@ func TestLoopbackForbiddenAuditIsRateLimited(t *testing.T) {
 	defer eg.Close()
 	var mu sync.Mutex
 	var n int
-	eg.SetAudit(func(botID, runID, path string, status int) {
+	eg.SetAudit(func(botID, runID, path string, status int, suppressed int) {
 		mu.Lock()
 		n++
 		mu.Unlock()
@@ -503,6 +503,43 @@ func TestLoopbackForbiddenAuditIsRateLimited(t *testing.T) {
 	mu.Unlock()
 	if got != 3 {
 		t.Fatalf("audited %d, want 3", got)
+	}
+}
+
+func TestForbiddenAuditReportsSuppressed(t *testing.T) {
+	prev := denyAuditLimit
+	denyAuditLimit = 2
+	t.Cleanup(func() { denyAuditLimit = prev })
+	eg, addr := startBridge(t, nil, nil)
+	var mu sync.Mutex
+	var suppressed int
+	var rows int
+	eg.SetAudit(func(botID, runID, path string, status int, n int) {
+		if status != http.StatusForbidden {
+			return
+		}
+		mu.Lock()
+		rows++
+		suppressed = n
+		mu.Unlock()
+	})
+	for i := 0; i < 6; i++ {
+		if code := rawStatus(t, addr, "/admin"); code != http.StatusForbidden {
+			t.Fatalf("deny %d", code)
+		}
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if code := rawStatus(t, addr, "/admin"); code != http.StatusForbidden {
+		t.Fatalf("later deny %d", code)
+	}
+	mu.Lock()
+	gotRows, gotSkip := rows, suppressed
+	mu.Unlock()
+	if gotRows != 3 {
+		t.Fatalf("rows %d", gotRows)
+	}
+	if gotSkip != 4 {
+		t.Fatalf("suppressed %d", gotSkip)
 	}
 }
 

@@ -39,12 +39,13 @@ type Egress struct {
 	gateMu      sync.Mutex
 	gates       map[string]gateBinding
 	// onAudit records one request. Headers and bodies are not passed.
-	// The callback receives the bot, the run, the normalized path, and the status.
-	onAudit  func(botID, runID, path string, status int)
-	routeBot string
-	routeRun string
-	denyMu   sync.Mutex
-	denyAt   []time.Time
+	// suppressed counts 403 rows omitted since the previous 403 row.
+	onAudit    func(botID, runID, path string, status int, suppressed int)
+	routeBot   string
+	routeRun   string
+	denyMu     sync.Mutex
+	denyAt     []time.Time
+	suppressed int
 }
 
 // denyAuditLimit is how many 403 rows one proxy writes per second.
@@ -188,9 +189,11 @@ func (e *Egress) Admit(botID, runID, secret string) func() {
 	}
 }
 
-// SetAudit registers the request record. A nil function disables it.
-// The callback must not expect headers, a body, or the presented bearer.
-func (e *Egress) SetAudit(fn func(botID, runID, path string, status int)) {
+// SetAudit registers the request record. suppressed is how many 403 rows
+// were omitted since the previous 403 row. It is zero for other statuses.
+// A nil function disables it. The callback must not expect headers, a body,
+// or the presented bearer.
+func (e *Egress) SetAudit(fn func(botID, runID, path string, status int, suppressed int)) {
 	if e == nil {
 		return
 	}
@@ -226,19 +229,26 @@ func (e *Egress) note(botID, runID, path string, status int) {
 	if fn == nil {
 		return
 	}
-	if status == http.StatusForbidden && !e.allowDenyAudit() {
-		return
+	suppressed := 0
+	if status == http.StatusForbidden {
+		ok, n := e.allowDenyAudit()
+		if !ok {
+			return
+		}
+		suppressed = n
 	}
-	fn(botID, runID, path, status)
+	fn(botID, runID, path, status, suppressed)
 }
 
-func (e *Egress) allowDenyAudit() bool {
+// allowDenyAudit reports whether this 403 may be recorded. The count is how
+// many 403 rows were skipped since the last recorded 403.
+func (e *Egress) allowDenyAudit() (bool, int) {
 	if e == nil {
-		return false
+		return false, 0
 	}
 	limit := denyAuditLimit
 	if limit < 1 {
-		return false
+		return false, 0
 	}
 	e.denyMu.Lock()
 	defer e.denyMu.Unlock()
@@ -253,10 +263,13 @@ func (e *Egress) allowDenyAudit() bool {
 	}
 	e.denyAt = e.denyAt[:n]
 	if len(e.denyAt) >= limit {
-		return false
+		e.suppressed++
+		return false, 0
 	}
+	skipped := e.suppressed
+	e.suppressed = 0
 	e.denyAt = append(e.denyAt, now)
-	return true
+	return true, skipped
 }
 
 func (e *Egress) admits(botID, runID, presented string) bool {
