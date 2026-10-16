@@ -151,6 +151,8 @@ No shared cookie jar, no shared desktop session. Coordination is messages plus t
 
 The sandbox model — base jail plus named capability grants for network, git, SSH, builds, and later a headless browser — is in `docs/sandbox.md`. The user sets those grants on the profile. Bots cannot grant them. The default remains the locked-down workspace. The browser grant is not built.
 
+User-configured connectors (COIs) follow the same mediation principle: credentials stay on the host, the daemon performs the real call, and the sandbox sees either a structured tool or a narrow call site. Dynamic add/remove via the web UI, per-bot grants, and host-only credential storage are detailed in `docs/sandbox.md` (COIs and credential brokering).
+
 **CLI mode:** The daemon's workspace jail is off. File and shell tools are the CLI's own, running inside its sandbox (Seatbelt or bubblewrap plus any managed settings InfoSec has configured). The daemon's only filesystem touch is a narrow append-only channel used to inject timer prompts. The CLI's tools read that channel. The daemon never re-implements the CLI's allow/deny rules for SSH keys, .env files, or other sensitive paths; it inherits them.
 
 ## 8. Logging
