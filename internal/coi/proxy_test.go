@@ -72,6 +72,70 @@ func TestEgressReplacesBearer(t *testing.T) {
 	}
 }
 
+func TestLoopbackReplacesBearer(t *testing.T) {
+	var gotAuth string
+	var calls atomic.Int32
+	trip := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		gotAuth = r.Header.Get("Authorization")
+		if r.Header.Get("X-Secret") != "" || r.Header.Get("Cookie") != "" {
+			t.Errorf("forwarded a stripped header")
+		}
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("ok"))}, nil
+	})
+	reads := 0
+	eg, err := StartLoopback([]string{GrokChatHost}, nil, func() (string, error) {
+		reads++
+		return "real-token-value", nil
+	}, trip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eg.Close()
+	base := eg.Base()
+	if !strings.HasPrefix(base, "http://127.0.0.1:") {
+		t.Fatalf("base %q", base)
+	}
+	req, err := http.NewRequest(http.MethodGet, base+"/v1/ping", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+PlaceholderToken)
+	req.Header.Set("X-Secret", "nope")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 || string(body) != "ok" || calls.Load() != 1 {
+		t.Fatalf("status %d body %s calls %d", resp.StatusCode, body, calls.Load())
+	}
+	if gotAuth != "Bearer real-token-value" || strings.Contains(gotAuth, PlaceholderToken) {
+		t.Fatalf("auth replaced incorrectly")
+	}
+	for _, p := range []string{"/admin", "/v1/../x", "/v2/x"} {
+		deny, err := http.NewRequest(http.MethodGet, base+p, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err = http.DefaultClient.Do(deny)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("%s status %d", p, resp.StatusCode)
+		}
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("denied path reached upstream: %d", calls.Load())
+	}
+	if reads < 2 {
+		t.Fatalf("bearer reads %d", reads)
+	}
+}
+
 func TestEgressPathAllowlistSkipsUpstream(t *testing.T) {
 	var calls atomic.Int32
 	trip := roundTripFunc(func(r *http.Request) (*http.Response, error) {

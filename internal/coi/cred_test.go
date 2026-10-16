@@ -1,6 +1,7 @@
 package coi
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -9,8 +10,43 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
+
+func TestReadBearerDoesNotWrite(t *testing.T) {
+	if clisession.GrokPlaceholderToken != PlaceholderToken {
+		t.Fatal("placeholder token drifted")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "auth.json")
+	body := []byte(`{"https://auth.x.ai::x":{"key":"live-access-token","refresh_token":"live-refresh-token","expires_at":"2099-01-01T00:00:00Z"}}`)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tok, err := ReadBearer(path)
+	if err != nil || tok != "live-access-token" {
+		t.Fatalf("bearer err=%v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != string(body) {
+		t.Fatal("read rewrote the login file")
+	}
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Fatal("left a temp file")
+	}
+	expired := []byte(`{"https://auth.x.ai::x":{"key":"live-access-token","refresh_token":"live-refresh-token","expires_at":"2000-01-01T00:00:00Z"}}`)
+	if err := os.WriteFile(path, expired, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadBearer(path); !errors.Is(err, ErrLoginUnusable) {
+		t.Fatalf("expired err=%v", err)
+	}
+	got, _ = os.ReadFile(path)
+	if string(got) != string(expired) {
+		t.Fatal("expired read rewrote the login file")
+	}
+}
 
 func TestJailCredentialGate(t *testing.T) {
 	tool := policy.CLITool{

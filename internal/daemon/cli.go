@@ -14,6 +14,7 @@ import (
 
 	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
+	"github.com/PixnBits/local-grok-bots/internal/coi"
 	"github.com/PixnBits/local-grok-bots/internal/dlp"
 	"github.com/PixnBits/local-grok-bots/internal/id"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
@@ -369,6 +370,14 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isola
 		opts.ClaudeSandbox = true
 	}
 	opts.UserHome, _ = os.UserHomeDir()
+	if strings.EqualFold(backend, "grok") {
+		base, err := a.ensureGrokProxy(opts.UserHome)
+		if err != nil {
+			a.recordGrokProxy(botID, err)
+			return nil, err
+		}
+		opts.ProxyBase = base
+	}
 	ownHome := isolated
 	if strings.EqualFold(backend, "claude") {
 		// On macOS Claude's login is in the Keychain, found through the real
@@ -394,6 +403,77 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws string) (*clisession.Isola
 		}
 	}
 	return &iso, nil
+}
+
+// ensureGrokProxy starts the loopback credential proxy once. It reads the
+// bearer from the user login file and does not write that file. No usable
+// login means the CLI keeps the placeholder and is not pointed at a proxy.
+// An expired login fails the turn instead of refreshing the user file.
+func (a *App) ensureGrokProxy(userHome string) (string, error) {
+	if a == nil || a.noGrokProxy {
+		return "", nil
+	}
+	a.grokMu.Lock()
+	defer a.grokMu.Unlock()
+	if a.grokProxy != nil {
+		return a.grokProxy.Base(), nil
+	}
+	userHome = strings.TrimSpace(userHome)
+	if userHome == "" {
+		return "", nil
+	}
+	path := filepath.Join(userHome, ".grok", "auth.json")
+	if _, err := os.Lstat(path); err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", errGrokProxy
+	}
+	if _, err := coi.ReadBearer(path); err != nil {
+		if errors.Is(err, coi.ErrLoginUnusable) {
+			return "", err
+		}
+		return "", nil
+	}
+	eg, err := coi.StartLoopback([]string{coi.GrokChatHost}, nil, func() (string, error) {
+		return coi.ReadBearer(path)
+	}, nil)
+	if err != nil {
+		return "", errGrokProxy
+	}
+	a.grokProxy = eg
+	return eg.Base(), nil
+}
+
+var errGrokProxy = errors.New("grok credential proxy is not available, so the turn was refused")
+
+func (a *App) closeGrokProxy() {
+	if a == nil {
+		return
+	}
+	a.grokMu.Lock()
+	eg := a.grokProxy
+	a.grokProxy = nil
+	a.grokMu.Unlock()
+	if eg != nil {
+		eg.Close()
+	}
+}
+
+func (a *App) recordGrokProxy(botID string, err error) {
+	why := errGrokProxy.Error()
+	if errors.Is(err, coi.ErrLoginUnusable) {
+		why = coi.ErrLoginUnusable.Error()
+	}
+	fields := map[string]any{"backend": "grok", "reason": why}
+	a.log(botID, "cli_proxy_unavailable", fields)
+	if a.audit != nil && a.audit.Enabled() {
+		rec := map[string]any{"event": "cli_proxy_unavailable", "bot_id": botID}
+		for k, v := range fields {
+			rec[k] = v
+		}
+		a.audit.Write(rec)
+	}
 }
 
 // lgbAllow approves the lgb and coi spool commands. Other shell commands still ask.

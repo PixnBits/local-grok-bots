@@ -481,6 +481,7 @@ func newCLIApp(t *testing.T, dir, policyPath string) *App {
 	if err != nil {
 		t.Fatal(err)
 	}
+	app.noGrokProxy = true
 	t.Cleanup(app.Shutdown)
 	return app
 }

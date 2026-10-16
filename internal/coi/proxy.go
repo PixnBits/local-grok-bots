@@ -16,6 +16,9 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
 
+// egressToken is the bearer for one request. It is not logged.
+type egressToken struct{}
+
 // Egress is the host-side reverse proxy. The jail speaks plain HTTP to a
 // loopback forwarder; this process dials TLS to the allowlisted host and
 // sets Authorization. A CONNECT proxy would hide that header inside TLS,
@@ -26,6 +29,7 @@ type Egress struct {
 	ln       net.Listener
 	srv      *http.Server
 	token    string
+	bearer   func() (string, error)
 	hosts    map[string]bool
 	first    string
 	prefixes []string
@@ -84,34 +88,119 @@ func StartEgress(parent string, hosts, prefixes []string, token string, trip htt
 	}
 	_ = os.Chmod(sock, 0o600)
 	eg := &Egress{dir: dir, sock: sock, ln: ln, token: token, hosts: allow, first: first, prefixes: resolved}
-	var transport http.RoundTripper = allowTransport(allow)
+	eg.serve(trip)
+	return eg, nil
+}
+
+// StartLoopback listens on 127.0.0.1 and serves the same reverse proxy as
+// StartEgress. bearer is called per request and is not logged. The Grok CLI
+// speaks HTTP, so the chat client needs a TCP origin. A unix socket is what
+// the jailed COI forwarder uses; this listener is for a process that shares
+// the host network namespace.
+func StartLoopback(hosts, prefixes []string, bearer func() (string, error), trip http.RoundTripper) (*Egress, error) {
+	if bearer == nil || len(hosts) == 0 {
+		return nil, ErrProxyUnavailable
+	}
+	if _, err := bearer(); err != nil {
+		return nil, ErrProxyUnavailable
+	}
+	resolved, err := resolvePrefixes(prefixes)
+	if err != nil {
+		return nil, ErrProxyUnavailable
+	}
+	allow := map[string]bool{}
+	var first string
+	for _, h := range hosts {
+		h = strings.ToLower(strings.TrimSpace(h))
+		if h == "" {
+			continue
+		}
+		if first == "" {
+			first = h
+		}
+		allow[h] = true
+	}
+	if first == "" || !allow[first] {
+		return nil, ErrProxyUnavailable
+	}
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		return nil, ErrProxyUnavailable
+	}
+	tcp, ok := ln.Addr().(*net.TCPAddr)
+	if !ok || tcp.IP == nil || !tcp.IP.IsLoopback() {
+		_ = ln.Close()
+		return nil, ErrProxyUnavailable
+	}
+	eg := &Egress{ln: ln, bearer: bearer, hosts: allow, first: first, prefixes: resolved}
+	eg.serve(trip)
+	return eg, nil
+}
+
+func (e *Egress) serve(trip http.RoundTripper) {
+	var transport http.RoundTripper = allowTransport(e.hosts)
 	if trip != nil {
 		transport = trip
 	}
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.SetURL(&url.URL{Scheme: "https", Host: eg.first})
-			pr.Out.Host = eg.first
+			pr.SetURL(&url.URL{Scheme: "https", Host: e.first})
+			pr.Out.Host = e.first
 			keepForwardHeaders(pr.Out.Header)
-			pr.Out.Header.Set("Authorization", "Bearer "+eg.token)
+			tok, _ := pr.In.Context().Value(egressToken{}).(string)
+			if tok == "" {
+				tok = e.token
+			}
+			if tok != "" {
+				pr.Out.Header.Set("Authorization", "Bearer "+tok)
+			}
 		},
 		Transport: transport,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 		},
 	}
-	eg.srv = &http.Server{
+	e.srv = &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !eg.allowRequest(r) || !eg.allowPath(r) {
+			if !e.allowRequest(r) || !e.allowPath(r) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
-			proxy.ServeHTTP(w, r)
+			tok, err := e.currentToken()
+			if err != nil || tok == "" {
+				http.Error(w, "proxy is not available", http.StatusServiceUnavailable)
+				return
+			}
+			proxy.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), egressToken{}, tok)))
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	go func() { _ = eg.srv.Serve(ln) }()
-	return eg, nil
+	go func() { _ = e.srv.Serve(e.ln) }()
+}
+
+func (e *Egress) currentToken() (string, error) {
+	if e == nil {
+		return "", ErrProxyUnavailable
+	}
+	if e.bearer != nil {
+		tok, err := e.bearer()
+		if err != nil || tok == "" {
+			return "", ErrProxyUnavailable
+		}
+		return tok, nil
+	}
+	if e.token == "" {
+		return "", ErrProxyUnavailable
+	}
+	return e.token, nil
+}
+
+// Base is the loopback origin, with no path. It is empty for a unix-socket proxy.
+func (e *Egress) Base() string {
+	if e == nil || e.ln == nil || e.ln.Addr() == nil || e.ln.Addr().Network() != "tcp" {
+		return ""
+	}
+	return "http://" + e.ln.Addr().String()
 }
 
 func (e *Egress) Sock() string {

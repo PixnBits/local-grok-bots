@@ -67,6 +67,7 @@ func newApp(t *testing.T, dir string, m model.Client) *App {
 	if err != nil {
 		t.Fatal(err)
 	}
+	app.noGrokProxy = true
 	t.Cleanup(app.Shutdown)
 	return app
 }

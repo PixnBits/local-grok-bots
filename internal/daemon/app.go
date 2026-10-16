@@ -65,6 +65,11 @@ type App struct {
 	// coiCap counts brokered host-CLI calls per bot.
 	coiOnce sync.Once
 	coiCap  *coi.HourCap
+	// noGrokProxy skips the Grok CLI credential proxy. Tests set it so they
+	// do not read the host login. Production leaves it false.
+	noGrokProxy bool
+	grokMu      sync.Mutex
+	grokProxy   *coi.Egress
 	// runner, when set, replaces the real CLI exec. Tests use it.
 	runner clisession.Runner
 	// cliTTY, when set, overrides /dev/tty detection for permission prompts.
@@ -216,6 +221,7 @@ func (a *App) Shutdown() {
 	a.rtMu.Unlock()
 	a.cancel()
 	a.wg.Wait()
+	a.closeGrokProxy()
 	_ = a.st.FailRunning("shutdown")
 	_ = a.st.AddLog("", "daemon_stop", map[string]any{})
 	_ = a.st.Close()
