@@ -93,6 +93,34 @@ COIs are not compiled in.
 
 Internal LGB COIs (timers, etc.) already follow the daemon-mediated pattern. User-defined COIs reuse the same mechanism.
 
+### Host CLI broker (`tools.cli` / `.lgb/bin/coi`)
+
+The first slice is a host CLI invoked from the bot jail through the lgb spool. The bot never receives `credential_home`. The inner CLI is still untrusted relative to those credentials, so the daemon runs it in its own OS sandbox:
+
+- Linux: bubblewrap (`bwrap`). Missing or failed `bwrap` denies the call and audits `coi_sandbox_unavailable`. There is no unshare fallback.
+- macOS: `sandbox-exec` with a generated Seatbelt profile. Missing `sandbox-exec` is the same denial.
+- Only the bot workspace is writable. System directories (`/usr`, `/bin`, `/lib`, `/etc`, …) are read-only. The resolved CLI **file** is bound read-only. The daemon does not bind `~/.grok`, the credential home, or any other host home.
+- `credential_home` is not mounted. Policy `credential_files` (relative paths such as `.grok/auth.json`) are copied into a private 0700 HOME for the call and deleted afterward. Inside the Linux jail that HOME is a bind over tmpfs at `/tmp/coi-home`.
+- Child `PATH` is pinned to system directories (`/usr/local/sbin`, `/usr/local/bin`, `/usr/sbin`, `/usr/bin`, `/sbin`, `/bin` as they exist). Workspace and credential-home directories are never on `PATH`.
+- Bot argv cannot pass `--always-approve` or `--sandbox` (blocked like `login` / `config`). Policy `fixed_args` and `fixed_env` are prepended by the daemon and are not taken from the bot. Flags not listed in `value_flags` are boolean, so they cannot swallow the next word; blocked-word checks apply to values and to `--flag=value`.
+- Path allowlist checks remain as defense in depth. They are TOCTOU against a process that can still `open` after `stat`; the sandbox is the filesystem boundary.
+- Output redaction (`audit.RedactText`, credential-home paths, secret values scanned from the home) is a backstop for logs and replies. It is not the control that keeps credentials out of the bot jail or the inner CLI filesystem.
+
+#### Grok pins used by the daemon
+
+Grok has no `--setting-sources` / `--strict-mcp-config` equivalent. For a `tools.cli` entry named `grok` the daemon:
+
+- Writes `sandbox.toml` with `[profiles.lgb] extends = "strict"` into the private HOME `.grok` (not into the host credential home).
+- Prepends `--sandbox lgb` unless `fixed_args` already contains `--sandbox`.
+- Sets `GROK_HOME` to that private `.grok`, `GROK_DISABLE_AUTOUPDATER=1`, and every `GROK_CLAUDE_*_ENABLED`, `GROK_CURSOR_*_ENABLED`, `GROK_CODEX_*_ENABLED`, plus `GROK_MANAGED_MCPS_ENABLED`, to `false`.
+- Drops `GROK_CONFIG`, `GROK_CONFIG_PATH`, and `GROK_SANDBOX` (the flag selects the profile). It never passes `--trust`.
+
+Policy should list `value_flags` the CLI actually uses (`-p`, `--cwd`, `--max-turns`, …) and may add `fixed_args` such as `--permission-mode acceptEdits` and `--no-auto-update`. `--always-approve` stays blocked on bot argv; if a headless edit cannot proceed without an approval mode, that mode belongs in daemon `fixed_args` because the OS sandbox is now the boundary. Inner Grok `restrict_network` is left false so the model API still works; file isolation is the control.
+
+`sandbox_bin` (absolute) is a test/ops hook that replaces `bwrap` / `sandbox-exec`. An invalid path denies the call as `coi_sandbox_unavailable`.
+
+The hourly cap is stored in SQLite (`coi_cap`) so a restart cannot reset the window. A store error fails closed. Long COI calls run on a bounded worker set in the spool drain (limit 4) so other `lgb` tools are not blocked behind them.
+
 ## Out
 
 - Per-bot microVMs.

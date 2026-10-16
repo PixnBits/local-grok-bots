@@ -104,24 +104,37 @@ imminent_timer_minutes = 2
 
 # [tools]
 # Host CLIs the daemon runs for a sandboxed bot. The bot calls
-# `.lgb/bin/coi <name> ...` or `lgb coi <name> ...`. The real binary runs on
-# the host. credential_home is absolute and outside the workspace; it is never
-# mounted into the jail. allowed_args lists subcommands and flags. Anything
-# else is denied, and config/auth/login/logout/whoami/token/env/--print-config/
-# --debug style arguments are denied even when listed. A timeout, max_output,
-# or max_calls_per_hour of 0 denies the call.
+# `.lgb/bin/coi <name> ...` or `lgb coi <name> ...`. The real binary runs in
+# bwrap (Linux) or sandbox-exec (macOS): workspace writable, system dirs and
+# the CLI file read-only. credential_home is absolute and outside the
+# workspace; it is never mounted. credential_files are relative paths copied
+# into a private HOME for the call (for example ".grok/auth.json").
+# allowed_args lists subcommands and flags. value_flags lists flags that take
+# a value; every other flag is boolean. Anything else is denied, and
+# config/auth/login/logout/whoami/token/env/update/--print-config/--debug/
+# --always-approve/--sandbox style arguments are denied even when listed.
+# fixed_args and fixed_env are prepended by the daemon (not the bot). A
+# timeout, max_output, or max_calls_per_hour of 0 denies the call. If bwrap
+# cannot start, the call is denied and audited as coi_sandbox_unavailable.
+# Path checks are defense in depth; the sandbox is the filesystem boundary.
+# Output redaction is a backstop, not the control.
 # Managed policy can lock an entry (lock = true) or ban a name (cli_ban).
 # cli_allow_local = false drops local-only names. Local policy can only narrow
-# a managed entry: fewer args, fewer bots, lower limits. It cannot change the
-# path or the credential home. The daemon re-reads this on each call.
+# a managed entry: fewer args, fewer bots, lower limits, fewer value_flags and
+# credential_files. It cannot change the path, credential home, sandbox_bin,
+# fixed_args, or fixed_env. The daemon re-reads this on each call.
 # cli_ban = ["curl"]
 # cli_allow_local = true
 # [[tools.cli]]
 # name = "grok"
 # path = "/home/pixnbits/.grok/bin/grok"
 # credential_home = "/var/lib/local-grok-bots/coi/grok"
+# credential_files = [".grok/auth.json"]
 # bots = ["bot-id-or-name"]
-# allowed_args = ["-p", "--prompt", "--model", "edit"]
+# allowed_args = ["-p", "--cwd", "--max-turns", "--no-auto-update"]
+# value_flags = ["-p", "--cwd", "--max-turns"]
+# fixed_args = ["--sandbox", "lgb", "--permission-mode", "acceptEdits", "--no-auto-update"]
+# fixed_env = ["GROK_CLAUDE_MCPS_ENABLED=false"]
 # timeout = "2m"
 # max_output = 65536
 # max_calls_per_hour = 30
