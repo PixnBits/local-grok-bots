@@ -126,4 +126,4 @@ The hour cap is in SQLite (`coi_cap`). In this run the sandbox-unavailable call 
 
 ## Gates
 
-Run from the worktree after the stop.
+Run from the worktree after the stop. `gofmt -l .` printed nothing (`GOFMT_LINES=0`). `go vet ./...` exited 0. `go test -race ./...` exited 0 (`internal/coi` 1.258s, `internal/daemon` 83.678s; unchanged packages were cache hits). `GOOS=darwin GOARCH=arm64 go build ./...` exited 0.
