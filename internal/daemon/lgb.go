@@ -105,6 +105,7 @@ type lgbRun struct {
 	cancel     context.CancelFunc
 	done       chan struct{}
 	mu         sync.Mutex
+	drainMu    sync.Mutex
 	calls      int
 	coiWG      sync.WaitGroup
 	coiSem     chan struct{}
@@ -155,6 +156,7 @@ func (a *App) startLGB(ctx context.Context, bot store.Bot, runID, ws string) (*l
 	cctx, cancel := context.WithCancel(ctx)
 	dev, ino, err := coi.DirIdentity(root)
 	if err != nil {
+		cancel()
 		req.close()
 		resp.close()
 		return nil, nil, err
@@ -261,7 +263,12 @@ func (r *lgbRun) loop(ctx context.Context) {
 	}
 }
 
+// drain takes one pass over the request directory. The open directory has
+// a single read offset, and a request is removed only after this pass sees
+// it, so overlapping passes would handle the same file twice.
 func (r *lgbRun) drain(ctx context.Context) {
+	r.drainMu.Lock()
+	defer r.drainMu.Unlock()
 	names, err := r.req.names()
 	if err != nil {
 		return

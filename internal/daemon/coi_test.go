@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -193,6 +194,34 @@ func (f *coiFix) post(t *testing.T, token string, args ...string) (int, string) 
 func (f *coiFix) coi(t *testing.T, args ...string) (int, string) {
 	t.Helper()
 	return f.post(t, f.run.token, append([]string{"coi"}, args...)...)
+}
+
+func TestConcurrentDrainRunsRequestOnce(t *testing.T) {
+	f := setupCOI(t, 4, nil)
+	name := f.drop(t, f.run.token, "coi", "fake", "--version")
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			f.run.drain(context.Background())
+		}()
+	}
+	wg.Wait()
+	f.run.waitCOI()
+	code, _ := f.waitResp(t, name, time.Second)
+	if code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	n := 0
+	for _, ev := range f.logs(t) {
+		if ev["status"] == coi.StatusOK {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("ok calls %d", n)
+	}
 }
 
 func (f *coiFix) ran() bool {
