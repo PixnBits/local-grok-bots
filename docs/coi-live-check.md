@@ -219,3 +219,5 @@ Date: 2026-10-16. Data under `~/lgb-dev-data/coi-check/r5`, binary `/tmp/lgb-coi
 | Leak scan (workspace, audit log, daemon log, database) | 4 token values and 7 other login strings checked. 0 hits for each. No run token in the audit log or the daemon log. |
 
 While the daemon was still up, `~/.grok/auth.json` had the same inode, link count, and SHA-256 as before the copy (the hash is not recorded), and nothing under the r5 tree shared that inode.
+
+Stop: SIGTERM to pid 822209 only, after confirming the command was `/tmp/lgb-coi-check`. Nothing listens on 8139. Ports 8080, 8090, and 8095 were left running. Pid 287544 was still `/tmp/lgb-dev`. The r5 credential copy was deleted. `~/.grok/auth.json` has the same inode, link count, and SHA-256 as before the run (the hash is not recorded).
