@@ -48,6 +48,10 @@ type IsolationOptions struct {
 	Secrets []string
 	// Grants map the bot's daemon grants onto CLI settings.
 	Grants Grants
+	// ProxyBase is the Grok chat proxy origin, such as http://127.0.0.1:9.
+	// Empty means the CLI is not pointed at the proxy. The value is an origin
+	// with no path. The daemon appends /v1.
+	ProxyBase string
 	// ClaudeSandbox turns on Claude's Bash sandbox, fail closed.
 	ClaudeSandbox bool
 	// Protect are extra absolute paths both CLIs are denied (daemon secrets).
@@ -82,16 +86,17 @@ var passEnv = map[string]bool{
 }
 
 // credEnv names the only backend variables kept: credentials, not overrides.
+// Grok does not keep XAI_API_KEY. The daemon sets a placeholder and the
+// proxy replaces the bearer.
 var credEnv = map[string][]string{
 	"claude": {"ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"},
-	"grok":   {"XAI_API_KEY"},
 }
 
 // credFiles are linked from the user's home into an isolated home so login
 // still works. Only the credential file is shared, never settings.
+// Grok's login is not linked. The bot home gets a placeholder file.
 var credFiles = map[string][]string{
 	"claude": {".claude/.credentials.json"},
-	"grok":   {".grok/auth.json"},
 }
 
 // grokCompatOff turns off Grok's Claude and Cursor compatibility scans.
@@ -161,11 +166,7 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 		}
 		if o.UserHome != "" {
 			for _, rel := range credFiles[backend] {
-				if backend == "grok" {
-					hardlinkCred(filepath.Join(o.UserHome, rel), filepath.Join(o.Home, rel))
-				} else {
-					linkCred(filepath.Join(o.UserHome, rel), filepath.Join(o.Home, rel))
-				}
+				linkCred(filepath.Join(o.UserHome, rel), filepath.Join(o.Home, rel))
 			}
 		}
 	}
@@ -223,9 +224,8 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 			return Isolation{}, err
 		}
 		env["GROK_HOME"] = grokHome
-		if o.UserHome != "" && grokHome != filepath.Join(o.UserHome, ".grok") {
-			// Login is ~/.grok/auth.json. A separate GROK_HOME would miss it.
-			hardlinkCred(filepath.Join(o.UserHome, ".grok", "auth.json"), filepath.Join(grokHome, "auth.json"))
+		if err := placeGrokPlaceholder(o.UserHome, grokHome); err != nil {
+			return Isolation{}, err
 		}
 		if err := os.WriteFile(filepath.Join(grokHome, "sandbox.toml"), []byte(grokSandboxTOML(o)), 0o600); err != nil {
 			return Isolation{}, &SandboxError{Backend: "grok", Err: fmt.Errorf("Grok's sandbox profile could not be written (%v), so the turn was refused", err)}
@@ -234,6 +234,16 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 	}
 	for k, v := range o.Extra {
 		env[k] = v
+	}
+	if backend == "grok" {
+		// Policy env must not put a real key or the real API origin back.
+		env["XAI_API_KEY"] = GrokPlaceholderToken
+		if base := strings.TrimRight(strings.TrimSpace(o.ProxyBase), "/"); base != "" {
+			chat := base + "/v1"
+			env["GROK_CLI_CHAT_PROXY_BASE_URL"] = chat
+			env["GROK_XAI_API_BASE_URL"] = chat
+			env["XAI_API_BASE_URL"] = chat
+		}
 	}
 	delete(env, "AUTH_TOKEN")
 	for k, v := range env {
@@ -265,21 +275,35 @@ func linkCred(src, dst string) {
 	_ = os.Symlink(src, dst)
 }
 
-// hardlinkCred shares Grok's login by hard link: grok 1.0.52 reports "Not
-// signed in" when auth.json is a symlink. It is relinked when the user's file
-// was replaced (a new inode). Across filesystems it falls back to a symlink.
-func hardlinkCred(src, dst string) {
-	st, err := os.Stat(src)
-	if err != nil || !st.Mode().IsRegular() {
-		return
+// placeGrokPlaceholder writes the synthetic login into GROK_HOME. It never
+// writes the user's ~/.grok/auth.json and never links that file in.
+func placeGrokPlaceholder(userHome, grokHome string) error {
+	dst := filepath.Join(grokHome, "auth.json")
+	if userHome != "" && filepath.Clean(dst) == filepath.Clean(filepath.Join(userHome, ".grok", "auth.json")) {
+		return fmt.Errorf("refusing to replace the user grok login")
 	}
-	if cur, err := os.Lstat(dst); err == nil && cur.Mode().IsRegular() && os.SameFile(st, cur) {
-		return
+	return writeGrokPlaceholder(dst)
+}
+
+// GrokPlaceholderAuth is a synthetic login file. It contains no value from
+// the host credential file. The proxy overwrites Authorization.
+const GrokPlaceholderAuth = `{"https://auth.x.ai::00000000-0000-4000-8000-000000000001":{"key":"` + GrokPlaceholderToken + `","auth_mode":"oidc","expires_at":"2099-01-01T00:00:00.000000000Z","refresh_token":"coi-placeholder-refresh","oidc_issuer":"https://auth.x.ai","oidc_client_id":"00000000-0000-4000-8000-000000000001"}}
+`
+
+// GrokPlaceholderToken is the dummy bearer in GrokPlaceholderAuth and in
+// XAI_API_KEY. The host proxy replaces it and never forwards it.
+const GrokPlaceholderToken = "coi-placeholder-token"
+
+// writeGrokPlaceholder replaces path with a regular file. Remove drops a hard
+// link or a symlink and does not follow it, so the target file stays.
+func writeGrokPlaceholder(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
 	}
-	_ = os.Remove(dst)
-	if err := os.Link(src, dst); err != nil {
-		_ = os.Symlink(src, dst)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
 	}
+	return os.WriteFile(path, []byte(GrokPlaceholderAuth), 0o600)
 }
 
 // overrideNames are workspace files a CLI would read as configuration.

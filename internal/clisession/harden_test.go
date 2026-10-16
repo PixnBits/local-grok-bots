@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -262,9 +263,14 @@ func TestGrokProfileAndFlags(t *testing.T) {
 			t.Fatalf("profile lacks %q:\n%s", want, toml)
 		}
 	}
-	// Missing paths would make Grok refuse to start; its own login stays readable.
-	if strings.Contains(toml, ".aws") || strings.Contains(toml, "auth.json") {
-		t.Fatalf("profile denies a missing path or Grok's login:\n%s", toml)
+	// Missing paths would make Grok refuse to start. The user login is denied.
+	// The placeholder in the bot home is not.
+	userAuth := filepath.Join(user, ".grok", "auth.json")
+	if strings.Contains(toml, ".aws") || !strings.Contains(toml, strconv.Quote(userAuth)) {
+		t.Fatalf("profile deny list:\n%s", toml)
+	}
+	if strings.Contains(toml, strconv.Quote(filepath.Join(home, ".grok", "auth.json"))) {
+		t.Fatalf("profile denies the placeholder:\n%s", toml)
 	}
 	argv := grokArgv(t, &iso)
 	if !strings.Contains(argv, "--sandbox lgb") || !strings.Contains(argv, "--disallowed-tools web_fetch,web_search") {
@@ -307,10 +313,26 @@ func TestGrokProfileAndFlags(t *testing.T) {
 	if err != nil || !strings.Contains(string(b), "[profiles.lgb]") || !strings.Contains(string(b), `extends = "strict"`) {
 		t.Fatalf("daemon profile: %s %v", b, err)
 	}
-	src, _ := os.Stat(filepath.Join(user, ".grok", "auth.json"))
+	real := filepath.Join(user, ".grok", "auth.json")
+	fi, err := os.Stat(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || st.Nlink != 1 {
+		t.Fatalf("user login nlink %v", st)
+	}
 	dst, err := os.Lstat(filepath.Join(grokHome, "auth.json"))
-	if err != nil || !dst.Mode().IsRegular() || !os.SameFile(src, dst) {
-		t.Fatalf("user-home auth not hard linked: %v %v", dst, err)
+	if err != nil || dst.Mode()&os.ModeSymlink != 0 || !dst.Mode().IsRegular() || os.SameFile(fi, dst) {
+		t.Fatalf("user-home auth was linked: %v %v", dst, err)
+	}
+	body, err := os.ReadFile(filepath.Join(grokHome, "auth.json"))
+	if err != nil || string(body) != GrokPlaceholderAuth {
+		t.Fatalf("placeholder %q %v", body, err)
+	}
+	userBody, err := os.ReadFile(real)
+	if err != nil || string(userBody) != "{}" {
+		t.Fatalf("user login changed: %q %v", userBody, err)
 	}
 	if _, err := PrepareIsolation(IsolationOptions{Backend: "grok", StateDir: "relative", UserHome: user}); err == nil {
 		t.Fatal("relative state dir wrote a profile")

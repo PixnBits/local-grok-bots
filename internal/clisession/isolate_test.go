@@ -6,8 +6,22 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 )
+
+func nlink(t *testing.T, path string) uint64 {
+	t.Helper()
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatal("stat has no nlink")
+	}
+	return uint64(st.Nlink)
+}
 
 func envMap(env []string) map[string]string {
 	m := map[string]string{}
@@ -72,19 +86,39 @@ func TestPrepareIsolationClaudeScrubsEnv(t *testing.T) {
 func TestPrepareIsolationGrok(t *testing.T) {
 	user := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(user, ".grok"), 0o700)
-	_ = os.WriteFile(filepath.Join(user, ".grok", "auth.json"), []byte("{}"), 0o600)
+	real := filepath.Join(user, ".grok", "auth.json")
+	const marker = "unit-real-marker-value"
+	if err := os.WriteFile(real, []byte(`{"key":"`+marker+`"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := nlink(t, real)
 	state := t.TempDir()
 	home := filepath.Join(state, "home")
+	// A planted hard link and a planted symlink must both become a regular placeholder.
+	plant := filepath.Join(home, ".grok")
+	if err := os.MkdirAll(plant, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(real, filepath.Join(plant, "auth.json")); err != nil {
+		t.Fatal(err)
+	}
 	iso, err := PrepareIsolation(IsolationOptions{
 		Backend: "grok", StateDir: state, Home: home, UserHome: user,
-		Base: []string{"PATH=/bin", "GROK_CONFIG={\"x\":1}", "GROK_SANDBOX=off", "XAI_API_KEY=x", "ANTHROPIC_API_KEY=k"},
+		Base:  []string{"PATH=/bin", "GROK_CONFIG={\"x\":1}", "GROK_SANDBOX=off", "XAI_API_KEY=" + marker, "ANTHROPIC_API_KEY=k"},
+		Extra: map[string]string{"XAI_API_KEY": marker, "XAI_API_BASE_URL": "https://api.x.ai/v1"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	env := envMap(iso.Env)
-	if env["GROK_HOME"] != filepath.Join(home, ".grok") || env["XAI_API_KEY"] != "x" || env["GROK_CLAUDE_MCPS_ENABLED"] != "false" {
+	if env["GROK_HOME"] != filepath.Join(home, ".grok") || env["XAI_API_KEY"] != GrokPlaceholderToken || env["GROK_CLAUDE_MCPS_ENABLED"] != "false" {
 		t.Fatalf("env: %v", iso.Env)
+	}
+	if env["XAI_API_BASE_URL"] != "" && !strings.Contains(env["XAI_API_BASE_URL"], "api.x.ai") {
+		t.Fatalf("base url %q", env["XAI_API_BASE_URL"])
+	}
+	if strings.Contains(strings.Join(iso.Env, "\n"), marker) {
+		t.Fatal("real marker reached the cli env")
 	}
 	for _, k := range []string{"GROK_CONFIG", "GROK_SANDBOX", "ANTHROPIC_API_KEY"} {
 		if _, ok := env[k]; ok {
@@ -94,20 +128,51 @@ func TestPrepareIsolationGrok(t *testing.T) {
 	if iso.SettingsPath != "" {
 		t.Fatal("grok got a claude settings file")
 	}
-	src, _ := os.Stat(filepath.Join(user, ".grok", "auth.json"))
-	dst, err := os.Lstat(filepath.Join(home, ".grok", "auth.json"))
-	if err != nil || !dst.Mode().IsRegular() || !os.SameFile(src, dst) {
-		t.Fatalf("grok auth not hard linked: %v %v", dst, err)
+	if nlink(t, real) != before || before != 1 {
+		t.Fatalf("link count %d, was %d", nlink(t, real), before)
 	}
-	// The user's login replaced by rename gets relinked on the next turn.
-	_ = os.WriteFile(filepath.Join(user, ".grok", "auth.json.new"), []byte(`{"v":2}`), 0o600)
-	_ = os.Rename(filepath.Join(user, ".grok", "auth.json.new"), filepath.Join(user, ".grok", "auth.json"))
-	if _, err := PrepareIsolation(IsolationOptions{Backend: "grok", StateDir: t.TempDir(), Home: home, UserHome: user}); err != nil {
+	dstPath := filepath.Join(home, ".grok", "auth.json")
+	dst, err := os.Lstat(dstPath)
+	if err != nil || dst.Mode()&os.ModeSymlink != 0 || !dst.Mode().IsRegular() {
+		t.Fatalf("bot auth is not a regular file: %v %v", dst, err)
+	}
+	src, _ := os.Stat(real)
+	if os.SameFile(src, dst) {
+		t.Fatal("bot auth shares the user inode")
+	}
+	b, err := os.ReadFile(dstPath)
+	if err != nil || strings.Contains(string(b), marker) || string(b) != GrokPlaceholderAuth {
+		t.Fatalf("bot auth = %q %v", b, err)
+	}
+	// Replacing the user file does not relink it into the bot home.
+	_ = os.WriteFile(real+".new", []byte(`{"v":2,"key":"second-marker-value"}`), 0o600)
+	_ = os.Rename(real+".new", real)
+	if _, err := PrepareIsolation(IsolationOptions{
+		Backend: "grok", StateDir: state, Home: home, UserHome: user,
+		ProxyBase: "http://127.0.0.1:9",
+	}); err != nil {
 		t.Fatal(err)
 	}
-	b, _ := os.ReadFile(filepath.Join(home, ".grok", "auth.json"))
-	if string(b) != `{"v":2}` {
-		t.Fatalf("not relinked: %s", b)
+	if nlink(t, real) != 1 {
+		t.Fatalf("link count after replace %d", nlink(t, real))
+	}
+	b, _ = os.ReadFile(dstPath)
+	if strings.Contains(string(b), "second-marker-value") || string(b) != GrokPlaceholderAuth {
+		t.Fatalf("bot auth followed the user file: %s", b)
+	}
+	env = envMap(iso.Env)
+	iso2, err := PrepareIsolation(IsolationOptions{
+		Backend: "grok", StateDir: state, Home: home, UserHome: user,
+		ProxyBase: "http://127.0.0.1:9",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env = envMap(iso2.Env)
+	for _, k := range []string{"GROK_CLI_CHAT_PROXY_BASE_URL", "GROK_XAI_API_BASE_URL", "XAI_API_BASE_URL"} {
+		if env[k] != "http://127.0.0.1:9/v1" {
+			t.Fatalf("%s=%q", k, env[k])
+		}
 	}
 }
 
