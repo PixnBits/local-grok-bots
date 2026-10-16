@@ -151,6 +151,75 @@ func TestSymlinkParentsRefused(t *testing.T) {
 	}
 }
 
+func TestRemoveBotCLIUnlinksSymlinks(t *testing.T) {
+	const body = "canary-keep"
+	data := t.TempDir()
+	outside := t.TempDir()
+	canary := filepath.Join(outside, "canary")
+	if err := os.WriteFile(canary, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bot := filepath.Join(data, "cli", "bot1")
+	if err := os.MkdirAll(filepath.Join(bot, "home", ".grok"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bot, "home", ".grok", "auth.json"), []byte("placeholder"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bot, "note.txt"), []byte("n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(bot, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(canary, filepath.Join(bot, "home", "auth-link")); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(data, "cli", "bot2", "note.txt")
+	if err := os.MkdirAll(filepath.Dir(other), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(other, []byte("stay"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveBotCLI(data, "bot1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(bot); !os.IsNotExist(err) {
+		t.Fatalf("bot dir remains: %v", err)
+	}
+	assertCanary(t, canary, body)
+	if _, err := os.Lstat(outside); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(other); err != nil {
+		t.Fatal("removed another bot")
+	}
+	if err := os.MkdirAll(filepath.Join(data, "cli"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(data, "cli", "bot3")); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveBotCLI(data, "bot3"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(data, "cli", "bot3")); !os.IsNotExist(err) {
+		t.Fatalf("symlink bot remains: %v", err)
+	}
+	assertCanary(t, canary, body)
+	if err := os.RemoveAll(filepath.Join(data, "cli")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(data, "cli")); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveBotCLI(data, "bot1"); !errors.Is(err, ErrCredSymlink) {
+		t.Fatalf("cli symlink err %v", err)
+	}
+	assertCanary(t, canary, body)
+}
+
 func TestGrokHomeSymlinkRefused(t *testing.T) {
 	data := t.TempDir()
 	outside := t.TempDir()

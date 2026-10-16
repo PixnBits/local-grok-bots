@@ -325,6 +325,46 @@ func TestDeleteBotRemovesGrokLogin(t *testing.T) {
 	if !ok || st.Nlink != 1 {
 		t.Fatalf("nlink %v", st)
 	}
+	if _, err := os.Lstat(filepath.Join(app.cfg.DataDir, "cli", bot.ID)); !os.IsNotExist(err) {
+		t.Fatalf("cli dir remains: %v", err)
+	}
+}
+
+func TestDeleteBotDropsSymlinkWithoutFollowing(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	app := newApp(t, "", nil)
+	srv := serve(t, app)
+	bot := createBot(t, srv.URL, "Cred")
+	outside := t.TempDir()
+	canary := filepath.Join(outside, "canary")
+	if err := os.WriteFile(canary, []byte("canary-keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	botDir := filepath.Join(app.cfg.DataDir, "cli", bot.ID)
+	if err := os.MkdirAll(filepath.Join(botDir, "home", ".grok"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(botDir, "home", ".grok", "auth.json"), []byte("placeholder"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(botDir, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	res, b := do(t, http.MethodDelete, srv.URL+"/api/bots/"+bot.ID, nil, "")
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete %d %s", res.StatusCode, b)
+	}
+	if _, err := os.Lstat(botDir); !os.IsNotExist(err) {
+		t.Fatalf("cli dir remains: %v", err)
+	}
+	got, err := os.ReadFile(canary)
+	if err != nil || string(got) != "canary-keep" {
+		t.Fatalf("canary %q %v", got, err)
+	}
+	if _, err := os.Lstat(outside); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestSymlinkParentIsAudited(t *testing.T) {

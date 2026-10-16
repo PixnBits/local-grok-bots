@@ -431,14 +431,14 @@ func (a *App) handleDeleteBot(w http.ResponseWriter, r *http.Request) {
 	a.goneBots.Store(id, struct{}{})
 	a.cancelBot(id)
 	a.credMu.Lock()
-	err := clisession.RemoveBotGrokAuth(a.cfg.DataDir, id)
+	err := clisession.RemoveBotCLI(a.cfg.DataDir, id)
 	a.credMu.Unlock()
 	if err != nil {
 		if errors.Is(err, clisession.ErrCredSymlink) {
 			a.auditCredSymlink(id, "")
 		}
 		a.goneBots.Delete(id)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not remove the bot login file"})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not remove the bot directory"})
 		return
 	}
 	if err := a.st.DeleteBot(id, "user"); err != nil {
