@@ -16,42 +16,55 @@ var passEnv = map[string]bool{
 	"SSL_CERT_FILE": true, "SSL_CERT_DIR": true, "NODE_EXTRA_CA_CERTS": true,
 }
 
-// ScrubEnv returns the environment for a host CLI.
-// HOME and the XDG home variables point at credHome. LGB_TOKEN and any
+// ScrubEnv returns the allowlisted environment for a host CLI.
+// PATH is pinned to system directories. HOME is not set here; the jail
+// points it at a private copy of credential_files. LGB_TOKEN and any
 // variable that is not allowlisted, or that carries a token, is dropped.
 func ScrubEnv(base []string, credHome, workspace string) ([]string, error) {
 	credHome = filepath.Clean(credHome)
 	env := map[string]string{}
 	for _, kv := range base {
 		k, v, ok := strings.Cut(kv, "=")
-		if !ok || !keepEnv(k) {
+		if !ok || !keepEnv(k) || k == "PATH" || k == "HOME" || k == "TMPDIR" {
+			continue
+		}
+		if strings.HasPrefix(k, "XDG_") || strings.HasPrefix(k, "GROK_") {
 			continue
 		}
 		if audit.RedactText(v) != v || strings.Contains(v, "lgbr_") {
 			continue
 		}
-		if k == "PATH" {
-			v = scrubPath(v, workspace, credHome)
-		}
 		env[k] = v
 	}
-	if env["PATH"] == "" {
-		env["PATH"] = "/usr/bin" + string(os.PathListSeparator) + "/bin"
-	}
-	tmp, err := tempDir(workspace, credHome)
-	if err != nil {
-		return nil, err
-	}
-	env["HOME"] = credHome
-	env["XDG_CONFIG_HOME"] = credHome
-	env["XDG_DATA_HOME"] = credHome
-	env["XDG_CACHE_HOME"] = credHome
-	env["XDG_STATE_HOME"] = credHome
-	env["TMPDIR"] = tmp
+	env["PATH"] = systemPATH()
 	delete(env, "LGB_TOKEN")
 	delete(env, "LGB_SPOOL")
 	delete(env, "LGB_SESSION_MARKER")
 	delete(env, "AUTH_TOKEN")
+	_ = credHome
+	_ = workspace
+	return envList(env), nil
+}
+
+func systemPATH() string {
+	candidates := []string{
+		"/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin",
+	}
+	var dirs []string
+	for _, d := range candidates {
+		st, err := os.Stat(d)
+		if err != nil || !st.IsDir() {
+			continue
+		}
+		dirs = append(dirs, d)
+	}
+	if len(dirs) == 0 {
+		return "/usr/bin" + string(os.PathListSeparator) + "/bin"
+	}
+	return strings.Join(dirs, string(os.PathListSeparator))
+}
+
+func envList(env map[string]string) []string {
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
@@ -61,7 +74,18 @@ func ScrubEnv(base []string, credHome, workspace string) ([]string, error) {
 	for _, k := range keys {
 		out = append(out, k+"="+env[k])
 	}
-	return out, nil
+	return out
+}
+
+func envMap(list []string) map[string]string {
+	env := map[string]string{}
+	for _, kv := range list {
+		k, v, ok := strings.Cut(kv, "=")
+		if ok {
+			env[k] = v
+		}
+	}
+	return env
 }
 
 func keepEnv(k string) bool {
@@ -78,37 +102,4 @@ func keepEnv(k string) bool {
 		return true
 	}
 	return false
-}
-
-func scrubPath(path, workspace, credHome string) string {
-	var keep []string
-	for _, p := range filepath.SplitList(path) {
-		if p == "" {
-			continue
-		}
-		clean := filepath.Clean(p)
-		if workspace != "" && Overlaps(workspace, clean) {
-			continue
-		}
-		if credHome != "" && Overlaps(credHome, clean) {
-			continue
-		}
-		keep = append(keep, p)
-	}
-	if len(keep) == 0 {
-		return "/usr/bin" + string(os.PathListSeparator) + "/bin"
-	}
-	return strings.Join(keep, string(os.PathListSeparator))
-}
-
-func tempDir(workspace, credHome string) (string, error) {
-	t := filepath.Clean(os.TempDir())
-	if filepath.IsAbs(t) && !Overlaps(workspace, t) && !Overlaps(credHome, t) {
-		return t, nil
-	}
-	p := filepath.Join(credHome, "tmp")
-	if err := os.MkdirAll(p, 0o700); err != nil {
-		return "", err
-	}
-	return p, nil
 }

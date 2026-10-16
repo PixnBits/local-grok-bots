@@ -128,13 +128,30 @@ func Run(ctx context.Context, c Call) Result {
 	if err != nil {
 		return Result{Code: 1, Status: StatusDenied, Err: "credential home is not available"}
 	}
+	home, err := prepareJailHome(tool)
+	if err != nil {
+		msg := err.Error()
+		if msg == "" {
+			msg = ErrSandboxUnavailable.Error()
+		}
+		return Result{Code: 1, Status: StatusDenied, Err: msg}
+	}
+	defer os.RemoveAll(home)
+	env = pinJailEnv(applyFixedEnv(env, tool.FixedEnv), home, tool.Name)
 	runCtx, cancel := context.WithTimeout(ctx, tool.Timeout)
 	defer cancel()
-	cmd := exec.Command(tool.Path, c.Args...)
-	cmd.Dir = c.Workspace
-	cmd.Env = env
+	cmd, err := wrapCommand(jailSpec{
+		Bin:        tool.Path,
+		Args:       append(daemonArgs(tool), c.Args...),
+		Workspace:  c.Workspace,
+		Env:        env,
+		Home:       home,
+		SandboxBin: tool.SandboxBin,
+	})
+	if err != nil {
+		return Result{Code: 1, Status: StatusDenied, Err: ErrSandboxUnavailable.Error()}
+	}
 	cmd.Stdin = nil
-	detach(cmd)
 	capBuf := newCapture(int(tool.MaxOutput))
 	capBuf.onLimit = func() { killTree(cmd) }
 	capBuf.onPrompt = func() {
@@ -146,7 +163,7 @@ func Run(ctx context.Context, c Call) Result {
 	cmd.Stdout = capBuf
 	cmd.Stderr = capBuf
 	if err := cmd.Start(); err != nil {
-		return Result{Code: 1, Status: StatusDenied, Err: "cli binary is not available"}
+		return Result{Code: 1, Status: StatusDenied, Err: ErrSandboxUnavailable.Error()}
 	}
 	done := make(chan struct{})
 	go func() {

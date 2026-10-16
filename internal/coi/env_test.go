@@ -33,21 +33,21 @@ func TestScrubEnvDropsSecretsAndPointsHome(t *testing.T) {
 			t.Fatalf("secret leaked in %s", k)
 		}
 	}
-	if got["HOME"] != cred || got["XDG_CONFIG_HOME"] != cred || got["XDG_DATA_HOME"] != cred || got["XDG_CACHE_HOME"] != cred {
-		t.Fatalf("homes %+v", got)
+	if _, ok := got["HOME"]; ok {
+		t.Fatalf("HOME set before jail: %+v", got)
 	}
 	if got["LANG"] != "C" || got["LC_ALL"] != "C" || got["TERM"] != "xterm" {
 		t.Fatalf("allowlist dropped: %+v", got)
 	}
-	if strings.Contains(got["PATH"], ws) {
-		t.Fatalf("workspace on PATH: %s", got["PATH"])
+	if strings.Contains(got["PATH"], ws) || strings.Contains(got["PATH"], cred) {
+		t.Fatalf("workspace or cred on PATH: %s", got["PATH"])
 	}
-	for _, banned := range []string{"LGB_TOKEN", "LGB_SPOOL", "XAI_API_KEY", "AUTH_TOKEN", "FOO"} {
+	if got["PATH"] != systemPATH() {
+		t.Fatalf("PATH %q want %q", got["PATH"], systemPATH())
+	}
+	for _, banned := range []string{"LGB_TOKEN", "LGB_SPOOL", "XAI_API_KEY", "AUTH_TOKEN", "FOO", "HOME", "TMPDIR"} {
 		if _, ok := got[banned]; ok {
 			t.Fatalf("%s was copied", banned)
 		}
-	}
-	if got["HOME"] == "/home/someone" {
-		t.Fatal("host home kept")
 	}
 }

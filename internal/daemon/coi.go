@@ -122,8 +122,41 @@ func (r *lgbRun) execCOI(ctx context.Context, args []string) (int, string) {
 	if msg == "" {
 		msg = "denied"
 	}
+	if msg == coi.ErrSandboxUnavailable.Error() {
+		r.auditSandbox(name, rest, ready.CredentialHome, secrets)
+		return 1, "coi: " + coi.RedactOutput(msg, paths, secrets)
+	}
 	r.auditCOI(name, rest, res.Status, msg, ready.CredentialHome, secrets, 0, false)
 	return 1, "coi: " + coi.RedactOutput(msg, paths, secrets)
+}
+
+func (r *lgbRun) auditSandbox(name string, args []string, credHome string, secrets []string) {
+	if r == nil || r.a == nil {
+		return
+	}
+	paths := []string{}
+	if credHome != "" {
+		paths = []string{credHome}
+	}
+	red := make([]string, 0, len(args))
+	for _, a := range args {
+		red = append(red, clip(coi.RedactOutput(a, paths, secrets), 500))
+	}
+	fields := map[string]any{
+		"run_id": r.runID,
+		"cli":    name,
+		"args":   red,
+		"status": coi.StatusDenied,
+		"error":  coi.ErrSandboxUnavailable.Error(),
+	}
+	r.a.log(r.bot.ID, "coi_sandbox_unavailable", fields)
+	if r.a.audit != nil && r.a.audit.Enabled() {
+		rec := map[string]any{"event": "coi_sandbox_unavailable", "bot_id": r.bot.ID}
+		for k, v := range fields {
+			rec[k] = v
+		}
+		r.a.audit.Write(rec)
+	}
 }
 
 func (r *lgbRun) noteInnerPrompt(ctx context.Context, pol policy.Permission, name string, args []string) {

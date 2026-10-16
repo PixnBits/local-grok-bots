@@ -33,7 +33,8 @@ func TestRunFakeCLIRedactsAndScrubs(t *testing.T) {
 	res := Run(context.Background(), Call{
 		Tool: policy.CLITool{
 			Name: "fake", Path: script, CredentialHome: cred,
-			AllowedArgs: []string{"--version"}, Timeout: time.Second, MaxOutput: 4096,
+			AllowedArgs: []string{"--version"}, CredentialFiles: []string{"auth.json"},
+			Timeout: time.Second, MaxOutput: 4096,
 		},
 		Args:      []string{"--version"},
 		Workspace: ws,
@@ -51,7 +52,7 @@ func TestRunFakeCLIRedactsAndScrubs(t *testing.T) {
 	if strings.Contains(res.Output, cred) || strings.Contains(res.Output, "hunter2-hunter2") || strings.Contains(res.Output, token) {
 		t.Fatalf("output leaked: %s", res.Output)
 	}
-	if !strings.Contains(res.Output, "[credential-home]") || !strings.Contains(res.Output, "[redacted]") {
+	if !strings.Contains(res.Output, "[redacted]") {
 		t.Fatalf("output %s", res.Output)
 	}
 	env, err := os.ReadFile(filepath.Join(ws, "child.env"))
@@ -59,11 +60,14 @@ func TestRunFakeCLIRedactsAndScrubs(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(env)
-	if strings.Contains(text, token) || strings.Contains(text, "xai-supersecret") || strings.Contains(text, "HOME=/home/someone") {
+	if strings.Contains(text, token) || strings.Contains(text, "xai-supersecret") || strings.Contains(text, "HOME=/home/someone") || strings.Contains(text, cred) {
 		t.Fatalf("child env leaked:\n%s", text)
 	}
-	if !strings.Contains(text, "HOME="+cred) || !strings.Contains(text, "XDG_CONFIG_HOME="+cred) {
+	if !strings.Contains(text, "HOME=") || strings.Contains(text, "HOME="+cred) {
 		t.Fatalf("child home:\n%s", text)
+	}
+	if strings.Contains(text, "PATH="+ws) || strings.Contains(text, ws+"/bin") {
+		t.Fatalf("workspace on PATH:\n%s", text)
 	}
 }
 
@@ -170,4 +174,77 @@ func writeExe(t *testing.T, root, name, body string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestRunSandboxHidesCredentialHome(t *testing.T) {
+	root := t.TempDir()
+	ws := filepath.Join(root, "ws")
+	cred := filepath.Join(root, "cred")
+	if err := os.MkdirAll(ws, 0o755); err != nil || os.MkdirAll(cred, 0o755) != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cred, "auth.json"), []byte("hunter2-hunter2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := writeExe(t, root, "probe", "#!/bin/sh\nif [ -e \""+cred+"/auth.json\" ]; then echo LEAK; fi\ncat \"$HOME/auth.json\"\n")
+	res := Run(context.Background(), Call{
+		Tool: policy.CLITool{
+			Name: "probe", Path: script, CredentialHome: cred,
+			AllowedArgs: []string{"--version"}, CredentialFiles: []string{"auth.json"},
+			Timeout: time.Second, MaxOutput: 4096,
+		},
+		Args: []string{"--version"}, Workspace: ws,
+	})
+	if res.Status != StatusOK || res.Code != 0 {
+		t.Fatalf("result %+v", res)
+	}
+	if strings.Contains(res.Output, "LEAK") || strings.Contains(res.Output, "hunter2-hunter2") || strings.Contains(res.Output, cred) {
+		t.Fatalf("sandbox leaked credential home: %s", res.Output)
+	}
+	if !strings.Contains(res.Output, "[redacted]") {
+		t.Fatalf("copy was not readable: %s", res.Output)
+	}
+}
+
+func TestRunSandboxUnavailable(t *testing.T) {
+	root := t.TempDir()
+	ws := filepath.Join(root, "ws")
+	cred := filepath.Join(root, "cred")
+	if err := os.MkdirAll(ws, 0o755); err != nil || os.MkdirAll(cred, 0o755) != nil {
+		t.Fatal(err)
+	}
+	script := writeExe(t, root, "fake", "#!/bin/sh\necho ran > \"$PWD/ran\"\n")
+	res := Run(context.Background(), Call{
+		Tool: policy.CLITool{
+			Name: "fake", Path: script, CredentialHome: cred,
+			AllowedArgs: []string{"--version"}, SandboxBin: filepath.Join(root, "no-bwrap"),
+			Timeout: time.Second, MaxOutput: 1024,
+		},
+		Args: []string{"--version"}, Workspace: ws,
+	})
+	if res.Status != StatusDenied || res.Err != ErrSandboxUnavailable.Error() {
+		t.Fatalf("result %+v", res)
+	}
+	if _, err := os.Stat(filepath.Join(ws, "ran")); !os.IsNotExist(err) {
+		t.Fatal("cli ran without a sandbox")
+	}
+}
+
+func TestSeatbeltProfileHidesHome(t *testing.T) {
+	prof, err := coiSeatbeltProfile("/work", "/tmp/coi-home-1", "/usr/bin/grok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prof, `(subpath "/work")`) || !strings.Contains(prof, `(subpath "/tmp/coi-home-1")`) {
+		t.Fatalf("writable roots missing:\n%s", prof)
+	}
+	if !strings.Contains(prof, `(literal "/usr/bin/grok")`) {
+		t.Fatalf("binary not readable:\n%s", prof)
+	}
+	if strings.Contains(prof, "/.grok") || strings.Contains(prof, "/Users") {
+		t.Fatalf("opened a host home:\n%s", prof)
+	}
+	if !strings.Contains(prof, "(allow network-outbound)") {
+		t.Fatal("API network missing")
+	}
 }

@@ -26,6 +26,11 @@ case "$1" in
   --fail)
     exit 3
     ;;
+  --sleep)
+    sleep 2
+    echo slept
+    exit 0
+    ;;
 esac
 touch "$PWD/ran"
 env > "$PWD/child.env"
@@ -116,7 +121,8 @@ func (f *coiFix) entry(name, path, home string, bots []string, calls int) string
 		}
 		b.WriteString(strconv.Quote(bot))
 	}
-	b.WriteString("]\nallowed_args = [\"--version\", \"--fail\", \"--prompt\", \"--model\", \"edit\", \"config\", \"--print-config\", \"--debug\"]\n")
+	b.WriteString("]\nallowed_args = [\"--version\", \"--fail\", \"--prompt\", \"--model\", \"--sleep\", \"edit\", \"config\", \"--print-config\", \"--debug\"]\n")
+	b.WriteString("value_flags = [\"--model\", \"--prompt\"]\ncredential_files = [\"auth.json\"]\n")
 	fmt.Fprintf(&b, "timeout = \"30s\"\nmax_output = 65536\nmax_calls_per_hour = %d\n", calls)
 	return b.String()
 }
@@ -228,7 +234,7 @@ func TestCOIShimRunsFakeCLI(t *testing.T) {
 		return string(out)
 	}
 	out := runShim("coi", "fake", "--version")
-	if !strings.Contains(out, "[credential-home]") || !strings.Contains(out, "[redacted]") {
+	if !strings.Contains(out, "[redacted]") {
 		t.Fatalf("shim output was not redacted:\n%s", out)
 	}
 	assertClean(t, out, f.cred)
@@ -238,9 +244,6 @@ func TestCOIShimRunsFakeCLI(t *testing.T) {
 	}
 	envText := string(envb)
 	for _, want := range []string{
-		"HOME=" + f.cred + "\n",
-		"XDG_CONFIG_HOME=" + f.cred + "\n",
-		"XDG_DATA_HOME=" + f.cred + "\n",
 		"LC_ALL=C.UTF-8\n",
 		"PWD=" + f.ws + "\n",
 	} {
@@ -248,7 +251,10 @@ func TestCOIShimRunsFakeCLI(t *testing.T) {
 			t.Fatalf("child env lacks %q:\n%s", want, envText)
 		}
 	}
-	for _, bad := range []string{"LGB_TOKEN=", "XAI_API_KEY=", "FOO=", "lgbr_", coiSecret, "HOME=" + f.ws} {
+	if !strings.Contains(envText, "HOME=") || strings.Contains(envText, "HOME="+f.cred) {
+		t.Fatalf("child home still the credential home:\n%s", envText)
+	}
+	for _, bad := range []string{"LGB_TOKEN=", "XAI_API_KEY=", "FOO=", "lgbr_", coiSecret, "HOME=" + f.ws, f.cred} {
 		if strings.Contains(envText, bad) {
 			t.Fatalf("child env contains %q:\n%s", bad, envText)
 		}
@@ -543,6 +549,31 @@ func (f *coiFix) assertPrompt(t *testing.T, source, rule string) {
 	}
 	if !found {
 		t.Fatalf("run tools %+v", tools[f.run.runID])
+	}
+}
+
+func TestCOISandboxUnavailable(t *testing.T) {
+	f := setupCOI(t, 5, nil)
+	f.manual()
+	var b strings.Builder
+	fmt.Fprintf(&b, "[[tools.cli]]\nname = %s\npath = %s\ncredential_home = %s\n",
+		strconv.Quote("fake"), strconv.Quote(f.bin), strconv.Quote(f.cred))
+	fmt.Fprintf(&b, "bots = [%s]\nallowed_args = [\"--version\"]\nvalue_flags = []\ncredential_files = [\"auth.json\"]\n",
+		strconv.Quote(f.bot.Name))
+	fmt.Fprintf(&b, "sandbox_bin = %s\ntimeout = \"30s\"\nmax_output = 65536\nmax_calls_per_hour = 5\n",
+		strconv.Quote(filepath.Join(f.dir, "missing-bwrap")))
+	f.writeTools(t, b.String())
+	code, out := f.coi(t, "fake", "--version")
+	if code != 1 || !strings.Contains(out, "sandbox is not available") || f.ran() {
+		t.Fatalf("sandbox %d %q ran=%v", code, out, f.ran())
+	}
+	raw := string(mustRead(t, f.audit))
+	if !strings.Contains(raw, `"event":"coi_sandbox_unavailable"`) {
+		t.Fatalf("audit:\n%s", raw)
+	}
+	ev, err := f.app.st.ListLog(f.bot.ID, "coi_sandbox_unavailable", "", 10)
+	if err != nil || len(ev) == 0 {
+		t.Fatalf("log %v %d", err, len(ev))
 	}
 }
 
