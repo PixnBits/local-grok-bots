@@ -190,9 +190,12 @@ managed config still apply.
 
 ## Sandbox and tools
 
-The daemon jail is off for CLI backends, so each CLI's own sandbox is the
-boundary. The daemon configures it per turn from the bot's grants (`net` with
-its host list, `git`, `ssh`). The settings only add restrictions.
+Ollama's workspace jail is off for CLI backends. On Linux, Grok is started in
+the daemon's pid jail (private `/proc`) so other same-user processes are hidden;
+Grok's own `--sandbox` is omitted there because a nested namespace cannot be
+created on this host. Claude still uses its own sandbox. The daemon configures
+each turn from the bot's grants (`net` with its host list, `git`, `ssh`). The
+settings only add restrictions. Remaining limits are in [Sandbox model](sandbox.md).
 
 ### Claude
 
@@ -401,10 +404,13 @@ With a CLI backend the HTTP API requires a token. `AUTH_TOKEN` wins; otherwise
 the daemon generates one at `DATA_DIR/admin-token` (0600) and prints its path
 at startup. Paste it in the UI, or open `/login?token=<token>` once to get an
 HttpOnly, SameSite=Strict cookie. The token is never in the CLI environment:
-`AUTH_TOKEN` and any variable whose value contains the token are dropped, and
-both CLIs are denied the file. Without the token a CLI's shell can't call the
-API, including `POST .../permissions/{id}`. `GET /api/health` stays open, as
-does the per-run MCP permission route, which only asks the broker. Ollama-only
+`AUTH_TOKEN` and any variable whose value contains the token are dropped from
+the CLI environment, and both CLIs are denied the file. On Linux the daemon
+re-execs once at startup so `/proc/self/environ` does not keep the token
+either. On macOS the names are unset; original startup memory is unchanged.
+Without the token a CLI's shell can't call the API, including
+`POST .../permissions/{id}`. `GET /api/health` stays open, as does the
+per-run MCP permission route, which only asks the broker. Ollama-only
 setups need no token unless `AUTH_TOKEN` is set.
 
 ## Ollama run_shell on macOS

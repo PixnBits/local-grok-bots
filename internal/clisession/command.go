@@ -82,7 +82,7 @@ type Result struct {
 }
 
 // Args builds argv for a headless turn, including argv0.
-// The daemon does not wrap this command in another jail.
+// On Linux, ExecRunner starts Grok inside a daemon pid jail.
 func Args(spec Spec) ([]string, error) {
 	switch strings.ToLower(strings.TrimSpace(spec.Backend)) {
 	case "grok":

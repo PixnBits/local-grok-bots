@@ -35,13 +35,24 @@ A coding bot can clone, build, test, and (when granted) push or reach a host. Ev
 
 ## CLI backend mode
 
-When the policy selects `backend = claude` or `backend = grok`, the daemon's workspace jail is off. The daemon does not wrap the CLI process in bubblewrap or Seatbelt. Claude on Linux needs `bwrap` and `socat` ([Host dependencies](host-dependencies.md)). A Grok turn does not link the host login into the bot home ([Grok CLI login live check](cred-hardlink-check.md)). The CLI's own sandbox (Seatbelt on macOS, bubblewrap on Linux/WSL2) plus any InfoSec-managed settings (domain allowlists, credential deny/mask, `allowManagedDomainsOnly`, `failIfUnavailable`, etc.) are the isolation boundary.
+When the policy selects `backend = claude` or `backend = grok`, the Ollama workspace jail is off. Claude on Linux needs `bwrap` and `socat` ([Host dependencies](host-dependencies.md)). A Grok turn does not link the host login into the bot home ([Grok CLI login live check](cred-hardlink-check.md)).
+
+On Linux, a Grok turn is started in the daemon's bubblewrap jail with a private pid namespace and a fresh `/proc`. That hides other same-user processes, including the daemon and other bots (`/proc/<pid>/environ` and `/proc/<pid>/fd`). The jail shares the host network so the existing loopback credential proxy on `127.0.0.1` stays reachable. Workspace, the bot home, and `GROK_HOME` are bound; system directories are read-only. Nested Grok bubblewrap cannot create a user namespace when the kernel restricts unprivileged user namespaces (`kernel.apparmor_restrict_unprivileged_userns`). Remounting `/proc` with `hidepid` needs root. The working boundary is therefore the daemon pid jail; Grok's `--sandbox` flag is omitted inside it. The custom `lgb` profile is still written. On macOS, Grok keeps `--sandbox lgb` and Seatbelt; there is no daemon pid namespace.
+
+Claude is unchanged: the daemon does not wrap it. Claude's own sandbox plus managed settings remain the boundary.
 
 The daemon is a thin orchestrator: it spawns or resumes the CLI headless, injects timer prompts via a narrow append-only channel that the CLI's own tools read, and relays the CLI's streaming output to the web portal. It never executes shell commands or file operations on the bot's behalf. Sensitive-path restrictions (SSH keys, `.env` files, etc.) are enforced by the CLI's existing policy, not re-implemented by the daemon.
 
-Nested jails are avoided. The daemon does not attempt to re-jail a CLI that already has its own sandbox.
-
 The host CLI broker later in this document is a different path. There the daemon's bubblewrap or Seatbelt jail is the only sandbox. The inner CLI is not given a second sandbox profile.
+
+### Remaining isolation limits
+
+- The Grok pid jail shares the host network. Loopback and other host listeners are reachable from the turn. The credential proxy still admits one placeholder per bot and run.
+- Filesystem binds include `/usr`, `/bin`, `/lib`, `/etc`, the workspace, and the bot home. Other bots' state under `DATA_DIR/cli` is not bound, but a process that can already see a host path outside those binds is outside this jail.
+- Grok's own sandbox is not a second layer on Linux. Tool subprocesses inherit the daemon pid jail, not a nested Grok profile.
+- On macOS, `/proc` is not the exposure. `Unsetenv` after startup does not rewrite original process memory. Seatbelt is the process boundary.
+- Unix-socket COI egress is authenticated by the socket. It is audited as `coi_proxy_request` (bot, run, path, status). It does not use the loopback per-run gate.
+- A Grok-backend bot that is granted `net` can reach the network from inside the shared-net jail.
 
 ## COIs (connectors) and credential brokering
 
@@ -105,7 +116,7 @@ The first slice is a host CLI invoked from the bot jail through the lgb spool. T
 - `credential_home` is not mounted. The private HOME is a 0700 directory under `<data>/coi/homes` (not the host temp dir), deleted after the call. Startup removes stale `coi-home-*` directories under that homes directory only. Inside the Linux jail that HOME is a bind over tmpfs at `/tmp/coi-home`.
 - The jail does not receive real credential bytes. `proxy_hosts` (hostnames only, no scheme, port, or path) turns on the egress proxy. The first host is the TLS upstream. The jail gets a placeholder file (`coi-placeholder-token`, and for an entry named `grok` a synthetic `auth.json` whose expiry is far in the future). The daemon binary is bound read-only and started as `--coi-forward`. That process listens on `127.0.0.1:<port>` inside the jail, splices the TCP connection to a unix socket, then execs the CLI. The socket lives in a 0700 directory under `<data>/coi/proxy`, mode 0600, and its filename does not end in `.sock`. Linux bind-mounts it at `/coi-proxy.sock`. That is the only socket path mounted into the jail.
 - Grok is pointed at `http://127.0.0.1:<port>/v1` via `GROK_CLI_CHAT_PROXY_BASE_URL`, `GROK_XAI_API_BASE_URL`, and `XAI_API_BASE_URL`. The forwarder also sets `XAI_API_KEY` to the placeholder. Grok 1.0.52 does not treat a synthetic `auth.json` as a session; it does send `Authorization: Bearer` from that variable. Other CLIs get `COI_FORWARD_URL` with no path prefix. The host proxy is a reverse proxy: it opens TLS to the first allowlisted host and forwards the path only when that path is under `proxy_path_prefixes`. An omitted list means `/v1`, the prefix Grok uses on `cli-chat-proxy.grok.com`. Any other path, including `..`, an encoded dot or slash, or an empty segment, is 403 and is not sent upstream. A query string with a parent segment or an encoded slash is rejected the same way. Path prefixes are matched with their stored case. On an allowed path it forwards only a fixed set of request headers (content type, length, accept, user agent, and the CLI's non-credential `x-grok-*` request headers), then sets `Authorization` to the bearer from the credential file. It does not log bodies or headers. An HTTP CONNECT proxy cannot inject that header, because the CLI's TLS would hide it, so CONNECT is not used. The CLI must accept an `http://` base URL.
-- The loopback listener used by the Grok CLI backend admits one placeholder per bot and run and records each request as `cli_proxy_request` (bot, run, path, status). The unix-socket egress used by the jailed COI forwarder does not use that gate and is not audited that way.
+- The loopback listener used by the Grok CLI backend admits one placeholder per bot and run and records each request as `cli_proxy_request` (bot, run, path, status). A 403 is marked `auth=none` and those rows are rate-limited. The unix-socket egress used by the jailed COI forwarder does not use that gate. Each of its requests is recorded as `coi_proxy_request` (bot, run, path, status) with the same 403 rule.
 - The host reads the Grok login file (`key` as the bearer, `refresh_token` when present). If `expires_at` is within 90 seconds, the host POSTs `grant_type=refresh_token` to `https://auth.x.ai/oauth2/token` and writes the new access token back to that file, mode 0600. A successful refresh can rotate the refresh token. Refreshing a copy of the user's login file can desync the real one. If refresh fails and the access token is still valid, the call continues. If it is expired and refresh fails, the call is denied.
 - If the proxy cannot be prepared, the call is denied and audited as `coi_proxy_unavailable`. The daemon does not fall back to copying secrets. The preflight runs before the hourly slot is taken.
 - Without `proxy_hosts`, listed `credential_files` are still placeholders. Copying the real files requires managed `allow_jail_credentials = true`. The daemon then logs `coi_jail_credentials`. Local policy cannot turn that flag on. It can turn a managed flag off. `credential_files` together with `fixed_args` `--always-approve`, without the proxy and without that opt-in, is denied before the hourly slot.
@@ -127,6 +138,8 @@ Grok has no `--setting-sources` / `--strict-mcp-config` equivalent. For a `tools
 `sandbox_bin` (absolute) is a test/ops hook that replaces `bwrap` / `sandbox-exec`. An invalid path denies the call as `coi_sandbox_unavailable`.
 
 The hourly cap is stored in SQLite (`coi_cap`) so a restart cannot reset the window. A store error fails closed. Long COI calls run on a bounded worker set in the spool drain (limit 4) so other `lgb` tools are not blocked behind them.
+
+A `[[tools.cli]]` entry is unusable without a non-empty `allowed_args` list and a positive `max_output`. Zero `timeout`, `max_output`, or `max_calls_per_hour` denies every call. An omitted `allowed_args` list is deny-by-default (`no arguments allowed`).
 
 ## Out
 
