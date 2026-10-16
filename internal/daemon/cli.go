@@ -446,9 +446,11 @@ func botGrants(bot store.Bot) clisession.Grants {
 }
 
 // daemonSecrets are paths no CLI tool or shell may read: the admin token,
-// the database, policy.toml, and DATA_DIR/cli (MCP tokens and CLI state).
-// The workspace is not included. DATA_DIR/cli is created so Grok, which only
-// denies paths that exist, still binds the directory.
+// the database, policy.toml, DATA_DIR/cli (MCP tokens and CLI state),
+// DATA_DIR/coi (staged jail homes and the proxy socket), and each tools.cli
+// credential_home from the loaded policy. The workspace is not included.
+// DATA_DIR/cli and DATA_DIR/coi are created so Grok, which only denies paths
+// that exist, still binds those directories.
 func (a *App) daemonSecrets() []string {
 	dir, err := filepath.Abs(a.cfg.DataDir)
 	if err != nil {
@@ -456,16 +458,31 @@ func (a *App) daemonSecrets() []string {
 	}
 	cliDir := filepath.Join(dir, "cli")
 	_ = os.MkdirAll(cliDir, 0o700)
+	coiDir := filepath.Join(dir, "coi")
+	_ = os.MkdirAll(coiDir, 0o700)
 	out := []string{
 		filepath.Join(dir, adminTokenFile),
 		filepath.Join(dir, "state.db"), filepath.Join(dir, "state.db-wal"), filepath.Join(dir, "state.db-shm"),
 		cliDir,
+		coiDir,
 	}
 	if p := strings.TrimSpace(a.cfg.PolicyPath); p != "" {
 		abs, err := filepath.Abs(p)
 		if err == nil {
 			out = append(out, abs)
 		}
+	}
+	seen := map[string]bool{}
+	for _, p := range out {
+		seen[filepath.Clean(p)] = true
+	}
+	for _, tool := range a.policy.CLITools {
+		home := filepath.Clean(strings.TrimSpace(tool.CredentialHome))
+		if home == "" || home == "." || !filepath.IsAbs(home) || seen[home] {
+			continue
+		}
+		seen[home] = true
+		out = append(out, home)
 	}
 	return out
 }
