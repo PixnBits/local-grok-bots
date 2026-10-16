@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLinuxBwrapArgsBindBinaryNotHome(t *testing.T) {
@@ -46,7 +47,7 @@ func TestLinuxBwrapArgsBindBinaryNotHome(t *testing.T) {
 	if strings.Contains(joined, "--disable-userns") {
 		t.Fatal("user namespaces disabled")
 	}
-	for _, flag := range []string{"--unshare-net", "--unshare-ipc", "--new-session"} {
+	for _, flag := range []string{"--unshare-net", "--unshare-ipc", "--unshare-pid", "--new-session", "--clearenv"} {
 		if !strings.Contains(joined, flag) {
 			t.Fatalf("missing %s:\n%s", flag, joined)
 		}
@@ -190,8 +191,7 @@ func TestLinuxJailHidesHostRunAndNet(t *testing.T) {
 }
 
 func TestLinuxJailHidesHostProcEnviron(t *testing.T) {
-	bwrap, err := exec.LookPath("bwrap")
-	if err != nil {
+	if _, err := exec.LookPath("bwrap"); err != nil {
 		t.Skip(err)
 	}
 	// An unrelated host process. The jail should not see its pid.
@@ -205,63 +205,175 @@ func TestLinuxJailHidesHostProcEnviron(t *testing.T) {
 			_, _ = host.Process.Wait()
 		}
 	})
-	// The launcher marker is inherited by bubblewrap and is not passed in with --setenv.
-	t.Setenv("LGB_HOST_PROC_MARKER", "host-marker-value")
+	// Daemon-like markers on the launcher. They are not passed with --setenv.
+	const (
+		hostMarker = "LGB_HOST_PROC_MARKER"
+		hostValue  = "host-marker-value"
+		fakeSecret = "LGB_FAKE_SECRET"
+		secretVal  = "fake-secret-canary"
+		authToken  = "AUTH_TOKEN"
+		tokenVal   = "fake-token-canary"
+		adminPath  = "LGB_ADMIN_TOKEN_PATH"
+		adminVal   = "/tmp/lgb-admin-token-canary"
+		canaryName = "LGB_CANARY_VAR"
+		canaryVal  = "canary-var-value"
+		jailMarker = "LGB_JAIL_PROC_MARKER"
+	)
+	t.Setenv(hostMarker, hostValue)
+	t.Setenv(fakeSecret, secretVal)
+	t.Setenv(authToken, tokenVal)
+	t.Setenv(adminPath, adminVal)
+	t.Setenv(canaryName, canaryVal)
+	values := []string{hostValue, secretVal, tokenVal, adminVal, canaryVal}
 	root := t.TempDir()
 	ws := filepath.Join(root, "ws")
 	home := filepath.Join(root, "home")
 	if err := os.MkdirAll(ws, 0o755); err != nil || os.MkdirAll(home, 0o755) != nil {
 		t.Fatal(err)
 	}
+	fwd, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
 	script := filepath.Join(root, "probe")
 	body := "#!/bin/sh\n" +
-		"pid=$1\n" +
-		"if [ -n \"$pid\" ] && [ -e \"/proc/$pid/environ\" ]; then echo HOST_PID=visible; else echo HOST_PID=hidden; fi\n" +
-		"if [ -n \"$LGB_HOST_PROC_MARKER\" ]; then echo SELF_HAS_HOST=1; else echo SELF_HAS_HOST=0; fi\n" +
+		"hostpid=$1\n" +
+		"if [ -n \"$hostpid\" ] && [ -e \"/proc/$hostpid\" ]; then echo HOST_PID=visible; else echo HOST_PID=hidden; fi\n" +
 		"if [ -n \"$LGB_JAIL_PROC_MARKER\" ]; then echo SELF_HAS_JAIL=1; else echo SELF_HAS_JAIL=0; fi\n" +
-		"echo PID1_COMM=$(cat /proc/1/comm 2>/dev/null)\n" +
-		"echo SELF_BYTES=$(wc -c < /proc/self/environ)\n" +
-		"if tr '\\0' '\\n' < /proc/1/environ | cut -d= -f1 | grep -qx LGB_HOST_PROC_MARKER; then echo PID1_HOST_MARKER=1; else echo PID1_HOST_MARKER=0; fi\n" +
-		"if tr '\\0' '\\n' < /proc/1/environ | cut -d= -f1 | grep -qx LGB_JAIL_PROC_MARKER; then echo PID1_JAIL_MARKER=1; else echo PID1_JAIL_MARKER=0; fi\n" +
-		"echo PIDS=$(ls -1 /proc | grep -E '^[0-9]+$' | tr '\\n' ' ')\n"
+		"if [ -n \"$PATH\" ]; then echo SELF_HAS_PATH=1; else echo SELF_HAS_PATH=0; fi\n" +
+		"if [ \"$LANG\" = \"C.UTF-8\" ]; then echo SELF_HAS_LANG=1; else echo SELF_HAS_LANG=0; fi\n" +
+		"echo PID1_COMM=$(cat /proc/1/comm 2>/dev/null | tr -d '\\n')\n" +
+		"leak=0\n" +
+		"for d in /proc/[0-9]*; do\n" +
+		"  p=${d#/proc/}\n" +
+		"  if [ ! -r \"$d/environ\" ]; then echo SKIP=$p; continue; fi\n" +
+		"  c=$(cat \"$d/comm\" 2>/dev/null | tr -d '\\n')\n" +
+		"  tr '\\0' '\\n' < \"$d/environ\" > /tmp/raw || { echo READ_FAIL=$p; leak=1; continue; }\n" +
+		"  while IFS= read -r line || [ -n \"$line\" ]; do\n" +
+		"    [ -n \"$line\" ] || continue\n" +
+		"    name=${line%%=*}\n" +
+		"    echo \"NAME $p $c $name\"\n" +
+		"    case \"$name\" in\n" +
+		"      LGB_FAKE_SECRET|AUTH_TOKEN|LGB_ADMIN_TOKEN_PATH|LGB_CANARY_VAR|LGB_HOST_PROC_MARKER)\n" +
+		"        echo \"LEAK_NAME=$p:$name\"; leak=1 ;;\n" +
+		"    esac\n" +
+		"    case \"$line\" in\n" +
+		"      *fake-secret-canary*|*fake-token-canary*|*lgb-admin-token-canary*|*canary-var-value*|*host-marker-value*)\n" +
+		"        echo \"LEAK_VALUE=$p:$name\"; leak=1 ;;\n" +
+		"    esac\n" +
+		"  done < /tmp/raw\n" +
+		"done\n" +
+		"echo LEAK=$leak\n"
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	args, err := linuxBwrapArgs(jailSpec{
+	cmd, err := wrapCommand(jailSpec{
 		Bin: script, Args: []string{strconv.Itoa(host.Process.Pid)},
-		Workspace: ws, Home: home,
-		Env: []string{"PATH=/usr/bin:/bin", "LGB_JAIL_PROC_MARKER=jail-marker-value"},
+		Workspace: ws, Home: home, Forwarder: fwd,
+		Env: []string{
+			"PATH=/usr/bin:/bin",
+			"LANG=C.UTF-8",
+			jailMarker + "=jail-marker-value",
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(bwrap, args...)
-	cmd.Env = os.Environ()
-	out, err := cmd.CombinedOutput()
-	text := string(out)
-	if strings.Contains(text, "host-marker-value") || strings.Contains(text, "jail-marker-value") {
-		t.Fatal("probe printed an environment value")
+	if strings.Join(cmd.Env, "\n") != "PATH=/usr/bin:/bin" {
+		t.Fatalf("supervisor env: %q", cmd.Env)
 	}
-	if err != nil {
-		t.Fatalf("bwrap: %v\n%s", err, text)
-	}
-	for _, want := range []string{
-		"HOST_PID=hidden",
-		"SELF_HAS_HOST=0",
-		"SELF_HAS_JAIL=1",
-		"PID1_COMM=bwrap",
-		"SELF_BYTES=0",
-		"PID1_HOST_MARKER=1",
-		"PID1_JAIL_MARKER=0",
-	} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("probe missing %s:\n%s", want, text)
+	joined := strings.Join(cmd.Args, "\n")
+	for _, flag := range []string{"--unshare-pid", "--clearenv", "--setenv"} {
+		if !strings.Contains(joined, flag) {
+			t.Fatalf("missing %s", flag)
 		}
 	}
-	pidText := strconv.Itoa(host.Process.Pid)
-	if strings.Contains(text, "PIDS="+pidText) || strings.Contains(text, " "+pidText+" ") || strings.HasSuffix(strings.TrimSpace(text), pidText) {
-		t.Fatalf("host pid listed:\n%s", text)
+	timer := time.AfterFunc(20*time.Second, func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+	defer timer.Stop()
+	out, err := cmd.CombinedOutput()
+	text := string(out)
+	for _, v := range values {
+		if strings.Contains(text, v) {
+			t.Fatal("probe printed an environment value")
+		}
 	}
+	if err != nil {
+		t.Fatalf("bwrap: %v\n%s", err, redactProbe(text, values))
+	}
+	for _, want := range []string{"HOST_PID=hidden", "SELF_HAS_JAIL=1", "SELF_HAS_PATH=1", "SELF_HAS_LANG=1", "PID1_COMM=bwrap", "LEAK=0"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("probe missing %s:\n%s", want, redactProbe(text, values))
+		}
+	}
+	if strings.Contains(text, "LEAK_NAME=") || strings.Contains(text, "LEAK_VALUE=") || strings.Contains(text, "READ_FAIL=") {
+		t.Fatalf("environ leak:\n%s", redactProbe(text, values))
+	}
+	fwdComm := filepath.Base(fwd)
+	if len(fwdComm) > 15 {
+		fwdComm = fwdComm[:15]
+	}
+	names := map[string]map[string]bool{}
+	comms := map[string]string{}
+	for _, line := range strings.Split(text, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 4 || fields[0] != "NAME" {
+			continue
+		}
+		pid, comm, name := fields[1], fields[2], fields[3]
+		if names[pid] == nil {
+			names[pid] = map[string]bool{}
+		}
+		names[pid][name] = true
+		comms[pid] = comm
+	}
+	if len(names) == 0 {
+		t.Fatal("no environ names")
+	}
+	childOK := map[string]bool{"PATH": true, "LANG": true, jailMarker: true, "PWD": true}
+	sawFwd := false
+	sawChild := false
+	sawPID1 := false
+	for pid, set := range names {
+		comm := comms[pid]
+		if comm == "bwrap" || pid == "1" {
+			sawPID1 = true
+			if len(set) != 1 || !set["PATH"] {
+				t.Fatalf("pid 1 env names: %v", set)
+			}
+			continue
+		}
+		if comm == fwdComm {
+			sawFwd = true
+		}
+		if set[jailMarker] && set["PATH"] && set["LANG"] {
+			sawChild = true
+		}
+		for name := range set {
+			if !childOK[name] {
+				t.Fatalf("pid %s comm %s has %s", pid, comm, name)
+			}
+		}
+	}
+	if !sawPID1 || !sawFwd || !sawChild {
+		t.Fatalf("pid1=%v forwarder=%v child=%v\n%s", sawPID1, sawFwd, sawChild, redactProbe(text, values))
+	}
+	pidText := strconv.Itoa(host.Process.Pid)
+	if strings.Contains(text, "NAME "+pidText+" ") || strings.Contains(text, "SKIP="+pidText) {
+		t.Fatalf("host pid listed:\n%s", redactProbe(text, values))
+	}
+}
+
+func redactProbe(text string, values []string) string {
+	for _, v := range values {
+		if v != "" {
+			text = strings.ReplaceAll(text, v, "[redacted]")
+		}
+	}
+	return text
 }
 
 func makeSpool(t *testing.T, ws string) (string, uint64, uint64) {

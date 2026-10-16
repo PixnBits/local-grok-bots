@@ -22,6 +22,11 @@ func wrapCommand(spec jailSpec) (*exec.Cmd, error) {
 		return nil, err
 	}
 	cmd := exec.Command(bwrap, args...)
+	// Pid 1 inside --unshare-pid is this supervisor. Every process in the
+	// jail can read its environment, so it gets a fixed PATH and nothing
+	// from the daemon. The command is given spec.Env with --setenv after
+	// --clearenv, which is also the forwarder's environment.
+	cmd.Env = []string{"PATH=/usr/bin:/bin"}
 	detach(cmd)
 	return cmd, nil
 }
