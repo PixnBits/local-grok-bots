@@ -92,7 +92,7 @@ func StartEgress(parent string, hosts, prefixes []string, token string, trip htt
 		Rewrite: func(pr *httputil.ProxyRequest) {
 			pr.SetURL(&url.URL{Scheme: "https", Host: eg.first})
 			pr.Out.Host = eg.first
-			pr.Out.Header.Del("Authorization")
+			stripCredentialHeaders(pr.Out.Header)
 			pr.Out.Header.Set("Authorization", "Bearer "+eg.token)
 		},
 		Transport: transport,
@@ -284,6 +284,35 @@ func normalizeProxyPath(raw string) (string, bool) {
 		return "", false
 	}
 	return trimmed, true
+}
+
+// stripCredentialHeaders removes caller credentials before the proxy sets
+// the real bearer. Matching is case-insensitive. A header whose name
+// contains "token" or "auth" is treated as a credential, along with the
+// common key and cookie names that do not.
+func stripCredentialHeaders(h http.Header) {
+	if len(h) == 0 {
+		return
+	}
+	var drop []string
+	for k := range h {
+		if credentialHeader(k) {
+			drop = append(drop, k)
+		}
+	}
+	for _, k := range drop {
+		delete(h, k)
+		h.Del(k)
+	}
+}
+
+func credentialHeader(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	switch n {
+	case "cookie", "api-key", "x-api-key":
+		return true
+	}
+	return strings.Contains(n, "token") || strings.Contains(n, "auth")
 }
 
 func badProxyPath(s string) bool {

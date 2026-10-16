@@ -2,6 +2,7 @@ package coi
 
 import (
 	"bufio"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -132,6 +133,82 @@ func TestEgressPathAllowlistSkipsUpstream(t *testing.T) {
 	before = calls.Load()
 	if code := rawStatus(t, noneAddr, "/v1/ping"); code != http.StatusForbidden || calls.Load() != before {
 		t.Fatalf("empty prefixes code %d calls %d", code, calls.Load())
+	}
+}
+
+func TestStripCredentialHeaders(t *testing.T) {
+	h := http.Header{
+		"Authorization":       {"Bearer jail-authorization"},
+		"x-api-key":           {"jail-api-key"},
+		"Api-Key":             {"jail-api-key-2"},
+		"Cookie":              {"jail-cookie"},
+		"X-Custom-Token":      {"jail-custom-token"},
+		"X-Auth-Extra":        {"jail-auth-extra"},
+		"Proxy-Authorization": {"Basic jail-proxy"},
+		"X-Xai-Token-Auth":    {"jail-xai"},
+		"X-Request-Id":        {"keep-me"},
+	}
+	stripCredentialHeaders(h)
+	if len(h) != 1 || h.Get("X-Request-Id") != "keep-me" {
+		t.Fatalf("left %v", h)
+	}
+}
+
+func TestEgressStripsJailAuthHeaders(t *testing.T) {
+	seen := make(chan http.Header, 1)
+	trip := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		seen <- r.Header.Clone()
+		return &http.Response{
+			StatusCode: 204,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("")),
+		}, nil
+	})
+	_, addr := startBridge(t, nil, trip)
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	req := "GET /v1/ping HTTP/1.1\r\n" +
+		"Host: 127.0.0.1\r\n" +
+		"Authorization: Bearer jail-authorization\r\n" +
+		"Proxy-Authorization: Basic jail-proxy\r\n" +
+		"X-Api-Key: jail-api-key\r\n" +
+		"Api-Key: jail-api-key-2\r\n" +
+		"Cookie: jail-cookie\r\n" +
+		"X-Xai-Token-Auth: jail-xai\r\n" +
+		"X-Custom-Token: jail-custom-token\r\n" +
+		"X-Auth-Extra: jail-auth-extra\r\n" +
+		"X-Request-Id: keep-me\r\n" +
+		"Connection: close\r\n\r\n"
+	if _, err := io.WriteString(conn, req); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != 204 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	got := <-seen
+	if got.Get("Authorization") != "Bearer real-token-value" {
+		t.Fatalf("auth %q", got.Get("Authorization"))
+	}
+	if got.Get("X-Request-Id") != "keep-me" {
+		t.Fatalf("request id %q", got.Get("X-Request-Id"))
+	}
+	blob := fmt.Sprint(got)
+	for _, secret := range []string{
+		"jail-authorization", "jail-proxy", "jail-api-key", "jail-api-key-2",
+		"jail-cookie", "jail-xai", "jail-custom-token", "jail-auth-extra",
+	} {
+		if strings.Contains(blob, secret) {
+			t.Fatalf("forwarded %s", secret)
+		}
 	}
 }
 
