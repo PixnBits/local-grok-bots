@@ -30,4 +30,4 @@ Other strings from that file: the public issuer `https://auth.x.ai` and the `oid
 
 ## Stop
 
-At the time of this note the listener on `127.0.0.1:8139` was pid 922082, command `/tmp/lgb-cred-check`. It is stopped after this note is committed.
+`SIGTERM` to pid 922082 only, after `ps` confirmed the command was `/tmp/lgb-cred-check`. The process exited. Nothing listens on port 8139. Ports 8080, 8090, and 8095 were still listening. Pid 287544 was still `/tmp/lgb-dev`. Pid 510125 was still `lgb-voice-bin`.
