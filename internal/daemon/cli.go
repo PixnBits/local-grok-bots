@@ -533,13 +533,38 @@ func (a *App) releaseBotGates(botID string) {
 	}
 }
 
-func scrubHostGrokLogins(dataDir string) error {
+func (a *App) auditSymlinkNotes(botID string, notes []clisession.SymlinkNote) {
+	if a == nil || len(notes) == 0 {
+		return
+	}
+	for _, n := range notes {
+		if n.Event == "" || n.Rel == "" {
+			continue
+		}
+		fields := map[string]any{"path": n.Rel}
+		a.log(botID, n.Event, fields)
+		if a.audit != nil && a.audit.Enabled() {
+			rec := map[string]any{"event": n.Event, "path": n.Rel}
+			if botID != "" {
+				rec["bot_id"] = botID
+			}
+			a.audit.Write(rec)
+		}
+	}
+}
+
+func (a *App) scrubHostGrokLogins() error {
+	if a == nil {
+		return nil
+	}
 	home, err := os.UserHomeDir()
 	real := ""
 	if err == nil && home != "" {
 		real = filepath.Join(home, ".grok", "auth.json")
 	}
-	return clisession.ScrubStaleGrokAuth(dataDir, real)
+	notes, err := clisession.ScrubStaleGrokAuthNotes(a.cfg.DataDir, real)
+	a.auditSymlinkNotes("", notes)
+	return err
 }
 
 // ensureGrokProxy starts the loopback credential proxy once. It reads the

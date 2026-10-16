@@ -2,6 +2,7 @@ package clisession
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -80,6 +81,66 @@ func TestPrepareIsolationClaudeScrubsEnv(t *testing.T) {
 	b, err := os.ReadFile(iso.SettingsPath)
 	if err != nil || !strings.Contains(string(b), `"disableAllHooks": true`) {
 		t.Fatalf("settings file: %s %v", b, err)
+	}
+}
+
+func TestLinkCredRefusesSymlinkParent(t *testing.T) {
+	data := t.TempDir()
+	outside := t.TempDir()
+	canary := filepath.Join(outside, "canary")
+	if err := os.WriteFile(canary, []byte("canary-keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(data, "home"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(data, "home", ".claude")); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(t.TempDir(), ".credentials.json")
+	if err := os.WriteFile(src, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := linkCredNoFollow(src, data, filepath.Join("home", ".claude", ".credentials.json"))
+	if !errors.Is(err, ErrCredSymlink) {
+		t.Fatalf("err %v", err)
+	}
+	got, err := os.ReadFile(canary)
+	if err != nil || string(got) != "canary-keep" {
+		t.Fatalf("canary %q %v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(outside, ".credentials.json")); !os.IsNotExist(err) {
+		t.Fatal("followed the parent")
+	}
+}
+
+func TestClaudeSettingsRefusesSymlinkParent(t *testing.T) {
+	data := t.TempDir()
+	outside := t.TempDir()
+	canary := filepath.Join(outside, "canary")
+	if err := os.WriteFile(canary, []byte("canary-keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(data, "cli"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(data, "cli", "bot")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := PrepareIsolation(IsolationOptions{
+		Backend: "claude", StateDir: filepath.Join(data, "cli", "bot"),
+		UserHome: t.TempDir(), CredRoot: data,
+		Base: []string{"PATH=/bin"},
+	})
+	if !errors.Is(err, ErrCredSymlink) {
+		t.Fatalf("err %v", err)
+	}
+	got, err := os.ReadFile(canary)
+	if err != nil || string(got) != "canary-keep" {
+		t.Fatalf("canary %q %v", got, err)
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "claude-settings.json")); !os.IsNotExist(err) {
+		t.Fatal("followed the parent")
 	}
 }
 

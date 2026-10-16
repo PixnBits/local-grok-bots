@@ -195,7 +195,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		},
 	})
 	coi.CleanStaleHomes(cfg.DataDir)
-	if err := scrubHostGrokLogins(cfg.DataDir); err != nil {
+	if err := a.scrubHostGrokLogins(); err != nil {
 		st.Close()
 		_ = aud.Close()
 		cancel()

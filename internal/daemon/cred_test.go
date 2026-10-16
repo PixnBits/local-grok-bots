@@ -596,6 +596,50 @@ func TestDeleteBotDropsSymlinkWithoutFollowing(t *testing.T) {
 	}
 }
 
+func TestDeleteBotAuditsUnlinkedSymlink(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	app := newApp(t, "", nil)
+	logPath := filepath.Join(app.cfg.DataDir, "audit.log")
+	lg, err := audit.Open(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.audit = lg
+	srv := serve(t, app)
+	bot := createBot(t, srv.URL, "Cred")
+	outside := t.TempDir()
+	canary := filepath.Join(outside, "canary")
+	if err := os.WriteFile(canary, []byte("canary-keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	botDir := filepath.Join(app.cfg.DataDir, "cli", bot.ID)
+	if err := os.MkdirAll(filepath.Join(botDir, "home"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(botDir, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	res, b := do(t, http.MethodDelete, srv.URL+"/api/bots/"+bot.ID, nil, "")
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete %d %s", res.StatusCode, b)
+	}
+	if err := lg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"event":"cli_symlink_unlinked"`) || !strings.Contains(text, `"path":"cli/`+bot.ID+`/linked"`) {
+		t.Fatalf("audit %s", text)
+	}
+	if strings.Contains(text, outside) || strings.Contains(text, "canary-keep") {
+		t.Fatalf("audit names the target: %s", text)
+	}
+}
+
 func TestSymlinkParentIsAudited(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
