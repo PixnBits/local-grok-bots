@@ -15,6 +15,9 @@ import (
 func (a *App) coiCounter() *coi.HourCap {
 	a.coiOnce.Do(func() {
 		a.coiCap = coi.NewHourCap(nil)
+		if a.st != nil {
+			a.coiCap.SetStore(a.st)
+		}
 	})
 	return a.coiCap
 }

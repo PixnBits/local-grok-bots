@@ -374,6 +374,12 @@ CREATE TABLE IF NOT EXISTS log_events (
 );
 CREATE INDEX IF NOT EXISTS idx_log_bot ON log_events(bot_id, id);
 CREATE INDEX IF NOT EXISTS idx_log_kind ON log_events(kind, id);
+CREATE TABLE IF NOT EXISTS coi_cap (
+  bot_id TEXT NOT NULL,
+  cli TEXT NOT NULL,
+  ts TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_coi_cap ON coi_cap(bot_id, cli, ts);
 `)
 	if err != nil {
 		return err
@@ -1822,6 +1828,47 @@ func (s *Store) LogCount(kind string) (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM log_events WHERE kind=?`, kind).Scan(&n)
 	return n, err
+}
+
+// TakeCOICap records one brokered CLI call unless the last hour is already full.
+// A limit of zero or less denies the call and does not record it. A store
+// error is returned so the caller can fail closed.
+func (s *Store) TakeCOICap(botID, cli string, limit int) (bool, error) {
+	if s == nil {
+		return false, errors.New("store is not available")
+	}
+	if limit <= 0 {
+		return false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := Now()
+	cut := FormatTime(now.Add(-time.Hour))
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM coi_cap WHERE bot_id=? AND cli=? AND ts<=?`, botID, cli, cut); err != nil {
+		return false, err
+	}
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM coi_cap WHERE bot_id=? AND cli=? AND ts>?`, botID, cli, cut).Scan(&n); err != nil {
+		return false, err
+	}
+	if n >= limit {
+		if err := tx.Commit(); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if _, err := tx.Exec(`INSERT INTO coi_cap(bot_id, cli, ts) VALUES(?,?,?)`, botID, cli, FormatTime(now)); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // CountLogSince counts one bot's log events of kind at or after since.
