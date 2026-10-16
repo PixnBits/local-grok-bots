@@ -37,6 +37,8 @@ On macOS, `run_shell` runs under `/usr/bin/sandbox-exec` with a generated Seatbe
 
 Grants on the bot (`net`, `git`, `ssh`, `build`) are set from the profile. A missing grant fails closed. `git push` returns a diff and does not push. The model is `docs/sandbox.md`.
 
+User-configured connectors (COIs) are mediated the same way: credentials stay on the host, the daemon performs the real call, and the sandbox sees only a tool or a narrow call site. See the COI section in `docs/sandbox.md`.
+
 To give a bot material, copy or mount it into `workspace/`. The shell PATH includes `/usr/bin`, `/bin`, and toolchain directories already on the read-only `/usr` mount, such as `/usr/local/go/bin` and `/usr/local/bin` when they exist. Home directories and `/snap` are not added.
 
 ## systemd
