@@ -175,7 +175,7 @@ func (b *Broker) AddHook(h Hook) {
 
 // UserRule is a durable allow, ask, or deny pattern accepted by the user.
 // Effect is allow, ask, or deny. Pattern is the broker glob, such as
-// Bash(gh pr view *).
+// Bash(git status*).
 type UserRule struct {
 	ID      string
 	Effect  string

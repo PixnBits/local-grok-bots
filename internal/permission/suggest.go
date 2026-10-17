@@ -54,6 +54,10 @@ func Suggest(samples []Sample, workspace string) []Card {
 		text := strings.TrimSpace(argText(s.Args))
 		class := ClassifyCall(s.Tool, s.Args, workspace)
 		if strings.EqualFold(strings.TrimSpace(s.Tool), "Bash") {
+			// gh talks to the network. It is never a low-risk suggestion.
+			if ghCommand(text) {
+				continue
+			}
 			id := bashGroupID(text)
 			if id == "" {
 				continue
@@ -143,6 +147,11 @@ func suggestedPattern(c *cluster) string {
 		}
 	}
 	return c.tool + "(" + glob + ")"
+}
+
+func ghCommand(cmd string) bool {
+	toks := splitCmd(stripMeta(cmd))
+	return len(toks) > 0 && toks[0] == "gh"
 }
 
 func bashGroupID(cmd string) string {

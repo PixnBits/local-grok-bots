@@ -25,6 +25,11 @@ func ruleMatches(rule, tool, text string) bool {
 	if strings.TrimSpace(text) == "" {
 		return false
 	}
+	// Check the raw text. Trim would drop a trailing newline before the
+	// prefix suffix is inspected.
+	if prefixSuffixBlocked(pattern, text) {
+		return false
+	}
 	return globMatch(pattern, strings.TrimSpace(text))
 }
 
@@ -60,11 +65,41 @@ func argText(args map[string]any) string {
 }
 
 func globMatch(pattern, value string) bool {
+	if prefixSuffixBlocked(pattern, value) {
+		return false
+	}
 	re, err := regexp.Compile(globExpr(pattern, false))
 	if err != nil {
 		return false
 	}
 	return re.MatchString(value)
+}
+
+// prefixSuffixBlocked refuses a stored prefix rule when the text matched by
+// the trailing glob contains a shell separator. A deny pattern with a glob
+// in the middle still matches.
+func prefixSuffixBlocked(pattern, value string) bool {
+	i := strings.IndexAny(pattern, "*?")
+	if i < 0 {
+		return false
+	}
+	for _, r := range pattern[i:] {
+		if r != '*' && r != '?' {
+			return false
+		}
+	}
+	prefix := pattern[:i]
+	if !strings.HasPrefix(value, prefix) {
+		return false
+	}
+	suffix := value[len(prefix):]
+	for i := 0; i < len(suffix); i++ {
+		switch suffix[i] {
+		case ';', '|', '&', '`', '$', '(', ')', '<', '>', '\n':
+			return true
+		}
+	}
+	return false
 }
 
 func globMatchFold(pattern, value string) bool {

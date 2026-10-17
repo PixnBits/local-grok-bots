@@ -15,15 +15,15 @@ import (
 
 func TestUserAllowAutoAllowsOnlyLowRisk(t *testing.T) {
 	ws := t.TempDir()
-	rules := []UserRule{{ID: "rule-1", Effect: "allow", Pattern: "Bash(gh pr view *)"}}
+	rules := []UserRule{{ID: "rule-1", Effect: "allow", Pattern: "Bash(git status*)"}}
 	var audited map[string]any
 	b := New(Options{Audit: func(fields map[string]any) { audited = fields }})
 	pol := policy.Permission{Mode: "default", UIPrompts: true, PromptTimeout: 20 * time.Millisecond}
 	ok := b.Evaluate(context.Background(), pol, Request{
 		ID: "1", RunID: "run", BotID: "bot", Tool: "Bash", Workspace: ws, UserRules: rules,
-		Args: map[string]any{"command": "gh pr view 42"},
+		Args: map[string]any{"command": "git status"},
 	})
-	if ok.Decision != Allow || ok.Source != "user" || ok.Rule != "Bash(gh pr view *)" || ok.Behavior != "allow" {
+	if ok.Decision != Allow || ok.Source != "user" || ok.Rule != "Bash(git status*)" || ok.Behavior != "allow" {
 		t.Fatalf("%+v", ok)
 	}
 	if audited["rule_id"] != "rule-1" || audited["classification"] != "read_only" || audited["risk"] != "low" {
@@ -32,7 +32,7 @@ func TestUserAllowAutoAllowsOnlyLowRisk(t *testing.T) {
 
 	bad := b.Evaluate(context.Background(), pol, Request{
 		ID: "2", RunID: "run", BotID: "bot", Tool: "Bash", Workspace: ws, UserRules: rules,
-		Args: map[string]any{"command": "gh pr view 42; rm -rf /tmp/x"},
+		Args: map[string]any{"command": "git status; rm -rf /tmp/x"},
 	})
 	if bad.Source == "user" || bad.Decision == Allow {
 		t.Fatalf("composed command auto-allowed: %+v", bad)
@@ -91,9 +91,13 @@ func TestUserRulePrecedence(t *testing.T) {
 	if outside.Source == "user" || outside.Decision == Allow {
 		t.Fatalf("ls /etc auto-allowed: %+v", outside)
 	}
+	dir := filepath.Join(ws, "src")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	inside := b.Evaluate(context.Background(), policy.Permission{UIPrompts: false}, Request{
 		ID: "5", RunID: "run", BotID: "bot", Tool: "Bash", Workspace: ws, UserRules: lsRule,
-		Args: map[string]any{"command": "ls " + filepath.Join(ws, "src")},
+		Args: map[string]any{"command": "ls -- " + dir},
 	})
 	if inside.Decision != Allow || inside.Source != "user" {
 		t.Fatalf("ls inside workspace: %+v", inside)

@@ -2,6 +2,7 @@ package permission
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"unicode"
@@ -24,19 +25,15 @@ type Class struct {
 const SuggestAfter = 3
 
 var (
-	gitReadOnly = map[string]bool{
-		"status": true, "log": true, "diff": true, "show": true,
-		"rev-parse": true, "blame": true, "ls-files": true,
-		"describe": true, "shortlog": true, "version": true,
+	// gitStatusOpts are the only git options auto-allow accepts. The broker
+	// does not run git: it answers allow and the CLI runs the original
+	// command, so a safe git wrapper cannot be applied on that path.
+	// diff, log, and show can still invoke an external diff, textconv, or pager.
+	gitStatusOpt = map[string]bool{
+		"-s": true, "--short": true, "-b": true, "--branch": true, "--porcelain": true,
 	}
 	gitIrreversible = map[string]bool{
 		"push": true, "reset": true, "clean": true,
-	}
-	ghReadOnly = map[string]bool{
-		"pr view": true, "pr diff": true, "pr list": true, "pr checks": true, "pr status": true,
-		"issue view": true, "issue list": true,
-		"repo view": true,
-		"run view":  true, "run list": true,
 	}
 	fileReadOnly = map[string]bool{
 		"cat": true, "ls": true, "head": true, "tail": true, "wc": true,
@@ -68,11 +65,14 @@ var (
 func ClassifyCall(tool string, args map[string]any, workspace string) Class {
 	name := strings.ToLower(strings.TrimSpace(tool))
 	switch name {
-	case "read", "grep", "glob", "ls":
+	case "read", "ls":
 		return classifyReadTool(argText(args), workspace)
+	case "glob":
+		return classifyGlobTool(args, workspace)
+	case "grep":
+		return classifyGrepTool(args, workspace)
 	case "edit", "write", "multiedit", "notebookedit":
-		sens, _ := pathSensitivity(argText(args), workspace)
-		return blocked("write", sens, "high", "file write")
+		return blocked("write", pathLabel(argText(args), workspace), "high", "file write")
 	case "webfetch", "websearch":
 		return blocked("network", "unknown", "high", "network tool")
 	case "bash":
@@ -134,12 +134,17 @@ func eligibleAllow(pattern, workspace string) (Class, error) {
 }
 
 func eligibleBash(glob, workspace string) (Class, error) {
-	if shellComposed(glob) {
-		return Class{}, fmt.Errorf("auto-allow refused: pattern contains shell composition, redirection, or expansion")
+	if nonPrintableASCII(glob) {
+		return Class{}, fmt.Errorf("auto-allow refused: pattern contains a non-printable byte")
 	}
 	cmd, ok := literalCommand(glob)
 	if !ok {
 		return Class{}, fmt.Errorf("auto-allow refused: wildcard must be a trailing glob on a read-only command")
+	}
+	// The trailing * and ? are the rule glob. Shell expansion is checked on
+	// the literal command, and again on each later call.
+	if shellComposed(cmd) {
+		return Class{}, fmt.Errorf("auto-allow refused: pattern contains shell composition, redirection, or expansion")
 	}
 	id, ok := readOnlyIdentity(cmd)
 	if !ok || id == "" {
@@ -202,6 +207,10 @@ func literalCommand(glob string) (string, bool) {
 }
 
 func classifyBash(cmd, workspace string) Class {
+	// Checked before trim and split. Trim would drop a trailing control byte.
+	if nonPrintableASCII(cmd) {
+		return blocked("mixed", "unknown", "high", "command contains a non-printable byte")
+	}
 	cmd = strings.TrimSpace(cmd)
 	if cmd == "" {
 		return blocked("unknown", "unknown", "high", "empty command")
@@ -230,7 +239,7 @@ func classifyBash(cmd, workspace string) Class {
 	case "git":
 		return classifyGit(toks, workspace)
 	case "gh":
-		return classifyGH(toks, workspace)
+		return blocked("network", "unknown", "high", "gh is a network command")
 	default:
 		if fileReadOnly[bin] {
 			return classifyFileRead(toks, workspace)
@@ -240,6 +249,9 @@ func classifyBash(cmd, workspace string) Class {
 }
 
 func classifyGit(toks []string, workspace string) Class {
+	if why := gitForbiddenReason(toks); why != "" {
+		return blocked("unknown", "unknown", "high", why)
+	}
 	sub := gitSubcommand(toks)
 	if sub == "" {
 		return blocked("unknown", "unknown", "high", "git subcommand is not statically read-only")
@@ -250,48 +262,75 @@ func classifyGit(toks []string, workspace string) Class {
 	if sub == "fetch" || sub == "pull" || sub == "clone" || sub == "ls-remote" {
 		return blocked("network", "unknown", "high", "git "+sub+" uses the network")
 	}
-	if !gitReadOnly[sub] {
-		return blocked("write", "unknown", "high", "git "+sub+" is not a known read-only subcommand")
+	if sub == "diff" || sub == "log" || sub == "show" {
+		return blocked("unknown", "unknown", "high", "git "+sub+" can invoke an external diff, textconv, or pager")
+	}
+	if sub != "status" {
+		return blocked("unknown", "unknown", "high", "git "+sub+" is not auto-allowed")
 	}
 	for _, t := range toks {
 		if t == "--output" || strings.HasPrefix(t, "--output=") {
-			return blocked("write", "unknown", "high", "git "+sub+" --output writes a file")
+			return blocked("write", "unknown", "high", "git status --output writes a file")
 		}
 	}
-	if sens, ok := toksInside(toks, workspace); !ok {
-		return blocked(sens, sens, "high", "git "+sub+" path is outside the workspace")
+	if prob := gitStatusArgs(toks, workspace, true); prob != nil {
+		return blocked(prob.kind, prob.sens, "high", prob.reason)
 	}
-	return allowLow("read-only git " + sub)
-}
-
-func classifyGH(toks []string, workspace string) Class {
-	if len(toks) < 3 {
-		return blocked("unknown", "unknown", "high", "gh command is not a known read-only prefix")
-	}
-	pair := toks[1] + " " + toks[2]
-	if !ghReadOnly[pair] {
-		switch toks[1] {
-		case "auth":
-			return blocked("credential", "credential", "high", "gh auth handles credentials")
-		case "api", "ssh":
-			return blocked("network", "unknown", "high", "gh "+toks[1]+" uses the network")
-		}
-		return blocked("unknown", "unknown", "high", "gh "+pair+" is not a known read-only command")
-	}
-	if sens, ok := toksInside(toks, workspace); !ok {
-		return blocked(sens, sens, "high", "gh "+pair+" path is outside the workspace")
-	}
-	return allowLow("read-only gh " + pair)
+	return allowLow("read-only git status")
 }
 
 func classifyFileRead(toks []string, workspace string) Class {
 	if toks[0] == "find" && findWrites(toks) {
 		return blocked("write", "unknown", "high", "find would write or execute")
 	}
-	if sens, ok := argsInside(toks[1:], workspace); !ok {
-		return blocked(sens, sens, "high", "path is outside the workspace")
+	if prob := checkFileArgs(toks, workspace, true); prob != nil {
+		return blocked(prob.kind, prob.sens, "high", prob.reason)
 	}
 	return allowLow("read-only " + toks[0])
+}
+
+func classifyGlobTool(args map[string]any, workspace string) Class {
+	pattern, _ := stringArg(args, "pattern")
+	if strings.TrimSpace(pattern) == "" {
+		return blocked("unknown", "unknown", "high", "glob tool has no pattern")
+	}
+	if why := globPathRefused(pattern); why != "" {
+		return blocked("unknown", "unknown", "high", why)
+	}
+	if !strings.ContainsAny(pattern, "*?[") {
+		return classifyReadTool(pattern, workspace)
+	}
+	return allowLow("read-only glob pattern inside the workspace")
+}
+
+func classifyGrepTool(args map[string]any, workspace string) Class {
+	if g, ok := stringArg(args, "glob"); ok && strings.TrimSpace(g) != "" {
+		if why := globPathRefused(g); why != "" {
+			return blocked("unknown", "unknown", "high", why)
+		}
+	}
+	path, _ := stringArg(args, "path")
+	if strings.TrimSpace(path) == "" {
+		path, _ = stringArg(args, "file_path")
+	}
+	if strings.TrimSpace(path) == "" {
+		path, _ = stringArg(args, "filePath")
+	}
+	if strings.TrimSpace(path) == "" {
+		return allowLow("read-only grep in the workspace")
+	}
+	if why := globPathRefused(path); why != "" {
+		return blocked("unknown", "unknown", "high", why)
+	}
+	return classifyReadTool(path, workspace)
+}
+
+func stringArg(args map[string]any, key string) (string, bool) {
+	if args == nil {
+		return "", false
+	}
+	s, ok := args[key].(string)
+	return s, ok
 }
 
 func classifyReadTool(p, workspace string) Class {
@@ -299,16 +338,8 @@ func classifyReadTool(p, workspace string) Class {
 	if p == "" {
 		return blocked("unknown", "unknown", "high", "read tool has no path")
 	}
-	if credentialPath(p) {
-		return blocked("credential", "credential", "high", "path is a credential path")
-	}
-	sens, inside := pathSensitivity(p, workspace)
-	if !inside {
-		kind := sens
-		if kind == "" || kind == "project" {
-			kind = "unknown"
-		}
-		return blocked(kind, sens, "high", "path is outside the workspace")
+	if prob := pathProblem(p, workspace, true); prob != nil {
+		return blocked(prob.kind, prob.sens, "high", prob.reason)
 	}
 	return allowLow("read-only path inside the workspace")
 }
@@ -328,13 +359,10 @@ func blocked(kind, sens, risk, reason string) Class {
 }
 
 func gitSubcommand(toks []string) string {
-	i := 1
-	for i < len(toks) {
+	for i := 1; i < len(toks); i++ {
 		t := toks[i]
-		switch t {
-		case "-C", "--git-dir", "--work-tree":
-			i += 2
-			continue
+		if t == "--" {
+			return ""
 		}
 		if strings.HasPrefix(t, "-") {
 			return ""
@@ -342,6 +370,83 @@ func gitSubcommand(toks []string) string {
 		return t
 	}
 	return ""
+}
+
+func gitForbiddenReason(toks []string) string {
+	for i := 1; i < len(toks); i++ {
+		t := toks[i]
+		if t == "--" {
+			return ""
+		}
+		if gitOptForbidden(t) {
+			return "git option is not permitted"
+		}
+	}
+	return ""
+}
+
+func gitOptForbidden(t string) bool {
+	switch t {
+	case "-C", "-c", "--git-dir", "--work-tree", "--ext-diff", "--textconv", "--no-index":
+		return true
+	}
+	if strings.HasPrefix(t, "--git-dir=") || strings.HasPrefix(t, "--work-tree=") ||
+		strings.HasPrefix(t, "--ext-diff=") || strings.HasPrefix(t, "--textconv=") {
+		return true
+	}
+	// -c with an attached value. Short status flags are only s and b.
+	if strings.HasPrefix(t, "-c") && !strings.HasPrefix(t, "--") {
+		return true
+	}
+	return false
+}
+
+func gitStatusArgs(toks []string, workspace string, resolve bool) *argProblem {
+	subAt := -1
+	for i := 1; i < len(toks); i++ {
+		if !strings.HasPrefix(toks[i], "-") {
+			subAt = i
+			break
+		}
+	}
+	if subAt < 0 {
+		return &argProblem{kind: "unknown", sens: "unknown", reason: "git subcommand is not statically read-only"}
+	}
+	files := false
+	for _, t := range toks[subAt+1:] {
+		if !files {
+			if t == "--" {
+				files = true
+				continue
+			}
+			if strings.HasPrefix(t, "-") {
+				if !gitStatusOptOK(t) {
+					return &argProblem{kind: "unknown", sens: "unknown", reason: "git status option is not permitted"}
+				}
+				continue
+			}
+			return &argProblem{kind: "unknown", sens: "unknown", reason: "file operand requires --"}
+		}
+		if prob := pathProblem(t, workspace, resolve); prob != nil {
+			return prob
+		}
+	}
+	return nil
+}
+
+func gitStatusOptOK(t string) bool {
+	if gitStatusOpt[t] {
+		return true
+	}
+	if len(t) > 1 && t[0] == '-' && t[1] != '-' {
+		for _, c := range t[1:] {
+			if c != 's' && c != 'b' {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func findWrites(toks []string) bool {
@@ -364,19 +469,20 @@ func readOnlyIdentity(cmd string) (string, bool) {
 	}
 	switch toks[0] {
 	case "git":
-		sub := gitSubcommand(toks)
-		if gitReadOnly[sub] {
-			return "git " + sub, true
+		if gitForbiddenReason(toks) != "" {
+			return "", false
 		}
+		if gitSubcommand(toks) != "status" {
+			return "", false
+		}
+		if gitStatusArgs(toks, "", false) != nil {
+			return "", false
+		}
+		return "git status", true
 	case "gh":
-		if len(toks) >= 3 {
-			pair := toks[1] + " " + toks[2]
-			if ghReadOnly[pair] {
-				return "gh " + pair, true
-			}
-		}
+		return "", false
 	default:
-		if fileReadOnly[toks[0]] && !(toks[0] == "find" && findWrites(toks)) {
+		if fileReadOnly[toks[0]] && !(toks[0] == "find" && findWrites(toks)) && checkFileArgs(toks, "", false) == nil {
 			return toks[0], true
 		}
 	}
@@ -412,7 +518,7 @@ func shellComposed(s string) bool {
 		switch c {
 		case '\'', '"':
 			quote = c
-		case '\\', ';', '|', '&', '<', '>', '`', '$', '\n', '\r':
+		case '\\', ';', '|', '&', '<', '>', '`', '$', '\n', '\r', '{', '}', '*', '?', '[':
 			return true
 		}
 	}
@@ -488,88 +594,426 @@ func splitSegs(p string) []string {
 	})
 }
 
-func toksInside(toks []string, workspace string) (string, bool) {
-	for _, t := range toks {
-		if !looksLikePath(t) {
-			continue
-		}
-		sens, inside := pathSensitivity(t, workspace)
-		if !inside {
-			if sens == "" {
-				sens = "unknown"
-			}
-			return sens, false
-		}
-	}
-	return "project", true
+// argProblem is why one command or path is not auto-allowed.
+type argProblem struct {
+	kind, sens, reason string
 }
 
-func argsInside(args []string, workspace string) (string, bool) {
-	prevFlag := ""
-	for _, t := range args {
-		if strings.HasPrefix(t, "-") {
-			prevFlag = t
-			continue
-		}
-		if takesValue(prevFlag) {
-			prevFlag = ""
-			continue
-		}
-		prevFlag = ""
-		sens, inside := pathSensitivity(t, workspace)
-		if !inside {
-			if sens == "" {
-				sens = "unknown"
-			}
-			return sens, false
+func nonPrintableASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] > 0x7E {
+			return true
 		}
 	}
-	return "project", true
+	return false
 }
 
-func takesValue(flag string) bool {
-	switch flag {
-	case "-n", "-c", "-m", "-A", "-B", "-C", "-e", "--regexp", "--max-count",
-		"-name", "-path", "-maxdepth", "-mindepth":
+// globPathRefused reports an absolute path, a .. segment, or a ~ segment.
+// Glob patterns and grep globs are not filesystem lookups.
+func globPathRefused(p string) string {
+	p = strings.Trim(strings.TrimSpace(p), `"'`)
+	if p == "" {
+		return ""
+	}
+	if strings.HasPrefix(p, "~") || filepath.IsAbs(p) {
+		return "path is absolute or escapes the workspace"
+	}
+	for _, seg := range strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if seg == ".." || seg == "~" || strings.HasPrefix(seg, "~") {
+			return "path is absolute or escapes the workspace"
+		}
+	}
+	return ""
+}
+
+type optKind int
+
+const (
+	optFlag optKind = iota
+	optRaw
+	optPath
+)
+
+// readOpts is the allowlist of options for each read-only command.
+// A token that starts with - and is not listed is refused.
+var readOpts = map[string]map[string]optKind{
+	"cat": flagSet(
+		"-n", "--number", "-b", "--number-nonblank", "-A", "--show-all",
+		"-E", "--show-ends", "-T", "--show-tabs", "-v", "--show-nonprinting",
+		"-s", "--squeeze-blank", "-e", "-t", "-u",
+	),
+	"ls": flagSet(
+		"-a", "-A", "-C", "-d", "-F", "-h", "-i", "-l", "-n", "-r", "-R", "-s", "-S", "-t", "-1", "-g", "-o", "-G",
+		"--all", "--almost-all", "--classify", "--human-readable", "--inode",
+		"--numeric-uid-gid", "--reverse", "--recursive", "--size", "--directory",
+	),
+	"head": mergeOpts(flagSet("-q", "--quiet", "--silent", "-v", "--verbose"), rawSet("-n", "--lines", "-c", "--bytes")),
+	"tail": mergeOpts(flagSet("-q", "--quiet", "--silent", "-v", "--verbose"), rawSet("-n", "--lines", "-c", "--bytes")),
+	"wc": flagSet(
+		"-c", "-l", "-m", "-w", "-L",
+		"--bytes", "--chars", "--lines", "--words", "--max-line-length",
+	),
+	"pwd":  flagSet("-L", "-P", "--logical", "--physical"),
+	"stat": mergeOpts(flagSet("-t", "--terse"), rawSet("-c", "--format", "--printf")),
+	"file": flagSet(
+		"-b", "--brief", "-i", "--mime", "--mime-type", "--mime-encoding",
+		"-h", "--no-dereference", "-N", "--no-pad",
+	),
+	"grep": mergeOpts(flagSet(
+		"-n", "--line-number", "-H", "--with-filename", "-h", "--no-filename",
+		"-i", "--ignore-case", "-E", "--extended-regexp", "-F", "--fixed-strings",
+		"-w", "--word-regexp", "-x", "--line-regexp", "-o", "--only-matching",
+		"-v", "--invert-match", "-c", "--count", "-l", "--files-with-matches",
+		"-L", "--files-without-match", "-a", "--text", "-I", "-s", "--no-messages",
+		"-q", "--quiet", "--silent", "-r", "--recursive",
+	), rawSet(
+		"-m", "--max-count", "-A", "--after-context", "-B", "--before-context",
+		"-C", "--context", "-e", "--regexp", "--include", "--exclude", "--exclude-dir",
+	)),
+	"rg": mergeOpts(flagSet(
+		"-n", "--line-number", "-i", "--ignore-case", "-w", "--word-regexp",
+		"-l", "--files-with-matches", "-c", "--count", "-H", "--with-filename",
+		"--no-filename", "-o", "--only-matching", "-v", "--invert-match",
+		"-s", "--case-sensitive", "-S", "--smart-case", "-F", "--fixed-strings",
+		"-a", "--text", "--heading", "--no-heading", "--column",
+	), rawSet(
+		"-g", "--glob", "-t", "--type", "-T", "--type-not", "-m", "--max-count",
+		"-A", "--after-context", "-B", "--before-context", "-C", "--context",
+		"-e", "--regexp", "-d", "--max-depth",
+	)),
+	"find": mergeOpts(flagSet(
+		"-print", "-print0", "-o", "-or", "-a", "-and", "-not",
+		"-true", "-false", "-prune", "-depth", "-xdev", "-mount", "-noleaf",
+		"-empty", "-readable", "-nouser", "-nogroup", "-P", "-quit",
+	), mergeOpts(rawSet(
+		"-name", "-iname", "-path", "-ipath", "-wholename", "-iwholename",
+		"-regex", "-iregex", "-maxdepth", "-mindepth", "-type", "-size",
+		"-mtime", "-mmin", "-ctime", "-cmin", "-group", "-user", "-perm", "-links",
+	), pathSet("-newer"))),
+}
+
+func flagSet(names ...string) map[string]optKind {
+	out := map[string]optKind{}
+	for _, n := range names {
+		out[n] = optFlag
+	}
+	return out
+}
+
+func rawSet(names ...string) map[string]optKind {
+	out := map[string]optKind{}
+	for _, n := range names {
+		out[n] = optRaw
+	}
+	return out
+}
+
+func pathSet(names ...string) map[string]optKind {
+	out := map[string]optKind{}
+	for _, n := range names {
+		out[n] = optPath
+	}
+	return out
+}
+
+func mergeOpts(parts ...map[string]optKind) map[string]optKind {
+	out := map[string]optKind{}
+	for _, p := range parts {
+		for k, v := range p {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func supportsEndOfOptions(bin string) bool {
+	switch bin {
+	case "cat", "ls", "head", "tail", "wc", "stat", "file", "grep", "rg", "find":
 		return true
 	default:
 		return false
 	}
 }
 
-func looksLikePath(tok string) bool {
-	return strings.HasPrefix(tok, "/") || strings.HasPrefix(tok, "~") ||
-		strings.HasPrefix(tok, "./") || strings.HasPrefix(tok, "../") ||
-		strings.Contains(tok, "..") || strings.Contains(tok, `\`)
+func checkFileArgs(toks []string, workspace string, resolve bool) *argProblem {
+	if len(toks) == 0 {
+		return &argProblem{kind: "unknown", sens: "unknown", reason: "empty command"}
+	}
+	bin := toks[0]
+	table := readOpts[bin]
+	if table == nil {
+		return &argProblem{kind: "unknown", sens: "unknown", reason: "command is not a known read-only prefix"}
+	}
+	files := false
+	expr := false
+	hasPattern := false
+	needsPattern := bin == "grep" || bin == "rg"
+	for i := 1; i < len(toks); i++ {
+		t := toks[i]
+		if !files && t == "--" {
+			if !supportsEndOfOptions(bin) {
+				return &argProblem{kind: "unknown", sens: "unknown", reason: "operand starts with -"}
+			}
+			files = true
+			continue
+		}
+		if files && bin == "find" && (expr || findExprStart(t)) {
+			expr = true
+		}
+		if !files || expr {
+			kind, attached, hasAttached, ok := lookupOpt(bin, t)
+			if ok {
+				if needsPattern && (optName(t) == "-e" || optName(t) == "--regexp") {
+					hasPattern = true
+				}
+				if kind != optFlag && !hasAttached {
+					i++
+					if i >= len(toks) {
+						return &argProblem{kind: "unknown", sens: "unknown", reason: "option is not permitted"}
+					}
+					attached = toks[i]
+					hasAttached = true
+				}
+				if kind == optPath && hasAttached {
+					if prob := pathProblem(attached, workspace, resolve); prob != nil {
+						return prob
+					}
+				}
+				continue
+			}
+		}
+		if !files {
+			if needsPattern && !hasPattern && !strings.HasPrefix(t, "-") {
+				hasPattern = true
+				continue
+			}
+			if strings.HasPrefix(t, "-") {
+				if !supportsEndOfOptions(bin) {
+					return &argProblem{kind: "unknown", sens: "unknown", reason: "operand starts with -"}
+				}
+				return &argProblem{kind: "unknown", sens: "unknown", reason: "option is not permitted"}
+			}
+			if supportsEndOfOptions(bin) {
+				// A path that is already outside is reported as such. A path
+				// that would be inside still needs -- before the operand.
+				if prob := pathProblem(t, workspace, resolve); prob != nil {
+					return prob
+				}
+				return &argProblem{kind: "unknown", sens: "unknown", reason: "file operand requires --"}
+			}
+		}
+		if bin == "pwd" {
+			return &argProblem{kind: "unknown", sens: "unknown", reason: "pwd does not take a path"}
+		}
+		if prob := pathProblem(t, workspace, resolve); prob != nil {
+			return prob
+		}
+	}
+	if needsPattern && !hasPattern {
+		return &argProblem{kind: "unknown", sens: "unknown", reason: "command is not a known read-only prefix"}
+	}
+	return nil
 }
 
-func pathSensitivity(p, workspace string) (sens string, inside bool) {
+func findExprStart(t string) bool {
+	if t == "!" || t == "(" || t == ")" {
+		return true
+	}
+	_, ok := readOpts["find"][t]
+	return ok
+}
+
+func optName(token string) string {
+	if name, _, ok := strings.Cut(token, "="); ok && strings.HasPrefix(token, "--") {
+		return name
+	}
+	if strings.HasPrefix(token, "-") && !strings.HasPrefix(token, "--") && len(token) > 2 {
+		return token[:2]
+	}
+	return token
+}
+
+func lookupOpt(bin, token string) (kind optKind, attached string, hasAttached, ok bool) {
+	table := readOpts[bin]
+	if table == nil {
+		return 0, "", false, false
+	}
+	if k, found := table[token]; found {
+		return k, "", false, true
+	}
+	if strings.HasPrefix(token, "--") {
+		name, val, has := strings.Cut(token, "=")
+		if !has {
+			return 0, "", false, false
+		}
+		k, found := table[name]
+		if !found || k == optFlag {
+			return 0, "", false, false
+		}
+		return k, val, true, true
+	}
+	if (bin == "head" || bin == "tail") && numericShort(token) {
+		return optFlag, "", false, true
+	}
+	if strings.HasPrefix(token, "-") && len(token) > 2 {
+		letter := token[:2]
+		if k, found := table[letter]; found && k != optFlag {
+			return k, token[2:], true, true
+		}
+		for i := 1; i < len(token); i++ {
+			k, found := table["-"+token[i:i+1]]
+			if !found || k != optFlag {
+				return 0, "", false, false
+			}
+		}
+		return optFlag, "", false, true
+	}
+	return 0, "", false, false
+}
+
+func numericShort(token string) bool {
+	if len(token) < 2 || token[0] != '-' {
+		return false
+	}
+	for _, c := range token[1:] {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func pathLabel(p, workspace string) string {
 	p = strings.Trim(strings.TrimSpace(p), `"'`)
 	if p == "" {
-		return "project", true
+		return "unknown"
 	}
 	if credentialPath(p) {
-		return "credential", false
+		return "credential"
 	}
 	if isHome(p) && !withinWorkspace(p, workspace) {
-		return "home", false
+		return "home"
 	}
 	if isSystem(p) && !withinWorkspace(p, workspace) {
-		return "system", false
+		return "system"
 	}
-	if withinWorkspace(p, workspace) {
-		return "project", true
-	}
-	if workspace == "" && !filepath.IsAbs(p) && !strings.Contains(p, "..") && !isHome(p) {
-		return "project", true
+	if withinWorkspace(p, workspace) || (strings.TrimSpace(workspace) == "" && !filepath.IsAbs(p) && !strings.Contains(p, "..") && !isHome(p)) {
+		return "project"
 	}
 	if isSystem(p) {
-		return "system", false
+		return "system"
 	}
 	if isHome(p) {
-		return "home", false
+		return "home"
 	}
-	return "unknown", false
+	return "unknown"
+}
+
+func pathProblem(p, workspace string, resolve bool) *argProblem {
+	if !resolve {
+		return nil
+	}
+	p = strings.Trim(strings.TrimSpace(p), `"'`)
+	if p == "" {
+		return &argProblem{kind: "unknown", sens: "unknown", reason: "path is outside the workspace"}
+	}
+	if credentialPath(p) {
+		return &argProblem{kind: "credential", sens: "credential", reason: "path is a credential path"}
+	}
+	if isHome(p) && !withinWorkspace(p, workspace) {
+		return &argProblem{kind: "home", sens: "home", reason: "path is outside the workspace"}
+	}
+	if isSystem(p) && !withinWorkspace(p, workspace) {
+		return &argProblem{kind: "system", sens: "system", reason: "path is outside the workspace"}
+	}
+	lexicalInside := withinWorkspace(p, workspace)
+	if !lexicalInside {
+		if strings.TrimSpace(workspace) == "" && !filepath.IsAbs(p) && !strings.Contains(p, "..") && !isHome(p) {
+			return nil
+		}
+		if isSystem(p) {
+			return &argProblem{kind: "system", sens: "system", reason: "path is outside the workspace"}
+		}
+		if isHome(p) {
+			return &argProblem{kind: "home", sens: "home", reason: "path is outside the workspace"}
+		}
+		return &argProblem{kind: "unknown", sens: "unknown", reason: "path is outside the workspace"}
+	}
+	if !resolve || strings.TrimSpace(workspace) == "" {
+		return nil
+	}
+	// Symlink resolution runs at decision time, before the tool. A path can
+	// change between this check and the run. Sandbox read limits are the
+	// backstop for that gap.
+	inside, missing, cred := resolvesInside(p, workspace)
+	if cred {
+		return &argProblem{kind: "credential", sens: "credential", reason: "path is a credential path"}
+	}
+	if inside {
+		return nil
+	}
+	if missing {
+		return &argProblem{kind: "unknown", sens: "unknown", reason: "path parent is missing"}
+	}
+	return &argProblem{kind: "unknown", sens: "unknown", reason: "path resolves outside the workspace"}
+}
+
+// resolvesInside evaluates symlinks. The final component may be absent when
+// its parent exists and stays inside the workspace. A missing parent is refused.
+func resolvesInside(p, workspace string) (inside, missingParent, credential bool) {
+	root, err := resolvedDir(workspace)
+	if err != nil {
+		return false, true, false
+	}
+	candidate := p
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(root, candidate)
+	} else if abs, absErr := filepath.Abs(candidate); absErr == nil {
+		candidate = abs
+	}
+	candidate = filepath.Clean(candidate)
+	if resolved, err := filepath.EvalSymlinks(candidate); err == nil {
+		resolved = filepath.Clean(resolved)
+		if credentialPath(resolved) {
+			return false, false, true
+		}
+		return insideRoot(resolved, root), false, false
+	}
+	if st, statErr := os.Lstat(candidate); statErr == nil && st != nil {
+		return false, false, false
+	}
+	parent := filepath.Dir(candidate)
+	if _, err := os.Lstat(parent); err != nil {
+		return false, true, false
+	}
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return false, false, false
+	}
+	resolvedParent = filepath.Clean(resolvedParent)
+	full := filepath.Join(resolvedParent, filepath.Base(candidate))
+	if credentialPath(full) {
+		return false, false, true
+	}
+	return insideRoot(full, root), false, false
+}
+
+func resolvedDir(path string) (string, error) {
+	clean := filepath.Clean(path)
+	if abs, err := filepath.Abs(clean); err == nil {
+		clean = abs
+	}
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(resolved), nil
+}
+
+func insideRoot(path, root string) bool {
+	path = filepath.Clean(path)
+	root = filepath.Clean(root)
+	return path == root || strings.HasPrefix(path, root+string(filepath.Separator))
 }
 
 func withinWorkspace(p, workspace string) bool {

@@ -2,6 +2,7 @@ package permission
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -13,6 +14,12 @@ import (
 // paths, writes, or paths outside the workspace.
 func TestUserAllowFloor(t *testing.T) {
 	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "src", "main.go"), []byte("package p\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	outside := t.TempDir()
 	data := filepath.Join(filepath.Dir(ws), "state.db")
 	b := New(Options{})
@@ -56,7 +63,9 @@ func TestUserAllowFloor(t *testing.T) {
 
 	mustAllow("Bash", "Bash(git status*)", "git status")
 	mustAllow("Bash", "Bash(git status*)", "git status -sb")
-	mustAllow("Bash", "Bash(git diff *)", "git diff -- src/a.go")
+	mustHold("Bash", "Bash(git diff *)", "git diff -- src/a.go")
+	mustHold("Bash", "Bash(git log *)", "git log -1")
+	mustHold("Bash", "Bash(git show *)", "git show HEAD")
 	mustAllow("Read", "Read(./src/**)", "./src/main.go")
 
 	for _, cmd := range []string{
