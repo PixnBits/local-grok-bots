@@ -53,7 +53,7 @@ type Request struct {
 	Tool      string
 	Args      map[string]any
 	ToolUseID string
-	// Transport is mcp, stream_control, or none. Empty omits the field.
+	// Transport is mcp, stream_control, acp, or none. Empty omits the field.
 	Transport string
 	// Kind is "question" for an interactive question, empty otherwise.
 	Kind string

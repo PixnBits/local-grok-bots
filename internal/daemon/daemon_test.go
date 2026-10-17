@@ -24,6 +24,12 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// The jailed Grok binary is this test binary. Only the child sets the
+	// env, after this process has already passed TestMain.
+	if os.Getenv("LGB_ACP_FAKE") == "1" {
+		acpFakeMain()
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--lgb-fake-claude" {
 		fakeClaudeMain()
 		return

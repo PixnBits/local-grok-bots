@@ -474,6 +474,9 @@ const (
 	TransportStreamControl = "stream_control"
 	// TransportNone passes --permission-prompts none and attaches no host.
 	TransportNone = "none"
+	// TransportACP is the Grok stdio permission host. It is not a
+	// claude_transport value.
+	TransportACP = "acp"
 )
 
 const (

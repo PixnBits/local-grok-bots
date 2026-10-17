@@ -215,11 +215,14 @@ func TestCLITruncatedStreamIsInterrupted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.LastRunError != "interrupted" || got.SessionID == "" {
+	if got.LastRunStatus != "error" || !strings.Contains(got.LastRunError, "acp host") || got.SessionID == "" {
 		t.Fatalf("status %s err %s session %q", got.LastRunStatus, got.LastRunError, got.SessionID)
 	}
 	argv := readArgv(t, argvLog)
-	if strings.Contains(argv, "--always-approve") || !strings.Contains(argv, "streaming-json") {
+	if strings.Contains(argv, "--always-approve") || strings.Contains(argv, "streaming-json") || strings.Contains(argv, "--permission-mode") {
+		t.Fatalf("grok args:\n%s", argv)
+	}
+	if !strings.Contains(argv, "agent") || !strings.Contains(argv, "--no-leader") || !strings.Contains(argv, "stdio") {
 		t.Fatalf("grok args:\n%s", argv)
 	}
 }
@@ -556,8 +559,33 @@ fi
 if [ -n "$LGB_ENV_LOG" ]; then
   env > "$LGB_ENV_LOG"
 fi
-if [ -n "$LGB_FIXTURE" ]; then
+if [ "$1" != "agent" ] && [ -n "$LGB_FIXTURE" ]; then
   cat "$LGB_FIXTURE"
+  exit 0
+fi
+if [ "$1" = "agent" ]; then
+  acp_id() { printf '%s\n' "$1" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'; }
+  acp_send() { awk -v line="$1" 'BEGIN{print line; fflush()}'; }
+  IFS= read -r line || exit 1
+  id=$(acp_id "$line")
+  acp_send "{\"jsonrpc\":\"2.0\",\"id\":${id:-0},\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"loadSession\":true}}}"
+  IFS= read -r line || exit 1
+  id=$(acp_id "$line")
+  sid=stub-session
+  acp_send "{\"jsonrpc\":\"2.0\",\"id\":${id:-0},\"result\":{\"sessionId\":\"$sid\"}}"
+  IFS= read -r line || exit 1
+  id=$(acp_id "$line")
+  mode=${LGB_CLI_MODE:-ok}
+  if [ -n "$LGB_FIXTURE" ]; then
+    cat "$LGB_FIXTURE"
+    exit 0
+  fi
+  if [ "$mode" = "trunc" ]; then
+    acp_send "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"$sid\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"partial\"}}}}"
+    exit 0
+  fi
+  acp_send "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"$sid\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"hello\"}}}}"
+  acp_send "{\"jsonrpc\":\"2.0\",\"id\":${id:-0},\"result\":{\"stopReason\":\"end_turn\"}}"
   exit 0
 fi
 mode=${LGB_CLI_MODE:-ok}

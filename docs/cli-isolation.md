@@ -201,14 +201,14 @@ created on this host. Claude still uses its own sandbox. The daemon configures
 each turn from the bot's grants (`net` with its host list, `git`, `ssh`). The
 settings only add restrictions. Remaining limits are in [Sandbox model](sandbox.md).
 
-Durable low-risk grants are decided by the broker on the Claude permission
-host (see `docs/cli-permissions.md`). The bot turn does not load
-`user-permissions.json` or `grok-permission-rules` as allow rules. On Linux
-the Grok jail does not mount those files. When they exist at turn start, the
-Grok sandbox deny list names them and Claude settings deny Read and Edit of
-those paths. The process boundary is still the daemon jail (Grok on Linux) or
-the CLI sandbox (Claude). It is not what applies a user allow. Grok's own
-tool loop does not call the broker.
+Durable low-risk grants are decided by the broker (see `docs/cli-permissions.md`).
+The bot turn does not load `user-permissions.json` or `grok-permission-rules`
+as allow rules. On Linux the Grok jail does not mount those files. When they
+exist at turn start, the Grok sandbox deny list names them and Claude settings
+deny Read and Edit of those paths. The process boundary is still the daemon
+jail (Grok on Linux) or the CLI sandbox (Claude). It is not what applies a
+user allow. Grok's tool calls reach that broker through the ACP permission
+host: the jail does not decide the allow.
 
 ### Claude
 
@@ -299,8 +299,15 @@ restrict_network = true      # false with a net grant
 deny = ["/home/u/.ssh", ...]  # existing credential paths, admin-token, state.db*, policy.toml, DATA_DIR/cli
 ```
 
-and passes `--sandbox lgb` plus `--disallowed-tools web_fetch,web_search`
-unless `net`. A custom profile fails closed: Grok refuses to start if it can't
+and passes `--sandbox lgb` plus `--disallowed-tools`. Without a net grant
+that list starts with `web_fetch,web_search`. It always continues with the
+built-ins that cannot be forced to ask (`todo_write`, subagent and scheduler
+tools, `monitor`, `workflow`, plan mode, `ask_user_question`, `send_feedback`,
+image tools, `search_tool`, `use_tool`). The same directory gets `config.toml`:
+`permission_mode = "default"` and a catch-all ask list, so read-only tools
+send `session/request_permission` instead of running on their own.
+
+A custom profile fails closed: Grok refuses to start if it can't
 apply it (unknown profile, bad `sandbox.toml`, or no `bwrap` for a deny list on
 Linux). Only existing paths are listed, since Grok also refuses a deny path it
 can't bind. A `ssh` grant drops `~/.ssh` from the list. The user's
@@ -514,9 +521,58 @@ the broker follows the normal order.
 
 ### Grok
 
-Grok has no permission host on this branch. A headless TUI prompt fails the
-turn with `permission prompt requires a TTY or an explicit permission_mode`
-(`ErrPermissionPrompt`). It does not open a card.
+Grok asks through the ACP host in `docs/cli-permissions.md`. The card is the
+same allow-once / deny / allow-session card. The host answers `allow-once` or
+`reject-once`. A headless TUI prompt is not the Grok path anymore.
+`ErrPermissionPrompt` still fails a Claude turn that asks with no host.
+
+### Grok permission host (CISO)
+
+The Linux bubblewrap jail is unchanged. The same mounts, unshare flags
+(`user`, `pid`, `uts`, `ipc`, `net`), `--die-with-parent`, `--new-session`,
+`--clearenv`, private `/proc`, fresh `/tmp`, workspace bind, read-only binary,
+`HOME` and `GROK_HOME` binds, environment scrub, and proxy socket binds still
+apply. Nested `--sandbox` is still stripped inside the jail. The credential
+forwarder still passes the child's stdin through, which is how ACP is written.
+No new bind was added for the permission host.
+
+What changed around that jail:
+
+- Each turn writes `GROK_HOME/config.toml` with `permission_mode = "default"`
+  and a catch-all ask list (Bash, Read, Grep, Glob, Edit, Write, WebFetch,
+  WebSearch, MCPTool). The file is the bot's `GROK_HOME`, created with the
+  same no-follow write as `sandbox.toml`. The user's `~/.grok` is not written.
+- Argv is `grok agent --no-leader stdio`, plus `--cwd`, `--sandbox lgb`
+  (omitted inside the jail, as before), `--no-auto-update`, and
+  `--disallowed-tools` as above. There is no `--always-approve`, no
+  `--permission-mode`, no `-p`, and no user rule on `--allow` or `--deny`.
+- Managed deny rules remain `--deny`. The `lgb` and `coi` spool allows remain
+  `--allow`. Other managed allows are broker decisions after Grok asks. They
+  are not argv allows.
+- `session/new` carries only `cwd` and an empty `mcpServers`. A later turn
+  uses `session/load`. Neither sets `yoloMode` or `autoMode`.
+- Allow is answered `allow-once`. Deny is `reject-once`. `allow_always` is
+  never selected. A session grant stays in the broker, keyed by the session
+  id Grok returned, which the next turn loads.
+- Host failure (exit before a result, malformed request, broker error, missing
+  allow-once or reject-once option, protocol timeout) fails the turn and
+  writes an audit row with source `host`.
+
+Residuals, unchanged by this host:
+
+- A root-owned `/etc/grok/requirements.toml` that forces always-approve can
+  still short-circuit asks. This daemon does not write `requirements.toml`
+  and does not pass `--always-approve`.
+- If Grok enforces `--deny` before it asks, that call never reaches the
+  broker, so the broker's audit row is absent. The tool does not run. The
+  parity tests use a fake that always asks, so they observe the broker.
+- A path or symlink can change between `ClassifyCall` and the tool. The jail
+  and the sandbox deny list remain the backstop.
+- `list_dir` is classified as Glob so a Read or Glob ask rule can force a
+  prompt. The tool itself is still Grok's `list_dir`.
+- Isolated `GROK_HOME` and no `--trust` still mean a project `.grok/config.toml`
+  is not loaded. The ask rules in the per-bot `GROK_HOME` are what make Grok
+  request permission. A managed allow does not skip that ask.
 
 ## Override files
 

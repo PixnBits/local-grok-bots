@@ -647,12 +647,48 @@ func grokSandboxTOML(o IsolationOptions) string {
 	return b.String()
 }
 
-// grokDisallowed are built-in Grok tools removed unless granted.
+// grokUngatedTools are built-ins that do not honor an ask rule. They are
+// removed on every turn. lgb and coi are shell commands, not these tools,
+// and stay on their --allow lines. web_fetch and web_search are added only
+// when the bot has no net grant; with net, the ask list still gates them.
+var grokUngatedTools = []string{
+	"todo_write",
+	"kill_command_or_subagent",
+	"get_command_or_subagent_output",
+	"spawn_subagent",
+	"scheduler_create",
+	"scheduler_delete",
+	"scheduler_list",
+	"monitor",
+	"workflow",
+	"enter_plan_mode",
+	"exit_plan_mode",
+	"ask_user_question",
+	"send_feedback",
+	"image_gen",
+	"image_edit",
+	"image_to_video",
+	"reference_to_video",
+	"search_tool",
+	"use_tool",
+}
+
+// grokDisallowed are built-in Grok tools removed so they cannot run without
+// a permission request the host can see.
 func grokDisallowed(g Grants) []string {
-	if g.Net {
-		return nil
+	var out []string
+	if !g.Net {
+		out = append(out, "web_fetch", "web_search")
 	}
-	return []string{"web_fetch", "web_search"}
+	return append(out, grokUngatedTools...)
+}
+
+// grokPermissionTOML forces default mode and a catch-all ask list.
+// Without the ask list, read-only tools run with no session/request_permission.
+func grokPermissionTOML() string {
+	return "# Written by local-grok-bots for each turn. Do not edit.\n" +
+		"[ui]\npermission_mode = \"default\"\n\n" +
+		"[permission]\nask = [\"Bash\", \"Read\", \"Grep\", \"Glob\", \"Edit\", \"Write\", \"WebFetch\", \"WebSearch\", \"MCPTool\"]\n"
 }
 
 // existingRuleFiles lists the durable permission files in the bot state

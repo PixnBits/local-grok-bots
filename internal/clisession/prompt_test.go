@@ -77,7 +77,9 @@ sleep 120
 		Isolate: &Isolation{GrokSandbox: GrokProfile},
 		OnStart: func(p int) { pid = p },
 	}, nil)
-	if !errors.Is(err, ErrPermissionPrompt) {
+	// Grok turns use the ACP host. With no broker the host fails closed and
+	// kills the process. A stderr phrase is not ErrPermissionPrompt.
+	if err == nil || errors.Is(err, ErrPermissionPrompt) || !strings.Contains(err.Error(), "acp host") {
 		t.Fatalf("err %v", err)
 	}
 	if pid > 0 && pidRunning(pid) {

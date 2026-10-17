@@ -50,27 +50,32 @@ func grokSpec(spec Spec) Spec {
 	return spec
 }
 
-func TestGrokDoesNotAlwaysApproveUnlessPolicySaysSo(t *testing.T) {
-	plain, err := Args(grokSpec(Spec{Backend: "grok", SessionID: "s", Fresh: true, Prompt: "hi", Workspace: "/w"}))
+func TestGrokACPArgvDoesNotApproveItself(t *testing.T) {
+	plain, err := Args(grokSpec(Spec{
+		Backend: "grok", SessionID: "s", Fresh: true, Prompt: "hi", Workspace: "/w", Model: "m",
+		AllowRules: []string{"Bash(git status*)", "Bash(lgb)", "Bash(lgb *)"},
+	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(strings.Join(plain, " "), "--always-approve") {
-		t.Fatalf("default grok approved itself: %v", plain)
+	joined := strings.Join(plain, "\n")
+	for _, want := range []string{"-m\nm", "agent\n--no-leader\nstdio", "--sandbox\n" + GrokProfile, "--cwd\n/w", "--no-auto-update", "--allow\nBash(lgb)", "--allow\nBash(lgb *)"} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q in %v", want, plain)
+		}
 	}
-	if !strings.Contains(strings.Join(plain, "\n"), "--output-format\nstreaming-json") {
-		t.Fatalf("format %v", plain)
+	for _, bad := range []string{"--always-approve", "--permission-mode", "--output-format", "streaming-json", "--session-id", "--resume", "\n-p\n", "\nhi\n", "Bash(git status*)", "yoloMode"} {
+		if strings.Contains(joined, bad) {
+			t.Fatalf("argv has %q: %v", bad, plain)
+		}
 	}
-	allow, err := Args(grokSpec(Spec{Backend: "grok", SessionID: "s", Fresh: false, Prompt: "hi", Workspace: "/w", PermissionMode: "always-allow"}))
+	bypass, err := Args(grokSpec(Spec{Backend: "grok", SessionID: "s", Fresh: false, Prompt: "hi", Workspace: "/w", PermissionMode: "always-allow"}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	joined := strings.Join(allow, "\n")
-	if !strings.Contains(joined, "--always-approve") || !strings.Contains(joined, "--resume\ns") {
-		t.Fatalf("allow args %v", allow)
-	}
-	if strings.Contains(joined, "--permission-mode") {
-		t.Fatalf("bypass mode was also passed as --permission-mode: %v", allow)
+	joined = strings.Join(bypass, "\n")
+	if strings.Contains(joined, "--always-approve") || strings.Contains(joined, "--permission-mode") || strings.Contains(joined, "--resume") || strings.Contains(joined, "--session-id") {
+		t.Fatalf("bypass argv %v", bypass)
 	}
 }
 
@@ -83,11 +88,14 @@ func TestPermissionRulesArePassedThrough(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(grok, "\n")
-	if !strings.Contains(joined, "--allow\nBash(git status*)") || !strings.Contains(joined, "--deny\nBash(rm *)") {
+	if strings.Contains(joined, "--allow\nBash(git status*)") || !strings.Contains(joined, "--deny\nBash(rm *)") {
 		t.Fatalf("grok rules %v", grok)
 	}
-	if strings.Contains(joined, "--always-approve") || !strings.Contains(joined, "--permission-mode\nask") {
+	if strings.Contains(joined, "--always-approve") || strings.Contains(joined, "--permission-mode") {
 		t.Fatalf("grok mode %v", grok)
+	}
+	if !strings.Contains(joined, "agent\n--no-leader\nstdio") {
+		t.Fatalf("grok argv %v", grok)
 	}
 	claude, err := Args(Spec{
 		Backend: "claude", Prompt: "hi", Workspace: "/w", PermissionMode: "default",

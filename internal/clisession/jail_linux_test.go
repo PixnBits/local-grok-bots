@@ -50,7 +50,7 @@ func TestGrokJailHidesHostProc(t *testing.T) {
 		"  if [ -e \"/proc/$HOST_PROBE_PID/fd\" ]; then echo HOST_FD=visible; else echo HOST_FD=hidden; fi\n" +
 		"  echo COMM1=$(cat /proc/1/comm 2>/dev/null | tr -d '\\n')\n" +
 		"} > \"$HOST_PROBE_OUT\"\n" +
-		"printf '%s\\n' '{\"type\":\"result\",\"result\":\"ok\",\"session_id\":\"s\"}'\n"
+		acpShellTail()
 	if err := os.WriteFile(probe, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -59,6 +59,7 @@ func TestGrokJailHidesHostProc(t *testing.T) {
 	res, err := (ExecRunner{HasTTY: func() bool { return false }}).Run(ctx, Spec{
 		Backend: "grok", Bin: probe, Prompt: "hi", Workspace: ws,
 		PermissionMode: "always-allow",
+		ACP:            quietACP(),
 		Isolate: &Isolation{
 			Home:        home,
 			GrokSandbox: GrokProfile,

@@ -146,6 +146,17 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	eventTransport := ""
 	host := strings.TrimSpace(a.permBase) != ""
 	switch {
+	case strings.EqualFold(backend, "grok"):
+		eventTransport = policy.TransportACP
+		botID := bot.ID
+		spec.ACP = &clisession.ACPHooks{
+			Decide: func(ctx context.Context, ask clisession.ACPAsk) (clisession.ACPDecision, error) {
+				return a.decideGrokACP(ctx, botID, runID, sessionID, ask)
+			},
+			Fail: func(tool string, args map[string]any, reason string) {
+				a.recordACPHostFail(botID, runID, tool, args, reason)
+			},
+		}
 	case !strings.EqualFold(backend, "claude"):
 	case transport == policy.TransportStreamControl:
 		eventTransport = policy.TransportStreamControl
@@ -1195,6 +1206,49 @@ func (a *App) decideStreamControl(ctx context.Context, botID, runID, sessionID s
 		msg = "denied"
 	}
 	return clisession.ControlDecision{Behavior: permission.Deny, Message: msg}
+}
+
+func (a *App) decideGrokACP(ctx context.Context, botID, runID, sessionID string, ask clisession.ACPAsk) (clisession.ACPDecision, error) {
+	// Prefer the id Grok returned. A fresh turn starts under a daemon id and
+	// then stores Grok's id; a grant under the daemon id would not match the
+	// next turn.
+	if strings.TrimSpace(ask.SessionID) != "" {
+		sessionID = ask.SessionID
+	}
+	req := permission.Request{
+		RunID: runID, BotID: botID, SessionID: sessionID,
+		Tool: ask.Tool, Args: ask.Args, ToolUseID: ask.ToolUseID,
+		Transport: policy.TransportACP,
+	}
+	if a.perm == nil {
+		return clisession.ACPDecision{}, fmt.Errorf("no permission broker")
+	}
+	if ctx.Err() != nil {
+		a.perm.Record(req, permission.Deny, "cancel", "")
+		return clisession.ACPDecision{}, nil
+	}
+	req = a.withUserRules(botID, req)
+	out := a.perm.Evaluate(ctx, a.policy.Permission(), req)
+	if out.Behavior == permission.Allow {
+		return clisession.ACPDecision{Allow: true}, nil
+	}
+	return clisession.ACPDecision{}, nil
+}
+
+func (a *App) recordACPHostFail(botID, runID, tool string, args map[string]any, reason string) {
+	if a.perm == nil {
+		return
+	}
+	if strings.TrimSpace(tool) == "" {
+		tool = "acp"
+	}
+	if args == nil {
+		args = map[string]any{}
+	}
+	a.perm.Record(permission.Request{
+		RunID: runID, BotID: botID, Tool: tool, Args: args,
+		Transport: policy.TransportACP,
+	}, permission.Deny, "host", clip(reason, 200))
 }
 
 func (a *App) recordControlDeny(botID, runID, tool string, args map[string]any, rule string) {

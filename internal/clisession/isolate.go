@@ -337,6 +337,16 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 			}
 			return Isolation{}, &SandboxError{Backend: "grok", Err: fmt.Errorf("Grok's sandbox profile could not be written (%v), so the turn was refused", err)}
 		}
+		cfgRel, err := relUnder(root, filepath.Join(grokHome, "config.toml"))
+		if err != nil {
+			return Isolation{}, err
+		}
+		if err := writeFileNoFollow(root, cfgRel, []byte(grokPermissionTOML()), 0o600); err != nil {
+			if errors.Is(err, ErrCredSymlink) {
+				return Isolation{}, err
+			}
+			return Isolation{}, fmt.Errorf("grok permission config could not be written (%v), so the turn was refused", err)
+		}
 		iso.GrokSandbox = GrokProfile
 	}
 	for k, v := range o.Extra {

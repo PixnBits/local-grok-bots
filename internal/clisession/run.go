@@ -85,8 +85,9 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 	if err != nil {
 		return Result{}, err
 	}
+	grokACP := strings.EqualFold(spec.Backend, "grok")
 	var stdin io.WriteCloser
-	if spec.StreamControl {
+	if spec.StreamControl || grokACP {
 		stdin, err = cmd.StdinPipe()
 		if err != nil {
 			return Result{}, err
@@ -95,10 +96,10 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 	// Empty permission_mode lets the CLI prompt. With no controlling terminal,
 	// a prompt fails the turn. An explicit mode is passed through and is not
 	// treated as a prompt, even if the stream mentions one.
-	// Stream control is itself the permission host, so a can_use_tool line is
-	// not a headless prompt failure.
-	failPrompt := !spec.StreamControl && strings.TrimSpace(spec.PermissionMode) == "" && !e.interactive()
-	if !spec.StreamControl && e.interactive() && strings.TrimSpace(spec.PermissionMode) == "" {
+	// Stream control and the Grok ACP host are themselves the permission host,
+	// so a permission line is not a headless prompt failure.
+	failPrompt := !spec.StreamControl && !grokACP && strings.TrimSpace(spec.PermissionMode) == "" && !e.interactive()
+	if !spec.StreamControl && !grokACP && e.interactive() && strings.TrimSpace(spec.PermissionMode) == "" {
 		cmd.Stdin = os.Stdin
 	}
 	var stderr bytes.Buffer
@@ -136,6 +137,8 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 	var parseErr error
 	if spec.StreamControl {
 		res, parseErr = runControlSession(ctx, cmd, stdout, stdin, spec, onEvent)
+	} else if grokACP {
+		res, parseErr = runACPSession(ctx, cmd, stdout, stdin, spec, onEvent)
 	} else {
 		res, parseErr = readTurn(stdout, onEvent, failPrompt, promptCh, cmd)
 	}

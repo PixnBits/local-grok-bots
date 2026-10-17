@@ -272,8 +272,17 @@ func TestGrokProfileAndFlags(t *testing.T) {
 	if strings.Contains(toml, strconv.Quote(filepath.Join(home, ".grok", "auth.json"))) {
 		t.Fatalf("profile denies the placeholder:\n%s", toml)
 	}
+	cfg, err := os.ReadFile(filepath.Join(home, ".grok", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`permission_mode = "default"`, `"Bash"`, `"Read"`, `"Grep"`, `"Glob"`, `"Edit"`, `"Write"`, `"WebFetch"`, `"WebSearch"`, `"MCPTool"`} {
+		if !strings.Contains(string(cfg), want) {
+			t.Fatalf("config lacks %q:\n%s", want, cfg)
+		}
+	}
 	argv := grokArgv(t, &iso)
-	if !strings.Contains(argv, "--sandbox lgb") || !strings.Contains(argv, "--disallowed-tools web_fetch,web_search") {
+	if !strings.Contains(argv, "--sandbox lgb") || !strings.Contains(argv, "--disallowed-tools web_fetch,web_search") || !strings.Contains(argv, "todo_write") {
 		t.Fatalf("argv %s", argv)
 	}
 
@@ -287,8 +296,8 @@ func TestGrokProfileAndFlags(t *testing.T) {
 		t.Fatalf("net/ssh grant profile:\n%s", b)
 	}
 	argv = grokArgv(t, &iso)
-	if strings.Contains(argv, "--disallowed-tools") {
-		t.Fatalf("net grant still disallows web tools: %s", argv)
+	if !strings.Contains(argv, "--disallowed-tools") || strings.Contains(argv, "web_fetch") || strings.Contains(argv, "web_search") || !strings.Contains(argv, "todo_write") {
+		t.Fatalf("net grant disallowed list: %s", argv)
 	}
 
 	// home = "user" does not write ~/.grok/sandbox.toml. The custom profile
@@ -301,6 +310,9 @@ func TestGrokProfileAndFlags(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(user, ".grok", "sandbox.toml")); err == nil {
 		t.Fatalf("wrote the user's sandbox.toml")
 	}
+	if _, err := os.Stat(filepath.Join(user, ".grok", "config.toml")); err == nil {
+		t.Fatalf("wrote the user's config.toml")
+	}
 	if iso.GrokSandbox != GrokProfile {
 		t.Fatalf("user-home profile %q", iso.GrokSandbox)
 	}
@@ -312,6 +324,10 @@ func TestGrokProfileAndFlags(t *testing.T) {
 	b, err = os.ReadFile(filepath.Join(grokHome, "sandbox.toml"))
 	if err != nil || !strings.Contains(string(b), "[profiles.lgb]") || !strings.Contains(string(b), `extends = "strict"`) {
 		t.Fatalf("daemon profile: %s %v", b, err)
+	}
+	cfg, err = os.ReadFile(filepath.Join(grokHome, "config.toml"))
+	if err != nil || !strings.Contains(string(cfg), `permission_mode = "default"`) {
+		t.Fatalf("daemon permission config: %s %v", cfg, err)
 	}
 	real := filepath.Join(user, ".grok", "auth.json")
 	fi, err := os.Stat(real)
