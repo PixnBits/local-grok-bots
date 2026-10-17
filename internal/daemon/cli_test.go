@@ -559,11 +559,13 @@ fi
 if [ -n "$LGB_ENV_LOG" ]; then
   env > "$LGB_ENV_LOG"
 fi
-if [ "$1" != "agent" ] && [ -n "$LGB_FIXTURE" ]; then
+is_agent=
+for a in "$@"; do [ "$a" = "agent" ] && is_agent=1; done
+if [ -z "$is_agent" ] && [ -n "$LGB_FIXTURE" ]; then
   cat "$LGB_FIXTURE"
   exit 0
 fi
-if [ "$1" = "agent" ]; then
+if [ -n "$is_agent" ]; then
   acp_id() { printf '%s\n' "$1" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'; }
   acp_send() { awk -v line="$1" 'BEGIN{print line; fflush()}'; }
   IFS= read -r line || exit 1

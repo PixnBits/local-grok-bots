@@ -204,3 +204,14 @@ func TestClaudeStreamControlArgv(t *testing.T) {
 		t.Fatalf("stream control still looks like a print turn: %v", fresh)
 	}
 }
+
+func TestGrokAgentGlobalFlagsPrecedeSubcommand(t *testing.T) {
+	args, err := grokFlags(Spec{Workspace: "/ws", Isolate: &Isolation{GrokSandbox: GrokProfile, GrokDisallow: []string{"todo_write"}}, DenyRules: []string{"Bash(x *)"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := len(args)
+	if n < 3 || args[n-3] != "agent" || args[n-2] != "--no-leader" || args[n-1] != "stdio" {
+		t.Fatalf("agent stdio must be last, got %q", args)
+	}
+}

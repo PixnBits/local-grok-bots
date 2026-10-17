@@ -118,8 +118,9 @@ func grokFlags(spec Spec) ([]string, error) {
 	if spec.Model != "" {
 		args = append(args, "-m", spec.Model)
 	}
+	// grok agent stdio takes no session flags of its own. Global flags go
+	// before the subcommand or Grok refuses to start.
 	args = append(args,
-		"agent", "--no-leader", "stdio",
 		"--sandbox", profile,
 		"--cwd", spec.Workspace,
 		"--no-auto-update",
@@ -135,6 +136,7 @@ func grokFlags(spec Spec) ([]string, error) {
 	for _, rule := range spec.DenyRules {
 		args = append(args, "--deny", rule)
 	}
+	args = append(args, "agent", "--no-leader", "stdio")
 	return args, nil
 }
 
