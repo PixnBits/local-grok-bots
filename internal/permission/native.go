@@ -2,10 +2,11 @@ package permission
 
 import (
 	"encoding/json"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/PixnBits/local-grok-bots/internal/clisession"
 )
 
 // NativeRule is one accepted durable pattern written for a CLI the user
@@ -19,11 +20,14 @@ type NativeRule struct {
 // WriteNativeRules writes the Claude settings fragment and the Grok
 // allow/deny lines for rules. Ask rules are recorded as lgbAsk because
 // Claude and Grok have no ask flag; the broker enforces them.
+// The directory is created with a no-follow walk. A symlink parent or a
+// symlink at either file name is refused and not followed.
 func WriteNativeRules(dir string, rules []NativeRule) error {
 	if strings.TrimSpace(dir) == "" {
 		return nil
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
 		return err
 	}
 	allow, deny, ask := splitNative(rules)
@@ -39,7 +43,7 @@ func WriteNativeRules(dir string, rules []NativeRule) error {
 		return err
 	}
 	body = append(body, '\n')
-	if err := os.WriteFile(filepath.Join(dir, "user-permissions.json"), body, 0o600); err != nil {
+	if err := clisession.WriteFileInDir(abs, "user-permissions.json", body, 0o600); err != nil {
 		return err
 	}
 	var b strings.Builder
@@ -61,7 +65,7 @@ func WriteNativeRules(dir string, rules []NativeRule) error {
 		b.WriteString(p)
 		b.WriteString("  (broker only)\n")
 	}
-	return os.WriteFile(filepath.Join(dir, "grok-permission-rules"), []byte(b.String()), 0o600)
+	return clisession.WriteFileInDir(abs, "grok-permission-rules", []byte(b.String()), 0o600)
 }
 
 func splitNative(rules []NativeRule) (allow, deny, ask []string) {

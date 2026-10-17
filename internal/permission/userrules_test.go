@@ -2,12 +2,14 @@ package permission
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
 
@@ -126,4 +128,100 @@ func mustRead(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+func TestNativeRulesAreRegularFiles(t *testing.T) {
+	dir := t.TempDir()
+	rules := []NativeRule{{Effect: "allow", Pattern: "Bash(git status*)"}}
+	if err := WriteNativeRules(filepath.Join(dir, "cli", "bot"), rules); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteNativeRules(filepath.Join(dir, "cli", "bot"), []NativeRule{{Effect: "deny", Pattern: "Bash(*push*)"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"user-permissions.json", "grok-permission-rules"} {
+		path := filepath.Join(dir, "cli", "bot", name)
+		st, err := os.Lstat(path)
+		if err != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || st.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode %v %v", name, st, err)
+		}
+	}
+	body := mustRead(t, filepath.Join(dir, "cli", "bot", "user-permissions.json"))
+	if strings.Contains(body, "git status") || !strings.Contains(body, `Bash(*push*)`) {
+		t.Fatalf("rewrite did not replace the file: %s", body)
+	}
+}
+
+func TestNativeRulesRefuseSymlinkParents(t *testing.T) {
+	rules := []NativeRule{{Effect: "allow", Pattern: "Bash(git status*)"}}
+	canaryBody := []byte("keep-canary\n")
+	check := func(t *testing.T, canary string) {
+		t.Helper()
+		got, err := os.ReadFile(canary)
+		if err != nil || string(got) != string(canaryBody) {
+			t.Fatalf("canary changed: %q %v", got, err)
+		}
+	}
+	t.Run("cli", func(t *testing.T) {
+		data := t.TempDir()
+		outside := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(outside, "bot"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		canary := filepath.Join(outside, "bot", "user-permissions.json")
+		if err := os.WriteFile(canary, canaryBody, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(data, "cli")); err != nil {
+			t.Fatal(err)
+		}
+		err := WriteNativeRules(filepath.Join(data, "cli", "bot"), rules)
+		if !errors.Is(err, clisession.ErrCredSymlink) {
+			t.Fatalf("err %v", err)
+		}
+		check(t, canary)
+	})
+	t.Run("bot", func(t *testing.T) {
+		data := t.TempDir()
+		outside := t.TempDir()
+		canary := filepath.Join(outside, "grok-permission-rules")
+		if err := os.WriteFile(canary, canaryBody, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		bot := filepath.Join(data, "cli", "bot")
+		if err := os.MkdirAll(filepath.Dir(bot), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, bot); err != nil {
+			t.Fatal(err)
+		}
+		err := WriteNativeRules(bot, rules)
+		if !errors.Is(err, clisession.ErrCredSymlink) {
+			t.Fatalf("err %v", err)
+		}
+		check(t, canary)
+	})
+	t.Run("file", func(t *testing.T) {
+		data := t.TempDir()
+		outside := t.TempDir()
+		canary := filepath.Join(outside, "secret")
+		if err := os.WriteFile(canary, canaryBody, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		bot := filepath.Join(data, "cli", "bot")
+		if err := os.MkdirAll(bot, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(canary, filepath.Join(bot, "user-permissions.json")); err != nil {
+			t.Fatal(err)
+		}
+		err := WriteNativeRules(bot, rules)
+		if !errors.Is(err, clisession.ErrCredSymlink) {
+			t.Fatalf("err %v", err)
+		}
+		check(t, canary)
+		if _, err := os.Lstat(filepath.Join(bot, "grok-permission-rules")); !os.IsNotExist(err) {
+			t.Fatalf("wrote the second file after a symlink refusal: %v", err)
+		}
+	})
 }
