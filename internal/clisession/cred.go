@@ -2,7 +2,6 @@ package clisession
 
 import (
 	"encoding/json"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +20,12 @@ var grokAuthRel = []string{
 // of that inode is not unlinked. An empty cli directory does not read realPath.
 // A symlink directory is not entered.
 func ScrubStaleGrokAuth(dataDir, realPath string) error {
+	_, err := ScrubStaleGrokAuthNotes(dataDir, realPath)
+	return err
+}
+
+// ScrubStaleGrokAuthNotes is ScrubStaleGrokAuth plus symlink unlink/skip notes.
+func ScrubStaleGrokAuthNotes(dataDir, realPath string) ([]SymlinkNote, error) {
 	return scrubTree(dataDir, realPath)
 }
 
@@ -29,32 +34,46 @@ func ScrubStaleGrokAuth(dataDir, realPath string) error {
 // following it. A symlink directory on the way there fails with
 // ErrCredSymlink. An unsafe id does nothing.
 func RemoveBotGrokAuth(dataDir, botID string) error {
+	_, err := RemoveBotGrokAuthNotes(dataDir, botID)
+	return err
+}
+
+// RemoveBotGrokAuthNotes is RemoveBotGrokAuth plus symlink unlink/skip notes.
+func RemoveBotGrokAuthNotes(dataDir, botID string) ([]SymlinkNote, error) {
 	if !safeBotID(botID) {
-		return nil
+		return nil, nil
 	}
+	var notes []SymlinkNote
 	var first error
 	for _, rel := range grokAuthRel {
 		p := filepath.Join("cli", botID, rel)
-		err := removeFileNoFollow(dataDir, p)
+		n, err := removeFileNoted(dataDir, p)
+		notes = append(notes, n...)
 		if err != nil && !os.IsNotExist(err) && first == nil {
 			first = err
 		}
 	}
-	return first
+	return notes, first
 }
 
 // RemoveBotCLI removes dataDir/cli/<botID>. A symlink entry is unlinked and
 // is not entered. A symlink in a parent of that directory fails with
 // ErrCredSymlink. An unsafe id does nothing. A missing directory is success.
 func RemoveBotCLI(dataDir, botID string) error {
+	_, err := RemoveBotCLINotes(dataDir, botID)
+	return err
+}
+
+// RemoveBotCLINotes is RemoveBotCLI plus symlink unlink/skip notes.
+func RemoveBotCLINotes(dataDir, botID string) ([]SymlinkNote, error) {
 	if !safeBotID(botID) {
-		return nil
+		return nil, nil
 	}
-	err := removeTreeNoFollow(dataDir, filepath.Join("cli", botID))
+	notes, err := removeTreeNoted(dataDir, filepath.Join("cli", botID))
 	if err != nil && !os.IsNotExist(err) {
-		return err
+		return notes, err
 	}
-	return nil
+	return notes, nil
 }
 
 func safeBotID(id string) bool {
@@ -85,10 +104,5 @@ func loginSecrets(b []byte) []string {
 }
 
 func readLimited(path string) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, 1<<20))
+	return readRegularNoFollow(path)
 }

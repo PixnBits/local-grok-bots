@@ -25,7 +25,8 @@ type Runner interface {
 }
 
 // ExecRunner runs the real grok or claude binary.
-// It does not put the process in the daemon jail. The CLI sandbox is the boundary.
+// On Linux, Grok is started in a daemon pid jail. Nested Grok sandbox
+// cannot create a user namespace on a host that restricts that.
 type ExecRunner struct {
 	Policy policy.Policy
 	// PinLog receives a pin result when that backend is pinned.
@@ -54,11 +55,20 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 	if err := e.notePin(ctx, spec.Backend, path); err != nil {
 		return Result{}, err
 	}
-	cmd := exec.CommandContext(ctx, path, argv[1:]...)
+	var cmd *exec.Cmd
+	wrapped := grokHostJail() && strings.EqualFold(spec.Backend, "grok") && spec.Isolate != nil
+	if wrapped {
+		cmd, err = wrapGrokJail(ctx, path, argv[1:], spec)
+		if err != nil {
+			return Result{}, err
+		}
+	} else {
+		cmd = exec.CommandContext(ctx, path, argv[1:]...)
+	}
 	if spec.Workspace != "" {
 		cmd.Dir = spec.Workspace
 	}
-	if spec.Isolate != nil {
+	if spec.Isolate != nil && !wrapped {
 		// Nothing is inherited; an empty list still means an empty environment.
 		cmd.Env = append([]string{}, spec.Isolate.Env...)
 	}

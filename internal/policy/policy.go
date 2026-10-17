@@ -112,6 +112,13 @@ type Policy struct {
 	LGBMaxSchedPerHour int
 	// CLIEnv is added to the scrubbed CLI environment. Only managed policy sets it.
 	CLIEnv map[string]string
+	// NetPorts is the egress port list. Nil means 443 and 80. An empty
+	// slice allows no egress port. Local policy can only narrow the list.
+	NetPorts           []int
+	netPortsAsked      []int
+	netPortsAskedSet   bool
+	netPortsManaged    []int
+	netPortsManagedSet bool
 	// CLITools are host CLIs the credential broker may run. Empty denies every coi call.
 	CLITools []CLITool
 	// cliLocal is the local file's CLI table before managed merge.
@@ -216,6 +223,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 		path = strings.TrimSpace(p.ManagedPath)
 	}
 	if path == "" {
+		p.finishEgressPorts()
 		p.dropIncompleteCLI()
 		return p, nil
 	}
@@ -259,6 +267,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 		return Policy{}, err
 	}
 	base.DaemonJail = !base.UsesCLI()
+	base.finishEgressPorts()
 	base.dropIncompleteCLI()
 	return base, nil
 }
@@ -552,6 +561,19 @@ func (p *Policy) applyIsolation(iso *cliIsoDoc, trusted bool) error {
 	if iso.LGBManageBots != nil {
 		p.CLILGBManageBots = *iso.LGBManageBots
 	}
+	if iso.NetPorts != nil {
+		ports, err := normPorts(*iso.NetPorts)
+		if err != nil {
+			return err
+		}
+		if trusted {
+			p.netPortsManaged = ports
+			p.netPortsManagedSet = true
+		} else {
+			p.netPortsAsked = ports
+			p.netPortsAskedSet = true
+		}
+	}
 	if iso.Env != nil {
 		if !trusted {
 			p.Warnings = append(p.Warnings, "cli.isolation.env is ignored; only managed policy can set CLI environment")
@@ -568,6 +590,89 @@ func (p *Policy) applyIsolation(iso *cliIsoDoc, trusted bool) error {
 		p.CLIEnv = env
 	}
 	return nil
+}
+
+// DefaultEgressPorts is the built-in CONNECT and forward port list.
+func DefaultEgressPorts() []int {
+	return []int{443, 80}
+}
+
+// EgressPorts is the effective egress port list. Nil policy state means the
+// default. An empty list allows no port.
+func (p Policy) EgressPorts() []int {
+	if p.NetPorts == nil {
+		return DefaultEgressPorts()
+	}
+	out := make([]int, len(p.NetPorts))
+	copy(out, p.NetPorts)
+	return out
+}
+
+func (p *Policy) finishEgressPorts() {
+	if p == nil {
+		return
+	}
+	ceiling := DefaultEgressPorts()
+	if p.netPortsManagedSet {
+		ceiling = p.netPortsManaged
+	}
+	if !p.netPortsAskedSet {
+		if p.netPortsManagedSet {
+			p.NetPorts = append([]int(nil), ceiling...)
+			if p.NetPorts == nil {
+				p.NetPorts = []int{}
+			}
+		}
+		return
+	}
+	kept, extra := narrowPorts(ceiling, p.netPortsAsked)
+	p.NetPorts = kept
+	if len(extra) == 0 {
+		return
+	}
+	parts := make([]string, len(extra))
+	for i, n := range extra {
+		parts[i] = strconv.Itoa(n)
+	}
+	p.Warnings = append(p.Warnings, "cli.isolation.net_ports "+strings.Join(parts, ", ")+" ignored; local policy can only narrow egress ports")
+}
+
+func normPorts(in []int) ([]int, error) {
+	out := []int{}
+	seen := map[int]bool{}
+	for _, n := range in {
+		if n < 1 || n > 65535 {
+			return nil, fmt.Errorf("cli.isolation.net_ports has an invalid port")
+		}
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+func narrowPorts(ceiling, asked []int) (kept, extra []int) {
+	have := map[int]bool{}
+	for _, n := range ceiling {
+		have[n] = true
+	}
+	want := map[int]bool{}
+	for _, n := range asked {
+		if !have[n] {
+			extra = append(extra, n)
+			continue
+		}
+		want[n] = true
+	}
+	kept = []int{}
+	for _, n := range ceiling {
+		if want[n] {
+			kept = append(kept, n)
+		}
+	}
+	return kept, extra
 }
 
 func (p *Policy) applyLGB(doc *cliLGBDoc) error {
@@ -773,6 +878,7 @@ type cliIsoDoc struct {
 	LGB           *bool              `toml:"lgb" json:"lgb"`
 	LGBManageBots *bool              `toml:"lgb_manage_bots" json:"lgb_manage_bots"`
 	Env           *map[string]string `toml:"env" json:"env"`
+	NetPorts      *[]int             `toml:"net_ports" json:"net_ports"`
 }
 
 type cliPermDoc struct {

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -29,9 +28,40 @@ type Isolation struct {
 	ClaudeSandbox bool
 	// Protect is the path deny list written into this turn's settings.
 	Protect []string
-	// ReleaseGate drops this turn's loopback proxy gate. Nil is fine.
-	// Calling it more than once is safe.
+	// ReleaseGate drops this turn's loopback proxy gate and, on Linux, the
+	// per-turn egress proxy. Nil is fine. Calling it more than once is safe.
 	ReleaseGate func()
+	// ForwardBin is the in-jail process that bridges host unix sockets onto
+	// 127.0.0.1. Empty means the CLI is started directly.
+	ForwardBin string
+	// ForwardArgs are that process's arguments. The jail appends "--" and the
+	// CLI argv.
+	ForwardArgs []string
+	// ExtraBinds are host path, jail path pairs. Jail paths are JailProxySock
+	// and JailEgressSock.
+	ExtraBinds [][2]string
+}
+
+// JailProxySock is the credential proxy inside the Grok network namespace.
+const JailProxySock = "/cli-proxy.sock"
+
+// JailEgressSock is the net-grant HTTP proxy inside that namespace.
+const JailEgressSock = "/cli-egress.sock"
+
+// BridgeError is a fail-closed refusal when the jail cannot reach the
+// credential proxy or the net-grant egress proxy. The daemon audits it as
+// cli_bridge_unavailable.
+type BridgeError struct{ Err error }
+
+func (e *BridgeError) Error() string {
+	return "credential bridge is not available, so the turn was refused"
+}
+
+func (e *BridgeError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
 }
 
 // IsolationOptions builds an Isolation.
@@ -213,7 +243,13 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 		}
 		if o.UserHome != "" {
 			for _, rel := range credFiles[backend] {
-				linkCred(filepath.Join(o.UserHome, rel), filepath.Join(o.Home, rel))
+				dstRel, err := relUnder(root, filepath.Join(o.Home, rel))
+				if err != nil {
+					return Isolation{}, err
+				}
+				if err := linkCredNoFollow(filepath.Join(o.UserHome, rel), root, dstRel); err != nil {
+					return Isolation{}, err
+				}
 			}
 		}
 	}
@@ -253,17 +289,15 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 		if !filepath.IsAbs(o.StateDir) {
 			return Isolation{}, fmt.Errorf("cli state dir must be absolute")
 		}
-		if err := os.MkdirAll(o.StateDir, 0o700); err != nil {
-			return Isolation{}, err
-		}
-		iso.SettingsPath = filepath.Join(o.StateDir, "claude-settings.json")
 		body, err := claudeSettingsJSON(o)
 		if err != nil {
 			return Isolation{}, err
 		}
-		if err := os.WriteFile(iso.SettingsPath, body, 0o600); err != nil {
+		path, err := writeClaudeSettings(o, body)
+		if err != nil {
 			return Isolation{}, err
 		}
+		iso.SettingsPath = path
 		iso.ClaudeSandbox = o.ClaudeSandbox
 	case "grok":
 		for _, k := range grokCompatOff {
@@ -337,15 +371,35 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 	return iso, nil
 }
 
-func linkCred(src, dst string) {
-	if st, err := os.Stat(src); err != nil || !st.Mode().IsRegular() {
-		return
+func writeClaudeSettings(o IsolationOptions, body []byte) (string, error) {
+	state, err := absClean(o.StateDir)
+	if err != nil {
+		return "", err
 	}
-	if cur, err := os.Readlink(dst); err == nil && cur == src {
-		return
+	if r := strings.TrimSpace(o.CredRoot); r != "" {
+		root, err := absClean(r)
+		if err != nil {
+			return "", err
+		}
+		rel, err := relUnder(root, filepath.Join(state, "claude-settings.json"))
+		if err != nil {
+			return "", err
+		}
+		if err := writeFileNoFollow(root, rel, body, 0o600); err != nil {
+			return "", err
+		}
+		return filepath.Join(root, rel), nil
 	}
-	_ = os.Remove(dst)
-	_ = os.Symlink(src, dst)
+	parent := filepath.Dir(state)
+	base := filepath.Base(state)
+	if err := mkdirNoFollow(parent, base); err != nil {
+		return "", err
+	}
+	rel := filepath.Join(base, "claude-settings.json")
+	if err := writeFileNoFollow(parent, rel, body, 0o600); err != nil {
+		return "", err
+	}
+	return filepath.Join(parent, rel), nil
 }
 
 // placeGrokPlaceholder writes the synthetic login into GROK_HOME. It never

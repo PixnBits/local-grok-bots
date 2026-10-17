@@ -43,6 +43,12 @@ type Call struct {
 	// OnPrompt is called when the CLI asks for a permission.
 	// It must return without waiting on this process. The call is still denied.
 	OnPrompt func(ctx context.Context)
+	// BotID and RunID are recorded on unix-socket proxy rows.
+	BotID string
+	RunID string
+	// OnProxy records one unix-socket request. Headers and bodies are omitted.
+	// suppressed is how many 403 rows were skipped since the previous 403 row.
+	OnProxy func(botID, runID, path string, status int, suppressed int)
 }
 
 // Result is the broker's decision. Output is set only when Status is ok.
@@ -151,6 +157,10 @@ func Run(ctx context.Context, c Call) Result {
 			return Result{Code: 1, Status: StatusDenied, Err: ErrProxyUnavailable.Error()}
 		}
 		defer egress.Close()
+		egress.BindRoute(c.BotID, c.RunID)
+		if c.OnProxy != nil {
+			egress.SetAudit(c.OnProxy)
+		}
 	}
 	home, err := prepareJailHome(c.StateDir, tool, UsesJailCredentials(tool))
 	if err != nil {

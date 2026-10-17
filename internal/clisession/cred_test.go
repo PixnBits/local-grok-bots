@@ -4,7 +4,11 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestScrubStaleGrokAuth(t *testing.T) {
@@ -295,6 +299,100 @@ func TestScrubSkipsSymlinkParent(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(data, "cli", "bot", "home")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestScrubStaleGrokAuthSkipsFIFO(t *testing.T) {
+	realDir := t.TempDir()
+	real := filepath.Join(realDir, "auth.json")
+	if err := unix.Mkfifo(real, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data := t.TempDir()
+	leaf := filepath.Join(data, "cli", "bot", "home", ".grok", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(leaf), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mkfifo(leaf, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- ScrubStaleGrokAuth(data, real) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked on a fifo")
+	}
+	if _, err := os.Lstat(leaf); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRemoveBotCLINotesUnlinkedSymlink(t *testing.T) {
+	data := t.TempDir()
+	outside := t.TempDir()
+	bot := filepath.Join(data, "cli", "bot1")
+	if err := os.MkdirAll(filepath.Join(bot, "home"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(bot, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	notes, err := RemoveBotCLINotes(data, "bot1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saw bool
+	for _, n := range notes {
+		if n.Event != EventSymlinkUnlinked {
+			t.Fatalf("event %q", n.Event)
+		}
+		if strings.Contains(n.Rel, outside) {
+			t.Fatalf("note names the target: %+v", n)
+		}
+		if n.Rel == filepath.Join("cli", "bot1", "linked") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("notes %+v", notes)
+	}
+}
+
+func TestScrubNotesSkippedSymlinkParent(t *testing.T) {
+	user := t.TempDir()
+	real := filepath.Join(user, ".grok", "auth.json")
+	if err := os.MkdirAll(filepath.Dir(real), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"https://auth.x.ai::x":{"key":"unit-real-marker-value","refresh_token":"unit-refresh-value"}}`)
+	if err := os.WriteFile(real, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(data, "cli", "bot"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(user, filepath.Join(data, "cli", "bot", "home")); err != nil {
+		t.Fatal(err)
+	}
+	notes, err := ScrubStaleGrokAuthNotes(data, real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) == 0 {
+		t.Fatal("expected a skip note")
+	}
+	for _, n := range notes {
+		if n.Event != EventSymlinkSkipped {
+			t.Fatalf("event %q", n.Event)
+		}
+		if strings.Contains(n.Rel, user) || n.Rel == real {
+			t.Fatalf("note names the target: %+v", n)
+		}
 	}
 }
 

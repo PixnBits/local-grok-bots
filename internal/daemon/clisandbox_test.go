@@ -25,7 +25,9 @@ func TestGeneratedSettingsDenyDaemonSecrets(t *testing.T) {
 	secrets := app.daemonSecrets()
 	admin := filepath.Join(dir, adminTokenFile)
 	cliDir := filepath.Join(dir, "cli")
-	for _, want := range []string{admin, policyPath, cliDir} {
+	proxyDir := filepath.Join(dir, "cli-proxy")
+	egressDir := filepath.Join(dir, "cli-egress")
+	for _, want := range []string{admin, policyPath, cliDir, proxyDir, egressDir} {
 		if !strings.Contains("\n"+strings.Join(secrets, "\n")+"\n", "\n"+want+"\n") {
 			t.Fatalf("secrets %v lack %s", secrets, want)
 		}
@@ -33,8 +35,11 @@ func TestGeneratedSettingsDenyDaemonSecrets(t *testing.T) {
 	if strings.Contains("\n"+strings.Join(secrets, "\n")+"\n", "\n"+filepath.Join(dir, "workspace")+"\n") {
 		t.Fatalf("workspace is denied: %v", secrets)
 	}
-	if st, err := os.Stat(cliDir); err != nil || !st.IsDir() || st.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("cli dir %v %v", st, err)
+	for _, d := range []string{cliDir, proxyDir, egressDir} {
+		st, err := os.Stat(d)
+		if err != nil || !st.IsDir() || st.Mode().Perm()&0o077 != 0 {
+			t.Fatalf("secret dir %s %v %v", d, st, err)
+		}
 	}
 	home := t.TempDir()
 	iso, err := clisession.PrepareIsolation(clisession.IsolationOptions{
@@ -63,7 +68,7 @@ func TestGeneratedSettingsDenyDaemonSecrets(t *testing.T) {
 		m := f.(map[string]any)
 		modes[m["path"].(string)] = m["mode"].(string)
 	}
-	for _, p := range []string{admin, policyPath, cliDir} {
+	for _, p := range []string{admin, policyPath, cliDir, proxyDir, egressDir} {
 		if !strings.Contains("\n"+strings.Join(deny, "\n")+"\n", "\nRead(/"+p+")\n") {
 			t.Fatalf("deny lacks %s: %v", p, deny)
 		}
@@ -84,7 +89,7 @@ func TestGeneratedSettingsDenyDaemonSecrets(t *testing.T) {
 	}
 	// DATA_DIR/cli is denied around this bot's GROK_HOME: another bot's
 	// state is denied, the path down to grok-home is not.
-	for _, p := range []string{admin, policyPath, filepath.Join(cliDir, "bot")} {
+	for _, p := range []string{admin, policyPath, filepath.Join(cliDir, "bot"), proxyDir, egressDir} {
 		if !strings.Contains(string(toml), strconv.Quote(p)) {
 			t.Fatalf("grok deny lacks %s:\n%s", p, toml)
 		}
@@ -452,6 +457,12 @@ func (sandboxFailRunner) Run(context.Context, clisession.Spec, func(clisession.E
 	return clisession.Result{}, fmt.Errorf("sandbox profile lgb could not be applied")
 }
 
+type bridgeFailRunner struct{}
+
+func (bridgeFailRunner) Run(context.Context, clisession.Spec, func(clisession.Event)) (clisession.Result, error) {
+	return clisession.Result{}, &clisession.BridgeError{}
+}
+
 type okRunner struct{}
 
 func (okRunner) Run(context.Context, clisession.Spec, func(clisession.Event)) (clisession.Result, error) {
@@ -610,6 +621,44 @@ func TestGrokSandboxFailureIsAudited(t *testing.T) {
 	}
 	raw, err := os.ReadFile(logPath)
 	if err != nil || !strings.Contains(string(raw), `"event":"cli_sandbox_unavailable"`) || !strings.Contains(string(raw), `"backend":"grok"`) {
+		t.Fatalf("audit %s %v", raw, err)
+	}
+}
+
+func TestGrokBridgeRefusalIsAudited(t *testing.T) {
+	dir := t.TempDir()
+	app := newApp(t, dir, nil)
+	logPath := filepath.Join(dir, "audit.log")
+	lg, err := audit.Open(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.audit = lg
+	app.runner = bridgeFailRunner{}
+	app.rtMu.Lock()
+	app.policy = policy.Policy{Backend: "grok", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute}
+	app.rtMu.Unlock()
+	srv := serve(t, app)
+	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Geo", "description": "g"}, "")
+	if res.StatusCode != 201 && res.StatusCode != 200 {
+		t.Fatalf("create %d %s", res.StatusCode, b)
+	}
+	var bot store.Bot
+	decodeJSON(t, b, &bot)
+	res, b = do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "go"}, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("post %d %s", res.StatusCode, b)
+	}
+	waitIdle(t, srv.URL, bot.ID, "")
+	evs, err := app.st.ListLog(bot.ID, "cli_bridge_unavailable", "", 10)
+	if err != nil || len(evs) != 1 || !strings.Contains(string(evs[0].Detail), `"backend":"grok"`) {
+		t.Fatalf("log %v %v", evs, err)
+	}
+	if err := lg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil || !strings.Contains(string(raw), `"event":"cli_bridge_unavailable"`) || !strings.Contains(string(raw), `"backend":"grok"`) {
 		t.Fatalf("audit %s %v", raw, err)
 	}
 }
