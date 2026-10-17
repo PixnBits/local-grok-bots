@@ -25,7 +25,7 @@ func TestClassifyCall(t *testing.T) {
 	}{
 		{"network client view", "Bash", map[string]any{"command": "gh pr view 42"}, false, "network", "high", "unknown"},
 		{"network client diff", "Bash", map[string]any{"command": "gh pr diff 7"}, false, "network", "high", "unknown"},
-		{"git status", "Bash", map[string]any{"command": "git status -sb"}, true, "read_only", "low", "project"},
+		{"git status", "Bash", map[string]any{"command": "git status -sb"}, false, "unknown", "high", "unknown"},
 		{"git log", "Bash", map[string]any{"command": "git log -5 --oneline"}, false, "unknown", "high", "unknown"},
 		{"push", "Bash", map[string]any{"command": "git push origin main"}, false, "irreversible", "high", "unknown"},
 		{"rm", "Bash", map[string]any{"command": "rm -rf /tmp/x"}, false, "irreversible", "high", "unknown"},
@@ -61,7 +61,13 @@ func TestCheckUserRule(t *testing.T) {
 	if _, err := CheckUserRule("allow", "Bash(git diff *)", ws); err == nil {
 		t.Fatal("git diff pattern allowed")
 	}
-	if _, err := CheckUserRule("allow", "Bash(git status*)", ws); err != nil {
+	if _, err := CheckUserRule("allow", "Bash(git status*)", ws); err == nil {
+		t.Fatal("git status pattern stored")
+	}
+	if _, err := CheckUserRule("ask", "Bash(git status*)", ws); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CheckUserRule("allow", "Bash(pwd)", ws); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := CheckUserRule("allow", "Read(./src/**)", ws); err != nil {

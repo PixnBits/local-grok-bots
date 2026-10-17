@@ -52,7 +52,7 @@ type Policy struct {
 	TurnTimeout    time.Duration
 	PermissionMode string
 	// ToolAllow, ToolDeny, and ToolAsk are Claude-style tool rules
-	// such as "Bash(git status*)".
+	// such as "Bash(cat *)".
 	ToolAllow []string
 	ToolDeny  []string
 	ToolAsk   []string

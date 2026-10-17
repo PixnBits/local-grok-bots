@@ -61,8 +61,9 @@ func TestUserAllowFloor(t *testing.T) {
 		}
 	}
 
-	mustAllow("Bash", "Bash(git status*)", "git status")
-	mustAllow("Bash", "Bash(git status*)", "git status -sb")
+	mustHold("Bash", "Bash(git status*)", "git status")
+	mustHold("Bash", "Bash(git status*)", "git status -sb")
+	mustAllow("Bash", "Bash(pwd)", "pwd")
 	mustHold("Bash", "Bash(git diff *)", "git diff -- src/a.go")
 	mustHold("Bash", "Bash(git log *)", "git log -1")
 	mustHold("Bash", "Bash(git show *)", "git show HEAD")

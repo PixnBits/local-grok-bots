@@ -18,6 +18,8 @@ The daemon log is 234 bytes, contains `listening on 127.0.0.1:8139`, and does no
 
 ## Accept and auto-allow
 
+Round 3 removes git, including `git status`, from user auto-allow. A stored allow for git does not apply, and git is not suggested as low-risk. The log below is the check as it ran on this date, before that change.
+
 `POST /api/bots` returned 201. One seed turn asked `git status -sb`, stayed pending, and was answered `allow_once` (200). The run finished `done` with an empty error. `POST /api/bots/{id}/permission-suggestions/analyze` returned 200 with one pending card, pattern `Bash(git status *)`, risk `low`. Accept posted effect `allow` and pattern `Bash(git status*)` (the card's pattern edited, which is what the profile field does) and returned 201. `user-permissions.json` and `grok-permission-rules` were regular files mode `0600`. The JSON contained `Bash(git status*)`. The text file contained `allow Bash(git status*)`.
 
 A second turn asked `git status`. It did not sit in `GET /api/bots/{id}/permissions`. The run finished `done` with an empty error. The `kind: "permission"` row was `decision` `allow`, `source` `user`, `rule` `Bash(git status*)`, `classification` `read_only`, `ok` true. Its `rule_id` was set and equaled the id from the accept response.

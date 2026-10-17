@@ -270,6 +270,68 @@ func TestAllowSessionRemembersTool(t *testing.T) {
 	}
 }
 
+func TestSessionGrantOneTarget(t *testing.T) {
+	ws := t.TempDir()
+	mustFile(t, ws, "a.txt")
+	mustFile(t, ws, "b.txt")
+	b := New(Options{UIPresent: func(string) bool { return true }})
+	approve := func(id, tool string, args map[string]any) {
+		t.Helper()
+		done := make(chan Outcome, 1)
+		go func() {
+			done <- b.Evaluate(context.Background(), policy.Permission{UIPrompts: true, PromptTimeout: time.Second, AllowSessionGrants: true}, Request{
+				ID: id, RunID: "run", BotID: "bot", SessionID: "sess", Tool: tool, Workspace: ws, Args: args,
+			})
+		}()
+		waitForPending(t, b, id)
+		if err := b.DecideFor("bot", "run", id, AllowSession); err != nil {
+			t.Fatal(err)
+		}
+		out := <-done
+		if out.Decision != AllowSession || out.Source != "ui" {
+			t.Fatalf("approve %+v", out)
+		}
+	}
+	quiet := policy.Permission{UIPrompts: false}
+	approve("c1", "Bash", map[string]any{"command": "pwd"})
+	same := b.Evaluate(context.Background(), quiet, Request{
+		RunID: "run-2", BotID: "bot", SessionID: "sess", Tool: "bash", Workspace: ws,
+		Args: map[string]any{"command": "pwd"},
+	})
+	if same.Decision != Allow || same.Source != "ui" || same.Rule != "session" {
+		t.Fatalf("same command %+v", same)
+	}
+	otherCmd := b.Evaluate(context.Background(), quiet, Request{
+		RunID: "run-3", BotID: "bot", SessionID: "sess", Tool: "Bash", Workspace: ws,
+		Args: map[string]any{"command": "ls"},
+	})
+	if otherCmd.Decision == Allow || otherCmd.Source == "ui" {
+		t.Fatalf("other command %+v", otherCmd)
+	}
+	otherSess := b.Evaluate(context.Background(), quiet, Request{
+		RunID: "run-4", BotID: "bot", SessionID: "other", Tool: "Bash", Workspace: ws,
+		Args: map[string]any{"command": "pwd"},
+	})
+	if otherSess.Decision == Allow {
+		t.Fatalf("other session %+v", otherSess)
+	}
+	approve("p1", "Read", map[string]any{"file_path": "a.txt"})
+	samePath := b.Evaluate(context.Background(), quiet, Request{
+		RunID: "run-5", BotID: "bot", SessionID: "sess", Tool: "Read", Workspace: ws,
+		Args: map[string]any{"file_path": "./a.txt"},
+	})
+	if samePath.Decision != Allow || samePath.Source != "ui" || samePath.Rule != "session" {
+		t.Fatalf("same path %+v", samePath)
+	}
+	otherPath := b.Evaluate(context.Background(), quiet, Request{
+		RunID: "run-6", BotID: "bot", SessionID: "sess", Tool: "Read", Workspace: ws,
+		Args: map[string]any{"file_path": "b.txt"},
+	})
+	if otherPath.Decision == Allow || otherPath.Source == "ui" {
+		t.Fatalf("other path %+v", otherPath)
+	}
+}
+
 func TestAuditRedactsSecretArg(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.log")
 	log, err := audit.Open(path)

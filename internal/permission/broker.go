@@ -130,6 +130,7 @@ type wait struct {
 	runID     string
 	sessionID string
 	tool      string
+	subject   string
 	sessionOK bool
 	kind      string
 	questions []Question
@@ -175,7 +176,7 @@ func (b *Broker) AddHook(h Hook) {
 
 // UserRule is a durable allow, ask, or deny pattern accepted by the user.
 // Effect is allow, ask, or deny. Pattern is the broker glob, such as
-// Bash(git status*).
+// Bash(cat *).
 type UserRule struct {
 	ID      string
 	Effect  string
@@ -258,10 +259,12 @@ func (b *Broker) Evaluate(ctx context.Context, pol policy.Permission, req Reques
 	if rule := matchRules(pol.Allow, req.Tool, text); rule != "" {
 		return b.complete(req, Allow, "policy", rule)
 	}
-	if pattern, id := matchUser(req.UserRules, "allow", req.Tool, text); pattern != "" {
-		class := ClassifyCall(req.Tool, req.Args, req.Workspace)
-		if class.AutoAllow {
-			return b.complete(stampUser(req, id, class), Allow, "user", pattern)
+	if allowText, ok := userAllowText(req, text); ok {
+		if pattern, id := matchUser(req.UserRules, "allow", req.Tool, allowText); pattern != "" {
+			class := ClassifyCall(req.Tool, req.Args, req.Workspace)
+			if class.AutoAllow {
+				return b.complete(stampUser(req, id, class), Allow, "user", pattern)
+			}
 		}
 	}
 	if b.granted(req) {
@@ -429,6 +432,7 @@ func (b *Broker) canUseTool(ctx context.Context, pol policy.Permission, req Requ
 		runID:     req.RunID,
 		sessionID: req.SessionID,
 		tool:      req.Tool,
+		subject:   grantSubject(req),
 		sessionOK: sessionOK,
 		kind:      req.Kind,
 		questions: qs,
@@ -633,10 +637,14 @@ func (b *Broker) hookSnapshot() []Hook {
 }
 
 func (b *Broker) granted(req Request) bool {
+	token := grantToken(req.Tool, grantSubject(req))
+	if token == "" {
+		return false
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for _, tool := range b.grants[grantKey(req)] {
-		if strings.EqualFold(tool, req.Tool) && req.Tool != "" {
+	for _, have := range b.grants[grantKey(req)] {
+		if have == token {
 			return true
 		}
 	}
@@ -644,16 +652,70 @@ func (b *Broker) granted(req Request) bool {
 }
 
 func (b *Broker) rememberLocked(w *wait) {
-	if w.tool == "" {
+	token := grantToken(w.tool, w.subject)
+	if token == "" {
 		return
 	}
 	key := grantKey(Request{BotID: w.botID, SessionID: w.sessionID, RunID: w.runID})
-	for _, tool := range b.grants[key] {
-		if strings.EqualFold(tool, w.tool) {
+	for _, have := range b.grants[key] {
+		if have == token {
 			return
 		}
 	}
-	b.grants[key] = append(b.grants[key], w.tool)
+	b.grants[key] = append(b.grants[key], token)
+}
+
+// grantToken is the tool plus the command or path the user approved.
+func grantToken(tool, subject string) string {
+	tool = strings.ToLower(strings.TrimSpace(tool))
+	if tool == "" {
+		return ""
+	}
+	return tool + "\x00" + subject
+}
+
+// grantSubject is the trimmed command, or the resolved path. Glob and Grep
+// also include the pattern so two patterns do not share a grant.
+func grantSubject(req Request) string {
+	name := strings.ToLower(strings.TrimSpace(req.Tool))
+	if name == "bash" {
+		return strings.TrimSpace(firstNonEmptyArg(req.Args, "command", "cmd"))
+	}
+	var parts []string
+	if p := firstNonEmptyArg(req.Args, "file_path", "filePath", "path"); p != "" {
+		parts = append(parts, resolvedGrantPath(p, req.Workspace))
+	}
+	if name == "glob" || name == "grep" {
+		if pat := firstNonEmptyArg(req.Args, "pattern"); pat != "" {
+			parts = append(parts, strings.TrimSpace(pat))
+		}
+	}
+	if name == "grep" {
+		if g := firstNonEmptyArg(req.Args, "glob"); g != "" {
+			parts = append(parts, strings.TrimSpace(g))
+		}
+	}
+	if len(parts) == 0 {
+		return strings.TrimSpace(firstNonEmptyArg(req.Args, "command", "cmd"))
+	}
+	return strings.Join(parts, "\x00")
+}
+
+func firstNonEmptyArg(args map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if s, ok := stringArg(args, key); ok && strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// userAllowText drops a Glob allow match when the path or pattern is refused.
+func userAllowText(req Request, text string) (string, bool) {
+	if strings.EqualFold(strings.TrimSpace(req.Tool), "glob") && !classifyGlobTool(req.Args, req.Workspace).AutoAllow {
+		return "", false
+	}
+	return text, true
 }
 
 func grantKey(req Request) string {

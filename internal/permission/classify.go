@@ -25,10 +25,8 @@ type Class struct {
 const SuggestAfter = 3
 
 var (
-	// gitStatusOpts are the only git options auto-allow accepts. The broker
-	// does not run git: it answers allow and the CLI runs the original
-	// command, so a safe git wrapper cannot be applied on that path.
-	// diff, log, and show can still invoke an external diff, textconv, or pager.
+	// gitStatusOpt recognizes a narrow status shape. Git is not auto-allowed:
+	// the broker does not run git, and a stored allow falls through to a prompt.
 	gitStatusOpt = map[string]bool{
 		"-s": true, "--short": true, "-b": true, "--branch": true, "--porcelain": true,
 	}
@@ -276,7 +274,7 @@ func classifyGit(toks []string, workspace string) Class {
 	if prob := gitStatusArgs(toks, workspace, true); prob != nil {
 		return blocked(prob.kind, prob.sens, "high", prob.reason)
 	}
-	return allowLow("read-only git status")
+	return blocked("unknown", "unknown", "high", "git is not auto-allowed")
 }
 
 func classifyFileRead(toks []string, workspace string) Class {
@@ -297,10 +295,48 @@ func classifyGlobTool(args map[string]any, workspace string) Class {
 	if why := globPathRefused(pattern); why != "" {
 		return blocked("unknown", "unknown", "high", why)
 	}
+	if c, refuse := globSearchRoots(args, workspace); refuse {
+		return c
+	}
 	if !strings.ContainsAny(pattern, "*?[") {
 		return classifyReadTool(pattern, workspace)
 	}
+	if prob := globPrefixProblem(pattern, workspace); prob != nil {
+		return blocked(prob.kind, prob.sens, "high", prob.reason)
+	}
 	return allowLow("read-only glob pattern inside the workspace")
+}
+
+// globSearchRoots checks path and file_path the same way a grep path is checked.
+func globSearchRoots(args map[string]any, workspace string) (Class, bool) {
+	for _, key := range []string{"path", "file_path", "filePath"} {
+		p, ok := stringArg(args, key)
+		if !ok || strings.TrimSpace(p) == "" {
+			continue
+		}
+		if why := globPathRefused(p); why != "" {
+			return blocked("unknown", "unknown", "high", why), true
+		}
+		if prob := pathProblem(p, workspace, true); prob != nil {
+			return blocked(prob.kind, prob.sens, "high", prob.reason), true
+		}
+	}
+	return Class{}, false
+}
+
+// globPrefixProblem resolves the literal directory before the first glob
+// metacharacter. An empty prefix is the workspace root.
+func globPrefixProblem(pattern, workspace string) *argProblem {
+	pattern = strings.Trim(strings.TrimSpace(pattern), `"'`)
+	i := strings.IndexAny(pattern, "*?[")
+	if i <= 0 {
+		return nil
+	}
+	prefix := strings.TrimSpace(pattern[:i])
+	if prefix == "" {
+		return nil
+	}
+	return pathProblem(prefix, workspace, true)
 }
 
 func classifyGrepTool(args map[string]any, workspace string) Class {
@@ -451,12 +487,33 @@ func gitStatusOptOK(t string) bool {
 
 func findWrites(toks []string) bool {
 	for _, t := range toks[1:] {
-		switch t {
-		case "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprintf", "-fprint0":
+		if findWriteToken(t) {
 			return true
 		}
 	}
 	return false
+}
+
+func findWriteToken(t string) bool {
+	switch t {
+	case "-delete", "-exec", "-execdir", "-ok", "-okdir", "-fls", "-fprint", "-fprintf", "-fprint0":
+		return true
+	default:
+		return false
+	}
+}
+
+// findPrimaryRefused rejects expression tokens that are not on the allowlist,
+// including symlink-following options and write or execute actions.
+func findPrimaryRefused(t string) *argProblem {
+	switch t {
+	case "-follow", "-L", "-H":
+		return &argProblem{kind: "unknown", sens: "unknown", reason: "find expression is not permitted"}
+	}
+	if findWriteToken(t) {
+		return &argProblem{kind: "write", sens: "unknown", reason: "find would write or execute"}
+	}
+	return nil
 }
 
 func readOnlyIdentity(cmd string) (string, bool) {
@@ -468,18 +525,7 @@ func readOnlyIdentity(cmd string) (string, bool) {
 		return "", false
 	}
 	switch toks[0] {
-	case "git":
-		if gitForbiddenReason(toks) != "" {
-			return "", false
-		}
-		if gitSubcommand(toks) != "status" {
-			return "", false
-		}
-		if gitStatusArgs(toks, "", false) != nil {
-			return "", false
-		}
-		return "git status", true
-	case "gh":
+	case "git", "gh":
 		return "", false
 	default:
 		if fileReadOnly[toks[0]] && !(toks[0] == "find" && findWrites(toks)) && checkFileArgs(toks, "", false) == nil {
@@ -750,6 +796,11 @@ func checkFileArgs(toks []string, workspace string, resolve bool) *argProblem {
 	needsPattern := bin == "grep" || bin == "rg"
 	for i := 1; i < len(toks); i++ {
 		t := toks[i]
+		if bin == "find" {
+			if prob := findPrimaryRefused(t); prob != nil {
+				return prob
+			}
+		}
 		if !files && t == "--" {
 			if !supportsEndOfOptions(bin) {
 				return &argProblem{kind: "unknown", sens: "unknown", reason: "operand starts with -"}
@@ -757,7 +808,7 @@ func checkFileArgs(toks []string, workspace string, resolve bool) *argProblem {
 			files = true
 			continue
 		}
-		if files && bin == "find" && (expr || findExprStart(t)) {
+		if files && bin == "find" && (expr || findExprStart(t) || strings.HasPrefix(t, "-") || t == "!" || t == "(" || t == ")") {
 			expr = true
 		}
 		if !files || expr {
@@ -780,6 +831,12 @@ func checkFileArgs(toks []string, workspace string, resolve bool) *argProblem {
 					}
 				}
 				continue
+			}
+			if expr && bin == "find" {
+				if t == "!" || t == "(" || t == ")" {
+					continue
+				}
+				return &argProblem{kind: "unknown", sens: "unknown", reason: "find expression is not permitted"}
 			}
 		}
 		if !files {
@@ -996,6 +1053,38 @@ func resolvesInside(p, workspace string) (inside, missingParent, credential bool
 		return false, false, true
 	}
 	return insideRoot(full, root), false, false
+}
+
+// resolvedGrantPath is the path a session grant remembers. The final
+// component may be absent; its parent is still resolved.
+func resolvedGrantPath(p, workspace string) string {
+	p = strings.Trim(strings.TrimSpace(p), `"'`)
+	if p == "" {
+		return ""
+	}
+	root := strings.TrimSpace(workspace)
+	if root != "" {
+		if resolved, err := resolvedDir(root); err == nil {
+			root = resolved
+		} else {
+			root = filepath.Clean(root)
+		}
+	}
+	candidate := p
+	if root != "" && !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(root, candidate)
+	} else if abs, err := filepath.Abs(candidate); err == nil {
+		candidate = abs
+	}
+	candidate = filepath.Clean(candidate)
+	if resolved, err := filepath.EvalSymlinks(candidate); err == nil {
+		return filepath.Clean(resolved)
+	}
+	parent := filepath.Dir(candidate)
+	if resolvedParent, err := filepath.EvalSymlinks(parent); err == nil {
+		return filepath.Join(filepath.Clean(resolvedParent), filepath.Base(candidate))
+	}
+	return candidate
 }
 
 func resolvedDir(path string) (string, error) {

@@ -20,7 +20,7 @@ func TestDurableAllowAutoAllowsReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, cmd := range []string{"git status", "git status", "git status", "gh pr view 7"} {
+	for _, cmd := range []string{"pwd", "pwd", "pwd", "gh pr view 7", "git status"} {
 		if err := app.st.AddRunTool("run-h", bot.ID, store.ToolRecord{
 			Kind: "permission", Name: "Bash", OK: true,
 			Arguments: []byte(`{"command":"` + cmd + `"}`),
@@ -32,7 +32,7 @@ func TestDurableAllowAutoAllowsReadOnly(t *testing.T) {
 	srv := serve(t, app)
 	base := srv.URL + "/api/bots/" + bot.ID
 	res, body := do(t, "POST", base+"/permission-suggestions/analyze", map[string]any{}, "")
-	if res.StatusCode != 200 || !strings.Contains(string(body), "Bash(git status)") || !strings.Contains(string(body), `"risk":"low"`) || strings.Contains(string(body), "gh pr") {
+	if res.StatusCode != 200 || !strings.Contains(string(body), "Bash(pwd)") || !strings.Contains(string(body), `"risk":"low"`) || strings.Contains(string(body), "gh pr") || strings.Contains(string(body), "git status") {
 		t.Fatalf("analyze %d %s", res.StatusCode, body)
 	}
 	var listed struct {
@@ -43,16 +43,22 @@ func TestDurableAllowAutoAllowsReadOnly(t *testing.T) {
 		t.Fatalf("%+v", listed.Suggestions)
 	}
 	res, body = do(t, "POST", base+"/permission-suggestions/"+listed.Suggestions[0].ID+"/accept", nil, "")
-	if res.StatusCode != 201 || !strings.Contains(string(body), "Bash(git status)") {
+	if res.StatusCode != 201 || !strings.Contains(string(body), "Bash(pwd)") {
 		t.Fatalf("accept suggestion %d %s", res.StatusCode, body)
 	}
 	native, err := os.ReadFile(filepath.Join(app.cfg.DataDir, "cli", bot.ID, "user-permissions.json"))
-	if err != nil || !strings.Contains(string(native), "Bash(git status)") {
+	if err != nil || !strings.Contains(string(native), "Bash(pwd)") {
 		t.Fatalf("native %v %s", err, native)
 	}
 	grok, err := os.ReadFile(filepath.Join(app.cfg.DataDir, "cli", bot.ID, "grok-permission-rules"))
-	if err != nil || !strings.Contains(string(grok), "allow Bash(git status)") {
+	if err != nil || !strings.Contains(string(grok), "allow Bash(pwd)") {
 		t.Fatalf("grok %v %s", err, grok)
+	}
+	res, body = do(t, "POST", base+"/permission-rules", map[string]any{
+		"effect": "allow", "pattern": "Bash(git status*)",
+	}, "")
+	if res.StatusCode != 400 {
+		t.Fatalf("git status pattern %d %s", res.StatusCode, body)
 	}
 	res, body = do(t, "POST", base+"/permission-rules", map[string]any{
 		"effect": "allow", "pattern": "Bash(git push *)",
@@ -74,9 +80,9 @@ func TestDurableAllowAutoAllowsReadOnly(t *testing.T) {
 	pol := app.policy.Permission()
 	allow := app.perm.Evaluate(context.Background(), pol, app.withUserRules(bot.ID, permission.Request{
 		ID: "r1", RunID: "run-1", BotID: bot.ID, Tool: "Bash",
-		Args: map[string]any{"command": "git status"},
+		Args: map[string]any{"command": "pwd"},
 	}))
-	if allow.Decision != permission.Allow || allow.Source != "user" || allow.Rule != "Bash(git status)" {
+	if allow.Decision != permission.Allow || allow.Source != "user" || allow.Rule != "Bash(pwd)" {
 		t.Fatalf("auto-allow %+v", allow)
 	}
 	tools, err := app.st.RunTools([]string{"run-1"})
@@ -93,7 +99,7 @@ func TestDurableAllowAutoAllowsReadOnly(t *testing.T) {
 
 	composed := app.perm.Evaluate(context.Background(), pol, app.withUserRules(bot.ID, permission.Request{
 		ID: "r2", RunID: "run-2", BotID: bot.ID, Tool: "Bash",
-		Args: map[string]any{"command": "git status; rm -rf /tmp/x"},
+		Args: map[string]any{"command": "pwd; rm -rf /tmp/x"},
 	}))
 	if composed.Source == "user" || composed.Decision == permission.Allow {
 		t.Fatalf("composed auto-allowed %+v", composed)
@@ -142,7 +148,7 @@ func TestUserRulesDoNotWidenCLI(t *testing.T) {
 	srv := serve(t, app)
 	base := srv.URL + "/api/bots/" + bot.ID
 	res, body := do(t, "POST", base+"/permission-rules", map[string]any{
-		"effect": "allow", "pattern": "Bash(git status*)",
+		"effect": "allow", "pattern": "Bash(pwd)",
 	}, "")
 	if res.StatusCode != 201 {
 		t.Fatalf("allow %d %s", res.StatusCode, body)
@@ -169,7 +175,7 @@ func TestUserRulesDoNotWidenCLI(t *testing.T) {
 		t.Fatalf("policy allow missing: %v", cap.spec.AllowRules)
 	}
 	for _, rule := range append(append([]string{}, cap.spec.AllowRules...), cap.spec.DenyRules...) {
-		if strings.Contains(rule, "git status") || strings.Contains(rule, "push") {
+		if strings.Contains(rule, "pwd") || strings.Contains(rule, "push") {
 			t.Fatalf("user rule on argv spec: %v deny %v", cap.spec.AllowRules, cap.spec.DenyRules)
 		}
 	}
@@ -187,17 +193,17 @@ func TestUserRulesDoNotWidenCLI(t *testing.T) {
 				continue
 			}
 			rule := argv[i+1]
-			if strings.Contains(rule, "git status") || strings.Contains(rule, "push") {
+			if strings.Contains(rule, "pwd") || strings.Contains(rule, "push") {
 				t.Fatalf("user pattern on %s %s", argv[i], rule)
 			}
 		}
 	}
 	settings, err := os.ReadFile(filepath.Join(dir, "cli", bot.ID, "claude-settings.json"))
-	if err != nil || strings.Contains(string(settings), "git status") || strings.Contains(string(settings), `Bash(*push*)`) {
+	if err != nil || strings.Contains(string(settings), "pwd") || strings.Contains(string(settings), `Bash(*push*)`) {
 		t.Fatalf("settings %v %s", err, settings)
 	}
 	native, err := os.ReadFile(filepath.Join(dir, "cli", bot.ID, "user-permissions.json"))
-	if err != nil || !strings.Contains(string(native), "Bash(git status*)") || !strings.Contains(string(native), "Bash(*push*)") {
+	if err != nil || !strings.Contains(string(native), "Bash(pwd)") || !strings.Contains(string(native), "Bash(*push*)") {
 		t.Fatalf("native %v %s", err, native)
 	}
 }

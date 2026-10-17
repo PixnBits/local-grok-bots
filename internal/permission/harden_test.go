@@ -101,12 +101,12 @@ func TestReadOnlyOptionAllowlist(t *testing.T) {
 	}
 }
 
-func TestGitStatusAllowlist(t *testing.T) {
+func TestGitNotAutoAllowed(t *testing.T) {
 	ws := t.TempDir()
 	if err := os.Mkdir(filepath.Join(ws, "sub"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	allowed := []string{
+	refused := []string{
 		"git status",
 		"git status -s",
 		"git status --short",
@@ -116,14 +116,6 @@ func TestGitStatusAllowlist(t *testing.T) {
 		"git status -sb",
 		"git status -bs",
 		"git status -- sub",
-	}
-	for _, cmd := range allowed {
-		got := ClassifyCall("Bash", map[string]any{"command": cmd}, ws)
-		if !got.AutoAllow {
-			t.Fatalf("%q refused: %+v", cmd, got)
-		}
-	}
-	refused := []string{
 		"git status -u",
 		"git status --untracked-files",
 		"git status sub",
@@ -156,7 +148,10 @@ func TestGitStatusAllowlist(t *testing.T) {
 	if _, err := CheckUserRule("allow", "Bash(git log *)", ws); err == nil {
 		t.Fatal("git log pattern stored")
 	}
-	if _, err := CheckUserRule("allow", "Bash(git status*)", ws); err != nil {
+	if _, err := CheckUserRule("allow", "Bash(git status*)", ws); err == nil {
+		t.Fatal("git status pattern stored")
+	}
+	if _, err := CheckUserRule("ask", "Bash(git status*)", ws); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -216,6 +211,8 @@ func TestGlobAndGrepPathFields(t *testing.T) {
 	}{
 		{"Glob", map[string]any{"pattern": "src/**/*.go"}},
 		{"Glob", map[string]any{"pattern": "*.go"}},
+		{"Glob", map[string]any{"pattern": "**", "path": "src"}},
+		{"Glob", map[string]any{"pattern": "*.go", "file_path": "src"}},
 		{"Grep", map[string]any{"pattern": "a..b", "path": "src", "glob": "*.go"}},
 		{"Grep", map[string]any{"pattern": "TODO"}},
 	}
@@ -233,6 +230,10 @@ func TestGlobAndGrepPathFields(t *testing.T) {
 		{"Glob", map[string]any{"pattern": "../x"}},
 		{"Glob", map[string]any{"pattern": "~/x"}},
 		{"Glob", map[string]any{"pattern": "src/../../etc"}},
+		{"Glob", map[string]any{"pattern": "**", "path": "src/../../.."}},
+		{"Glob", map[string]any{"pattern": "**", "file_path": "src/../../.."}},
+		{"Glob", map[string]any{"pattern": "*.go", "path": "src", "file_path": "../outside"}},
+		{"Glob", map[string]any{"pattern": "**", "filePath": "~/x"}},
 		{"Grep", map[string]any{"pattern": "TODO", "path": "/tmp/tree"}},
 		{"Grep", map[string]any{"pattern": "TODO", "glob": "/tmp/tree/*"}},
 		{"Grep", map[string]any{"pattern": "TODO", "glob": "../*.go"}},
@@ -243,6 +244,74 @@ func TestGlobAndGrepPathFields(t *testing.T) {
 		got := ClassifyCall(tc.tool, tc.args, ws)
 		if got.AutoAllow {
 			t.Fatalf("%s %+v auto-allowed: %+v", tc.tool, tc.args, got)
+		}
+	}
+}
+
+func TestGlobPrefixOutside(t *testing.T) {
+	ws := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Mkdir(filepath.Join(ws, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(ws, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(ws, "src", "out")); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range []map[string]any{
+		{"pattern": "link/**"},
+		{"pattern": "link*"},
+		{"pattern": "src/out/**/*.go"},
+		{"pattern": "**", "path": "link"},
+		{"pattern": "src/**", "file_path": "link"},
+	} {
+		got := ClassifyCall("Glob", args, ws)
+		if got.AutoAllow {
+			t.Fatalf("%+v auto-allowed: %+v", args, got)
+		}
+	}
+	if got := ClassifyCall("Glob", map[string]any{"pattern": "src/**/*.go"}, ws); !got.AutoAllow {
+		t.Fatalf("inside prefix refused: %+v", got)
+	}
+}
+
+func TestFindExpressionAllowlist(t *testing.T) {
+	ws := t.TempDir()
+	mustFile(t, ws, "notes.txt")
+	allowed := []string{
+		"find -- . -name foo",
+		"find -- . -type f -print",
+		"find -- . ( -name foo )",
+		"find -P -- . -name foo",
+	}
+	for _, cmd := range allowed {
+		got := ClassifyCall("Bash", map[string]any{"command": cmd}, ws)
+		if !got.AutoAllow {
+			t.Fatalf("%q refused: %+v", cmd, got)
+		}
+	}
+	refused := []string{
+		"find -L -- .",
+		"find -H -- .",
+		"find -- . -follow",
+		"find -- . -name foo -follow",
+		"find -- . -delete",
+		"find -- . -exec rm x",
+		"find -- . -execdir rm x",
+		"find -- . -ok rm x",
+		"find -- . -fprint out.txt",
+		"find -- . -fprintf out.txt p",
+		"find -- . -fls out.txt",
+		"find -- . -fprint0 out.txt",
+		"find -- . -name foo -printf p",
+		"find -- . -name foo -ls",
+	}
+	for _, cmd := range refused {
+		got := ClassifyCall("Bash", map[string]any{"command": cmd}, ws)
+		if got.AutoAllow {
+			t.Fatalf("%q auto-allowed: %+v", cmd, got)
 		}
 	}
 }

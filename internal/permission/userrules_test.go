@@ -15,24 +15,36 @@ import (
 
 func TestUserAllowAutoAllowsOnlyLowRisk(t *testing.T) {
 	ws := t.TempDir()
-	rules := []UserRule{{ID: "rule-1", Effect: "allow", Pattern: "Bash(git status*)"}}
+	rules := []UserRule{{ID: "rule-1", Effect: "allow", Pattern: "Bash(pwd)"}}
 	var audited map[string]any
 	b := New(Options{Audit: func(fields map[string]any) { audited = fields }})
 	pol := policy.Permission{Mode: "default", UIPrompts: true, PromptTimeout: 20 * time.Millisecond}
 	ok := b.Evaluate(context.Background(), pol, Request{
 		ID: "1", RunID: "run", BotID: "bot", Tool: "Bash", Workspace: ws, UserRules: rules,
-		Args: map[string]any{"command": "git status"},
+		Args: map[string]any{"command": "pwd"},
 	})
-	if ok.Decision != Allow || ok.Source != "user" || ok.Rule != "Bash(git status*)" || ok.Behavior != "allow" {
+	if ok.Decision != Allow || ok.Source != "user" || ok.Rule != "Bash(pwd)" || ok.Behavior != "allow" {
 		t.Fatalf("%+v", ok)
 	}
 	if audited["rule_id"] != "rule-1" || audited["classification"] != "read_only" || audited["risk"] != "low" {
 		t.Fatalf("audit %#v", audited)
 	}
 
+	gitRules := []UserRule{{ID: "git", Effect: "allow", Pattern: "Bash(git status*)"}}
+	gitCall := b.Evaluate(context.Background(), pol, Request{
+		ID: "1b", RunID: "run", BotID: "bot", Tool: "Bash", Workspace: ws, UserRules: gitRules,
+		Args: map[string]any{"command": "git status"},
+	})
+	if gitCall.Source == "user" || gitCall.Decision == Allow {
+		t.Fatalf("git status auto-allowed: %+v", gitCall)
+	}
+	if gitCall.Source != "timeout" {
+		t.Fatalf("git status was not asked: %+v", gitCall)
+	}
+
 	bad := b.Evaluate(context.Background(), pol, Request{
 		ID: "2", RunID: "run", BotID: "bot", Tool: "Bash", Workspace: ws, UserRules: rules,
-		Args: map[string]any{"command": "git status; rm -rf /tmp/x"},
+		Args: map[string]any{"command": "pwd; rm -rf /tmp/x"},
 	})
 	if bad.Source == "user" || bad.Decision == Allow {
 		t.Fatalf("composed command auto-allowed: %+v", bad)
@@ -47,6 +59,58 @@ func TestUserAllowAutoAllowsOnlyLowRisk(t *testing.T) {
 	})
 	if write.Source == "user" || write.Decision == Allow {
 		t.Fatalf("push auto-allowed: %+v", write)
+	}
+}
+
+func TestGlobStoredRuleOutside(t *testing.T) {
+	ws := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Mkdir(filepath.Join(ws, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(ws, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(ws, "src", "out")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "src", "a.go"), []byte("package p\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	b := New(Options{})
+	pol := policy.Permission{UIPrompts: false}
+	eval := func(id string, rules []UserRule, args map[string]any) Outcome {
+		t.Helper()
+		return b.Evaluate(context.Background(), pol, Request{
+			ID: id, RunID: "run", BotID: "bot", Tool: "Glob", Workspace: ws,
+			UserRules: rules, Args: args,
+		})
+	}
+	broad := []UserRule{{ID: "g", Effect: "allow", Pattern: "Glob(**)"}}
+	for _, args := range []map[string]any{
+		{"pattern": "**", "path": "src/../../.."},
+		{"pattern": "src/../../..", "path": "src"},
+		{"pattern": "**", "file_path": "src/../../.."},
+		{"pattern": "link/**"},
+		{"pattern": "**", "path": "link"},
+		{"pattern": "src/out/**", "path": "src/out"},
+	} {
+		out := eval("1", broad, args)
+		if out.Decision == Allow || out.Source == "user" {
+			t.Fatalf("%+v auto-allowed: %+v", args, out)
+		}
+	}
+	scoped := []UserRule{{ID: "s", Effect: "allow", Pattern: "Glob(src/**)"}}
+	if _, err := CheckUserRule("allow", "Glob(src/**)", ws); err != nil {
+		t.Fatal(err)
+	}
+	out := eval("2", scoped, map[string]any{"pattern": "**", "path": "src/../../.."})
+	if out.Decision == Allow || out.Source == "user" {
+		t.Fatalf("scoped traversal %+v", out)
+	}
+	inside := eval("3", scoped, map[string]any{"pattern": "src/**/*.go", "path": "src/a.go"})
+	if inside.Decision != Allow || inside.Source != "user" || inside.Rule != "Glob(src/**)" {
+		t.Fatalf("inside glob %+v", inside)
 	}
 }
 
