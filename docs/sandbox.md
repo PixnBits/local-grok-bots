@@ -41,7 +41,7 @@ The daemon is a thin orchestrator: it spawns or resumes the CLI headless, inject
 
 Nested jails are avoided. The daemon does not attempt to re-jail a CLI that already has its own sandbox.
 
-Durable low-risk auto-grants and the analysis layer that suggests them live in the permission broker (see `docs/cli-permissions.md`). The preferred path keeps the CLI sandbox as the enforcement boundary while the daemon records every decision and surfaces suggestions in the portal. This preserves the reviewed COI surface and a single audit trail.
+Durable low-risk auto-grants and the analysis layer that suggests them live in the permission broker (see `docs/cli-permissions.md`). The first pass keeps the CLI sandbox as the enforcement boundary, decides the bot turn in the broker, and writes the native rule files beside the bot CLI state. This preserves the reviewed COI surface and a single audit trail.
 
 The host CLI broker later in this document is a different path. There the daemon's bubblewrap or Seatbelt jail is the only sandbox. The inner CLI is not given a second sandbox profile.
 

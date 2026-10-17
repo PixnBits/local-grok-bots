@@ -967,6 +967,7 @@ func (a *App) decideStreamControl(ctx context.Context, botID, runID, sessionID s
 		a.perm.Record(req, permission.Deny, "cancel", "")
 		return clisession.ControlDecision{Silent: true}
 	}
+	req = a.withUserRules(botID, req)
 	out := a.perm.Evaluate(ctx, a.policy.Permission(), req)
 	if out.Source == "cancel" {
 		return clisession.ControlDecision{Silent: true}

@@ -221,10 +221,23 @@ func (a *App) recordPermission(payload any) {
 			detail["answered"] = n
 		}
 	}
+	if id, _ := m["rule_id"].(string); id != "" {
+		detail["rule_id"] = id
+	}
+	if c, _ := m["classification"].(string); c != "" {
+		detail["classification"] = c
+	}
+	if sens, _ := m["sensitivity"].(string); sens != "" {
+		detail["sensitivity"] = sens
+	}
+	if risk, _ := m["risk"].(string); risk != "" {
+		detail["risk"] = risk
+	}
 	body, _ := json.Marshal(detail)
 	_ = a.st.AddRunTool(runID, botID, store.ToolRecord{
 		Kind: "permission", Name: tool, Arguments: args, OK: allowed, Result: string(body),
 	})
+	a.noteAutoSuggest(botID)
 }
 
 func answeredCount(v any) (int, bool) {

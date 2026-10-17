@@ -197,8 +197,11 @@ its host list, `git`, `ssh`). The settings only add restrictions.
 The preferred path for durable low-risk grants (see `docs/cli-permissions.md`)
 is to generate or update the CLI's native allow/ask/deny rules from user-accepted
 patterns while the daemon continues to host residual asks and record every
-decision. This keeps the already-reviewed COI sandbox as the enforcement
-boundary and the daemon's audit trail complete.
+decision. The first pass writes those native rules under `DATA_DIR/cli/<bot>/`
+and still decides the bot turn in the broker, so the audit record is not lost
+when the CLI would otherwise allow before the host. This keeps the
+already-reviewed COI sandbox as the enforcement boundary and the daemon's
+audit trail complete.
 
 ### Claude
 
