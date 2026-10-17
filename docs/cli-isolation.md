@@ -205,18 +205,46 @@ Grok has no flag to skip setting sources. The daemon:
   `requirements.toml`, `trusted_folders.toml`, `managed_config.toml`,
   `hooks-paths`, and the `hooks`, `plugins`, `skills`, and `agents`
   directories. A missing name is created with the daemon's known bytes
-  (the permission file, or a one-line marker, or a directory that holds
-  only that marker). A name whose bytes differ, or a symlink, refuses the
-  turn and is left in place. The same names are then bind-mounted
-  read-only over the writable `GROK_HOME`, so the process cannot replace
-  them. The rest of `GROK_HOME`, including sessions, stays writable.
+  (the permission file, the requirements file, a one-line marker, or a
+  directory that holds only that marker). A name whose bytes differ, a
+  symlink, or an extra link refuses the turn and is left in place. An
+  exact previous requirements marker is replaced with the current
+  requirements body. `requirements.toml` sets
+  `[ui] remember_tool_approvals = false`. Any
+  `sessions/**/permission*.toml` that already exists must be the daemon
+  placeholder. A different body is left in place and the turn is refused.
+  Missing permission files are not created;
+- mounts `GROK_HOME` read-only, then mounts `sessions/` and `logs/`
+  writable, then mounts the sealed names and matching permission files
+  read-only on top. The same startup files are checked in `HOME` and
+  mounted read-only: `.bashrc`, `.bash_profile`, `.bash_login`,
+  `.profile`, and `.zshrc`. A missing startup file is created as the
+  daemon placeholder. A different file refuses the turn and is left in
+  place.
 
-`/etc/grok/requirements.toml` and `/etc/claude-code/managed-settings.json`
-refuse the turn when they are present, for both backends, unless managed
-policy sets `trust_system_config`. The default is untrusted. The read-only
-`/etc` bind does not hide them. A refusal is audited as
-`cli_untrusted_config` and as a host permission denial. `/etc/grok/managed_config.toml`
-is not part of that check.
+Writable inside the jail: the workspace, the fresh `/tmp`, the bot `HOME`
+except those startup files and except the read-only `GROK_HOME` tree,
+`GROK_HOME/sessions` except matching `permission*.toml` files, and
+`GROK_HOME/logs`. Not writable: `lsp.json`,
+`installed-plugins/registry.json`, `trusted-plugins`,
+`trusted-hook-projects`, `disabled-hooks`, `mcp_preferences.json`,
+`commands/`, `rules/`, `personas/`, `roles/`, `workflows/`, `bundled/`,
+`AGENTS.md`, `CLAUDE.md`, `sandbox.toml`, `auth.json`, and the sealed
+names. A permission file created during a turn is caught on the next
+turn's check.
+
+`/etc/grok/requirements.toml`, `/etc/grok/managed_config.toml`, and
+`/etc/claude-code/managed-settings.json` refuse the turn when they are
+present, for both backends, unless managed policy sets
+`trust_system_config`. The default is untrusted. The read-only `/etc`
+bind does not hide them. A refusal is audited as `cli_untrusted_config`
+and as a host permission denial.
+
+Before a Grok turn the daemon reads `grok --version` and allows only
+1.0.52 and 1.0.62. The result is cached for that binary's path, size,
+and modification time. Any other release, or a check that does not
+return a version, refuses the turn and is audited as
+`cli_version_refused`.
 
 ## Sandbox and tools
 
@@ -561,21 +589,25 @@ same allow-once / deny / allow-session card. The host answers `allow-once` or
 The Linux bubblewrap jail keeps the same unshare flags
 (`user`, `pid`, `uts`, `ipc`, `net`), `--die-with-parent`, `--new-session`,
 `--clearenv`, private `/proc`, fresh `/tmp`, workspace bind, read-only binary,
-`HOME` and `GROK_HOME` binds, environment scrub, and proxy socket binds.
-Nested `--sandbox` is still stripped inside the jail. The credential
+writable `HOME`, read-only `GROK_HOME`, environment scrub, and proxy socket
+binds. Nested `--sandbox` is still stripped inside the jail. The credential
 forwarder still passes the child's stdin through, which is how ACP is written.
-After the writable `GROK_HOME` bind, the sealed names are `--ro-bind`ed
-onto themselves.
+`sessions/` and `logs/` are writable mounts inside the read-only
+`GROK_HOME`. Sealed names and matching permission files are `--ro-bind`ed
+after those mounts.
 
 What changed around that jail:
 
 - Each turn checks the sealed names under `GROK_HOME` and writes a missing
   one with the no-follow helpers. `config.toml` is `permission_mode = "default"`
   and a catch-all ask list (Bash, Read, Grep, Glob, Edit, Write, WebFetch,
-  WebSearch, MCPTool). The other sealed files and directory markers are a
-  one-line comment. A different body refuses the turn and is not overwritten.
-  The user's `~/.grok` is not written. `sandbox.toml` and `auth.json` are
-  still written as before and are not in the read-only set.
+  WebSearch, MCPTool). `requirements.toml` sets
+  `[ui] remember_tool_approvals = false`. The other sealed files and
+  directory markers are a one-line comment. A different body refuses the
+  turn and is not overwritten. The user's `~/.grok` is not written.
+  `sandbox.toml` and `auth.json` are still written on the host before the
+  turn and are read-only inside the jail, because the whole `GROK_HOME`
+  tree is read-only except `sessions/` and `logs/`.
 - Argv is `grok` with global flags, then `agent --no-leader stdio`. The
   global flags include `--cwd`, `--sandbox lgb` (omitted inside the jail, as
   before), `--no-auto-update`, and `--tools`. There is no `--always-approve`,
@@ -588,9 +620,16 @@ What changed around that jail:
   uses `session/load`. Neither sets `yoloMode` or `autoMode`. The result's
   `modes.currentModeId` must be `default` before the prompt is sent. A later
   `current_mode_update`, `config_option_update`, or `_x.ai/sessions/changed`
-  that selects another mode, or a bypass flag, fails the turn.
-- A user message that is a slash command after trimming is refused before
-  the process starts.
+  that selects another mode, or a bypass flag, fails the turn. A top-level
+  notification method `_x.ai/sessions/changed` or `x.ai/sessions/changed`
+  is checked the same way, including entries under `params.upserted`.
+- A user message that is a slash command, after leading space and format
+  characters, is refused before the process starts. A solidus counts as a
+  slash.
+- `grok --version` must be 1.0.52 or 1.0.62. Any other release refuses the
+  turn and is audited as `cli_version_refused`.
+- `HOME` startup files listed above are the daemon placeholder and are
+  mounted read-only. A different file refuses the turn.
 - Allow is answered `allow-once`. Deny is `reject-once`. An option whose id,
   name, or kind contains `always` is never selected. The permission request's
   session id must be the current session. A session grant stays in the
@@ -606,14 +645,19 @@ What changed around that jail:
 
 Residuals:
 
-- `/etc/grok/managed_config.toml` is not in the host-file check. A profile
-  pinned in `requirements.toml` still outranks `--sandbox` when managed
-  policy has trusted that file.
+- A profile pinned in `requirements.toml` still outranks `--sandbox` when
+  managed policy has trusted that file. `/etc/grok/managed_config.toml` is
+  part of the host-file check.
 - `cli_deny` matches the words denied, not allowed, disallowed, and not
   permitted. A shell error that uses the same words can be recorded. The
   call is still not allowed by that record.
-- `sandbox.toml` and `auth.json` stay writable inside `GROK_HOME`. They are
-  outside the sealed set.
+- `sandbox.toml` and `auth.json` are read-only inside the jail. A new
+  `permission*.toml` created during a turn, under a session directory that
+  did not have one at the start, is caught on the next turn's check.
+  `remember_tool_approvals` is off in the sealed requirements file.
+- With `home = "user"`, a missing shell startup file is created as the
+  daemon placeholder in that home. A different file is left in place and
+  the turn is refused. The user's `~/.grok` is still not written.
 - `hooks-paths` is sealed as a file. A directory of that name is refused.
 - A path or symlink can change between `ClassifyCall` and the tool. The jail
   and the sandbox deny list remain the backstop.

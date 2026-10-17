@@ -343,6 +343,9 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 		if err := SealGrokHome(root, grokHome); err != nil {
 			return Isolation{}, err
 		}
+		if err := prepareShellRC(home); err != nil {
+			return Isolation{}, err
+		}
 		iso.GrokSandbox = GrokProfile
 	}
 	for k, v := range o.Extra {

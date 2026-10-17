@@ -104,9 +104,21 @@ func acpFakeMain() {
 		})
 		drainACP(sc)
 	case "changed":
-		writeACPUpdate(sid, map[string]any{
-			"sessionUpdate": "_x.ai/sessions/changed",
-			"mode":          "other",
+		writeACP(map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "_x.ai/sessions/changed",
+			"params": map[string]any{
+				"upserted": []any{map[string]any{"yolo": true}},
+			},
+		})
+		drainACP(sc)
+	case "changed-alias":
+		writeACP(map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "x.ai/sessions/changed",
+			"params": map[string]any{
+				"upserted": []any{map[string]any{"mode": "other", "yolo": false}},
+			},
 		})
 		drainACP(sc)
 	case "other-session":
@@ -179,6 +191,13 @@ func acpFakeMain() {
 		writeACPResult(prompt, map[string]any{"stopReason": "end_turn"})
 		os.Exit(0)
 	default:
+		writeACP(map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "_x.ai/sessions/changed",
+			"params": map[string]any{
+				"upserted": []any{map[string]any{"yolo": false, "mode": "default"}},
+			},
+		})
 		writeACPUpdate(sid, map[string]any{
 			"sessionUpdate": "current_mode_update",
 			"currentModeId": "default",

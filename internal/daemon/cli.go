@@ -309,6 +309,10 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		if errors.As(err, &untrusted) {
 			a.auditUntrustedConfig(bot.ID, runID, backend, "grok_home", untrusted.Names)
 		}
+		var refused *clisession.VersionError
+		if errors.As(err, &refused) {
+			a.auditVersionRefused(bot.ID, runID, backend, refused.Version)
+		}
 		if fresh && strings.TrimSpace(res.SessionID) == "" {
 			_ = a.st.SetBotSession(bot.ID, "")
 		}
@@ -1284,6 +1288,47 @@ func (a *App) recordACPNote(botID, runID, kind, tool string, args map[string]any
 		RunID: runID, BotID: botID, Tool: tool, Args: args,
 		Transport: policy.TransportACP, Classification: class,
 	}, permission.Deny, source, clip(reason, 200))
+}
+
+func (a *App) auditVersionRefused(botID, runID, backend, version string) {
+	version = clip(oneLine(version), 200)
+	if version == "" {
+		version = "unknown"
+	}
+	fields := map[string]any{
+		"backend": backend,
+		"version": version,
+		"action":  "refuse",
+	}
+	if runID != "" {
+		fields["run_id"] = runID
+	}
+	a.log(botID, "cli_version_refused", fields)
+	if a.audit != nil && a.audit.Enabled() {
+		rec := map[string]any{"event": "cli_version_refused", "bot_id": botID}
+		for k, v := range fields {
+			rec[k] = v
+		}
+		a.audit.Write(rec)
+	}
+	if a.perm == nil {
+		return
+	}
+	transport := ""
+	if strings.EqualFold(backend, "grok") {
+		transport = policy.TransportACP
+	}
+	a.perm.Record(permission.Request{
+		RunID: runID, BotID: botID, Tool: "acp",
+		Args:      map[string]any{"version": version},
+		Transport: transport,
+	}, permission.Deny, "host", "cli version is not allowed")
+}
+
+func oneLine(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", " ")
+	return strings.TrimSpace(s)
 }
 
 func (a *App) auditUntrustedConfig(botID, runID, backend, kind string, names []string) {

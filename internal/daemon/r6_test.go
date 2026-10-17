@@ -133,6 +133,7 @@ func TestACPModeRefusesBeforePrompt(t *testing.T) {
 		{mode: "config-update", needle: "permission mode"},
 		{mode: "notice", needle: "permission mode"},
 		{mode: "changed", needle: "permission mode"},
+		{mode: "changed-alias", needle: "permission mode"},
 		{mode: "other-session", needle: "does not match"},
 	}
 	for _, c := range cases {

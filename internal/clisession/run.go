@@ -58,6 +58,11 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 		}
 		path = looked
 	}
+	if strings.EqualFold(spec.Backend, "grok") {
+		if err := checkGrokVersion(ctx, path); err != nil {
+			return Result{}, err
+		}
+	}
 	if err := e.notePin(ctx, spec.Backend, path); err != nil {
 		return Result{}, err
 	}

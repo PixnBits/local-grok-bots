@@ -325,6 +325,20 @@ func (s *acpSession) dispatch(line string, st *streamAcc) error {
 			s.onPermission(ctx, raw)
 		})
 		return nil
+	case sessionChangedMethod(method):
+		if p := sessionsChangedProblem(raw); p != "" {
+			s.hostFail(p, "acp", map[string]any{"method": method})
+			return s.fatalErr()
+		}
+		if !hasID {
+			return nil
+		}
+		_ = s.writeJSON(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      raw["id"],
+			"error":   map[string]any{"code": -32601, "message": "method not supported"},
+		})
+		return nil
 	case method != "" && hasID:
 		_ = s.writeJSON(map[string]any{
 			"jsonrpc": "2.0",

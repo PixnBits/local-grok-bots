@@ -783,6 +783,50 @@ func writeReplacingAt(parent *dirFD, base string, data []byte, mode os.FileMode)
 	return nil
 }
 
+func tooManyLinks(st os.FileInfo) bool {
+	if st == nil || st.Sys() == nil {
+		return false
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !ok || sys == nil {
+		return false
+	}
+	return sys.Nlink > 1
+}
+
+// createExclusiveNoFollow creates name inside an existing directory.
+// A symlink at the directory or the new name is refused. An existing name
+// is left in place.
+func createExclusiveNoFollow(dir, name string, data []byte) error {
+	if !safeComponent(name) {
+		return errors.New("bad path component")
+	}
+	st, err := os.Lstat(dir)
+	if err != nil || st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
+		return errors.New("seal directory is not available")
+	}
+	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if isSymlinkAt(unix.AT_FDCWD, dir) {
+			return ErrCredSymlink
+		}
+		return err
+	}
+	defer unix.Close(fd)
+	if isSymlinkAt(fd, name) {
+		return ErrCredSymlink
+	}
+	wfd, err := unix.Openat(fd, name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	if err != nil {
+		if isSymlinkAt(fd, name) {
+			return ErrCredSymlink
+		}
+		return err
+	}
+	defer unix.Close(wfd)
+	return writeFull(wfd, data)
+}
+
 func siblingTemp(base string) (string, error) {
 	var buf [8]byte
 	if _, err := rand.Read(buf[:]); err != nil {

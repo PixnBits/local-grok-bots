@@ -87,6 +87,24 @@ func TestSlashPromptAndDenyText(t *testing.T) {
 	if !SlashPrompt("  /status") || SlashPrompt("please /status") || SlashPrompt("  ") {
 		t.Fatal("slash")
 	}
+	for _, s := range []string{
+		"\uFEFF/status",
+		"\u200B/status",
+		"\u200C /status",
+		"\u00A0/status",
+		"\u3000/status",
+		"\uFF0Fstatus",
+		"\u2215status",
+		"\u2044status",
+		"\uFEFF\u200B \uFF0Fstatus",
+	} {
+		if !SlashPrompt(s) {
+			t.Fatalf("missed %q", s)
+		}
+	}
+	if SlashPrompt("please \uFF0Fstatus") || SlashPrompt("\uFEFFplease") || !SlashPrompt("\u29F8") {
+		t.Fatal("slash look-alike")
+	}
 	if !denyText("Denied by a rule") || !denyText("not allowed") || denyText("") || denyText("failed to open") {
 		t.Fatal("deny text")
 	}
@@ -102,6 +120,46 @@ func TestSlashPromptAndDenyText(t *testing.T) {
 	}, nil)
 	if !errors.Is(err, ErrSlash) || !strings.Contains(noted, ErrSlash.Error()) {
 		t.Fatalf("%v %s", err, noted)
+	}
+	noted = ""
+	_, err = (ExecRunner{}).Run(context.Background(), Spec{
+		Backend: "grok", Prompt: "\uFF0Fstatus", Workspace: t.TempDir(),
+		ACP: &ACPHooks{Fail: func(tool string, args map[string]any, reason string) {
+			noted = tool + " " + reason
+		}},
+	}, nil)
+	if !errors.Is(err, ErrSlash) || !strings.Contains(noted, ErrSlash.Error()) {
+		t.Fatalf("look-alike %v %s", err, noted)
+	}
+}
+
+func TestSessionChangedUpsert(t *testing.T) {
+	bad := map[string]any{
+		"method": "_x.ai/sessions/changed",
+		"params": map[string]any{"upserted": []any{map[string]any{"yolo": true}}},
+	}
+	if sessionsChangedProblem(bad) == "" || !sessionChangedMethod("_x.ai/sessions/changed") {
+		t.Fatal("yolo true")
+	}
+	alias := map[string]any{
+		"method": "x.ai/sessions/changed",
+		"params": map[string]any{"upserted": []any{map[string]any{"mode": "other", "yolo": false}}},
+	}
+	if sessionsChangedProblem(alias) == "" || !sessionChangedMethod("x.ai/sessions/changed") {
+		t.Fatal("alias mode")
+	}
+	ok := map[string]any{
+		"params": map[string]any{"upserted": []any{map[string]any{"yolo": false, "mode": "default"}}},
+	}
+	if sessionsChangedProblem(ok) != "" {
+		t.Fatal(sessionsChangedProblem(ok))
+	}
+	nested := map[string]any{"params": map[string]any{"upserted": []any{[]any{map[string]any{"yolo": true}}}}}
+	if sessionsChangedProblem(nested) == "" {
+		t.Fatal("nested list")
+	}
+	if sessionChangedMethod("session/update") {
+		t.Fatal("ordinary update")
 	}
 }
 

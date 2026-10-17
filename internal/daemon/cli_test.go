@@ -547,6 +547,10 @@ func installCLIStub(t *testing.T, dir, name string) {
 		t.Fatal(err)
 	}
 	script := `#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf '%s\n' 'grok 1.0.52'
+  exit 0
+fi
 if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
   [ -n "$LGB_AUTH_LOG" ] && env > "$LGB_AUTH_LOG"
   printf '{"loggedIn":true,"authMethod":"%s","configDirectory":"%s"}\n' "${LGB_AUTH_METHOD:-claude.ai}" "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"

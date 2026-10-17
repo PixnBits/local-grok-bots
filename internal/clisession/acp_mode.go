@@ -1,6 +1,10 @@
 package clisession
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
 
 // acpModeRefused is the user-facing reason when a session is not in the
 // default permission mode, or a bypass flag is set.
@@ -87,6 +91,19 @@ func changedProblem(m map[string]any) string {
 	return notificationProblem(m)
 }
 
+func sessionChangedMethod(method string) bool {
+	return method == "_x.ai/sessions/changed" || method == "x.ai/sessions/changed"
+}
+
+// sessionsChangedProblem checks a top-level session-changed notification.
+// Entries may be nested in lists.
+func sessionsChangedProblem(raw map[string]any) string {
+	if raw == nil {
+		return ""
+	}
+	return walkModeValue(raw["params"])
+}
+
 func notificationProblem(n map[string]any) string {
 	if n == nil {
 		return ""
@@ -98,10 +115,24 @@ func notificationProblem(n map[string]any) string {
 		if skipModeWalk(k) {
 			continue
 		}
-		if sub := asMap(v); sub != nil {
-			if p := modeFieldsProblem(sub); p != "" {
-				return p
-			}
+		if p := walkModeValue(v); p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
+func walkModeValue(v any) string {
+	if sub := asMap(v); sub != nil {
+		return notificationProblem(sub)
+	}
+	items, ok := v.([]any)
+	if !ok {
+		return ""
+	}
+	for _, item := range items {
+		if p := walkModeValue(item); p != "" {
+			return p
 		}
 	}
 	return ""
@@ -231,9 +262,28 @@ func modeTruthy(v any) bool {
 	return false
 }
 
-// SlashPrompt reports a turn input that is a slash command after trimming.
+// SlashPrompt reports a turn input that is a slash command.
+// Leading space and format characters are ignored. A solidus counts as a slash.
 func SlashPrompt(text string) bool {
-	return strings.HasPrefix(strings.TrimSpace(text), "/")
+	s := strings.TrimLeftFunc(text, leadingSlashNoise)
+	if s == "" {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(s)
+	return slashRune(r)
+}
+
+func leadingSlashNoise(r rune) bool {
+	return unicode.IsSpace(r) || unicode.Is(unicode.Zs, r) || unicode.Is(unicode.Cf, r)
+}
+
+func slashRune(r rune) bool {
+	switch r {
+	case '/', '\u2044', '\u2215', '\u29F8', '\uFF0F':
+		return true
+	default:
+		return false
+	}
 }
 
 // ErrSlash refuses a slash command before the CLI starts.

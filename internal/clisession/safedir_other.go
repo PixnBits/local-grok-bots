@@ -81,3 +81,9 @@ func linkCredNoFollow(src, root, rel string) error {
 func writeFileInDir(dir, name string, data []byte, mode os.FileMode) error {
 	return errors.New("credential directory walk is unavailable")
 }
+
+func tooManyLinks(st os.FileInfo) bool { return false }
+
+func createExclusiveNoFollow(dir, name string, data []byte) error {
+	return errors.New("credential directory walk is unavailable")
+}
