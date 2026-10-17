@@ -455,13 +455,13 @@
           <label><input type="checkbox" name="grant" value="ssh"> ssh</label>
           <label><input type="checkbox" name="grant" value="build"> build</label>
         </fieldset>
-        <label>Network allowlist<input id="profile-net" placeholder="example.com, api.github.com" autocomplete="off"></label>
+        <label>Network allowlist<input id="profile-net" placeholder="host.example" autocomplete="off"></label>
         <label>SSH allowlist<input id="profile-ssh" placeholder="host.example" autocomplete="off"></label>
         <p class="empty" style="padding:0">Only you can set grants. Bots cannot grant them to themselves. Durable permission rules are the same: nothing is auto-allowed until you accept it, and a write still asks.</p>
         <h2>Permission rules</h2>
         <div id="perm-rules" class="perm-list"></div>
         <div class="routine">
-          <label>Pattern<input id="perm-pattern" placeholder="Bash(gh pr view *)" autocomplete="off"></label>
+          <label>Pattern<input id="perm-pattern" placeholder="Read(./src/**)" autocomplete="off"></label>
           <label>Effect
             <select id="perm-effect">
               <option value="allow">allow</option>
@@ -1841,6 +1841,19 @@ function riskBadge(risk, effect) {
   const label = risk || effect || "rule";
   return el("span", "risk " + (risk || effect || ""), label);
 }
+// perm-rules:begin
+function clearPermErr() {
+  const note = $("#profile-err");
+  if (!note) return;
+  note.style.color = "";
+  note.textContent = "";
+}
+function showPermErr(err) {
+  const note = $("#profile-err");
+  if (!note) return;
+  note.style.color = "";
+  note.textContent = err && err.message ? err.message : String(err || "");
+}
 async function loadPermPanel() {
   const rulesBox = $("#perm-rules");
   const sugBox = $("#perm-suggestions");
@@ -1861,8 +1874,11 @@ async function loadPermPanel() {
     const revoke = el("button", "ghost", "Revoke");
     revoke.type = "button";
     revoke.addEventListener("click", async () => {
-      await api("/api/bots/" + state.botId + "/permission-rules/" + encodeURIComponent(rule.id), {method: "DELETE"});
-      await loadPermPanel();
+      clearPermErr();
+      try {
+        await api("/api/bots/" + state.botId + "/permission-rules/" + encodeURIComponent(rule.id), {method: "DELETE"});
+        await loadPermPanel();
+      } catch (err) { showPermErr(err); }
     });
     card.append(revoke);
     rulesBox.append(card);
@@ -1872,42 +1888,53 @@ async function loadPermPanel() {
   if (!pending.length) sugBox.append(el("p", "empty", "No suggestions."));
   for (const s of pending) {
     const card = el("div", "perm-card");
+    card.dataset.status = s.status || "";
     const head = el("div", "row");
     head.append(riskBadge(s.risk, s.status === "refused" ? "high" : s.effect));
     head.append(el("strong", null, s.status === "refused" ? "refused" : "suggestion"));
     card.append(head);
     const pattern = el("input");
     pattern.value = s.pattern || "";
-    card.append(pattern);
+    pattern.setAttribute("aria-label", "Pattern");
+    const lab = el("label", null, "Pattern");
+    lab.append(pattern);
+    card.append(lab);
     card.append(el("div", "meta", s.summary || ""));
     const examples = (s.examples || []).join(" · ");
     if (examples) card.append(el("div", "meta", examples));
     const actions = el("div", "row");
-    const accept = el("button", "primary", "Accept");
-    accept.type = "button";
-    accept.addEventListener("click", async () => {
-      try {
-        await api("/api/bots/" + state.botId + "/permission-suggestions/" + encodeURIComponent(s.id) + "/accept", {
-          method: "POST",
-          body: JSON.stringify({effect: "allow", pattern: pattern.value})
-        });
-        await loadPermPanel();
-      } catch (err) { $("#profile-err").textContent = err.message; }
-    });
+    if (s.status !== "refused") {
+      const accept = el("button", "primary", "Accept");
+      accept.type = "button";
+      accept.addEventListener("click", async () => {
+        clearPermErr();
+        try {
+          await api("/api/bots/" + state.botId + "/permission-suggestions/" + encodeURIComponent(s.id) + "/accept", {
+            method: "POST",
+            body: JSON.stringify({effect: "allow", pattern: pattern.value})
+          });
+          await loadPermPanel();
+        } catch (err) { showPermErr(err); }
+      });
+      actions.append(accept);
+    }
     const dismiss = el("button", "ghost", "Dismiss");
     dismiss.type = "button";
     dismiss.addEventListener("click", async () => {
-      await api("/api/bots/" + state.botId + "/permission-suggestions/" + encodeURIComponent(s.id) + "/dismiss", {method: "POST"});
-      await loadPermPanel();
+      clearPermErr();
+      try {
+        await api("/api/bots/" + state.botId + "/permission-suggestions/" + encodeURIComponent(s.id) + "/dismiss", {method: "POST"});
+        await loadPermPanel();
+      } catch (err) { showPermErr(err); }
     });
-    actions.append(accept, dismiss);
+    actions.append(dismiss);
     card.append(actions);
     sugBox.append(card);
   }
 }
 $("#perm-add").addEventListener("click", async () => {
   if (!state.botId) return;
-  $("#profile-err").textContent = "";
+  clearPermErr();
   try {
     await api("/api/bots/" + state.botId + "/permission-rules", {method: "POST", body: JSON.stringify({
       effect: $("#perm-effect").value,
@@ -1915,16 +1942,17 @@ $("#perm-add").addEventListener("click", async () => {
     })});
     $("#perm-pattern").value = "";
     await loadPermPanel();
-  } catch (err) { $("#profile-err").textContent = err.message; }
+  } catch (err) { showPermErr(err); }
 });
 $("#perm-analyze").addEventListener("click", async () => {
   if (!state.botId) return;
-  $("#profile-err").textContent = "";
+  clearPermErr();
   try {
     await api("/api/bots/" + state.botId + "/permission-suggestions/analyze", {method: "POST", body: "{}"});
     await loadPermPanel();
-  } catch (err) { $("#profile-err").textContent = err.message; }
+  } catch (err) { showPermErr(err); }
 });
+// perm-rules:end
 function fillKinds() {
   const sel = $("#log-kind");
   for (const k of KINDS) sel.append(new Option(k, k));

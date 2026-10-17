@@ -73,12 +73,29 @@ func TestCheckUserRule(t *testing.T) {
 	if _, err := CheckUserRule("allow", "Read(./src/**)", ws); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := CheckUserRule("allow", "Bash(grep *)", ws); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CheckUserRule("allow", "Bash(rg *)", ws); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CheckUserRule("allow", "Glob(./**)", ws); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CheckUserRule("allow", "Glob(*.txt)", ws); err == nil {
+		t.Fatal("pattern-only glob stored")
+	}
+	if _, err := CheckUserRule("allow", "Glob(**)", ws); err == nil {
+		t.Fatal("unprefixed glob stored")
+	}
 	for _, p := range []string{
 		"Bash(git push *)",
 		"Bash(rm -rf *)",
 		"Bash(curl *)",
 		"Bash(*push*)",
 		"Bash(*)",
+		"Bash(grep -f *)",
+		"Bash(rg --pre *)",
 		"Read",
 		"Read(**/.env)",
 		"Edit(./src/**)",

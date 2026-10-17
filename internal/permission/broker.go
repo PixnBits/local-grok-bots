@@ -220,16 +220,16 @@ func (b *Broker) Evaluate(ctx context.Context, pol policy.Permission, req Reques
 			}
 		}
 	}
-	if rule := matchRules(pol.Deny, req.Tool, text); rule != "" {
+	if rule := matchRules(pol.Deny, req, text); rule != "" {
 		return b.complete(req, Deny, "policy", rule)
 	}
-	if pattern, id := matchUser(req.UserRules, "deny", req.Tool, text); pattern != "" {
+	if pattern, id := matchUser(req.UserRules, "deny", req, text); pattern != "" {
 		return b.complete(stampUser(req, id, ClassifyCall(req.Tool, req.Args, req.Workspace)), Deny, "user", pattern)
 	}
-	if rule := matchRules(pol.Ask, req.Tool, text); rule != "" && askRule == "" {
+	if rule := matchRules(pol.Ask, req, text); rule != "" && askRule == "" {
 		askRule = rule
 	}
-	if pattern, id := matchUser(req.UserRules, "ask", req.Tool, text); pattern != "" && askRule == "" {
+	if pattern, id := matchUser(req.UserRules, "ask", req, text); pattern != "" && askRule == "" {
 		askRule = pattern
 		req = stampUser(req, id, ClassifyCall(req.Tool, req.Args, req.Workspace))
 	}
@@ -256,11 +256,11 @@ func (b *Broker) Evaluate(ctx context.Context, pol policy.Permission, req Reques
 	if policy.IsBypassMode(pol.Mode) {
 		return b.complete(req, Allow, "policy", pol.Mode)
 	}
-	if rule := matchRules(pol.Allow, req.Tool, text); rule != "" {
+	if rule := matchRules(pol.Allow, req, text); rule != "" {
 		return b.complete(req, Allow, "policy", rule)
 	}
 	if allowText, ok := userAllowText(req, text); ok {
-		if pattern, id := matchUser(req.UserRules, "allow", req.Tool, allowText); pattern != "" {
+		if pattern, id := matchUser(req.UserRules, "allow", req, allowText); pattern != "" {
 			class := ClassifyCall(req.Tool, req.Args, req.Workspace)
 			if class.AutoAllow {
 				return b.complete(stampUser(req, id, class), Allow, "user", pattern)
@@ -674,12 +674,24 @@ func grantToken(tool, subject string) string {
 	return tool + "\x00" + subject
 }
 
-// grantSubject is the trimmed command, or the resolved path. Glob and Grep
-// also include the pattern so two patterns do not share a grant.
+// grantSubject is the trimmed command, the resolved path, url for WebFetch,
+// or notebook_path for NotebookEdit. Other tools fall back to canonical JSON
+// arguments. Glob and Grep also include the pattern so two patterns do not
+// share a grant.
 func grantSubject(req Request) string {
 	name := strings.ToLower(strings.TrimSpace(req.Tool))
 	if name == "bash" {
 		return strings.TrimSpace(firstNonEmptyArg(req.Args, "command", "cmd"))
+	}
+	if name == "webfetch" {
+		if u := firstNonEmptyArg(req.Args, "url"); u != "" {
+			return strings.TrimSpace(u)
+		}
+	}
+	if name == "notebookedit" {
+		if p := firstNonEmptyArg(req.Args, "notebook_path"); p != "" {
+			return resolvedGrantPath(p, req.Workspace)
+		}
 	}
 	var parts []string
 	if p := firstNonEmptyArg(req.Args, "file_path", "filePath", "path"); p != "" {
@@ -696,9 +708,23 @@ func grantSubject(req Request) string {
 		}
 	}
 	if len(parts) == 0 {
-		return strings.TrimSpace(firstNonEmptyArg(req.Args, "command", "cmd"))
+		if cmd := strings.TrimSpace(firstNonEmptyArg(req.Args, "command", "cmd")); cmd != "" {
+			return cmd
+		}
+		return canonicalArgs(req.Args)
 	}
 	return strings.Join(parts, "\x00")
+}
+
+func canonicalArgs(args map[string]any) string {
+	if len(args) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(args)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 func firstNonEmptyArg(args map[string]any, keys ...string) string {

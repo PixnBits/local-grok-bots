@@ -154,6 +154,12 @@ func eligibleBash(glob, workspace string) (Class, error) {
 	}
 	c := classifyBash(cmd, workspace)
 	if !c.AutoAllow {
+		// grep and rg need a search pattern on a concrete call. A trailing
+		// glob prefix such as "grep" is still a known read-only command.
+		if grepRgPrefixOK(id, cmd, workspace) {
+			c = allowLow("low-risk read-only " + id + "; each later call is rechecked, and shell composition still asks")
+			return c, nil
+		}
 		if c.Reason == "" {
 			c.Reason = "command is not low-risk read-only"
 		}
@@ -161,6 +167,13 @@ func eligibleBash(glob, workspace string) (Class, error) {
 	}
 	c.Reason = "low-risk read-only " + id + "; each later call is rechecked, and shell composition still asks"
 	return c, nil
+}
+
+func grepRgPrefixOK(id, cmd, workspace string) bool {
+	if id != "grep" && id != "rg" {
+		return false
+	}
+	return inspectFileArgs(splitCmd(cmd), workspace, true, true) == nil
 }
 
 func eligibleRead(glob, workspace string) (Class, error) {
@@ -528,7 +541,7 @@ func readOnlyIdentity(cmd string) (string, bool) {
 	case "git", "gh":
 		return "", false
 	default:
-		if fileReadOnly[toks[0]] && !(toks[0] == "find" && findWrites(toks)) && checkFileArgs(toks, "", false) == nil {
+		if fileReadOnly[toks[0]] && !(toks[0] == "find" && findWrites(toks)) && inspectFileArgs(toks, "", false, true) == nil {
 			return toks[0], true
 		}
 	}
@@ -782,6 +795,10 @@ func supportsEndOfOptions(bin string) bool {
 }
 
 func checkFileArgs(toks []string, workspace string, resolve bool) *argProblem {
+	return inspectFileArgs(toks, workspace, resolve, false)
+}
+
+func inspectFileArgs(toks []string, workspace string, resolve, allowMissingPattern bool) *argProblem {
 	if len(toks) == 0 {
 		return &argProblem{kind: "unknown", sens: "unknown", reason: "empty command"}
 	}
@@ -867,6 +884,9 @@ func checkFileArgs(toks []string, workspace string, resolve bool) *argProblem {
 		}
 	}
 	if needsPattern && !hasPattern {
+		if allowMissingPattern {
+			return nil
+		}
 		return &argProblem{kind: "unknown", sens: "unknown", reason: "command is not a known read-only prefix"}
 	}
 	return nil

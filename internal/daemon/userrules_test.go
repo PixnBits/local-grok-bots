@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -215,4 +216,128 @@ func containsRule(rules []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestPermRuleApplyRollsBack(t *testing.T) {
+	app := newApp(t, t.TempDir(), nil)
+	bot, err := app.st.CreateBot("perm", "", nil, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := serve(t, app)
+	base := srv.URL + "/api/bots/" + bot.ID
+	dir := filepath.Join(app.cfg.DataDir, "cli", bot.ID)
+
+	t.Cleanup(func() { permApplyHook = nil })
+	permApplyHook = func(stage string) error {
+		if stage == "before_files" {
+			return errors.New("injected before files")
+		}
+		return nil
+	}
+	res, body := do(t, "POST", base+"/permission-rules", map[string]any{
+		"effect": "allow", "pattern": "Bash(pwd)",
+	}, "")
+	if res.StatusCode != 500 || !strings.Contains(string(body), "injected before files") {
+		t.Fatalf("before_files %d %s", res.StatusCode, body)
+	}
+	assertNoRule(t, app, bot.ID, dir)
+
+	permApplyHook = func(stage string) error {
+		if stage == "after_files" {
+			return errors.New("injected after files")
+		}
+		return nil
+	}
+	res, body = do(t, "POST", base+"/permission-rules", map[string]any{
+		"effect": "allow", "pattern": "Bash(pwd)",
+	}, "")
+	if res.StatusCode != 500 || !strings.Contains(string(body), "injected after files") {
+		t.Fatalf("after_files %d %s", res.StatusCode, body)
+	}
+	assertNoRule(t, app, bot.ID, dir)
+
+	permApplyHook = nil
+	res, body = do(t, "POST", base+"/permission-rules", map[string]any{
+		"effect": "allow", "pattern": "Bash(pwd)",
+	}, "")
+	if res.StatusCode != 201 {
+		t.Fatalf("accept %d %s", res.StatusCode, body)
+	}
+	var rule store.UserPermRule
+	decodeJSON(t, body, &rule)
+	native, err := os.ReadFile(filepath.Join(dir, "user-permissions.json"))
+	if err != nil || !strings.Contains(string(native), "Bash(pwd)") {
+		t.Fatalf("native %v %s", err, native)
+	}
+	logs, err := app.st.ListLog(bot.ID, "user_perm_rule", "", 10)
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("audit %v %+v", err, logs)
+	}
+
+	permApplyHook = func(stage string) error {
+		if stage == "after_files" {
+			return errors.New("injected revoke")
+		}
+		return nil
+	}
+	res, body = do(t, "DELETE", base+"/permission-rules/"+rule.ID, nil, "")
+	if res.StatusCode != 500 || !strings.Contains(string(body), "injected revoke") {
+		t.Fatalf("revoke %d %s", res.StatusCode, body)
+	}
+	got, err := app.st.ListUserPermRules(bot.ID)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("revoke rolled back row %+v %v", got, err)
+	}
+	native, err = os.ReadFile(filepath.Join(dir, "user-permissions.json"))
+	if err != nil || !strings.Contains(string(native), "Bash(pwd)") {
+		t.Fatalf("revoke restored files %v %s", err, native)
+	}
+	logs, err = app.st.ListLog(bot.ID, "user_perm_rule", "", 10)
+	if err != nil || len(logs) != 1 {
+		t.Fatalf("revoke audit %v %+v", err, logs)
+	}
+}
+
+func assertNoRule(t *testing.T, app *App, botID, dir string) {
+	t.Helper()
+	got, err := app.st.ListUserPermRules(botID)
+	if err != nil || len(got) != 0 {
+		t.Fatalf("row %+v %v", got, err)
+	}
+	logs, err := app.st.ListLog(botID, "user_perm_rule", "", 10)
+	if err != nil || len(logs) != 0 {
+		t.Fatalf("audit %+v %v", logs, err)
+	}
+	for _, name := range []string{"user-permissions.json", "grok-permission-rules"} {
+		p := filepath.Join(dir, name)
+		if _, err := os.Lstat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s left behind: %v", name, err)
+		}
+	}
+}
+
+func TestRefusedSuggestionWhitespace(t *testing.T) {
+	app := newApp(t, t.TempDir(), nil)
+	bot, err := app.st.CreateBot("perm", "", nil, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sug, err := app.st.SaveSuggestion(store.PermSuggestion{
+		BotID: bot.ID, Pattern: "Bash(pwd)", Effect: "allow",
+		Summary: "classification refused auto-allow", Status: "refused", Count: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := serve(t, app)
+	base := srv.URL + "/api/bots/" + bot.ID + "/permission-suggestions/" + sug.ID + "/accept"
+	res, body := do(t, "POST", base, map[string]any{"effect": "allow", "pattern": "  Bash( pwd )  "}, "")
+	if res.StatusCode != 400 || !strings.Contains(string(body), "classification refused") {
+		t.Fatalf("padded refused %d %s", res.StatusCode, body)
+	}
+	res, body = do(t, "POST", base, map[string]any{"effect": "allow", "pattern": "Bash(ls *)"}, "")
+	if res.StatusCode != 201 {
+		t.Fatalf("edited %d %s", res.StatusCode, body)
+	}
 }

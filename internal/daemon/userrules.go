@@ -5,12 +5,19 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
+
+// permApplyHook is a test injection point. Stage is before_files or after_files.
+var permApplyHook func(stage string) error
+
+var writeNativeRules = permission.WriteNativeRules
 
 func (a *App) userRules(botID string) []permission.UserRule {
 	if a == nil || a.st == nil || botID == "" {
@@ -56,11 +63,92 @@ func (a *App) syncNativeRules(botID string) error {
 	if err != nil {
 		return err
 	}
+	return a.writeNativeFrom(botID, rows)
+}
+
+func (a *App) writeNativeFrom(botID string, rows []store.UserPermRule) error {
+	if a == nil || a.cfg.DataDir == "" {
+		return nil
+	}
+	if botID == "" || strings.Contains(botID, "/") || strings.Contains(botID, `\`) || strings.Contains(botID, "..") {
+		return errors.New("invalid bot id")
+	}
 	rules := make([]permission.NativeRule, 0, len(rows))
 	for _, r := range rows {
 		rules = append(rules, permission.NativeRule{Effect: r.Effect, Pattern: r.Pattern})
 	}
-	return permission.WriteNativeRules(filepath.Join(a.cfg.DataDir, "cli", botID), rules)
+	return writeNativeRules(filepath.Join(a.cfg.DataDir, "cli", botID), rules)
+}
+
+func (a *App) nativeDir(botID string) string {
+	if a == nil || a.cfg.DataDir == "" || botID == "" {
+		return ""
+	}
+	return filepath.Join(a.cfg.DataDir, "cli", botID)
+}
+
+type nativeFileSnap struct {
+	present bool
+	data    []byte
+}
+
+type nativeSnap struct {
+	dir   string
+	files map[string]nativeFileSnap
+}
+
+func snapshotNative(dir string) nativeSnap {
+	s := nativeSnap{dir: dir, files: map[string]nativeFileSnap{}}
+	if dir == "" {
+		return s
+	}
+	for _, name := range []string{"user-permissions.json", "grok-permission-rules"} {
+		p := filepath.Join(dir, name)
+		st, err := os.Lstat(p)
+		if err != nil || !st.Mode().IsRegular() {
+			s.files[name] = nativeFileSnap{}
+			continue
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			s.files[name] = nativeFileSnap{}
+			continue
+		}
+		s.files[name] = nativeFileSnap{present: true, data: append([]byte(nil), b...)}
+	}
+	return s
+}
+
+func restoreNative(s nativeSnap) {
+	if s.dir == "" {
+		return
+	}
+	for name, f := range s.files {
+		p := filepath.Join(s.dir, name)
+		if !f.present {
+			st, err := os.Lstat(p)
+			if err == nil && st.Mode().IsRegular() {
+				_ = os.Remove(p)
+			}
+			continue
+		}
+		_ = clisession.WriteFileInDir(s.dir, name, f.data, 0o600)
+	}
+}
+
+func (a *App) applyNativeWrite(botID string, rows []store.UserPermRule) error {
+	if permApplyHook != nil {
+		if err := permApplyHook("before_files"); err != nil {
+			return err
+		}
+	}
+	if err := a.writeNativeFrom(botID, rows); err != nil {
+		return err
+	}
+	if permApplyHook != nil {
+		return permApplyHook("after_files")
+	}
+	return nil
 }
 
 func (a *App) noteAutoSuggest(botID string) {
@@ -150,18 +238,14 @@ func (a *App) handleCreatePermRule(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleDeletePermRule(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	ruleID := r.PathValue("rule_id")
-	rule, err := a.st.RevokeUserPermRule(id, ruleID)
-	if err != nil {
+	if _, err := a.st.GetBot(id); err != nil {
 		writeErr(w, err)
 		return
 	}
-	if err := a.syncNativeRules(id); err != nil {
+	if _, err := a.commitRevokePermRule(id, ruleID); err != nil {
 		writeErr(w, err)
 		return
 	}
-	a.log(id, "user_perm_rule", map[string]any{
-		"action": "revoke", "id": rule.ID, "effect": rule.Effect, "pattern": rule.Pattern, "risk": rule.Risk,
-	})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -225,7 +309,7 @@ func (a *App) handleAcceptSuggestion(w http.ResponseWriter, r *http.Request) {
 	if v, ok := raw["pattern"]; ok {
 		_ = json.Unmarshal(v, &body.Pattern)
 	}
-	if sug.Status == "refused" && body.Pattern == sug.Pattern && strings.EqualFold(body.Effect, "allow") {
+	if sug.Status == "refused" && sameRulePattern(body.Pattern, sug.Pattern) && strings.EqualFold(strings.TrimSpace(body.Effect), "allow") {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": sug.Summary})
 		return
 	}
@@ -257,10 +341,11 @@ func (a *App) acceptPermRule(w http.ResponseWriter, botID, effect, pattern strin
 	}
 	effect = strings.ToLower(strings.TrimSpace(effect))
 	pattern = strings.TrimSpace(pattern)
-	rule, err := a.st.InsertUserPermRule(store.UserPermRule{
+	draft := store.UserPermRule{
 		BotID: botID, Effect: effect, Pattern: pattern,
 		Classification: class.Kind, Sensitivity: class.Sensitivity, Risk: class.Risk, Reason: class.Reason,
-	})
+	}
+	rule, err := a.commitAcceptPermRule(draft)
 	if errors.Is(err, store.ErrConflict) {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "rule already exists"})
 		return store.UserPermRule{}, false
@@ -269,13 +354,47 @@ func (a *App) acceptPermRule(w http.ResponseWriter, botID, effect, pattern strin
 		writeErr(w, err)
 		return store.UserPermRule{}, false
 	}
-	if err := a.syncNativeRules(botID); err != nil {
-		writeErr(w, err)
-		return store.UserPermRule{}, false
-	}
-	a.log(botID, "user_perm_rule", map[string]any{
-		"action": "accept", "id": rule.ID, "effect": rule.Effect, "pattern": rule.Pattern,
-		"risk": rule.Risk, "classification": rule.Classification, "sensitivity": rule.Sensitivity,
-	})
 	return rule, true
+}
+
+func (a *App) commitAcceptPermRule(rule store.UserPermRule) (store.UserPermRule, error) {
+	dir := a.nativeDir(rule.BotID)
+	snap := snapshotNative(dir)
+	audit := map[string]any{
+		"action": "accept", "effect": rule.Effect, "pattern": rule.Pattern,
+		"risk": rule.Risk, "classification": rule.Classification, "sensitivity": rule.Sensitivity,
+	}
+	out, err := a.st.AcceptUserPermRule(rule, audit, func(rows []store.UserPermRule) error {
+		return a.applyNativeWrite(rule.BotID, rows)
+	})
+	if err != nil {
+		restoreNative(snap)
+		return store.UserPermRule{}, err
+	}
+	return out, nil
+}
+
+func (a *App) commitRevokePermRule(botID, ruleID string) (store.UserPermRule, error) {
+	dir := a.nativeDir(botID)
+	snap := snapshotNative(dir)
+	out, err := a.st.RevokeUserPermRuleApply(botID, ruleID, nil, func(rows []store.UserPermRule) error {
+		return a.applyNativeWrite(botID, rows)
+	})
+	if err != nil {
+		restoreNative(snap)
+		return store.UserPermRule{}, err
+	}
+	return out, nil
+}
+
+func sameRulePattern(a, b string) bool {
+	return normRulePattern(a) == normRulePattern(b)
+}
+
+func normRulePattern(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.Join(strings.Fields(s), " ")
+	s = strings.ReplaceAll(s, "( ", "(")
+	s = strings.ReplaceAll(s, " )", ")")
+	return s
 }

@@ -2,6 +2,7 @@ package permission
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/PixnBits/local-grok-bots/internal/audit"
@@ -78,10 +79,11 @@ func Suggest(samples []Sample, workspace string) []Card {
 		if !isReadTool(s.Tool) {
 			continue
 		}
-		if text == "" {
+		path := samplePath(s)
+		if path == "" {
 			continue
 		}
-		dir := pathGroup(text)
+		dir := pathGroup(path, workspace)
 		c := take("read\x00" + strings.ToLower(s.Tool) + "\x00" + dir)
 		c.id = dir
 		c.tool = canonicalRead(s.Tool)
@@ -89,8 +91,8 @@ func Suggest(samples []Sample, workspace string) []Card {
 		if !class.AutoAllow {
 			c.mixed = true
 		}
-		c.paths = append(c.paths, text)
-		c.examples = addExample(c.examples, text)
+		c.paths = append(c.paths, path)
+		c.examples = addExample(c.examples, sampleExample(s, path))
 	}
 	var out []Card
 	for _, key := range order {
@@ -224,11 +226,47 @@ func canonicalRead(tool string) string {
 	}
 }
 
-func pathGroup(p string) string {
-	p = strings.TrimSpace(p)
-	p = strings.Trim(p, `"'`)
-	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
-		return p[:i+1]
+func samplePath(s Sample) string {
+	name := strings.ToLower(strings.TrimSpace(s.Tool))
+	switch name {
+	case "grep", "glob":
+		p := firstNonEmptyArg(s.Args, "path", "file_path", "filePath")
+		if strings.TrimSpace(p) == "" {
+			return "."
+		}
+		return p
+	default:
+		return strings.TrimSpace(argText(s.Args))
+	}
+}
+
+func sampleExample(s Sample, path string) string {
+	if pat := firstNonEmptyArg(s.Args, "pattern"); pat != "" {
+		if path == "." || path == "./" {
+			return pat
+		}
+	}
+	return path
+}
+
+func pathGroup(p, workspace string) string {
+	vals := pathMatchValues(p, workspace)
+	chosen := strings.Trim(strings.TrimSpace(p), `"'`)
+	for _, v := range vals {
+		if strings.HasPrefix(v, "./") {
+			chosen = v
+			break
+		}
+	}
+	if chosen == "./" || chosen == "." {
+		return "./"
+	}
+	if i := strings.LastIndexAny(chosen, `/\`); i >= 0 {
+		dir := chosen[:i+1]
+		if dir != "./" && !strings.HasPrefix(dir, "./") && !filepath.IsAbs(dir) {
+			dir = "./" + dir
+		}
+		return dir
 	}
 	return "./"
 }

@@ -73,7 +73,17 @@ func (s *Store) InsertUserPermRule(rule UserPermRule) (UserPermRule, error) {
 func (s *Store) ListUserPermRules(botID string) ([]UserPermRule, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`SELECT id, bot_id, effect, pattern, classification, sensitivity, risk, reason, created_at FROM user_perm_rules WHERE bot_id=? AND revoked_at IS NULL ORDER BY created_at, id`, botID)
+	return listUserPermRules(s.db, botID)
+}
+
+type ruleQuery interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func listUserPermRules(q ruleQuery, botID string) ([]UserPermRule, error) {
+	rows, err := q.Query(`SELECT id, bot_id, effect, pattern, classification, sensitivity, risk, reason, created_at FROM user_perm_rules WHERE bot_id=? AND revoked_at IS NULL ORDER BY created_at, id`, botID)
 	if err != nil {
 		return nil, err
 	}
@@ -87,6 +97,104 @@ func (s *Store) ListUserPermRules(botID string) ([]UserPermRule, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// AcceptUserPermRule inserts the rule and audit row, then runs write before
+// commit. A write error rolls the database back.
+func (s *Store) AcceptUserPermRule(rule UserPermRule, audit any, write func([]UserPermRule) error) (UserPermRule, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return UserPermRule{}, err
+	}
+	defer tx.Rollback()
+	var existing string
+	err = tx.QueryRow(`SELECT id FROM user_perm_rules WHERE bot_id=? AND effect=? AND pattern=? AND revoked_at IS NULL`,
+		rule.BotID, rule.Effect, rule.Pattern).Scan(&existing)
+	if err == nil {
+		return UserPermRule{}, ErrConflict
+	}
+	if err != sql.ErrNoRows {
+		return UserPermRule{}, err
+	}
+	if rule.ID == "" {
+		rule.ID = id.New()
+	}
+	if m, ok := audit.(map[string]any); ok && m != nil {
+		if _, exists := m["id"]; !exists {
+			m["id"] = rule.ID
+		}
+		if _, exists := m["action"]; !exists {
+			m["action"] = "accept"
+		}
+	}
+	rule.CreatedAt = FormatTime(Now())
+	_, err = tx.Exec(`INSERT INTO user_perm_rules(id, bot_id, effect, pattern, classification, sensitivity, risk, reason, created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		rule.ID, rule.BotID, rule.Effect, rule.Pattern, rule.Classification, rule.Sensitivity, rule.Risk, rule.Reason, rule.CreatedAt)
+	if err != nil {
+		return UserPermRule{}, err
+	}
+	if err := s.addLogTx(tx, rule.BotID, "user_perm_rule", audit); err != nil {
+		return UserPermRule{}, err
+	}
+	rows, err := listUserPermRules(tx, rule.BotID)
+	if err != nil {
+		return UserPermRule{}, err
+	}
+	if write != nil {
+		if err := write(rows); err != nil {
+			return UserPermRule{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return UserPermRule{}, err
+	}
+	return rule, nil
+}
+
+// RevokeUserPermRuleApply marks the rule revoked and writes the audit row,
+// then runs write before commit. A write error rolls the database back.
+func (s *Store) RevokeUserPermRuleApply(botID, id string, audit any, write func([]UserPermRule) error) (UserPermRule, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return UserPermRule{}, err
+	}
+	defer tx.Rollback()
+	var r UserPermRule
+	err = tx.QueryRow(`SELECT id, bot_id, effect, pattern, classification, sensitivity, risk, reason, created_at FROM user_perm_rules WHERE id=? AND bot_id=? AND revoked_at IS NULL`, id, botID).
+		Scan(&r.ID, &r.BotID, &r.Effect, &r.Pattern, &r.Classification, &r.Sensitivity, &r.Risk, &r.Reason, &r.CreatedAt)
+	if err == sql.ErrNoRows {
+		return UserPermRule{}, ErrNotFound
+	}
+	if err != nil {
+		return UserPermRule{}, err
+	}
+	now := FormatTime(Now())
+	if _, err := tx.Exec(`UPDATE user_perm_rules SET revoked_at=? WHERE id=? AND revoked_at IS NULL`, now, id); err != nil {
+		return UserPermRule{}, err
+	}
+	if audit == nil {
+		audit = map[string]any{"action": "revoke", "id": r.ID, "effect": r.Effect, "pattern": r.Pattern, "risk": r.Risk}
+	}
+	if err := s.addLogTx(tx, botID, "user_perm_rule", audit); err != nil {
+		return UserPermRule{}, err
+	}
+	rows, err := listUserPermRules(tx, botID)
+	if err != nil {
+		return UserPermRule{}, err
+	}
+	if write != nil {
+		if err := write(rows); err != nil {
+			return UserPermRule{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return UserPermRule{}, err
+	}
+	return r, nil
 }
 
 // RevokeUserPermRule marks a rule revoked. A missing or already revoked row

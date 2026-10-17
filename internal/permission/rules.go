@@ -5,9 +5,9 @@ import (
 	"strings"
 )
 
-func matchRules(rules []string, tool, text string) string {
+func matchRules(rules []string, req Request, text string) string {
 	for _, rule := range rules {
-		if ruleMatches(rule, tool, text) {
+		if ruleMatchesCall(rule, req, text) {
 			return rule
 		}
 	}
@@ -15,22 +15,39 @@ func matchRules(rules []string, tool, text string) string {
 }
 
 func ruleMatches(rule, tool, text string) bool {
+	return ruleMatchesCall(rule, Request{Tool: tool, Args: inferMatchArgs(tool, text)}, text)
+}
+
+func inferMatchArgs(tool, text string) map[string]any {
+	if isPathTool(tool) {
+		return map[string]any{"file_path": text, "path": text}
+	}
+	return map[string]any{"command": text}
+}
+
+func ruleMatchesCall(rule string, req Request, text string) bool {
 	name, pattern, scoped := splitRule(rule)
-	if !nameMatches(name, tool) {
+	if !nameMatches(name, req.Tool) {
 		return false
 	}
 	if !scoped {
 		return true
 	}
-	if strings.TrimSpace(text) == "" {
+	values := matchValues(req, text)
+	if len(values) == 0 {
 		return false
 	}
-	// Check the raw text. Trim would drop a trailing newline before the
-	// prefix suffix is inspected.
-	if prefixSuffixBlocked(pattern, text) {
-		return false
+	for _, v := range values {
+		// Check the raw text. Trim would drop a trailing newline before the
+		// prefix suffix is inspected.
+		if prefixSuffixBlocked(pattern, v) {
+			continue
+		}
+		if globMatch(pattern, strings.TrimSpace(v)) {
+			return true
+		}
 	}
-	return globMatch(pattern, strings.TrimSpace(text))
+	return false
 }
 
 func splitRule(rule string) (name, pattern string, scoped bool) {
@@ -130,13 +147,13 @@ func globExpr(pattern string, fold bool) string {
 	return b.String()
 }
 
-func matchUser(rules []UserRule, effect, tool, text string) (pattern, id string) {
+func matchUser(rules []UserRule, effect string, req Request, text string) (pattern, id string) {
 	effect = strings.ToLower(effect)
 	for _, rule := range rules {
 		if strings.ToLower(strings.TrimSpace(rule.Effect)) != effect {
 			continue
 		}
-		if ruleMatches(rule.Pattern, tool, text) {
+		if ruleMatchesCall(rule.Pattern, req, text) {
 			pat := rule.Pattern
 			if pat == "" {
 				pat = rule.ID
