@@ -23,7 +23,10 @@ func acpResultModeProblem(result map[string]any) string {
 		modes = asMap(result["modeState"])
 	}
 	if modes == nil {
-		return acpModeRefused
+		// Grok 1.0.52 reports no modes object on session/new. The mode then
+		// comes from the sealed config.toml, and later mode updates are still
+		// checked. A reported mode must be default.
+		return configOptionsProblem(result["configOptions"])
 	}
 	if p := notificationProblem(modes); p != "" {
 		return p

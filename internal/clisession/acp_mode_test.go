@@ -14,7 +14,6 @@ func TestSessionModeMustBeDefault(t *testing.T) {
 	}
 	for _, bad := range []map[string]any{
 		nil,
-		{},
 		{"modes": map[string]any{"currentModeId": "other"}},
 		{"modes": map[string]any{}},
 		{"yolo": true, "modes": map[string]any{"currentModeId": "default"}},
@@ -103,5 +102,35 @@ func TestSlashPromptAndDenyText(t *testing.T) {
 	}, nil)
 	if !errors.Is(err, ErrSlash) || !strings.Contains(noted, ErrSlash.Error()) {
 		t.Fatalf("%v %s", err, noted)
+	}
+}
+
+// A real agent may report no modes object; its mode then comes from the
+// sealed config. Reasoning effort options are not permission modes.
+func TestSessionResultWithoutModesUsesSealedConfig(t *testing.T) {
+	real := func() map[string]any {
+		return map[string]any{
+			"sessionId": "s",
+			"configOptions": []any{
+				map[string]any{"id": "model", "category": "model", "currentValue": "m"},
+				map[string]any{"id": "reasoning_effort", "category": "thought_level", "currentValue": "high"},
+			},
+			"_meta": map[string]any{"x.ai/sessionConfig": map[string]any{"options": []any{
+				map[string]any{"id": "xhigh", "category": "mode", "selected": false},
+			}}},
+		}
+	}
+	if p := acpResultModeProblem(real()); p != "" {
+		t.Fatal(p)
+	}
+	bad := real()
+	bad["yolo"] = true
+	if acpResultModeProblem(bad) == "" {
+		t.Fatal("bypass flag accepted")
+	}
+	opt := real()
+	opt["configOptions"] = append(opt["configOptions"].([]any), map[string]any{"id": "permission_mode", "currentValue": "always-approve"})
+	if acpResultModeProblem(opt) == "" {
+		t.Fatal("non-default permission option accepted")
 	}
 }
