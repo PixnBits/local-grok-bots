@@ -282,8 +282,14 @@ func TestGrokProfileAndFlags(t *testing.T) {
 		}
 	}
 	argv := grokArgv(t, &iso)
-	if !strings.Contains(argv, "--sandbox lgb") || !strings.Contains(argv, "--disallowed-tools web_fetch,web_search") || !strings.Contains(argv, "todo_write") {
+	if !strings.Contains(argv, "--sandbox lgb") || !strings.Contains(argv, "--tools run_terminal_command,read_file,search_replace,grep,write") {
 		t.Fatalf("argv %s", argv)
+	}
+	if strings.Contains(argv, "web_fetch") || strings.Contains(argv, "web_search") || strings.Contains(argv, "list_dir") || strings.Contains(argv, "todo_write") || strings.Contains(argv, "x_keyword_search") || strings.Contains(argv, "x_semantic_search") || strings.Contains(argv, "--disallowed-tools") {
+		t.Fatalf("argv %s", argv)
+	}
+	if toolsAt, agentAt := strings.Index(argv, "--tools "), strings.Index(argv, " agent "); toolsAt < 0 || agentAt < 0 || toolsAt > agentAt {
+		t.Fatalf("tools after agent: %s", argv)
 	}
 
 	iso, err = PrepareIsolation(IsolationOptions{Backend: "grok", StateDir: t.TempDir(), Home: home, UserHome: user,
@@ -296,8 +302,11 @@ func TestGrokProfileAndFlags(t *testing.T) {
 		t.Fatalf("net/ssh grant profile:\n%s", b)
 	}
 	argv = grokArgv(t, &iso)
-	if !strings.Contains(argv, "--disallowed-tools") || strings.Contains(argv, "web_fetch") || strings.Contains(argv, "web_search") || !strings.Contains(argv, "todo_write") {
-		t.Fatalf("net grant disallowed list: %s", argv)
+	if !strings.Contains(argv, "--tools run_terminal_command,read_file,search_replace,grep,write,web_fetch,web_search") {
+		t.Fatalf("net grant tools: %s", argv)
+	}
+	if strings.Contains(argv, "list_dir") || strings.Contains(argv, "todo_write") || strings.Contains(argv, "x_keyword_search") || strings.Contains(argv, "x_semantic_search") || strings.Contains(argv, "--disallowed-tools") {
+		t.Fatalf("net grant tools: %s", argv)
 	}
 
 	// home = "user" does not write ~/.grok/sandbox.toml. The custom profile

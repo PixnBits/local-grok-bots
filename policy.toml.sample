@@ -67,6 +67,10 @@ imminent_timer_minutes = 2
 # home = "isolated"
 # claude_home = "auto"   # macOS: user's HOME (Keychain login); Linux: isolated
 # claude_sandbox = "required"  # Claude Bash sandbox on, fail closed; "off" is managed-only
+# trust_system_config = false  # managed only; host CLI config stays untrusted
+# Managed env cannot set GROK_CONFIG, GROK_CONFIG_PATH,
+# GROK_DEFAULT_SELECTED_PERMISSION, or a GROK_* name that selects
+# permission, config, mode, sandbox, hooks, plugins, skills, agents, or home.
 #
 # [cli.lgb]
 # Floor for a repeating timer a bot creates, and how many scheduled turns

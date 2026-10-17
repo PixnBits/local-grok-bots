@@ -64,6 +64,81 @@ func TestIsolationRejectsBadValues(t *testing.T) {
 	}
 }
 
+func TestTrustSystemConfigIsManagedOnly(t *testing.T) {
+	if Defaults().CLITrustSystemConfig {
+		t.Fatal("default trusts host config")
+	}
+	dir := t.TempDir()
+	local := filepath.Join(dir, "policy.toml")
+	if err := os.WriteFile(local, []byte("[cli.isolation]\ntrust_system_config = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load(Options{Path: local})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.CLITrustSystemConfig || !strings.Contains(strings.Join(p.Warnings, "\n"), "trust_system_config") {
+		t.Fatalf("local trust applied: %v %v", p.CLITrustSystemConfig, p.Warnings)
+	}
+	managed := filepath.Join(dir, "managed.json")
+	if err := os.WriteFile(managed, []byte(`{"cli":{"isolation":{"trust_system_config":true}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err = Load(Options{Path: local, ManagedPath: managed})
+	if err != nil || !p.CLITrustSystemConfig {
+		t.Fatalf("managed trust: %v %v", p.CLITrustSystemConfig, err)
+	}
+}
+
+func TestManagedEnvCannotSetGrokConfig(t *testing.T) {
+	dir := t.TempDir()
+	local := filepath.Join(dir, "policy.toml")
+	managed := filepath.Join(dir, "managed.json")
+	if err := os.WriteFile(local, []byte("[backend]\nbackend = \"grok\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"GROK_CONFIG", "GROK_CONFIG_PATH", "GROK_DEFAULT_SELECTED_PERMISSION", "GROK_PERMISSION_MODE", "grok_home"} {
+		body := `{"cli":{"isolation":{"env":{"` + key + `":"x","ANTHROPIC_BASE_URL":"https://gw.example"}}}}`
+		if err := os.WriteFile(managed, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		p, err := Load(Options{Path: local, ManagedPath: managed})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.CLIPermitted || p.CLIEnv != nil || !strings.Contains(strings.Join(p.Warnings, " "), key) && !strings.Contains(strings.Join(p.Warnings, " "), strings.ToUpper(key)) {
+			t.Fatalf("%s permitted %v env %v warnings %v", key, p.CLIPermitted, p.CLIEnv, p.Warnings)
+		}
+	}
+	if err := os.WriteFile(managed, []byte(`{"cli":{"isolation":{"env":{"GROK_DISABLE_AUTOUPDATER":"1","ANTHROPIC_BASE_URL":"https://gw.example"}}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load(Options{Path: local, ManagedPath: managed})
+	if err != nil || !p.CLIPermitted || p.CLIEnv["ANTHROPIC_BASE_URL"] != "https://gw.example" || p.CLIEnv["GROK_DISABLE_AUTOUPDATER"] != "1" {
+		t.Fatalf("allowed env: permitted %v env %v err %v warnings %v", p.CLIPermitted, p.CLIEnv, err, p.Warnings)
+	}
+	if err := os.WriteFile(local, []byte("[cli.isolation]\nenv = { GROK_CONFIG = \"x\" }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err = Load(Options{Path: local})
+	if err != nil || !p.CLIPermitted || p.CLIEnv != nil {
+		t.Fatalf("local env fail-closed: permitted %v env %v err %v", p.CLIPermitted, p.CLIEnv, err)
+	}
+}
+
+func TestBlockedCLIEnv(t *testing.T) {
+	for _, key := range []string{"GROK_CONFIG", "GROK_CONFIG_PATH", "GROK_DEFAULT_SELECTED_PERMISSION", "GROK_SANDBOX", "GROK_HOME"} {
+		if !BlockedCLIEnv(key) {
+			t.Fatalf("allowed %s", key)
+		}
+	}
+	for _, key := range []string{"GROK_DISABLE_AUTOUPDATER", "ANTHROPIC_BASE_URL", "PATH"} {
+		if BlockedCLIEnv(key) {
+			t.Fatalf("blocked %s", key)
+		}
+	}
+}
+
 func TestClaudeHomePerOS(t *testing.T) {
 	d := Defaults()
 	if d.CLIClaudeHome != HomeAuto || !d.ClaudeUsesUserHome("darwin") || d.ClaudeUsesUserHome("linux") {

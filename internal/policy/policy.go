@@ -111,7 +111,12 @@ type Policy struct {
 	LGBMaxSchedSet     bool
 	LGBMaxSchedPerHour int
 	// CLIEnv is added to the scrubbed CLI environment. Only managed policy sets it.
+	// GROK_* names that select permission or config are refused.
 	CLIEnv map[string]string
+	// CLITrustSystemConfig is true only when managed policy sets
+	// cli.isolation.trust_system_config. Default false: a host file the CLI
+	// still reads refuses the turn.
+	CLITrustSystemConfig bool
 	// NetPorts is the egress port list. Nil means 443 and 80. An empty
 	// slice allows no egress port. Local policy can only narrow the list.
 	NetPorts           []int
@@ -577,6 +582,17 @@ func (p *Policy) applyIsolation(iso *cliIsoDoc, trusted bool) error {
 			p.netPortsAskedSet = true
 		}
 	}
+	if iso.TrustSystemConfig != nil {
+		if *iso.TrustSystemConfig {
+			if trusted {
+				p.CLITrustSystemConfig = true
+			} else {
+				p.Warnings = append(p.Warnings, "cli.isolation.trust_system_config is ignored; only managed policy can trust host CLI config")
+			}
+		} else {
+			p.CLITrustSystemConfig = false
+		}
+	}
 	if iso.Env != nil {
 		if !trusted {
 			p.Warnings = append(p.Warnings, "cli.isolation.env is ignored; only managed policy can set CLI environment")
@@ -588,11 +604,36 @@ func (p *Policy) applyIsolation(iso *cliIsoDoc, trusted bool) error {
 			if k == "" || strings.ContainsAny(k, "=\x00") || strings.ContainsRune(v, 0) {
 				return fmt.Errorf("cli.isolation.env has an invalid entry %q", k)
 			}
+			if BlockedCLIEnv(k) {
+				return fmt.Errorf("cli.isolation.env cannot set %s", k)
+			}
 			env[k] = v
 		}
 		p.CLIEnv = env
 	}
 	return nil
+}
+
+// BlockedCLIEnv reports a managed environment name that selects CLI
+// permission or config. GROK_CONFIG and GROK_CONFIG_* are always blocked.
+func BlockedCLIEnv(key string) bool {
+	k := strings.ToUpper(strings.TrimSpace(key))
+	if k == "GROK_CONFIG" || strings.HasPrefix(k, "GROK_CONFIG_") || k == "GROK_DEFAULT_SELECTED_PERMISSION" {
+		return true
+	}
+	if !strings.HasPrefix(k, "GROK_") {
+		return false
+	}
+	for _, frag := range []string{
+		"PERMISSION", "CONFIG", "MODE", "YOLO", "TRUST", "SANDBOX",
+		"HOOK", "PLUGIN", "SKILL", "AGENT", "MANAGED", "ALWAYS",
+		"REQUIREMENT", "APPROVE", "BYPASS", "HOME",
+	} {
+		if strings.Contains(k, frag) {
+			return true
+		}
+	}
+	return false
 }
 
 // DefaultEgressPorts is the built-in CONNECT and forward port list.
@@ -874,14 +915,15 @@ type cliLGBDoc struct {
 }
 
 type cliIsoDoc struct {
-	Overrides     *string            `toml:"overrides" json:"overrides"`
-	Home          *string            `toml:"home" json:"home"`
-	ClaudeHome    *string            `toml:"claude_home" json:"claude_home"`
-	ClaudeSandbox *string            `toml:"claude_sandbox" json:"claude_sandbox"`
-	LGB           *bool              `toml:"lgb" json:"lgb"`
-	LGBManageBots *bool              `toml:"lgb_manage_bots" json:"lgb_manage_bots"`
-	Env           *map[string]string `toml:"env" json:"env"`
-	NetPorts      *[]int             `toml:"net_ports" json:"net_ports"`
+	Overrides         *string            `toml:"overrides" json:"overrides"`
+	Home              *string            `toml:"home" json:"home"`
+	ClaudeHome        *string            `toml:"claude_home" json:"claude_home"`
+	ClaudeSandbox     *string            `toml:"claude_sandbox" json:"claude_sandbox"`
+	LGB               *bool              `toml:"lgb" json:"lgb"`
+	LGBManageBots     *bool              `toml:"lgb_manage_bots" json:"lgb_manage_bots"`
+	Env               *map[string]string `toml:"env" json:"env"`
+	NetPorts          *[]int             `toml:"net_ports" json:"net_ports"`
+	TrustSystemConfig *bool              `toml:"trust_system_config" json:"trust_system_config"`
 }
 
 type cliPermDoc struct {

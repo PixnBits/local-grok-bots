@@ -139,8 +139,12 @@ func (f *acpFix) gateFile() string {
 }
 
 func (f *acpFix) start(prompts bool) {
+	f.startContent("go", prompts)
+}
+
+func (f *acpFix) startContent(content string, prompts bool) {
 	f.t.Helper()
-	res, b := do(f.t, "POST", f.url+"/api/bots/"+f.bot.ID+"/thread/messages", map[string]any{"content": "go"}, "")
+	res, b := do(f.t, "POST", f.url+"/api/bots/"+f.bot.ID+"/thread/messages", map[string]any{"content": content}, "")
 	if res.StatusCode != 200 {
 		f.t.Fatalf("post %d %s", res.StatusCode, b)
 	}
@@ -504,11 +508,14 @@ func TestACPUnknownToolReachesBroker(t *testing.T) {
 		t.Fatalf("run %s %s", got.LastRunStatus, got.LastRunError)
 	}
 	raw := f.auditText()
-	if !strings.Contains(raw, `"tool":"custom_widget"`) || !strings.Contains(raw, `"source":"no_ui"`) || !strings.Contains(raw, `"transport":"acp"`) {
+	if !strings.Contains(raw, `"tool":"unknown"`) || !strings.Contains(raw, `"classification":"unknown"`) || !strings.Contains(raw, `"source":"no_ui"`) || !strings.Contains(raw, `"transport":"acp"`) {
 		t.Fatalf("audit %s", raw)
 	}
+	if strings.Contains(raw, "custom_widget") {
+		t.Fatalf("raw name kept %s", raw)
+	}
 	recs := f.permRecs()
-	if len(recs) != 1 || recs[0].Name != "custom_widget" {
+	if len(recs) != 1 || recs[0].Name != "unknown" || !strings.Contains(recs[0].Result, `"classification":"unknown"`) {
 		t.Fatalf("records %+v", recs)
 	}
 	assertWireOnce(t, f.stdinText(), "reject-once")

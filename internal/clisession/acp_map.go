@@ -8,12 +8,13 @@ import (
 // acpOption is one entry on a session/request_permission options list.
 type acpOption struct {
 	OptionID string
+	Name     string
 	Kind     string
 }
 
 // mapACPTool turns one ACP toolCall object into the tool name and arguments
-// the permission classifier already understands. An unknown tool keeps its
-// raw name so the broker still sees it.
+// the permission classifier already understands. An unknown tool is reported
+// as "unknown" so the audit does not keep the raw name.
 func mapACPTool(call map[string]any) (tool string, args map[string]any, useID string, err error) {
 	if call == nil {
 		return "", nil, "", fmt.Errorf("malformed permission request")
@@ -87,19 +88,10 @@ func mapACPTool(call map[string]any) (tool string, args map[string]any, useID st
 	case name == "web_search" || name == "websearch" || variant == "websearch":
 		tool = "WebSearch"
 	default:
-		tool = strings.TrimSpace(metaName)
-		if tool == "" {
-			tool = strOf(raw, "variant")
-		}
-		if tool == "" {
-			tool = strOf(call, "title")
-		}
-		if tool == "" {
-			tool = strOf(call, "kind")
-		}
-		if strings.TrimSpace(tool) == "" {
+		if strings.TrimSpace(metaName) == "" && strOf(raw, "variant") == "" && strOf(call, "title") == "" && strOf(call, "kind") == "" {
 			return "", nil, useID, fmt.Errorf("malformed permission request")
 		}
+		tool = "unknown"
 	}
 	// argText prefers command over file_path. File tools must not keep a
 	// command key or a Read of a path is classified as that command.
@@ -176,6 +168,10 @@ func selectACPOption(opts []acpOption, allow bool) (string, error) {
 func allowAlwaysOption(o acpOption) bool {
 	k := strings.ToLower(strings.TrimSpace(o.Kind))
 	id := strings.ToLower(strings.TrimSpace(o.OptionID))
+	name := strings.ToLower(strings.TrimSpace(o.Name))
+	if strings.Contains(id, "always") || strings.Contains(name, "always") || strings.Contains(k, "always") {
+		return true
+	}
 	return k == "allow_always" || id == "always-allow" || id == "allow_always"
 }
 
@@ -190,7 +186,11 @@ func acpOptions(v any) []acpOption {
 		if m == nil {
 			continue
 		}
-		out = append(out, acpOption{OptionID: strOf(m, "optionId", "option_id"), Kind: strOf(m, "kind")})
+		out = append(out, acpOption{
+			OptionID: strOf(m, "optionId", "option_id"),
+			Name:     strOf(m, "name", "title"),
+			Kind:     strOf(m, "kind"),
+		})
 	}
 	return out
 }

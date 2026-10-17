@@ -40,6 +40,12 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
+	if strings.EqualFold(spec.Backend, "grok") && SlashPrompt(spec.Prompt) {
+		if spec.ACP != nil && spec.ACP.Fail != nil {
+			spec.ACP.Fail("acp", map[string]any{}, ErrSlash.Error())
+		}
+		return Result{}, ErrSlash
+	}
 	argv, err := Args(spec)
 	if err != nil {
 		return Result{}, err

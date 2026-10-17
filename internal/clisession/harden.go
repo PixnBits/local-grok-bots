@@ -647,40 +647,23 @@ func grokSandboxTOML(o IsolationOptions) string {
 	return b.String()
 }
 
-// grokUngatedTools are built-ins that do not honor an ask rule. They are
-// removed on every turn. lgb and coi are shell commands, not these tools,
-// and stay on their --allow lines. web_fetch and web_search are added only
-// when the bot has no net grant; with net, the ask list still gates them.
-var grokUngatedTools = []string{
-	"todo_write",
-	"kill_command_or_subagent",
-	"get_command_or_subagent_output",
-	"spawn_subagent",
-	"scheduler_create",
-	"scheduler_delete",
-	"scheduler_list",
-	"monitor",
-	"workflow",
-	"enter_plan_mode",
-	"exit_plan_mode",
-	"ask_user_question",
-	"send_feedback",
-	"image_gen",
-	"image_edit",
-	"image_to_video",
-	"reference_to_video",
-	"search_tool",
-	"use_tool",
-}
-
-// grokDisallowed are built-in Grok tools removed so they cannot run without
-// a permission request the host can see.
-func grokDisallowed(g Grants) []string {
-	var out []string
-	if !g.Net {
+// grokAllowedTools is the --tools allowlist. Each name is one an ask rule
+// can force to prompt. lgb and coi are shell commands, so they need
+// run_terminal_command. list_dir is omitted until an ask rule is confirmed
+// to make it ask. x_keyword_search and x_semantic_search stay off.
+// Web tools are added only with a net grant.
+func grokAllowedTools(g Grants) []string {
+	out := []string{
+		"run_terminal_command",
+		"read_file",
+		"search_replace",
+		"grep",
+		"write",
+	}
+	if g.Net {
 		out = append(out, "web_fetch", "web_search")
 	}
-	return append(out, grokUngatedTools...)
+	return out
 }
 
 // grokPermissionTOML forces default mode and a catch-all ask list.

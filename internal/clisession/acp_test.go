@@ -39,7 +39,7 @@ id=$(id_of "$line")
 reply "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1}}"
 IFS= read -r line || exit 1
 id=$(id_of "$line")
-reply "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"s\"}}"
+reply "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"s\",\"modes\":{\"currentModeId\":\"default\"}}}"
 IFS= read -r line || exit 1
 id=$(id_of "$line")
 reply "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
@@ -125,7 +125,7 @@ func TestMapACPTool(t *testing.T) {
 		"title": "Custom",
 		"_meta": map[string]any{"x.ai/tool": map[string]any{"name": "custom_widget"}},
 	})
-	if err != nil || unknown != "custom_widget" {
+	if err != nil || unknown != "unknown" {
 		t.Fatalf("unknown %s %v", unknown, err)
 	}
 	readCmd, args, _, err := mapACPTool(map[string]any{
@@ -135,7 +135,7 @@ func TestMapACPTool(t *testing.T) {
 		t.Fatalf("read dropped command %s %#v %v", readCmd, args, err)
 	}
 	other, _, _, err := mapACPTool(map[string]any{"kind": "other"})
-	if err != nil || other != "other" {
+	if err != nil || other != "unknown" {
 		t.Fatalf("kind fallback %s %v", other, err)
 	}
 	if _, _, _, err := mapACPTool(map[string]any{}); err == nil {
@@ -171,6 +171,17 @@ func TestSelectACPOptionNeverAllowAlways(t *testing.T) {
 	got, err = selectACPOption(byID, true)
 	if err != nil || got != "allow-once" {
 		t.Fatalf("id match %q %v", got, err)
+	}
+	named := []acpOption{
+		{OptionID: "allow-once", Name: "Always", Kind: "allow_once"},
+		{OptionID: "reject-once", Name: "No", Kind: "reject_once"},
+	}
+	if _, err := selectACPOption(named, true); err == nil {
+		t.Fatal("name containing always was selected")
+	}
+	got, err = selectACPOption(named, false)
+	if err != nil || got != "reject-once" {
+		t.Fatalf("reject name %q %v", got, err)
 	}
 }
 
@@ -238,7 +249,7 @@ id=$(id_of "$line")
 reply "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1}}"
 IFS= read -r line || exit 1
 id=$(id_of "$line")
-reply "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"s\"}}"
+reply "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"s\",\"modes\":{\"currentModeId\":\"default\"}}}"
 IFS= read -r line || exit 1
 prompt=$(id_of "$line")
 reply '{"jsonrpc":"2.0","id":9,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"t","kind":"execute","rawInput":{"variant":"Bash","command":"cat -- a.txt"},"_meta":{"x.ai/tool":{"name":"run_terminal_command","input":{"command":"cat -- a.txt"}}}},"options":[{"optionId":"always-allow","kind":"allow_always"},{"optionId":"allow-once","kind":"allow_once"},{"optionId":"reject-once","kind":"reject_once"}]}}'
@@ -295,7 +306,7 @@ id=$(id_of "$line")
 reply "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1}}"
 IFS= read -r line || exit 1
 id=$(id_of "$line")
-reply "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+reply "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"modes\":{\"currentModeId\":\"default\"}}}"
 IFS= read -r line || exit 1
 id=$(id_of "$line")
 reply "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"

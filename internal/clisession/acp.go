@@ -35,6 +35,9 @@ type ACPHooks struct {
 	Decide func(ctx context.Context, ask ACPAsk) (ACPDecision, error)
 	// Fail records a host failure. The turn also returns an error.
 	Fail func(tool string, args map[string]any, reason string)
+	// Note records a CLI event that did not ask the broker.
+	// kind is "unknown" or "cli_deny". Nil skips the record.
+	Note func(kind, tool string, args map[string]any, reason string)
 }
 
 type rpcRequest struct {
@@ -76,6 +79,7 @@ type acpSession struct {
 	res       Result
 	tools     map[string]string
 	results   map[string]bool
+	asked     map[string]bool
 	exited    chan struct{}
 }
 
@@ -94,6 +98,7 @@ func runACPSession(ctx context.Context, cmd *exec.Cmd, stdout io.Reader, stdin i
 		pending: map[string]chan acpReply{},
 		tools:   map[string]string{},
 		results: map[string]bool{},
+		asked:   map[string]bool{},
 		exited:  make(chan struct{}),
 		done:    make(chan struct{}),
 	}
@@ -129,6 +134,11 @@ func runACPSession(ctx context.Context, cmd *exec.Cmd, stdout io.Reader, stdin i
 	}
 	if sid == "" {
 		s.hostFail(method+" returned no session", "", nil)
+		s.stop()
+		return s.snapshot(), s.fatalErr()
+	}
+	if reason := acpResultModeProblem(result); reason != "" {
+		s.hostFail(reason, "acp", nil)
 		s.stop()
 		return s.snapshot(), s.fatalErr()
 	}
@@ -299,6 +309,9 @@ func (s *acpSession) dispatch(line string, st *streamAcc) error {
 	switch {
 	case method == "session/update":
 		s.onUpdate(raw, st)
+		if s.failed() {
+			return s.fatalErr()
+		}
 		return nil
 	case method == "session/request_permission":
 		if !hasID {
@@ -338,10 +351,28 @@ func (s *acpSession) dispatch(line string, st *streamAcc) error {
 
 func (s *acpSession) onUpdate(raw map[string]any, st *streamAcc) {
 	params := asMap(raw["params"])
-	if params == nil {
+	reason := ""
+	if params != nil {
+		reason = metaModeProblem(asMap(params["_meta"]))
+	}
+	if reason == "" {
+		reason = metaModeProblem(asMap(raw["_meta"]))
+	}
+	var upd map[string]any
+	if params != nil {
+		upd = asMap(params["update"])
+	}
+	if reason == "" {
+		reason = acpUpdateModeProblem(upd)
+	}
+	if reason != "" {
+		su := ""
+		if upd != nil {
+			su = strOf(upd, "sessionUpdate")
+		}
+		s.hostFail(reason, "acp", map[string]any{"sessionUpdate": su})
 		return
 	}
-	upd := asMap(params["update"])
 	if upd == nil {
 		return
 	}
@@ -384,7 +415,11 @@ func (s *acpSession) emitTool(st *streamAcc, upd map[string]any, sid string) {
 	if id != "" {
 		s.tools[id] = name
 	}
+	note := s.hooks.Note
 	s.mu.Unlock()
+	if name == "unknown" && note != nil {
+		note("unknown", "unknown", args, "unknown tool")
+	}
 	s.feed(st, Event{Kind: "tool", ToolName: name, ToolArgs: args, SessionID: sid})
 }
 
@@ -410,7 +445,21 @@ func (s *acpSession) emitToolResult(st *streamAcc, upd map[string]any, sid strin
 	if name == "" {
 		name = "tool"
 	}
-	s.feed(st, Event{Kind: "tool_result", ToolName: name, Text: outputText(upd), SessionID: sid})
+	text := outputText(upd)
+	if status == "failed" && denyText(text) {
+		s.mu.Lock()
+		asked := id != "" && s.asked[id]
+		note := s.hooks.Note
+		s.mu.Unlock()
+		if !asked && note != nil {
+			toolName := name
+			if toolName == "tool" {
+				toolName = "unknown"
+			}
+			note("cli_deny", toolName, map[string]any{"status": status}, text)
+		}
+	}
+	s.feed(st, Event{Kind: "tool_result", ToolName: name, Text: text, SessionID: sid})
 }
 
 func (s *acpSession) deliver(id any, raw map[string]any, st *streamAcc) {
@@ -460,6 +509,17 @@ func (s *acpSession) onPermission(ctx context.Context, raw map[string]any) {
 	if call == nil {
 		s.hostFail("malformed permission request", "", nil)
 		return
+	}
+	reqSid := strOf(params, "sessionId", "session_id")
+	cur := s.currentSession()
+	if reqSid == "" || cur == "" || reqSid != cur {
+		s.hostFail("permission request session does not match", "acp", nil)
+		return
+	}
+	if id := strOf(call, "toolCallId", "tool_call_id"); id != "" {
+		s.mu.Lock()
+		s.asked[id] = true
+		s.mu.Unlock()
 	}
 	tool, args, useID, err := mapACPTool(call)
 	if err != nil {

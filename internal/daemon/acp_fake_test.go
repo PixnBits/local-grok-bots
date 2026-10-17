@@ -37,7 +37,12 @@ func acpFakeMain() {
 		os.Exit(1)
 	}
 	const sid = "acp-session"
-	writeACPResult(sc.Text(), map[string]any{"sessionId": sid})
+	writeACPResult(sc.Text(), acpSessionResult(mode, sid))
+	if mode == "bad-mode" {
+		for sc.Scan() {
+		}
+		os.Exit(0)
+	}
 	if !readACP(sc) {
 		os.Exit(1)
 	}
@@ -70,6 +75,83 @@ func acpFakeMain() {
 		writeACPPerm(sid, 8, true)
 		readACP(sc)
 		os.Exit(0)
+	case "mode-update":
+		writeACPUpdate(sid, map[string]any{
+			"sessionUpdate": "current_mode_update",
+			"currentModeId": "other",
+		})
+		drainACP(sc)
+	case "config-update":
+		writeACPUpdate(sid, map[string]any{
+			"sessionUpdate": "config_option_update",
+			"configOptions": []any{map[string]any{"id": "yolo", "value": true}},
+		})
+		drainACP(sc)
+	case "notice":
+		writeACP(map[string]any{
+			"jsonrpc": "2.0",
+			"method":  "session/update",
+			"params": map[string]any{
+				"sessionId": sid,
+				"_meta": map[string]any{
+					"_x.ai/session_notification": map[string]any{"yolo": true},
+				},
+				"update": map[string]any{
+					"sessionUpdate": "agent_message_chunk",
+					"content":       map[string]any{"type": "text", "text": "hi"},
+				},
+			},
+		})
+		drainACP(sc)
+	case "changed":
+		writeACPUpdate(sid, map[string]any{
+			"sessionUpdate": "_x.ai/sessions/changed",
+			"mode":          "other",
+		})
+		drainACP(sc)
+	case "other-session":
+		writeACPPerm("other", 8, false)
+		drainACP(sc)
+	case "broad-name":
+		writeBroadName(sid)
+		drainACP(sc)
+	case "cli-deny":
+		writeACPUpdate(sid, map[string]any{
+			"sessionUpdate": "tool_call",
+			"toolCallId":    "d1",
+			"kind":          "execute",
+			"title":         "tool",
+			"rawInput":      map[string]any{"variant": "Bash", "command": "rm -- x"},
+			"_meta": map[string]any{"x.ai/tool": map[string]any{
+				"name":  "run_terminal_command",
+				"input": map[string]any{"command": "rm -- x"},
+			}},
+		})
+		writeACPUpdate(sid, map[string]any{
+			"sessionUpdate": "tool_call_update",
+			"toolCallId":    "d1",
+			"status":        "failed",
+			"content":       map[string]any{"type": "text", "text": "denied by a rule"},
+		})
+		writeACPUpdate(sid, map[string]any{
+			"sessionUpdate": "agent_message_chunk",
+			"content":       map[string]any{"type": "text", "text": "stopped"},
+		})
+		writeACPResult(prompt, map[string]any{"stopReason": "end_turn"})
+		os.Exit(0)
+	case "quiet-unknown":
+		writeACPUpdate(sid, map[string]any{
+			"sessionUpdate": "tool_call",
+			"toolCallId":    "u1",
+			"title":         "Custom",
+			"_meta":         map[string]any{"x.ai/tool": map[string]any{"name": "custom_widget"}},
+		})
+		writeACPUpdate(sid, map[string]any{
+			"sessionUpdate": "agent_message_chunk",
+			"content":       map[string]any{"type": "text", "text": "hello"},
+		})
+		writeACPResult(prompt, map[string]any{"stopReason": "end_turn"})
+		os.Exit(0)
 	case "ask":
 		waitACPGate()
 		n := acpCount()
@@ -97,6 +179,17 @@ func acpFakeMain() {
 		writeACPResult(prompt, map[string]any{"stopReason": "end_turn"})
 		os.Exit(0)
 	default:
+		writeACPUpdate(sid, map[string]any{
+			"sessionUpdate": "current_mode_update",
+			"currentModeId": "default",
+		})
+		writeACPUpdate(sid, map[string]any{
+			"sessionUpdate": "config_option_update",
+			"configOptions": []any{
+				map[string]any{"id": "yolo", "value": false},
+				map[string]any{"id": "model", "value": "m"},
+			},
+		})
 		writeACP(map[string]any{
 			"jsonrpc": "2.0",
 			"method":  "session/update",
@@ -119,6 +212,55 @@ func readACP(sc *bufio.Scanner) bool {
 	}
 	logACPLine(sc.Text())
 	return true
+}
+
+func acpSessionResult(mode, sid string) map[string]any {
+	id := "default"
+	if mode == "bad-mode" {
+		id = "other"
+	}
+	return map[string]any{
+		"sessionId": sid,
+		"modes":     map[string]any{"currentModeId": id},
+	}
+}
+
+func writeACPUpdate(sid string, update map[string]any) {
+	writeACP(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "session/update",
+		"params":  map[string]any{"sessionId": sid, "update": update},
+	})
+}
+
+func drainACP(sc *bufio.Scanner) {
+	for sc.Scan() {
+	}
+	os.Exit(0)
+}
+
+func writeBroadName(sid string) {
+	writeACP(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      8,
+		"method":  "session/request_permission",
+		"params": map[string]any{
+			"sessionId": sid,
+			"toolCall": map[string]any{
+				"toolCallId": "t8",
+				"kind":       "execute",
+				"rawInput":   map[string]any{"variant": "Bash", "command": "git status"},
+				"_meta": map[string]any{"x.ai/tool": map[string]any{
+					"name":  "run_terminal_command",
+					"input": map[string]any{"command": "git status"},
+				}},
+			},
+			"options": []any{
+				map[string]any{"optionId": "allow-once", "kind": "allow_once", "name": "Always"},
+				map[string]any{"optionId": "reject-once", "kind": "reject_once", "name": "No"},
+			},
+		},
+	})
 }
 
 func writeACPResult(req string, result any) {

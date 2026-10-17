@@ -59,12 +59,12 @@ func TestGrokACPArgvDoesNotApproveItself(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(plain, "\n")
-	for _, want := range []string{"-m\nm", "agent\n--no-leader\nstdio", "--sandbox\n" + GrokProfile, "--cwd\n/w", "--no-auto-update", "--allow\nBash(lgb)", "--allow\nBash(lgb *)"} {
+	for _, want := range []string{"-m\nm", "agent\n--no-leader\nstdio", "--sandbox\n" + GrokProfile, "--cwd\n/w", "--no-auto-update", "--allow\nBash(lgb)", "--allow\nBash(lgb *)", "--tools\nrun_terminal_command,read_file,search_replace,grep,write"} {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("missing %q in %v", want, plain)
 		}
 	}
-	for _, bad := range []string{"--always-approve", "--permission-mode", "--output-format", "streaming-json", "--session-id", "--resume", "\n-p\n", "\nhi\n", "Bash(git status*)", "yoloMode"} {
+	for _, bad := range []string{"--always-approve", "--permission-mode", "--output-format", "streaming-json", "--session-id", "--resume", "\n-p\n", "\nhi\n", "Bash(git status*)", "yoloMode", "list_dir", "web_fetch", "x_keyword_search", "--disallowed-tools"} {
 		if strings.Contains(joined, bad) {
 			t.Fatalf("argv has %q: %v", bad, plain)
 		}
@@ -206,12 +206,28 @@ func TestClaudeStreamControlArgv(t *testing.T) {
 }
 
 func TestGrokAgentGlobalFlagsPrecedeSubcommand(t *testing.T) {
-	args, err := grokFlags(Spec{Workspace: "/ws", Isolate: &Isolation{GrokSandbox: GrokProfile, GrokDisallow: []string{"todo_write"}}, DenyRules: []string{"Bash(x *)"}})
+	args, err := grokFlags(Spec{Workspace: "/ws", Isolate: &Isolation{GrokSandbox: GrokProfile, GrokTools: []string{"read_file", "grep"}}, DenyRules: []string{"Bash(x *)"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	n := len(args)
 	if n < 3 || args[n-3] != "agent" || args[n-2] != "--no-leader" || args[n-1] != "stdio" {
 		t.Fatalf("agent stdio must be last, got %q", args)
+	}
+	toolsAt := -1
+	agentAt := -1
+	for i, a := range args {
+		if a == "--tools" {
+			toolsAt = i
+		}
+		if a == "agent" {
+			agentAt = i
+		}
+	}
+	if toolsAt < 0 || agentAt < 0 || toolsAt > agentAt || args[toolsAt+1] != "read_file,grep" {
+		t.Fatalf("tools flag %q", args)
+	}
+	if strings.Contains(strings.Join(args, " "), "todo_write") || strings.Contains(strings.Join(args, " "), "--disallowed-tools") {
+		t.Fatalf("old disallow list returned %q", args)
 	}
 }

@@ -574,7 +574,7 @@ if [ -n "$is_agent" ]; then
   IFS= read -r line || exit 1
   id=$(acp_id "$line")
   sid=stub-session
-  acp_send "{\"jsonrpc\":\"2.0\",\"id\":${id:-0},\"result\":{\"sessionId\":\"$sid\"}}"
+  acp_send "{\"jsonrpc\":\"2.0\",\"id\":${id:-0},\"result\":{\"sessionId\":\"$sid\",\"modes\":{\"currentModeId\":\"default\"}}}"
   IFS= read -r line || exit 1
   id=$(acp_id "$line")
   mode=${LGB_CLI_MODE:-ok}

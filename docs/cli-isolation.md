@@ -31,7 +31,14 @@ lgb_manage_bots = false
 # Managed policy can set a different list. Local policy still only narrows that.
 # net_ports = [443]
 # Added to the scrubbed environment. Only managed policy can set this.
+# A GROK_* name that selects permission, config, mode, sandbox, hooks,
+# plugins, skills, agents, or home is refused, and the managed file
+# fail-closes. GROK_CONFIG, GROK_CONFIG_*, and
+# GROK_DEFAULT_SELECTED_PERMISSION are in that set.
 # env = { ANTHROPIC_BASE_URL = "https://gateway.corp.example" }
+# Host files the CLI can still read refuse the turn unless managed policy
+# sets this. Local policy cannot set it. Default false.
+# trust_system_config = false
 ```
 
 ## Timeouts
@@ -98,7 +105,12 @@ rest of that inherited list. Its launch environment is `PATH`, `LANG`,
 `LGB_SPOOL` and `LGB_TOKEN` for that run. Every other `ANTHROPIC_*`,
 `CLAUDE_*`, and `GROK_*` variable is dropped, including
 `ANTHROPIC_BASE_URL`, `CLAUDE_CONFIG_DIR`, `GROK_CONFIG`, and
-`GROK_SANDBOX`. Managed `cli.isolation.env` is applied last.
+`GROK_SANDBOX`. Managed `cli.isolation.env` is applied after that scrub.
+It cannot set `GROK_CONFIG`, `GROK_CONFIG_PATH`,
+`GROK_DEFAULT_SELECTED_PERMISSION`, or any other `GROK_*` name that
+selects permission, config, mode, sandbox, hooks, plugins, skills, agents,
+or home. One of those keys makes the managed file unparseable and CLI
+backends stay off.
 
 With `home = "isolated"`, `HOME` is `DATA_DIR/cli/<bot>/home`. For Claude,
 the only file shared with the user's home is a symlink to
@@ -187,10 +199,24 @@ Grok has no flag to skip setting sources. The daemon:
   dropped when the turn ends
   ([Grok CLI login live check](cred-hardlink-check.md));
 - sets every `GROK_CLAUDE_*_ENABLED` and `GROK_CURSOR_*_ENABLED` to `false`;
-- drops `GROK_CONFIG`/`GROK_CONFIG_PATH`.
+- drops `GROK_CONFIG`/`GROK_CONFIG_PATH`, and refuses a managed env entry
+  that would put them back;
+- before the process starts, checks `GROK_HOME` for `config.toml`,
+  `requirements.toml`, `trusted_folders.toml`, `managed_config.toml`,
+  `hooks-paths`, and the `hooks`, `plugins`, `skills`, and `agents`
+  directories. A missing name is created with the daemon's known bytes
+  (the permission file, or a one-line marker, or a directory that holds
+  only that marker). A name whose bytes differ, or a symlink, refuses the
+  turn and is left in place. The same names are then bind-mounted
+  read-only over the writable `GROK_HOME`, so the process cannot replace
+  them. The rest of `GROK_HOME`, including sessions, stays writable.
 
-`/etc/grok/requirements.toml`, `/etc/grok/managed_config.toml`, and the synced
-managed config still apply.
+`/etc/grok/requirements.toml` and `/etc/claude-code/managed-settings.json`
+refuse the turn when they are present, for both backends, unless managed
+policy sets `trust_system_config`. The default is untrusted. The read-only
+`/etc` bind does not hide them. A refusal is audited as
+`cli_untrusted_config` and as a host permission denial. `/etc/grok/managed_config.toml`
+is not part of that check.
 
 ## Sandbox and tools
 
@@ -299,11 +325,15 @@ restrict_network = true      # false with a net grant
 deny = ["/home/u/.ssh", ...]  # existing credential paths, admin-token, state.db*, policy.toml, DATA_DIR/cli
 ```
 
-and passes `--sandbox lgb` plus `--disallowed-tools`. Without a net grant
-that list starts with `web_fetch,web_search`. It always continues with the
-built-ins that cannot be forced to ask (`todo_write`, subagent and scheduler
-tools, `monitor`, `workflow`, plan mode, `ask_user_question`, `send_feedback`,
-image tools, `search_tool`, `use_tool`). The same directory gets `config.toml`:
+and passes `--sandbox lgb` plus `--tools`, a global flag before `agent`.
+The list is the tools an ask rule can force to prompt:
+`run_terminal_command`, `read_file`, `search_replace`, `grep`, and `write`.
+`web_fetch` and `web_search` are added only with a net grant.
+`list_dir`, `x_keyword_search`, and `x_semantic_search` stay off.
+Everything else stays off because it is not on the list (`todo_write`,
+subagent and scheduler tools, `monitor`, `workflow`, plan mode,
+`ask_user_question`, `send_feedback`, image tools, `search_tool`,
+`use_tool`). The same directory gets `config.toml`:
 `permission_mode = "default"` and a catch-all ask list, so read-only tools
 send `session/request_permission` instead of running on their own.
 
@@ -528,48 +558,68 @@ same allow-once / deny / allow-session card. The host answers `allow-once` or
 
 ### Grok permission host (CISO)
 
-The Linux bubblewrap jail is unchanged. The same mounts, unshare flags
+The Linux bubblewrap jail keeps the same unshare flags
 (`user`, `pid`, `uts`, `ipc`, `net`), `--die-with-parent`, `--new-session`,
 `--clearenv`, private `/proc`, fresh `/tmp`, workspace bind, read-only binary,
-`HOME` and `GROK_HOME` binds, environment scrub, and proxy socket binds still
-apply. Nested `--sandbox` is still stripped inside the jail. The credential
+`HOME` and `GROK_HOME` binds, environment scrub, and proxy socket binds.
+Nested `--sandbox` is still stripped inside the jail. The credential
 forwarder still passes the child's stdin through, which is how ACP is written.
-No new bind was added for the permission host.
+After the writable `GROK_HOME` bind, the sealed names are `--ro-bind`ed
+onto themselves.
 
 What changed around that jail:
 
-- Each turn writes `GROK_HOME/config.toml` with `permission_mode = "default"`
+- Each turn checks the sealed names under `GROK_HOME` and writes a missing
+  one with the no-follow helpers. `config.toml` is `permission_mode = "default"`
   and a catch-all ask list (Bash, Read, Grep, Glob, Edit, Write, WebFetch,
-  WebSearch, MCPTool). The file is the bot's `GROK_HOME`, created with the
-  same no-follow write as `sandbox.toml`. The user's `~/.grok` is not written.
-- Argv is `grok agent --no-leader stdio`, plus `--cwd`, `--sandbox lgb`
-  (omitted inside the jail, as before), `--no-auto-update`, and
-  `--disallowed-tools` as above. There is no `--always-approve`, no
-  `--permission-mode`, no `-p`, and no user rule on `--allow` or `--deny`.
+  WebSearch, MCPTool). The other sealed files and directory markers are a
+  one-line comment. A different body refuses the turn and is not overwritten.
+  The user's `~/.grok` is not written. `sandbox.toml` and `auth.json` are
+  still written as before and are not in the read-only set.
+- Argv is `grok` with global flags, then `agent --no-leader stdio`. The
+  global flags include `--cwd`, `--sandbox lgb` (omitted inside the jail, as
+  before), `--no-auto-update`, and `--tools`. There is no `--always-approve`,
+  no `--permission-mode`, no `-p`, no `--disallowed-tools`, and no user rule
+  on `--allow` or `--deny`.
 - Managed deny rules remain `--deny`. The `lgb` and `coi` spool allows remain
   `--allow`. Other managed allows are broker decisions after Grok asks. They
   are not argv allows.
 - `session/new` carries only `cwd` and an empty `mcpServers`. A later turn
-  uses `session/load`. Neither sets `yoloMode` or `autoMode`.
-- Allow is answered `allow-once`. Deny is `reject-once`. `allow_always` is
-  never selected. A session grant stays in the broker, keyed by the session
-  id Grok returned, which the next turn loads.
+  uses `session/load`. Neither sets `yoloMode` or `autoMode`. The result's
+  `modes.currentModeId` must be `default` before the prompt is sent. A later
+  `current_mode_update`, `config_option_update`, or `_x.ai/sessions/changed`
+  that selects another mode, or a bypass flag, fails the turn.
+- A user message that is a slash command after trimming is refused before
+  the process starts.
+- Allow is answered `allow-once`. Deny is `reject-once`. An option whose id,
+  name, or kind contains `always` is never selected. The permission request's
+  session id must be the current session. A session grant stays in the
+  broker, keyed by the session id Grok returned, which the next turn loads.
 - Host failure (exit before a result, malformed request, broker error, missing
-  allow-once or reject-once option, protocol timeout) fails the turn and
-  writes an audit row with source `host`.
+  allow-once or reject-once option, a mode that is not default, a slash
+  command, a session id that does not match, protocol timeout) fails the
+  turn and writes an audit row with source `host`.
+- An unknown tool is audited as tool `unknown` and classification `unknown`.
+  A failed tool update whose text says the call was denied, and which never
+  asked the host, is audited with source `cli_deny`. Empty failure text is
+  not. The turn still records the tool result.
 
-Residuals, unchanged by this host:
+Residuals:
 
-- A root-owned `/etc/grok/requirements.toml` that forces always-approve can
-  still short-circuit asks. This daemon does not write `requirements.toml`
-  and does not pass `--always-approve`.
-- If Grok enforces `--deny` before it asks, that call never reaches the
-  broker, so the broker's audit row is absent. The tool does not run. The
-  parity tests use a fake that always asks, so they observe the broker.
+- `/etc/grok/managed_config.toml` is not in the host-file check. A profile
+  pinned in `requirements.toml` still outranks `--sandbox` when managed
+  policy has trusted that file.
+- `cli_deny` matches the words denied, not allowed, disallowed, and not
+  permitted. A shell error that uses the same words can be recorded. The
+  call is still not allowed by that record.
+- `sandbox.toml` and `auth.json` stay writable inside `GROK_HOME`. They are
+  outside the sealed set.
+- `hooks-paths` is sealed as a file. A directory of that name is refused.
 - A path or symlink can change between `ClassifyCall` and the tool. The jail
   and the sandbox deny list remain the backstop.
-- `list_dir` is classified as Glob so a Read or Glob ask rule can force a
-  prompt. The tool itself is still Grok's `list_dir`.
+- `list_dir` is not on `--tools`. If a permission request for it still
+  arrives, it is classified as Glob. `x_keyword_search` and
+  `x_semantic_search` stay off even with a net grant.
 - Isolated `GROK_HOME` and no `--trust` still mean a project `.grok/config.toml`
   is not loaded. The ask rules in the per-bot `GROK_HOME` are what make Grok
   request permission. A managed allow does not skip that ask.

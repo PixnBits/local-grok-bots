@@ -125,8 +125,12 @@ func grokFlags(spec Spec) ([]string, error) {
 		"--cwd", spec.Workspace,
 		"--no-auto-update",
 	)
-	if spec.Isolate != nil && len(spec.Isolate.GrokDisallow) > 0 {
-		args = append(args, "--disallowed-tools", strings.Join(spec.Isolate.GrokDisallow, ","))
+	if spec.Isolate != nil {
+		tools := spec.Isolate.GrokTools
+		if len(tools) == 0 {
+			tools = grokAllowedTools(Grants{})
+		}
+		args = append(args, "--tools", strings.Join(tools, ","))
 	}
 	for _, rule := range spec.AllowRules {
 		if grokSpoolRule(rule) {

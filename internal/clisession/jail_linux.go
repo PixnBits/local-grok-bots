@@ -87,6 +87,13 @@ func grokBwrapArgs(bin string, args []string, spec Spec) ([]string, error) {
 		out = append(out, "--bind", dir, dir)
 		seen[dir] = true
 	}
+	// Read-only overlays sit on top of the writable home bind. A later
+	// mount must not cover them.
+	sealed, err := grokSealBinds(envVal(env, "GROK_HOME"))
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, sealed...)
 	for _, e := range env {
 		k, v, ok := strings.Cut(e, "=")
 		if !ok || !hostJailLogKey(k) {

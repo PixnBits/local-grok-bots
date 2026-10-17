@@ -58,6 +58,9 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	}
 	prompt, err := a.cliPrompt(bot, fresh, inputs)
 	if err != nil {
+		if errors.Is(err, clisession.ErrSlash) {
+			a.recordACPHostFail(bot.ID, runID, "acp", nil, err.Error())
+		}
 		if fresh {
 			_ = a.st.SetBotSession(bot.ID, "")
 		}
@@ -155,6 +158,9 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 			},
 			Fail: func(tool string, args map[string]any, reason string) {
 				a.recordACPHostFail(botID, runID, tool, args, reason)
+			},
+			Note: func(kind, tool string, args map[string]any, reason string) {
+				a.recordACPNote(botID, runID, kind, tool, args, reason)
 			},
 		}
 	case !strings.EqualFold(backend, "claude"):
@@ -299,6 +305,10 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	case errors.Is(err, clisession.ErrTruncated) || res.Interrupted:
 		a.finishCLIInterrupted(bot.ID, runID, text)
 	case err != nil:
+		var untrusted *clisession.UntrustedConfigError
+		if errors.As(err, &untrusted) {
+			a.auditUntrustedConfig(bot.ID, runID, backend, "grok_home", untrusted.Names)
+		}
 		if fresh && strings.TrimSpace(res.SessionID) == "" {
 			_ = a.st.SetBotSession(bot.ID, "")
 		}
@@ -396,6 +406,13 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 	if a.botDeleted(bot.ID) {
 		return nil, fmt.Errorf("bot was deleted")
 	}
+	if herr := clisession.RefuseHostConfig(a.policy.CLITrustSystemConfig, clisession.HostConfigPaths); herr != nil {
+		var untrusted *clisession.UntrustedConfigError
+		if errors.As(herr, &untrusted) {
+			a.auditUntrustedConfig(botID, runID, backend, "host", untrusted.Names)
+		}
+		return nil, herr
+	}
 	if strings.EqualFold(backend, "grok") {
 		base, err := a.ensureGrokProxy(opts.UserHome)
 		if err != nil {
@@ -446,6 +463,10 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 		a.auditCredSymlink(bot.ID, runID)
 	}
 	if err != nil {
+		var untrusted *clisession.UntrustedConfigError
+		if errors.As(err, &untrusted) {
+			a.auditUntrustedConfig(botID, runID, backend, "grok_home", untrusted.Names)
+		}
 		var se *clisession.SandboxError
 		if errors.As(err, &se) {
 			a.recordSandboxRefusal(botID, se.Backend, se.Error())
@@ -1215,10 +1236,17 @@ func (a *App) decideGrokACP(ctx context.Context, botID, runID, sessionID string,
 	if strings.TrimSpace(ask.SessionID) != "" {
 		sessionID = ask.SessionID
 	}
+	tool := strings.TrimSpace(ask.Tool)
+	if tool == "" || tool == "unknown" {
+		tool = "unknown"
+	}
 	req := permission.Request{
 		RunID: runID, BotID: botID, SessionID: sessionID,
-		Tool: ask.Tool, Args: ask.Args, ToolUseID: ask.ToolUseID,
+		Tool: tool, Args: ask.Args, ToolUseID: ask.ToolUseID,
 		Transport: policy.TransportACP,
+	}
+	if tool == "unknown" {
+		req.Classification = "unknown"
 	}
 	if a.perm == nil {
 		return clisession.ACPDecision{}, fmt.Errorf("no permission broker")
@@ -1233,6 +1261,62 @@ func (a *App) decideGrokACP(ctx context.Context, botID, runID, sessionID string,
 		return clisession.ACPDecision{Allow: true}, nil
 	}
 	return clisession.ACPDecision{}, nil
+}
+
+func (a *App) recordACPNote(botID, runID, kind, tool string, args map[string]any, reason string) {
+	if a == nil || a.perm == nil {
+		return
+	}
+	tool = strings.TrimSpace(tool)
+	source := "host"
+	class := ""
+	if kind == "cli_deny" {
+		source = "cli_deny"
+	}
+	if tool == "" || tool == "unknown" || kind == "unknown" {
+		tool = "unknown"
+		class = "unknown"
+	}
+	if args == nil {
+		args = map[string]any{}
+	}
+	a.perm.Record(permission.Request{
+		RunID: runID, BotID: botID, Tool: tool, Args: args,
+		Transport: policy.TransportACP, Classification: class,
+	}, permission.Deny, source, clip(reason, 200))
+}
+
+func (a *App) auditUntrustedConfig(botID, runID, backend, kind string, names []string) {
+	copied := append([]string(nil), names...)
+	fields := map[string]any{
+		"backend": backend,
+		"kind":    kind,
+		"names":   copied,
+		"action":  "refuse",
+	}
+	if runID != "" {
+		fields["run_id"] = runID
+	}
+	a.log(botID, "cli_untrusted_config", fields)
+	if a.audit != nil && a.audit.Enabled() {
+		rec := map[string]any{"event": "cli_untrusted_config", "bot_id": botID}
+		for k, v := range fields {
+			rec[k] = v
+		}
+		a.audit.Write(rec)
+	}
+	if a.perm == nil {
+		return
+	}
+	transport := ""
+	if strings.EqualFold(backend, "grok") {
+		transport = policy.TransportACP
+	}
+	a.perm.Record(permission.Request{
+		RunID: runID, BotID: botID, Tool: "acp",
+		Args:      map[string]any{"names": copied},
+		Transport: transport,
+	}, permission.Deny, "host", "untrusted CLI config")
 }
 
 func (a *App) recordACPHostFail(botID, runID, tool string, args map[string]any, reason string) {
@@ -1324,7 +1408,11 @@ func (a *App) cliPrompt(bot store.Bot, fresh bool, inputs []store.Message) (stri
 		b.WriteString("Continue.\n")
 		return b.String(), nil
 	}
+	grok := strings.EqualFold(a.policy.EffectiveBackend(), "grok")
 	for i, m := range inputs {
+		if grok && clisession.SlashPrompt(m.Content) {
+			return "", clisession.ErrSlash
+		}
 		if i > 0 {
 			b.WriteString("\n")
 		}
