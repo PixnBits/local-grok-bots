@@ -20,6 +20,7 @@ func main() {
 	if sandbox.HandleArgs(os.Args[1:]) {
 		return
 	}
+	config.ReexecIfNeeded()
 	cfg := config.FromEnv()
 	app, err := daemon.New(cfg, nil)
 	if err != nil {

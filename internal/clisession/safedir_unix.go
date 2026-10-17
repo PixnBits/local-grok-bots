@@ -231,54 +231,62 @@ func writeFull(fd int, data []byte) error {
 }
 
 func removeFileNoFollow(root, rel string) error {
+	_, err := removeFileNoted(root, rel)
+	return err
+}
+
+func removeFileNoted(root, rel string) ([]SymlinkNote, error) {
 	d, err := openConfiguredRoot(root)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer d.close()
 	parent, base, err := parentOf(d, rel, false)
 	if err != nil {
 		if errors.Is(err, unix.ENOENT) || errors.Is(err, os.ErrNotExist) {
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
 	defer parent.close()
+	var notes []SymlinkNote
 	if isSymlinkAt(parent.fd, base) {
-		// The final name is unlinked. The target stays.
-		err = unix.Unlinkat(parent.fd, base, 0)
-		if errors.Is(err, unix.ENOENT) {
-			return nil
-		}
-		return err
+		noteSymlink(&notes, EventSymlinkUnlinked, rel)
 	}
 	err = unix.Unlinkat(parent.fd, base, 0)
 	if errors.Is(err, unix.ENOENT) {
-		return nil
+		return notes, nil
 	}
-	return err
+	return notes, err
 }
 
 // removeTreeNoFollow removes rel under root. A symlink entry is unlinked.
 // The walk does not enter it. A symlink in a parent component of rel is an error.
 func removeTreeNoFollow(root, rel string) error {
+	_, err := removeTreeNoted(root, rel)
+	return err
+}
+
+func removeTreeNoted(root, rel string) ([]SymlinkNote, error) {
 	d, err := openConfiguredRoot(root)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer d.close()
 	parent, base, err := parentOf(d, rel, false)
 	if err != nil {
 		if errors.Is(err, unix.ENOENT) || errors.Is(err, os.ErrNotExist) {
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
 	defer parent.close()
-	return parent.removeEntry(base)
+	var notes []SymlinkNote
+	err = parent.removeEntry(base, rel, &notes)
+	return notes, err
 }
 
-func (d *dirFD) removeEntry(name string) error {
+func (d *dirFD) removeEntry(name, rel string, notes *[]SymlinkNote) error {
 	if !safeComponent(name) {
 		return errors.New("bad path component")
 	}
@@ -296,6 +304,9 @@ func (d *dirFD) removeEntry(name string) error {
 	}
 	if err != nil {
 		if errors.Is(err, ErrCredSymlink) || errors.Is(err, unix.ENOTDIR) {
+			if isSymlinkAt(d.fd, name) {
+				noteSymlink(notes, EventSymlinkUnlinked, rel)
+			}
 			uerr := unix.Unlinkat(d.fd, name, 0)
 			if uerr != nil && !errors.Is(uerr, unix.ENOENT) {
 				return uerr
@@ -316,7 +327,11 @@ func (d *dirFD) removeEntry(name string) error {
 		if n == "." || n == ".." {
 			continue
 		}
-		if err := child.removeEntry(n); err != nil {
+		childRel := n
+		if rel != "" {
+			childRel = filepath.Join(rel, n)
+		}
+		if err := child.removeEntry(n, childRel, notes); err != nil {
 			return err
 		}
 	}
@@ -346,8 +361,29 @@ func readlinkAt(dirfd int, name string) (string, error) {
 	}
 }
 
+func openRegularAt(dirfd int, name string, follow bool) (int, error) {
+	flags := unix.O_RDONLY | unix.O_NONBLOCK | unix.O_CLOEXEC
+	if !follow {
+		flags |= unix.O_NOFOLLOW
+	}
+	fd, err := unix.Openat(dirfd, name, flags, 0)
+	if err != nil {
+		return -1, err
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		unix.Close(fd)
+		return -1, err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		unix.Close(fd)
+		return -1, errNotRegular
+	}
+	return fd, nil
+}
+
 func readFileAt(dirfd int, name string) ([]byte, error) {
-	fd, err := unix.Openat(dirfd, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := openRegularAt(dirfd, name, false)
 	if err != nil {
 		return nil, err
 	}
@@ -357,13 +393,69 @@ func readFileAt(dirfd int, name string) ([]byte, error) {
 }
 
 func readFollowLeaf(dirfd int, name string) ([]byte, error) {
-	fd, err := unix.Openat(dirfd, name, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	fd, err := openRegularAt(dirfd, name, true)
 	if err != nil {
 		return nil, err
 	}
 	f := os.NewFile(uintptr(fd), name)
 	defer f.Close()
 	return io.ReadAll(io.LimitReader(f, 1<<20))
+}
+
+func readRegularNoFollow(path string) ([]byte, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		unix.Close(fd)
+		return nil, err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		unix.Close(fd)
+		return nil, errNotRegular
+	}
+	f := os.NewFile(uintptr(fd), path)
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, 1<<20))
+}
+
+func symlinkNoFollow(root, rel, target string) error {
+	d, err := openConfiguredRoot(root)
+	if err != nil {
+		return err
+	}
+	defer d.close()
+	parent, base, err := parentOf(d, rel, true)
+	if err != nil {
+		return err
+	}
+	defer parent.close()
+	if cur, err := readlinkAt(parent.fd, base); err == nil && cur == target {
+		return nil
+	}
+	if err := unix.Unlinkat(parent.fd, base, 0); err != nil && !errors.Is(err, unix.ENOENT) {
+		if isSymlinkAt(parent.fd, base) {
+			return ErrCredSymlink
+		}
+		return err
+	}
+	if err := unix.Symlinkat(target, parent.fd, base); err != nil {
+		if isSymlinkAt(parent.fd, base) {
+			return ErrCredSymlink
+		}
+		return err
+	}
+	return nil
+}
+
+func linkCredNoFollow(src, root, rel string) error {
+	st, err := os.Stat(src)
+	if err != nil || !st.Mode().IsRegular() {
+		return nil
+	}
+	return symlinkNoFollow(root, rel, src)
 }
 
 func sameStatInode(st unix.Stat_t, real os.FileInfo) bool {
@@ -377,29 +469,29 @@ func sameStatInode(st unix.Stat_t, real os.FileInfo) bool {
 	return uint64(st.Dev) == uint64(sys.Dev) && uint64(st.Ino) == uint64(sys.Ino)
 }
 
-func scrubTree(dataDir, realPath string) error {
+func scrubTree(dataDir, realPath string) ([]SymlinkNote, error) {
 	root, err := openConfiguredRoot(dataDir)
 	if errors.Is(err, unix.ENOENT) || errors.Is(err, os.ErrNotExist) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer root.close()
 	cli, err := root.openDir("cli")
 	if errors.Is(err, unix.ENOENT) || errors.Is(err, os.ErrNotExist) {
-		return nil
+		return nil, nil
 	}
 	if errors.Is(err, ErrCredSymlink) {
-		return nil
+		return []SymlinkNote{{Event: EventSymlinkSkipped, Rel: "cli"}}, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer cli.close()
 	names, err := cli.names()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var bots []string
 	for _, n := range names {
@@ -408,14 +500,14 @@ func scrubTree(dataDir, realPath string) error {
 		}
 	}
 	if len(bots) == 0 {
-		return nil
+		return nil, nil
 	}
 	realPath = filepath.Clean(realPath)
 	var realInfo os.FileInfo
 	var realBytes []byte
 	var secrets []string
 	if realPath != "" && realPath != "." {
-		if st, err := os.Stat(realPath); err == nil && st.Mode().IsRegular() {
+		if st, err := os.Lstat(realPath); err == nil && st.Mode().IsRegular() {
 			realInfo = st
 			if b, err := readLimited(realPath); err == nil {
 				realBytes = b
@@ -423,10 +515,16 @@ func scrubTree(dataDir, realPath string) error {
 			}
 		}
 	}
+	var notes []SymlinkNote
 	var first error
 	for _, bot := range bots {
+		botRel := filepath.Join("cli", bot)
 		bfd, err := cli.openDir(bot)
-		if errors.Is(err, ErrCredSymlink) || errors.Is(err, unix.ENOENT) || errors.Is(err, os.ErrNotExist) {
+		if errors.Is(err, ErrCredSymlink) {
+			noteSymlink(&notes, EventSymlinkSkipped, botRel)
+			continue
+		}
+		if errors.Is(err, unix.ENOENT) || errors.Is(err, os.ErrNotExist) {
 			continue
 		}
 		if err != nil {
@@ -436,35 +534,41 @@ func scrubTree(dataDir, realPath string) error {
 			continue
 		}
 		for _, rel := range grokAuthRel {
-			if err := scrubOne(bfd, rel, realPath, realInfo, realBytes, secrets); err != nil && first == nil {
+			n, err := scrubOne(bfd, rel, filepath.Join(botRel, rel), realPath, realInfo, realBytes, secrets)
+			notes = append(notes, n...)
+			if err != nil && first == nil {
 				first = err
 			}
 		}
 		bfd.close()
 	}
-	return first
+	return notes, first
 }
 
-func scrubOne(bot *dirFD, rel, realPath string, realInfo os.FileInfo, realBytes []byte, secrets []string) error {
+func scrubOne(bot *dirFD, rel, fullRel, realPath string, realInfo os.FileInfo, realBytes []byte, secrets []string) ([]SymlinkNote, error) {
 	parent, base, err := parentOf(bot, rel, false)
 	if errors.Is(err, ErrCredSymlink) {
-		return nil
+		return []SymlinkNote{{Event: EventSymlinkSkipped, Rel: fullRel}}, nil
 	}
 	if errors.Is(err, unix.ENOENT) || errors.Is(err, os.ErrNotExist) {
-		return nil
+		return nil, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer parent.close()
 	if !staleLeaf(parent, base, realPath, realInfo, realBytes, secrets) {
-		return nil
+		return nil, nil
+	}
+	var notes []SymlinkNote
+	if isSymlinkAt(parent.fd, base) {
+		noteSymlink(&notes, EventSymlinkUnlinked, fullRel)
 	}
 	err = unix.Unlinkat(parent.fd, base, 0)
 	if errors.Is(err, unix.ENOENT) {
-		return nil
+		return notes, nil
 	}
-	return err
+	return notes, err
 }
 
 func staleLeaf(parent *dirFD, name, realPath string, realInfo os.FileInfo, realBytes []byte, secrets []string) bool {
@@ -516,13 +620,13 @@ func linkTextMatches(dirfd int, name, realPath string) bool {
 }
 
 func sameOpenInode(dirfd int, name string, real os.FileInfo) bool {
-	fd, err := unix.Openat(dirfd, name, unix.O_RDONLY|unix.O_CLOEXEC, 0)
+	fd, err := unix.Openat(dirfd, name, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return false
 	}
 	defer unix.Close(fd)
 	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
+	if err := unix.Fstat(fd, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFREG {
 		return false
 	}
 	return sameStatInode(st, real)

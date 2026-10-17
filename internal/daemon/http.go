@@ -450,7 +450,8 @@ func (a *App) handleDeleteBot(w http.ResponseWriter, r *http.Request) {
 	a.credMu.Lock()
 	// Release before removal so a failed delete still rejects the secret.
 	a.releaseBotGates(id)
-	err := clisession.RemoveBotCLI(a.cfg.DataDir, id)
+	notes, err := clisession.RemoveBotCLINotes(a.cfg.DataDir, id)
+	a.auditSymlinkNotes(id, notes)
 	a.credMu.Unlock()
 	if err != nil {
 		if errors.Is(err, clisession.ErrCredSymlink) {

@@ -33,7 +33,7 @@ func (d *dirFD) walk(rel string, create bool) (*dirFD, error) {
 	return nil, errors.New("credential directory walk is unavailable")
 }
 
-func (d *dirFD) removeEntry(name string) error {
+func (d *dirFD) removeEntry(name, rel string, notes *[]SymlinkNote) error {
 	return errors.New("credential directory walk is unavailable")
 }
 
@@ -50,9 +50,30 @@ func removeFileNoFollow(root, rel string) error {
 }
 
 func removeTreeNoFollow(root, rel string) error {
+	_, err := removeTreeNoted(root, rel)
+	return err
+}
+
+func removeTreeNoted(root, rel string) ([]SymlinkNote, error) {
+	return nil, errors.New("credential directory walk is unavailable")
+}
+
+func removeFileNoted(root, rel string) ([]SymlinkNote, error) {
+	return nil, errors.New("credential directory walk is unavailable")
+}
+
+func scrubTree(dataDir, realPath string) ([]SymlinkNote, error) {
+	return nil, errors.New("credential directory walk is unavailable")
+}
+
+func readRegularNoFollow(path string) ([]byte, error) {
+	return nil, errors.New("credential directory walk is unavailable")
+}
+
+func symlinkNoFollow(root, rel, target string) error {
 	return errors.New("credential directory walk is unavailable")
 }
 
-func scrubTree(dataDir, realPath string) error {
+func linkCredNoFollow(src, root, rel string) error {
 	return errors.New("credential directory walk is unavailable")
 }

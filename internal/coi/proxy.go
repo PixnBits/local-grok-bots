@@ -29,6 +29,7 @@ type Egress struct {
 	dir         string
 	sock        string
 	ln          net.Listener
+	unixLn      net.Listener
 	srv         *http.Server
 	token       string
 	bearer      func() (string, error)
@@ -38,10 +39,18 @@ type Egress struct {
 	requireGate bool
 	gateMu      sync.Mutex
 	gates       map[string]gateBinding
-	// onAudit records one loopback request. It is not used for a unix socket.
-	// The callback receives the bot, the run, the normalized path, and the status.
-	onAudit func(botID, runID, path string, status int)
+	// onAudit records one request. Headers and bodies are not passed.
+	// suppressed counts 403 rows omitted since the previous 403 row.
+	onAudit    func(botID, runID, path string, status int, suppressed int)
+	routeBot   string
+	routeRun   string
+	denyMu     sync.Mutex
+	denyAt     []time.Time
+	suppressed int
 }
+
+// denyAuditLimit is how many 403 rows one proxy writes per second.
+var denyAuditLimit = 20
 
 // gateBinding is the bot and run a placeholder bearer was admitted for.
 type gateBinding struct {
@@ -110,9 +119,10 @@ func StartEgress(parent string, hosts, prefixes []string, token string, trip htt
 // StartEgress. bearer is called per accepted request and is not logged.
 // The listener injects that bearer only after Admit has registered the
 // presented placeholder for this bot run. Any other client is rejected.
-// The Grok CLI speaks HTTP, so the chat client needs a TCP origin. A unix
-// socket is what the jailed COI forwarder uses; this listener is for a
-// process that shares the host network namespace.
+// The Grok CLI speaks HTTP, so the chat client needs a TCP origin. The Grok
+// jail does not share the host network. ListenUnix publishes this same proxy
+// on a unix socket the jail bind-mounts. This TCP listener stays for host-side
+// callers.
 func StartLoopback(hosts, prefixes []string, bearer func() (string, error), trip http.RoundTripper) (*Egress, error) {
 	if bearer == nil || len(hosts) == 0 {
 		return nil, ErrProxyUnavailable
@@ -181,9 +191,11 @@ func (e *Egress) Admit(botID, runID, secret string) func() {
 	}
 }
 
-// SetAudit registers the loopback request record. A nil function disables it.
-// The callback must not expect headers, a body, or the presented bearer.
-func (e *Egress) SetAudit(fn func(botID, runID, path string, status int)) {
+// SetAudit registers the request record. suppressed is how many 403 rows
+// were omitted since the previous 403 row. It is zero for other statuses.
+// A nil function disables it. The callback must not expect headers, a body,
+// or the presented bearer.
+func (e *Egress) SetAudit(fn func(botID, runID, path string, status int, suppressed int)) {
 	if e == nil {
 		return
 	}
@@ -192,17 +204,74 @@ func (e *Egress) SetAudit(fn func(botID, runID, path string, status int)) {
 	e.gateMu.Unlock()
 }
 
+// BindRoute sets the bot and run recorded for unix-socket requests.
+func (e *Egress) BindRoute(botID, runID string) {
+	if e == nil {
+		return
+	}
+	e.gateMu.Lock()
+	e.routeBot = botID
+	e.routeRun = runID
+	e.gateMu.Unlock()
+}
+
 func (e *Egress) note(botID, runID, path string, status int) {
-	if e == nil || !e.requireGate {
+	if e == nil {
 		return
 	}
 	e.gateMu.Lock()
 	fn := e.onAudit
+	if botID == "" {
+		botID = e.routeBot
+	}
+	if runID == "" {
+		runID = e.routeRun
+	}
 	e.gateMu.Unlock()
 	if fn == nil {
 		return
 	}
-	fn(botID, runID, path, status)
+	suppressed := 0
+	if status == http.StatusForbidden {
+		ok, n := e.allowDenyAudit()
+		if !ok {
+			return
+		}
+		suppressed = n
+	}
+	fn(botID, runID, path, status, suppressed)
+}
+
+// allowDenyAudit reports whether this 403 may be recorded. The count is how
+// many 403 rows were skipped since the last recorded 403.
+func (e *Egress) allowDenyAudit() (bool, int) {
+	if e == nil {
+		return false, 0
+	}
+	limit := denyAuditLimit
+	if limit < 1 {
+		return false, 0
+	}
+	e.denyMu.Lock()
+	defer e.denyMu.Unlock()
+	now := time.Now()
+	cut := now.Add(-time.Second)
+	n := 0
+	for _, t := range e.denyAt {
+		if t.After(cut) {
+			e.denyAt[n] = t
+			n++
+		}
+	}
+	e.denyAt = e.denyAt[:n]
+	if len(e.denyAt) >= limit {
+		e.suppressed++
+		return false, 0
+	}
+	skipped := e.suppressed
+	e.suppressed = 0
+	e.denyAt = append(e.denyAt, now)
+	return true, skipped
 }
 
 func (e *Egress) admits(botID, runID, presented string) bool {
@@ -309,16 +378,9 @@ func (e *Egress) serve(trip http.RoundTripper) {
 				e.note(botID, runID, norm, http.StatusServiceUnavailable)
 				return
 			}
-			dst := w
-			var sw *statusWriter
-			if e.requireGate {
-				sw = &statusWriter{ResponseWriter: w}
-				dst = sw
-			}
-			proxy.ServeHTTP(dst, fwd.WithContext(context.WithValue(fwd.Context(), egressToken{}, tok)))
-			if sw != nil {
-				e.note(botID, runID, norm, sw.status())
-			}
+			sw := &statusWriter{ResponseWriter: w}
+			proxy.ServeHTTP(sw, fwd.WithContext(context.WithValue(fwd.Context(), egressToken{}, tok)))
+			e.note(botID, runID, norm, sw.status())
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -386,7 +448,58 @@ func (e *Egress) Sock() string {
 	if e == nil {
 		return ""
 	}
+	e.gateMu.Lock()
+	defer e.gateMu.Unlock()
 	return e.sock
+}
+
+// ListenUnix serves this proxy on a second listener: a mode-0600 socket named
+// sock in a 0700 directory under parent. The filename does not end in .sock.
+// A second call keeps the first socket. The TCP listener, when there is one,
+// keeps serving.
+func (e *Egress) ListenUnix(parent string) error {
+	if e == nil || e.srv == nil {
+		return ErrProxyUnavailable
+	}
+	parent = filepath.Clean(parent)
+	if !filepath.IsAbs(parent) {
+		return ErrProxyUnavailable
+	}
+	e.gateMu.Lock()
+	defer e.gateMu.Unlock()
+	if e.sock != "" {
+		return nil
+	}
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return ErrProxyUnavailable
+	}
+	if err := os.Chmod(parent, 0o700); err != nil {
+		return ErrProxyUnavailable
+	}
+	dir, err := os.MkdirTemp(parent, "call-")
+	if err != nil {
+		return ErrProxyUnavailable
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		return ErrProxyUnavailable
+	}
+	sock := filepath.Join(dir, "sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return ErrProxyUnavailable
+	}
+	if err := os.Chmod(sock, 0o600); err != nil {
+		_ = ln.Close()
+		_ = os.RemoveAll(dir)
+		return ErrProxyUnavailable
+	}
+	e.dir = dir
+	e.sock = sock
+	e.unixLn = ln
+	go func() { _ = e.srv.Serve(ln) }()
+	return nil
 }
 
 func (e *Egress) Close() {
@@ -401,6 +514,9 @@ func (e *Egress) Close() {
 	if e.ln != nil {
 		_ = e.ln.Close()
 	}
+	if e.unixLn != nil {
+		_ = e.unixLn.Close()
+	}
 	if e.dir != "" {
 		_ = os.RemoveAll(e.dir)
 	}
@@ -411,14 +527,14 @@ func (e *Egress) prepare(r *http.Request) (botID, runID, path string, fwd *http.
 		return "", "", "", nil, false
 	}
 	if !e.requireGate {
+		p := ""
+		if r.URL != nil {
+			p, _ = normalizeProxyPath(r.URL.Path)
+		}
 		if e.allowRequest(r) && e.allowPath(r) {
-			p := ""
-			if r.URL != nil {
-				p, _ = normalizeProxyPath(r.URL.Path)
-			}
 			return "", "", p, r, true
 		}
-		return "", "", "", nil, false
+		return "", "", p, nil, false
 	}
 	if r.URL == nil {
 		return "", "", "", nil, false

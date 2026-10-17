@@ -20,10 +20,15 @@ func HandleForward(args []string) bool {
 	return true
 }
 
-// RunForward listens on 127.0.0.1:0, bridges accepted TCP to the unix socket,
-// sets base-URL environment variables, and runs the CLI.
+// RunForward listens on 127.0.0.1 inside the jail network namespace, bridges
+// accepted TCP to host unix sockets, sets the CLI environment, and runs the CLI.
+// --sock is the credential proxy. --http-sock is an HTTP proxy. At least one
+// is required. --keep-key leaves XAI_API_KEY alone so a per-run gate token is
+// not replaced by the shared placeholder.
 func RunForward(args []string) int {
 	sock := ""
+	httpSock := ""
+	keepKey := false
 	var envs []string
 	prefix := ""
 	cli := []string{}
@@ -36,6 +41,11 @@ func RunForward(args []string) int {
 		case a == "--sock" && i+1 < len(args):
 			i++
 			sock = args[i]
+		case a == "--http-sock" && i+1 < len(args):
+			i++
+			httpSock = args[i]
+		case a == "--keep-key":
+			keepKey = true
 		case a == "--env" && i+1 < len(args):
 			i++
 			envs = append(envs, args[i])
@@ -46,36 +56,60 @@ func RunForward(args []string) int {
 			return 2
 		}
 	}
-	if sock == "" || len(cli) == 0 || cli[0] == "" {
+	if (sock == "" && httpSock == "") || len(cli) == 0 || cli[0] == "" {
 		return 2
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return 1
-	}
-	defer ln.Close()
-	tcp, ok := ln.Addr().(*net.TCPAddr)
-	if !ok {
-		return 1
-	}
-	go serveBridge(ln, sock)
 	env := os.Environ()
-	base := "http://127.0.0.1:" + itoa(tcp.Port) + prefix
-	grok := false
-	for _, name := range envs {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			continue
+	if sock != "" {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return 1
 		}
-		if name == "GROK_CLI_CHAT_PROXY_BASE_URL" || name == "XAI_API_BASE_URL" || name == "GROK_XAI_API_BASE_URL" {
-			grok = true
+		defer ln.Close()
+		tcp, ok := ln.Addr().(*net.TCPAddr)
+		if !ok {
+			return 1
 		}
-		env = setEnv(env, name, base)
+		go serveBridge(ln, sock)
+		base := "http://127.0.0.1:" + itoa(tcp.Port) + prefix
+		grok := false
+		for _, name := range envs {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			if name == "GROK_CLI_CHAT_PROXY_BASE_URL" || name == "XAI_API_BASE_URL" || name == "GROK_XAI_API_BASE_URL" {
+				grok = true
+			}
+			env = setEnv(env, name, base)
+		}
+		// Grok 1.0.52 does not treat a synthetic auth.json as a session. It does
+		// send Authorization: Bearer from XAI_API_KEY. The host proxy replaces that.
+		// --keep-key preserves a per-run gate token the loopback proxy admitted.
+		if grok && !keepKey {
+			env = setEnv(env, "XAI_API_KEY", PlaceholderToken)
+		}
 	}
-	// Grok 1.0.52 does not treat a synthetic auth.json as a session. It does
-	// send Authorization: Bearer from XAI_API_KEY. The host proxy replaces that.
-	if grok {
-		env = setEnv(env, "XAI_API_KEY", PlaceholderToken)
+	if httpSock != "" {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			return 1
+		}
+		defer ln.Close()
+		tcp, ok := ln.Addr().(*net.TCPAddr)
+		if !ok {
+			return 1
+		}
+		go serveBridge(ln, httpSock)
+		proxyURL := "http://127.0.0.1:" + itoa(tcp.Port)
+		for _, name := range []string{"HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"} {
+			env = setEnv(env, name, proxyURL)
+		}
+		// The credential origin is loopback in this namespace. It must not be
+		// sent through the egress proxy.
+		for _, name := range []string{"NO_PROXY", "no_proxy"} {
+			env = setEnv(env, name, "127.0.0.1,localhost,::1")
+		}
 	}
 	cmd := exec.Command(cli[0], cli[1:]...)
 	cmd.Env = env

@@ -116,7 +116,12 @@ func TestClaudeHomeExplicitSettingsAndEnvToken(t *testing.T) {
 
 func TestGrokHomeUnchangedOnDarwin(t *testing.T) {
 	withGOOS(t, "darwin")
-	app, _, bot, envLog := isolationApp(t, "grok", "")
+	app, _, bot, _ := isolationApp(t, "grok", "")
+	envLog := filepath.Join(app.ws, "bots", bot.ID, "env.log")
+	if err := os.MkdirAll(filepath.Dir(envLog), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LGB_ENV_LOG", envLog)
 	postAndWait(t, app, bot.ID)
 	env := readArgv(t, envLog)
 	home := filepath.Join(filepath.Dir(app.ws), "cli", bot.ID, "home")

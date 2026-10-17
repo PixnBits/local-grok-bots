@@ -397,6 +397,18 @@ func TestGrokProxyRequestIsAudited(t *testing.T) {
 	if resp.StatusCode != http.StatusNoContent {
 		t.Fatalf("status %d", resp.StatusCode)
 	}
+	deny, err := http.NewRequest(http.MethodGet, origin+"/v1/ping", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dresp, err := http.DefaultClient.Do(deny)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dresp.Body.Close()
+	if dresp.StatusCode != http.StatusForbidden {
+		t.Fatalf("deny %d", dresp.StatusCode)
+	}
 	if err := lg.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -411,10 +423,15 @@ func TestGrokProxyRequestIsAudited(t *testing.T) {
 		`"run_id":"run-1"`,
 		`"path":"/v1/ping"`,
 		`"status":204`,
+		`"status":403`,
+		`"auth":"none"`,
 	} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing %s", want)
 		}
+	}
+	if strings.Contains(text, `"auth":"none"`) && !strings.Contains(text, `"status":403`) {
+		t.Fatal("unauthenticated mark without a 403")
 	}
 	for _, bad := range []string{key, marker, headerMark, bodyMark, queryMark, "Authorization", "X-Secret"} {
 		if strings.Contains(text, bad) {
@@ -593,6 +610,50 @@ func TestDeleteBotDropsSymlinkWithoutFollowing(t *testing.T) {
 	}
 	if _, err := os.Lstat(outside); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDeleteBotAuditsUnlinkedSymlink(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	app := newApp(t, "", nil)
+	logPath := filepath.Join(app.cfg.DataDir, "audit.log")
+	lg, err := audit.Open(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.audit = lg
+	srv := serve(t, app)
+	bot := createBot(t, srv.URL, "Cred")
+	outside := t.TempDir()
+	canary := filepath.Join(outside, "canary")
+	if err := os.WriteFile(canary, []byte("canary-keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	botDir := filepath.Join(app.cfg.DataDir, "cli", bot.ID)
+	if err := os.MkdirAll(filepath.Join(botDir, "home"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(botDir, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	res, b := do(t, http.MethodDelete, srv.URL+"/api/bots/"+bot.ID, nil, "")
+	if res.StatusCode != http.StatusNoContent {
+		t.Fatalf("delete %d %s", res.StatusCode, b)
+	}
+	if err := lg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"event":"cli_symlink_unlinked"`) || !strings.Contains(text, `"path":"cli/`+bot.ID+`/linked"`) {
+		t.Fatalf("audit %s", text)
+	}
+	if strings.Contains(text, outside) || strings.Contains(text, "canary-keep") {
+		t.Fatalf("audit names the target: %s", text)
 	}
 }
 

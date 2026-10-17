@@ -111,7 +111,12 @@ func TestCLIOverrideRefuseFailsClosed(t *testing.T) {
 }
 
 func TestCLIGrokMCPJSONRefusedEvenWhenIgnoring(t *testing.T) {
-	app, _, bot, envLog := isolationApp(t, "grok", "")
+	app, _, bot, _ := isolationApp(t, "grok", "")
+	envLog := filepath.Join(app.ws, "bots", bot.ID, "env.log")
+	if err := os.MkdirAll(filepath.Dir(envLog), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LGB_ENV_LOG", envLog)
 	t.Setenv("AUTH_TOKEN", "fake-admin-token-value")
 	t.Setenv("DAEMON_CANARY", "canary-var-value")
 	ws := filepath.Join(app.ws, "bots", bot.ID)

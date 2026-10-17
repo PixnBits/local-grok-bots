@@ -26,6 +26,10 @@ claude_sandbox = "required"
 lgb = true
 # Let lgb create and update other bots (default false).
 lgb_manage_bots = false
+# Egress ports for a bot net grant. Default 443 and 80.
+# Local policy can only narrow the list. An empty list allows no port.
+# Managed policy can set a different list. Local policy still only narrows that.
+# net_ports = [443]
 # Added to the scrubbed environment. Only managed policy can set this.
 # env = { ANTHROPIC_BASE_URL = "https://gateway.corp.example" }
 ```
@@ -190,9 +194,12 @@ managed config still apply.
 
 ## Sandbox and tools
 
-The daemon jail is off for CLI backends, so each CLI's own sandbox is the
-boundary. The daemon configures it per turn from the bot's grants (`net` with
-its host list, `git`, `ssh`). The settings only add restrictions.
+Ollama's workspace jail is off for CLI backends. On Linux, Grok is started in
+the daemon's pid jail (private `/proc`) so other same-user processes are hidden;
+Grok's own `--sandbox` is omitted there because a nested namespace cannot be
+created on this host. Claude still uses its own sandbox. The daemon configures
+each turn from the bot's grants (`net` with its host list, `git`, `ssh`). The
+settings only add restrictions. Remaining limits are in [Sandbox model](sandbox.md).
 
 The preferred path for durable low-risk grants (see `docs/cli-permissions.md`)
 is to generate or update the CLI's native allow/ask/deny rules from user-accepted
@@ -363,9 +370,218 @@ recipient's bot log and the audit log. Timer turns are only counted, not
 refused, since timers are already checked when created. DMs and turns the
 user starts from the page are not counted.
 
-The command is a thin client. It writes a request to a workspace spool the
-daemon watches, then reads the reply. The spool directory is mode 0700 and
-is removed when the turn ends. The token is mode 0600 and is the same
-`LGB_TOKEN` the environment carries. A bad token, a missing spool, or a
-malformed request is a deny. The daemon does not re-jail the CLI process;
-the CLI's own sandbox is the boundary.
+Transport. Both sandboxes block the network, and live with Grok 1.0.52 the
+`lgb` profile (`restrict_network = true`) refused a connect to a unix socket
+both in `/tmp` and in the workspace. So lgb uses a spool in the workspace,
+which both sandboxes let the CLI write:
+
+- Before each turn the daemon deletes and recreates
+  `<workspace>/.lgb/{bin,req,resp}` (0700) and writes `bin/lgb`, a POSIX `sh`
+  script (needs `sh`, `od`, `tr`, `mv`, `head`, `tail`, `sleep`).
+- The script writes `token\0arg\0arg…` to `req/.<id>`, renames it to
+  `req/<id>`, and waits up to 60 s for `resp/<id>` (first line exit code).
+- The daemon polls `req` every 100 ms through directory file descriptors it
+  opened at setup, with `O_NOFOLLOW` for every read and `O_EXCL|O_NOFOLLOW` plus
+  `renameat` for every write. A bot that swaps `req`/`resp` for a symlink, or
+  plants a link as a request, can't make the daemon read or write outside the
+  spool (tested). Names must be hex. A request over 64 KiB is refused with
+  `lgb: request too large (max 64 KiB)`.
+- The CLI gets `PATH=<workspace>/.lgb/bin:…`. The daemon sets `LGB_SPOOL`
+  and `LGB_TOKEN` for this run. Other `LGB_*` variables are not passed through.
+
+Token. One token per run: `lgbr_` plus 32 random bytes. It is not single-use.
+The same token authorizes every lgb call in that run, up to 200 calls, and
+call 201 returns `lgb: call limit for this turn reached`. It is never the
+admin token, and only the spool accepts it. The HTTP API returns 401 for it.
+The permission decision route is the exception: a live `lgbr_` token, or the
+turn's MCP permission token, is 403 there. The token is revoked when the run
+ends: it is forgotten, the poller stops, and `req` is removed. A later call
+fails with "not available in this run", and that route returns 401 again.
+Every call, including a bad token, is written as `lgb_call` to the bot log
+and the audit sink with `run_id`, the command, the tool, redacted arguments,
+and the result.
+
+Approval. The daemon adds allow rules `Bash(lgb)` and `Bash(lgb *)`
+(`--allowedTools` for Claude, `--allow` for Grok). Other shell commands still
+ask as before. A chained command (`lgb … ; echo $?`) is not covered and asks;
+the preamble tells the bot to run each lgb call alone. Live, Grok's headless
+ask for such a command cancelled the turn.
+
+Claude sandbox users: nothing else changes. The settings file, deny rules,
+sandbox block and managed-settings behavior are as above. lgb runs inside
+Claude's sandbox (writes to the workspace, no network) and adds one allow rule.
+
+### Daemon API
+
+With a CLI backend the HTTP API requires a token. `AUTH_TOKEN` wins; otherwise
+the daemon generates one at `DATA_DIR/admin-token` (0600) and prints its path
+at startup. Paste it in the UI, or open `/login?token=<token>` once to get an
+HttpOnly, SameSite=Strict cookie. The token is never in the CLI environment:
+`AUTH_TOKEN` and any variable whose value contains the token are dropped from
+the CLI environment, and both CLIs are denied the file. On Linux the daemon
+re-execs once at startup so `/proc/self/environ` does not keep the token
+either. On macOS the names are unset; original startup memory is unchanged.
+Without the token a CLI's shell can't call the API, including
+`POST .../permissions/{id}`. `GET /api/health` stays open, as does the
+per-run MCP permission route, which only asks the broker. Ollama-only
+setups need no token unless `AUTH_TOKEN` is set.
+
+## Ollama run_shell on macOS
+
+On macOS, Ollama `run_shell` now runs under `/usr/bin/sandbox-exec` with a
+generated Seatbelt profile. Before this branch it failed closed on macOS, so
+the tool never ran a command there. There is no `/work` mount: the shell
+starts in the real workspace path. The profile denies by default, reads
+system paths and the workspace, and writes only the workspace and a private
+temp directory. `net` and `ssh` grants are denied because the connect proxy
+needs `LD_PRELOAD`, so the network stays closed. A missing `sandbox-exec`
+fails closed. Apple marks `sandbox-exec` deprecated; it still ships. This
+path has been compile-checked, not run on a Mac.
+
+## Interactive tools
+
+Claude's built-in question and plan tools are specified in
+`@anthropic-ai/claude-agent-sdk` 0.3.300 `sdk-tools.d.ts`
+(`AskUserQuestionInput`, `AskUserQuestionOutput`, `ExitPlanModeInput`).
+The daemon is headless. This is what each interactive path does.
+
+### AskUserQuestion
+
+Handled. The broker keeps a small case-sensitive set, and today the only name
+in it is `AskUserQuestion`. Hooks, then deny rules, still run first, so a deny
+rule on that tool wins. Otherwise it is always a UI question. A bypass mode,
+an allow rule, a hook allow, and a session grant do not answer it, because
+there is no answer yet. Malformed input (not 1–4 questions, or a question
+missing its text, header, boolean `multiSelect`, or 2–4 options with a label
+and a description) is a deny, rule `malformed`, with no card.
+
+`permission_request` carries `kind: "question"` and the validated questions.
+Question text is redacted with the usual redactor; `multiSelect` stays a
+boolean. The page shows a header chip, the question, radios or checkboxes
+with their descriptions, an Other text field, Submit, Skip, and the countdown.
+Submit posts `{"decision":"answer","answers":{<question text>: <value>}}`.
+Skip posts `{"decision":"deny"}`. The decision stays a UI deny; Claude's message uses the reason word `skipped`. Text is set with `textContent`.
+
+Answer keys Claude receives are the original question text. The page may send
+the redacted text it was shown; the broker maps that back to the original and
+maps a redacted option label back to the original label. A single choice is
+the option label, or the typed string when the user picks Other. Free text
+longer than 4 KiB is rejected with HTTP 400 and the question stays pending.
+A multi-select value is the chosen labels joined by `", "` (a label that
+itself contains `", "` is kept whole). Optional `annotations` (`preview`, `notes`), keyed by
+question text, are copied into `updatedInput` only when the client sent some.
+
+Both transports return the same body. Allow is `{"behavior":"allow","updatedInput":{...original input, answers}}`.
+A Skip, a timeout, `no_ui`, or a cancel that writes a response is
+`{"behavior":"deny","message":"The user did not answer the question (<reason>)."}`.
+A hook or policy deny keeps the ordinary deny message. `stream_control`'s
+`control_cancel_request` still writes no response. A daemon restart drops the
+in-memory ask and sends nothing. A shutdown cancel uses source `cancel` when
+a response is written.
+
+`allow_once` or `allow_session` on a question, or `answer` on any other
+request, is 400 and leaves the request pending. A second decision is 409.
+A live `lgbr_` token or the turn's MCP permission token is 403 on
+`POST /api/bots/{id}/runs/{run_id}/permissions/{req_id}` only. The admin
+token, Bearer or the `lgb_auth` cookie, is what decides. One decision is
+stored per request. The audit record has `kind: "question"`, `answered`
+(how many questions), `source`, and the answers after redaction. The
+`updatedInput` sent back to Claude is not redacted.
+
+### ExitPlanMode
+
+A normal allow/deny card. The broker does not special-case the tool. When
+`arguments.plan` is a string, the card shows that text above the argument
+dump, then Allow once, Deny, and Allow for session when the policy offers it.
+In SDK 0.3.300, `ExitPlanModeInput` is `allowedPrompts` plus unknown keys.
+`plan` is not a required field. The card shows it when the call includes it.
+
+### MCP elicitation
+
+Declined. The daemon sets `disableAllHooks` and does not implement Claude's
+elicitation dialog or Elicitation hooks. An unrecognized `control_request`
+subtype, including `mcp_message` and `hook_callback`, gets
+`Unsupported control request subtype: ...` and a deny audit. There is no form.
+
+### requiresUserInteraction
+
+Claude treats `AskUserQuestion`, and MCP tools whose
+`_meta["anthropic/requiresUserInteraction"]` is true, as something it will not
+auto-approve before it calls the host. That annotation is not on the
+`can_use_tool` payload this daemon sees. The broker forces a question only
+for the case-sensitive name `AskUserQuestion`. Any other tool that reaches
+the broker follows the normal order.
+
+### Grok
+
+Grok has no permission host on this branch. A headless TUI prompt fails the
+turn with `permission prompt requires a TTY or an explicit permission_mode`
+(`ErrPermissionPrompt`). It does not open a card.
+
+## Override files
+
+Before each turn the daemon scans the bot workspace (three levels, skipping
+`.git` and `node_modules`) for `.claude/settings.json`,
+`.claude/settings.local.json`, `.claude/CLAUDE*.md`, `.mcp.json`, `CLAUDE.md`,
+`CLAUDE.local.md`, `AGENTS.md`, anything under `.grok/`, and `.cursor/mcp.json`
+or `.cursor/hooks.json`. A hit is written to the bot log and the audit sink as
+`cli_override` with the files, the mode, and the action.
+
+| Backend, home | Neutralized | Not neutralized (refused even under `ignore`) |
+| --- | --- | --- |
+| Claude, either | all of the above | none |
+| Grok, isolated | all but `.mcp.json` | `.mcp.json` |
+| Grok, user | none | all, since a folder-trust grant may exist |
+
+Under `overrides = "refuse"` every hit fails the turn with
+`workspace CLI config override refused: <files>`, and the CLI is not started.
+
+## Verified, and not
+
+- lgb live with Grok 1.0.52 and a real daemon on a test port (2026-10-14):
+  a Grok bot set a 10-minute timer and wrote `favorite_color=teal` through lgb;
+  `lgb run_shell id` gave "unknown command" and `lgb bot create` gave "off by
+  policy"; all four calls were logged as `lgb_call` with the run id; the run
+  token got 401 on `/api/bots` and, in that build, on the permission decision
+  route, and failed after the run. A live run token on the decision route is
+  now 403. `curl` and `cat admin-token` were asked for, which cancelled
+  the headless turn.
+- lgb with Claude is tested only with the fake CLI (argv has `--allowedTools
+  Bash(lgb *)`, the script ran, the memory and timer landed). That Claude's
+  sandbox allows the workspace spool and `/dev/urandom` needs a real run.
+
+- Fake-CLI tests check argv, the child environment, the per-bot home,
+  credential links, the scan, and refuse/ignore.
+- Real Grok 1.0.52 on Linux, 2026-10-14: a symlinked `auth.json` gave "Not
+  signed in"; a hard link authenticated. That hard link is no longer how a
+  turn authenticates
+  ([Grok CLI login live check](cred-hardlink-check.md)). Through `PrepareIsolation` and
+  `Args`, the `lgb` profile blocked `curl https://example.com` (could not
+  resolve host), denied `cat` of the admin token and `ls ~/.ssh`, denied a
+  write outside the workspace, allowed one inside, and `web_fetch`/`web_search`
+  were not in the tool list. An unknown `--sandbox` profile refused to start.
+  Under strict, `read_file` of `~/.bashrc` was denied.
+- Earlier, with an isolated `GROK_HOME`, a headless `-p` turn authenticated, reported the folder
+  untrusted, and ignored an `AGENTS.md` instruction. `grok inspect` still lists
+  a workspace `.mcp.json` with every compat cell off, which is why it is refused.
+- Claude's sandbox block, deny rules, the bwrap/socat check, the copy of
+  the user's `sandbox` keys, and the merge with managed settings are tested
+  only against the settings JSON and a fake CLI. The merge rules are from
+  Claude's docs. A real run should confirm that
+  `failIfUnavailable` exits as expected, that `//abs` Read/Edit rules match,
+  and that a managed sandbox still applies alongside `--settings`.
+- Claude was not installed on the test machine. The flags come from the CLI
+  reference and the Agent SDK source; that `--setting-sources=` with an empty
+  list also skips project `CLAUDE.md`, and that the credential symlink works
+  with `CLAUDE_CONFIG_DIR`, need a live run.
+- macOS is compile-checked and tested only through an OS seam on Linux
+  (fake CLI). On a real Mac, check that under `claude_home = "auto"`:
+  - `claude auth status` reports a logged-in Keychain method;
+  - a turn authenticates without an API key;
+  - user `~/.claude/settings.json` hooks and allow rules and `~/.claude.json`
+    MCP servers really don't apply;
+  - `cli_login` shows `keychain_or_user_home` with the expected
+    `config_directory`.
+  Also check whether `claude_home = "isolated"` on macOS loses the Keychain
+  login, as expected, and whether `claude auth status` JSON has the
+  `configDirectory` field (CLI v2.1.268 or later).
