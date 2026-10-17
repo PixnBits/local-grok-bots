@@ -64,43 +64,50 @@ Accepting or revoking a rule is a `user_perm_rule` log event with the exact patt
 
 Suggestions are static only. There is no local-model second pass. `POST /api/bots/{id}/permission-suggestions/analyze` clusters logged `kind: "permission"` rows. The same clustering runs after 3 similar requests. Mixed or deceptive clusters are stored as refused and cannot be accepted until the pattern is edited into an eligible allow. Nothing is applied without an explicit accept. The profile page lists rules and suggestions.
 
-### User-controlled durable patterns
+### What the code does
 
-A user (via the web profile) can persist allow/ask/deny patterns that survive sessions. Patterns use the same shape the broker already understands: tool + optional glob on the argument string (`Bash(gh pr view *)`, `Read(./src/**)`, `deny Bash(*push*)`, `deny Read(**/.env)`).
+A durable rule is one bot, one tool name, and an optional argument glob (`Bash(git status*)`, `Read(./src/**)`, `Bash(*push*)`). It lasts until it is revoked. There is no project scope and no time bound. Session grants stay managed-only and in memory.
 
-- Scope: permanent (until revoked), project-scoped, or time-bounded. Session grants remain as they are (managed-only for the session offer).
-- Hard floors that user rules cannot override:
-  - Any write, redirect, or command that is not statically recognised as read-only.
-  - Network, credential paths, irreversible actions (`push`, package install, `rm -rf`, etc.).
-  - Managed policy can still pin stronger denies or ceilings.
-- Every auto-decision records the matched rule id, classification, and redacted command in the existing audit path (`run_tools` kind `permission`).
+An allow is stored only when `CheckUserRule` accepts it. Ask and deny are stored when the shape is well formed, including patterns that are not read-only. At decision time `ClassifyCall` runs again. A user allow applies only when that call has `AutoAllow`. A stored pattern that would match a wider command does not widen the call.
 
-Accepting a pattern is an explicit user action that appears in the log with the exact pattern and the risk label shown at acceptance time.
+`AutoAllow` is only a low-risk read-only call inside the bot workspace:
 
-### Analysis and suggestion layer
+- Bash, and only these binaries: `git` with `status`, `log`, `diff`, `show`, `rev-parse`, `blame`, `ls-files`, `describe`, `shortlog`, or `version`; `gh` with `pr view`, `pr diff`, `pr list`, `pr checks`, `pr status`, `issue view`, `issue list`, `repo view`, `run view`, or `run list`; `cat`, `ls`, `head`, `tail`, `wc`, `pwd`, `stat`, `file`, `grep`, `rg`, or `find`.
+- Read tools `read`, `grep`, `glob`, and `ls`, for a project path.
 
-Every permission request is already logged. An analyser (on demand or after a threshold of similar requests) classifies them and proposes candidate rules:
+These are never `AutoAllow`, even when a glob matches:
 
-- Static classification first (deterministic, CISO-friendly):
-  - Known read-only command prefixes or tools (`git status`, `git log`, `gh pr view`, `gh pr diff`, `cat`, `ls`, `head`, `grep` without write flags, etc.).
-  - Path containment (stays inside workspace / granted additional directories).
-  - Absence of redirection, pipes to writers, or known mutating subcommands.
-  - Sensitivity label: project-local data vs home/credential/system paths.
-- Optional second pass with a small local model only for ambiguous cases, never as the sole authority.
-- Output is a suggested rule plus a short risk card: “12 prior `Bash(gh pr view *)` requests, all classified read-only / project data. Suggest permanent allow? Risk: low (reads pull-request metadata already visible to anyone with repo access).”
-- Special call-out for mixed or deceptive cases: “Command contains both a read and a write; classification refused auto-allow.”
+- Shell composition. Unquoted `\`, `;`, `|`, `&`, `<`, `>`, `` ` ``, `$`, newline, or CR, and `$`, `` ` ``, newline, or CR inside double quotes. `Bash(git status*)` therefore does not allow `git status; rm x` or `git status > /etc/x` or `git status > notes.txt`. Characters inside single quotes are literal. A glob `*` is `.*` and does not match a newline; a command that contains a newline is still not auto-allowed.
+- `git` `--output` or `--output=`, including `git diff --output=notes.txt`.
+- `find` with `-delete`, `-exec`, `-execdir`, `-ok`, `-okdir`, `-fls`, `-fprint`, `-fprintf`, or `-fprint0`.
+- Network binaries: `curl`, `wget`, `ssh`, `scp`, `sftp`, `nc`, `ncat`, `netcat`, `ping`, `dig`, `nslookup`, `npm`, `npx`, `yarn`, `pnpm`, `pip`, `pip3`, `gem`, `apt`, `apt-get`, `brew`, `docker`, `kubectl`, `helm`, `aws`, `gcloud`, `az`, `rsync`, `ftp`, `telnet`, `socat`. Git `fetch`, `pull`, `clone`, and `ls-remote`. Tools `webfetch` and `websearch`.
+- Irreversible binaries: `rm`, `rmdir`, `dd`, `mkfs`, `shred`, `sudo`, `doas`, `su`. Git `push`, `reset`, and `clean`.
+- Write binaries: `tee`, `mv`, `cp`, `install`, `mkdir`, `touch`, `truncate`, `ln`, `chmod`, `chown`, `chgrp`, `sed`, `tar`. Tools `edit`, `write`, `multiedit`, and `notebookedit`.
+- A path segment `.ssh`, `.aws`, `.gnupg`, `.netrc`, `.kube`, `.azure`, `.docker`, `.grok`, `credentials`, `credentials.json`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `auth.json`, `admin-token`, `policy.toml`, `.git-credentials`, `.npmrc`, `.pypirc`, `cookies`, `.env`, `.env.*`, `*.pem`, `*.key`, `state.db`, `state.db-*`, `user-permissions.json`, or `grok-permission-rules`. That includes `~/.grok/config` and a copy of those names inside the workspace.
+- A path outside the bot workspace, including home and system paths. `DATA_DIR` is not a separate input; an absolute path that is not inside the workspace fails the same way.
 
-The user reviews suggestions in the portal (risk badge, example commands, “promote / edit / dismiss”). Accepting writes the rule into the same store the broker evaluates. Nothing is auto-applied.
+Anything that is not one of the read-only shapes above also fails closed.
 
-### COI vs daemon: enforcement and audit
+Managed deny, managed ask, and a managed bypass mode still win over a user allow. A user deny and a user ask are applied before managed allow and before bypass. The rules that become `--allowedTools`, `--disallowedTools`, `--allow`, or `--deny` are the policy rules (plus the `lgb` and `coi` spool allows). A user rule is not copied onto those flags and is not copied into the turn's `claude-settings.json` allow list. A user settings file cannot add an allow either; that merge is unchanged.
 
-The preferred middle path keeps the CLI’s own sandbox and native rules as the enforcement boundary (already reviewed by many CISOs) while the daemon owns the decision record and the suggestion surface:
+The broker runs on the Claude permission host (`mcp` and `stream_control`). Grok stays on policy flags. A Grok tool call is not sent through this broker, so a durable allow does not auto-allow it. A Grok permission prompt still fails the turn.
 
-- Generate or update the CLI’s native allow/ask/deny rules (Claude `settings.json`, Grok permission rules / `sandbox.toml`) from the user’s accepted patterns, so the same rules apply when the user runs the CLI directly.
-- Always attach the permission host so residual asks still surface in the portal and every decision (including those the CLI reports) is audited with the same redaction and retention.
-- Treat pure always-approve / bypass modes as managed-only, exactly as the policy file already does.
+Accept and revoke write a `user_perm_rule` log event with the pattern and the risk label. The same action writes `DATA_DIR/cli/<bot>/user-permissions.json` (Claude `permissions.allow` and `permissions.deny`, plus `lgbAsk`) and `grok-permission-rules` (allow and deny lines; ask lines are comments). The directory is created with a no-follow walk from `/`. A symlink in any component, including the file name, is refused and not followed. The bytes go to a sibling opened with `O_CREAT|O_EXCL|O_NOFOLLOW` and renamed into place. On macOS the walk crosses `/tmp`, `/var`, and `/etc` only when that link points under `/private`. The bot turn does not load either file. Copy them when running the CLI outside the bot.
 
-Full deferral to the COI without ingestion loses the fine-grained unified permission-decision audit that the broker currently provides. The daemon still logs outer events (login source, sandbox status, override detections, and any `permission_denied` the CLI reports), but the internal match and “always allow” grants stay inside the CLI’s own session logs unless deliberately collected. The middle path above preserves both the reviewed boundary and a single complete audit trail inside the bot system.
+On Linux the Grok jail bind-mounts the workspace, the bot home, and `GROK_HOME`. The two rule files sit beside `home` and `grok-home`, and they are not mounted. Grok does not need to read them. When a rule file exists as a regular file at turn start, the Grok `lgb` deny list names it, and Claude settings deny `Read` and `Edit` of that path. `DATA_DIR/cli` is still expanded around the bot home, because denying the whole directory would make Grok's own home read-only. A file created after that profile is written is absent from that turn's Grok deny list. A symlink at the rule-file name is not added to the deny list, because the deny must not follow it; the writer refuses to replace that symlink.
+
+Suggestions are static. `POST /api/bots/{id}/permission-suggestions/analyze` clusters logged `kind: "permission"` rows and keeps a card at count 1. The same clustering runs after 3 similar requests (`SuggestAfter`). An eligible card's summary is `{count} prior {pattern} requests, all classified {kind} / {sensitivity}. Suggest permanent allow? Risk: {risk} ({reason}).` A mixed cluster is `{count} prior requests look like {pattern} but at least one is a write, a redirect, or a sensitive path. Classification refused auto-allow.` A refused card cannot be accepted until the pattern or effect is changed; the same pattern with effect allow is 400. Nothing is applied without an explicit accept.
+
+The profile page lists each rule with its effect, pattern, risk, and reason, and a Revoke button. Suggestions show an editable pattern, the summary, and examples, with Accept and Dismiss. A separate form posts effect and pattern. Analyze posts the analyze route. There is no edit of an accepted rule other than revoke and add.
+
+### Future work
+
+Not implemented, and not enforced:
+
+- Project scope.
+- Time bounds.
+- A second pass with a local model. If it is added, it must not be the only authority for an allow.
+- Generating Claude `settings.json` permissions or Grok `sandbox.toml` allow rules from accepted patterns and loading those allows into the bot turn. That would let the CLI allow before the host and drop the broker's `rule_id` record. The files written today are for a CLI the user runs outside the bot.
 
 ## Claude transport
 

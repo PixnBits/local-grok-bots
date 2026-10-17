@@ -201,14 +201,14 @@ created on this host. Claude still uses its own sandbox. The daemon configures
 each turn from the bot's grants (`net` with its host list, `git`, `ssh`). The
 settings only add restrictions. Remaining limits are in [Sandbox model](sandbox.md).
 
-The preferred path for durable low-risk grants (see `docs/cli-permissions.md`)
-is to generate or update the CLI's native allow/ask/deny rules from user-accepted
-patterns while the daemon continues to host residual asks and record every
-decision. The first pass writes those native rules under `DATA_DIR/cli/<bot>/`
-and still decides the bot turn in the broker, so the audit record is not lost
-when the CLI would otherwise allow before the host. This keeps the
-already-reviewed COI sandbox as the enforcement boundary and the daemon's
-audit trail complete.
+Durable low-risk grants are decided by the broker on the Claude permission
+host (see `docs/cli-permissions.md`). The bot turn does not load
+`user-permissions.json` or `grok-permission-rules` as allow rules. On Linux
+the Grok jail does not mount those files. When they exist at turn start, the
+Grok sandbox deny list names them and Claude settings deny Read and Edit of
+those paths. The process boundary is still the daemon jail (Grok on Linux) or
+the CLI sandbox (Claude). It is not what applies a user allow. Grok's own
+tool loop does not call the broker.
 
 ### Claude
 
