@@ -143,6 +143,11 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 		res, parseErr = readTurn(stdout, onEvent, failPrompt, promptCh, cmd)
 	}
 	waitErr := cmd.Wait()
+	if grokACP && parseErr == nil && res.StopReason != "" {
+		// The prompt was answered. The host closes stdin and stops a lingering
+		// agent, so its exit status says nothing about the turn.
+		waitErr = nil
+	}
 	if errors.Is(parseErr, ErrPermissionPrompt) {
 		return res, ErrPermissionPrompt
 	}

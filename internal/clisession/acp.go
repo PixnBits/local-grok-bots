@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ACPAsk is one session/request_permission tool call.
@@ -47,13 +48,18 @@ type acpReply struct {
 	raw map[string]any
 }
 
+// acpExitGrace is how long Grok gets to exit after stdin closes.
+const acpExitGrace = 5 * time.Second
+
 type acpSession struct {
-	turn    context.Context
-	cmd     *exec.Cmd
-	w       io.WriteCloser
-	hooks   ACPHooks
-	onEvent func(Event)
-	ws      string
+	done     chan struct{}
+	doneOnce sync.Once
+	turn     context.Context
+	cmd      *exec.Cmd
+	w        io.WriteCloser
+	hooks    ACPHooks
+	onEvent  func(Event)
+	ws       string
 
 	mu        sync.Mutex
 	wmu       sync.Mutex
@@ -89,6 +95,7 @@ func runACPSession(ctx context.Context, cmd *exec.Cmd, stdout io.Reader, stdin i
 		tools:   map[string]string{},
 		results: map[string]bool{},
 		exited:  make(chan struct{}),
+		done:    make(chan struct{}),
 	}
 	go s.read(stdout)
 	if spec.ACP == nil || spec.ACP.Decide == nil {
@@ -116,6 +123,10 @@ func runACPSession(ctx context.Context, cmd *exec.Cmd, stdout io.Reader, stdin i
 		return s.failCall(ctx, method, err)
 	}
 	sid := strOf(result, "sessionId", "session_id")
+	if sid == "" && method == "session/load" {
+		// ACP session/load answers without echoing the id it loaded.
+		sid = strings.TrimSpace(spec.SessionID)
+	}
 	if sid == "" {
 		s.hostFail(method+" returned no session", "", nil)
 		s.stop()
@@ -129,7 +140,21 @@ func runACPSession(ctx context.Context, cmd *exec.Cmd, stdout io.Reader, stdin i
 		s.stop()
 		return s.snapshot(), s.fatalErr()
 	}
-	<-s.exited
+	// grok agent stdio keeps running after the prompt answer, so the turn
+	// ends at that answer: close stdin, then stop the process if it lingers.
+	select {
+	case <-s.exited:
+	case <-s.done:
+		s.closeIn()
+		select {
+		case <-s.exited:
+		case <-time.After(acpExitGrace):
+			if s.cmd != nil && s.cmd.Process != nil {
+				killGroup(s.cmd.Process)
+			}
+			<-s.exited
+		}
+	}
 	res := s.snapshot()
 	if err := s.fatalErr(); err != nil {
 		return res, err
@@ -417,6 +442,7 @@ func (s *acpSession) finishPrompt(raw map[string]any, st *streamAcc) {
 			stop = s
 		}
 	}
+	defer s.doneOnce.Do(func() { close(s.done) })
 	text := st.b.String()
 	s.feed(st, Event{
 		Kind: "end", SessionID: s.currentSession(), StopReason: stop,

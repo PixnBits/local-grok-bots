@@ -277,3 +277,50 @@ exit 0
 		t.Fatalf("answer %s", text)
 	}
 }
+
+// A real agent keeps reading stdin after the prompt answer. The turn ends at
+// that answer, and a session/load reply need not echo the session id.
+func TestACPTurnEndsAtPromptAnswerAndLoadKeepsID(t *testing.T) {
+	if grokHostJail() {
+		if _, err := exec.LookPath("bwrap"); err != nil {
+			t.Skip(err)
+		}
+	}
+	dir := t.TempDir()
+	bin := writeScript(t, dir, "agent.sh", `#!/bin/sh
+id_of() { printf '%s' "$1" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p'; }
+reply() { awk -v line="$1" 'BEGIN{print line; fflush()}'; }
+IFS= read -r line || exit 1
+id=$(id_of "$line")
+reply "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"protocolVersion\":1}}"
+IFS= read -r line || exit 1
+id=$(id_of "$line")
+reply "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{}}"
+IFS= read -r line || exit 1
+id=$(id_of "$line")
+reply "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
+while IFS= read -r line; do :; done
+sleep 30
+`)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	start := time.Now()
+	res, err := (ExecRunner{HasTTY: func() bool { return false }}).Run(ctx, Spec{
+		Backend: "grok", Bin: bin, SessionID: "prior-session", Prompt: "hi", Workspace: dir,
+		Isolate: &Isolation{
+			Home:        dir,
+			GrokSandbox: GrokProfile,
+			Env:         []string{"PATH=/usr/bin:/bin", "HOME=" + dir},
+		},
+		ACP: quietACP(),
+	}, nil)
+	if err != nil {
+		t.Fatalf("run %v %+v", err, res)
+	}
+	if res.SessionID != "prior-session" {
+		t.Fatalf("session %q", res.SessionID)
+	}
+	if time.Since(start) > 15*time.Second {
+		t.Fatalf("turn waited for the agent to exit: %s", time.Since(start))
+	}
+}
