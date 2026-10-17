@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -15,23 +16,46 @@ import (
 	"time"
 )
 
+// EgressConfig is an allowlisting HTTP CONNECT and forward proxy.
+// Resolve, when set, replaces DNS. Dial, when set, replaces the TCP dial.
+// Both receive the address after the forbidden-IP check. Ports nil means
+// 443 and 80. An empty Ports list allows no port.
+type EgressConfig struct {
+	Allow   []string
+	Ports   []int
+	Resolve func(context.Context, string) ([]net.IP, error)
+	Dial    func(context.Context, string, string) (net.Conn, error)
+	Audit   func(EgressEvent)
+}
+
+// EgressEvent is one allow or deny. It has no header and no body.
+type EgressEvent struct {
+	Host   string
+	Port   int
+	Allow  bool
+	Reason string
+}
+
 // HTTPAllow is an HTTP CONNECT and forward proxy. It dials only exact
-// allowlisted hosts. Loopback, private, link-local, multicast, and
-// unspecified addresses are refused even when the name is listed. An empty
-// allowlist denies every request.
+// allowlisted hosts, and only on an allowed port. It resolves a name once,
+// refuses a forbidden address, and dials that IP. An empty allowlist denies
+// every request.
 type HTTPAllow struct {
-	dir    string
-	sock   string
-	ln     net.Listener
-	allow  map[string]bool
-	dial   func(context.Context, string, string) (net.Conn, error)
-	ctx    context.Context
-	cancel context.CancelFunc
+	dir     string
+	sock    string
+	ln      net.Listener
+	allow   map[string]bool
+	ports   []int
+	resolve func(context.Context, string) ([]net.IP, error)
+	dial    func(context.Context, string, string) (net.Conn, error)
+	audit   func(EgressEvent)
+	ctx     context.Context
+	cancel  context.CancelFunc
 }
 
 // StartHTTPAllowProxy listens on a mode-0600 socket named sock in a 0700
-// directory under parent. dial, when set, replaces the outbound dial (tests).
-func StartHTTPAllowProxy(parent string, allow []string, dial func(context.Context, string, string) (net.Conn, error)) (*HTTPAllow, error) {
+// directory under parent.
+func StartHTTPAllowProxy(parent string, cfg EgressConfig) (*HTTPAllow, error) {
 	parent = filepath.Clean(parent)
 	if !filepath.IsAbs(parent) {
 		return nil, errors.New("egress proxy is not available")
@@ -63,7 +87,8 @@ func StartHTTPAllowProxy(parent string, allow []string, dial func(context.Contex
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &HTTPAllow{
-		dir: dir, sock: sock, ln: ln, allow: setOf(allow), dial: dial,
+		dir: dir, sock: sock, ln: ln, allow: setOf(cfg.Allow), ports: cfg.Ports,
+		resolve: cfg.Resolve, dial: cfg.Dial, audit: cfg.Audit,
 		ctx: ctx, cancel: cancel,
 	}
 	go p.serve()
@@ -111,7 +136,27 @@ func (p *HTTPAllow) serveConn(conn net.Conn) {
 		return
 	}
 	host, port, ok := requestTarget(req)
-	if !ok || !p.allowed(host) {
+	if !ok {
+		writeDeny(conn)
+		return
+	}
+	decide := func(allow bool, reason string) {
+		if p.audit == nil {
+			return
+		}
+		p.audit(EgressEvent{Host: host, Port: port, Allow: allow, Reason: reason})
+	}
+	if !p.allowed(host) {
+		reason := "host"
+		if ip := net.ParseIP(host); ip != nil && forbiddenIP(ip) {
+			reason = "address"
+		}
+		decide(false, reason)
+		writeDeny(conn)
+		return
+	}
+	if !p.portAllowed(port) {
+		decide(false, "port")
 		writeDeny(conn)
 		return
 	}
@@ -120,16 +165,31 @@ func (p *HTTPAllow) serveConn(conn net.Conn) {
 	defer cancel()
 	up, err := p.dialHost(ctx, host, port)
 	if err != nil {
+		reason := "dial"
+		if errors.Is(err, errAddress) {
+			reason = "address"
+		} else if errors.Is(err, errResolve) {
+			reason = "resolve"
+		}
+		decide(false, reason)
 		writeDeny(conn)
 		return
 	}
 	defer up.Close()
 	if req.Method == http.MethodConnect {
-		_ = conn.SetDeadline(time.Time{})
 		if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 			return
 		}
-		splice(bufferedConn{Reader: br, Conn: conn}, up)
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		hello, reason := readConnectSNI(br, host)
+		_ = conn.SetDeadline(time.Time{})
+		if reason != "" {
+			decide(false, reason)
+			return
+		}
+		decide(true, "ok")
+		left := streamConn{Conn: conn, r: io.MultiReader(bytes.NewReader(hello), br)}
+		splice(left, up)
 		return
 	}
 	req.RequestURI = ""
@@ -138,9 +198,11 @@ func (p *HTTPAllow) serveConn(conn net.Conn) {
 	req.Header.Del("Proxy-Connection")
 	req.Header.Del("Proxy-Authorization")
 	if err := req.Write(up); err != nil {
+		decide(false, "dial")
 		writeDeny(conn)
 		return
 	}
+	decide(true, "ok")
 	_ = conn.SetDeadline(time.Time{})
 	_, _ = io.Copy(conn, up)
 }
@@ -152,33 +214,84 @@ func (p *HTTPAllow) allowed(host string) bool {
 	return p.allow[host]
 }
 
+func (p *HTTPAllow) portAllowed(port int) bool {
+	list := p.ports
+	if list == nil {
+		list = []int{443, 80}
+	}
+	for _, n := range list {
+		if n == port {
+			return true
+		}
+	}
+	return false
+}
+
 func (p *HTTPAllow) dialHost(ctx context.Context, host string, port int) (net.Conn, error) {
-	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	ip, err := p.chooseIP(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	addr := net.JoinHostPort(ip.String(), strconv.Itoa(port))
 	if p.dial != nil {
 		return p.dial(ctx, "tcp", addr)
 	}
+	// The resolver refuses lookups. The address is already an IP, so a second
+	// resolution cannot swap in a different answer.
+	d := net.Dialer{Resolver: refuseDNS()}
+	return d.DialContext(ctx, "tcp", addr)
+}
+
+func (p *HTTPAllow) chooseIP(ctx context.Context, host string) (net.IP, error) {
 	if ip := net.ParseIP(host); ip != nil {
 		if forbiddenIP(ip) {
-			return nil, errDenied
+			return nil, errAddress
 		}
-		var d net.Dialer
-		return d.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), strconv.Itoa(port)))
+		return append(net.IP(nil), ip...), nil
 	}
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	ips, err := p.lookup(ctx, host)
 	if err != nil || len(ips) == 0 {
-		return nil, errDenied
+		return nil, errResolve
 	}
 	var chosen net.IP
-	for _, got := range ips {
-		if forbiddenIP(got.IP) {
-			return nil, errDenied
+	for _, ip := range ips {
+		if ip == nil || forbiddenIP(ip) {
+			return nil, errAddress
 		}
 		if chosen == nil {
-			chosen = got.IP
+			chosen = append(net.IP(nil), ip...)
 		}
 	}
-	var d net.Dialer
-	return d.DialContext(ctx, "tcp", net.JoinHostPort(chosen.String(), strconv.Itoa(port)))
+	if chosen == nil {
+		return nil, errResolve
+	}
+	return chosen, nil
+}
+
+func (p *HTTPAllow) lookup(ctx context.Context, host string) ([]net.IP, error) {
+	if p.resolve != nil {
+		return p.resolve(ctx, host)
+	}
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]net.IP, 0, len(addrs))
+	for _, addr := range addrs {
+		if addr.IP != nil {
+			out = append(out, append(net.IP(nil), addr.IP...))
+		}
+	}
+	return out, nil
+}
+
+func refuseDNS() *net.Resolver {
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(context.Context, string, string) (net.Conn, error) {
+			return nil, errors.New("dns disabled")
+		},
+	}
 }
 
 func requestTarget(r *http.Request) (string, int, bool) {
@@ -227,23 +340,70 @@ func forbiddenIP(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
+	// To4 unmaps an IPv4-mapped IPv6 address before the IPv4 checks.
 	if v4 := ip.To4(); v4 != nil {
-		ip = v4
+		return forbidden4(v4)
 	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsMulticast() || ip.IsUnspecified() || ip.IsInterfaceLocalMulticast()
+	v6 := ip.To16()
+	if v6 == nil {
+		return true
+	}
+	return forbidden6(v6)
+}
+
+func forbidden4(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() || ip.IsUnspecified() || ip.IsInterfaceLocalMulticast() {
+		return true
+	}
+	// This-network (the whole zero prefix), shared CGNAT space, and the
+	// benchmarking range. Checked on the unmapped IPv4 address.
+	if ip[0] == 0 {
+		return true
+	}
+	if ip[0] == 100 && ip[1]&0xc0 == 0x40 {
+		return true
+	}
+	if ip[0] == 198 && ip[1]&0xfe == 18 {
+		return true
+	}
+	return false
+}
+
+func forbidden6(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() || ip.IsUnspecified() || ip.IsInterfaceLocalMulticast() {
+		return true
+	}
+	// Well-known NAT64 prefix and 6to4. The whole prefix is refused.
+	if ip[0] == 0x00 && ip[1] == 0x64 && ip[2] == 0xff && ip[3] == 0x9b && allZero(ip[4:12]) {
+		return true
+	}
+	if ip[0] == 0x20 && ip[1] == 0x02 {
+		return true
+	}
+	return false
+}
+
+func allZero(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func writeDeny(conn net.Conn) {
 	_, _ = io.WriteString(conn, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 }
 
-type bufferedConn struct {
-	*bufio.Reader
+type streamConn struct {
 	net.Conn
+	r io.Reader
 }
 
-func (c bufferedConn) Read(p []byte) (int, error) { return c.Reader.Read(p) }
+func (c streamConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
 func splice(left, right net.Conn) {
 	var wg sync.WaitGroup
@@ -259,4 +419,7 @@ func splice(left, right net.Conn) {
 	wg.Wait()
 }
 
-var errDenied = errors.New("denied")
+var (
+	errAddress = errors.New("address")
+	errResolve = errors.New("resolve")
+)

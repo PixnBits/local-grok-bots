@@ -624,6 +624,43 @@ func (a *App) ensureGrokProxy(userHome string) (string, error) {
 	return eg.Base(), nil
 }
 
+func (a *App) auditEgress(botID, runID string, ev sandbox.EgressEvent) {
+	if a == nil {
+		return
+	}
+	decision := "deny"
+	if ev.Allow {
+		decision = "allow"
+	}
+	fields := map[string]any{
+		"run_id":   runID,
+		"host":     ev.Host,
+		"port":     ev.Port,
+		"decision": decision,
+		"reason":   ev.Reason,
+	}
+	a.log(botID, "cli_egress_request", fields)
+	if a == nil || a.audit == nil || !a.audit.Enabled() {
+		return
+	}
+	rec := map[string]any{"event": "cli_egress_request", "bot_id": botID}
+	for k, v := range fields {
+		rec[k] = v
+	}
+	a.audit.Write(rec)
+}
+
+func (a *App) egressPorts() []int {
+	if a == nil {
+		return policy.DefaultEgressPorts()
+	}
+	pol := a.policy
+	if fresh, err := a.policyNow(); err == nil && (strings.TrimSpace(a.cfg.PolicyPath) == "" || fresh.Loaded) {
+		pol = fresh
+	}
+	return pol.EgressPorts()
+}
+
 func (a *App) auditProxyRequest(botID, runID, path string, status int, suppressed int) {
 	if a == nil || a.audit == nil || !a.audit.Enabled() {
 		return
@@ -718,7 +755,13 @@ func (a *App) attachGrokBridge(iso *clisession.Isolation, bot store.Bot, runID s
 		if err != nil {
 			return bridgeErr(err)
 		}
-		egress, err = sandbox.StartHTTPAllowProxy(parent, grants.NetAllow, nil)
+		egress, err = sandbox.StartHTTPAllowProxy(parent, sandbox.EgressConfig{
+			Allow: grants.NetAllow,
+			Ports: a.egressPorts(),
+			Audit: func(ev sandbox.EgressEvent) {
+				a.auditEgress(bot.ID, runID, ev)
+			},
+		})
 		if err != nil {
 			return bridgeErr(err)
 		}
@@ -854,10 +897,11 @@ func botGrants(bot store.Bot) clisession.Grants {
 
 // daemonSecrets are paths no CLI tool or shell may read: the admin token,
 // the database, policy.toml, DATA_DIR/cli (MCP tokens and CLI state),
-// DATA_DIR/coi (staged jail homes and the proxy socket), and each tools.cli
+// DATA_DIR/coi (staged jail homes and the proxy socket), DATA_DIR/cli-proxy
+// and DATA_DIR/cli-egress (the per-run unix sockets), and each tools.cli
 // credential_home from the policy read for this call. The workspace is not
-// included. DATA_DIR/cli and DATA_DIR/coi are created so Grok, which only
-// denies paths that exist, still binds those directories.
+// included. Those data directories are created so Grok, which only denies
+// paths that exist, still binds them.
 func (a *App) daemonSecrets() []string {
 	pol := a.policy
 	if fresh, err := a.policyNow(); err == nil && (strings.TrimSpace(a.cfg.PolicyPath) == "" || fresh.Loaded) {
@@ -871,16 +915,18 @@ func (a *App) secretsFrom(pol policy.Policy) []string {
 	if err != nil {
 		return nil
 	}
-	cliDir := filepath.Join(dir, "cli")
-	_ = os.MkdirAll(cliDir, 0o700)
-	coiDir := filepath.Join(dir, "coi")
-	_ = os.MkdirAll(coiDir, 0o700)
+	var dirs []string
+	for _, name := range []string{"cli", "coi", "cli-proxy", "cli-egress"} {
+		d := filepath.Join(dir, name)
+		_ = os.MkdirAll(d, 0o700)
+		_ = os.Chmod(d, 0o700)
+		dirs = append(dirs, d)
+	}
 	out := []string{
 		filepath.Join(dir, adminTokenFile),
 		filepath.Join(dir, "state.db"), filepath.Join(dir, "state.db-wal"), filepath.Join(dir, "state.db-shm"),
-		cliDir,
-		coiDir,
 	}
+	out = append(out, dirs...)
 	if p := strings.TrimSpace(a.cfg.PolicyPath); p != "" {
 		abs, err := filepath.Abs(p)
 		if err == nil {

@@ -140,12 +140,17 @@ func TestGrokJailNetGrantAllowlistsEgress(t *testing.T) {
 			_ = c.Close()
 		}
 	}()
-	proxy, err := sandbox.StartHTTPAllowProxy(t.TempDir(), []string{"allowed.test"}, func(_ context.Context, _, addr string) (net.Conn, error) {
-		host, _, splitErr := net.SplitHostPort(addr)
-		if splitErr != nil || host != "allowed.test" {
-			return nil, fmt.Errorf("denied")
-		}
-		return net.Dial("tcp", up.Addr().String())
+	proxy, err := sandbox.StartHTTPAllowProxy(t.TempDir(), sandbox.EgressConfig{
+		Allow: []string{"allowed.test"},
+		Resolve: func(context.Context, string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("192.0.2.10")}, nil
+		},
+		Dial: func(_ context.Context, _, addr string) (net.Conn, error) {
+			if addr != "192.0.2.10:80" {
+				return nil, fmt.Errorf("denied")
+			}
+			return net.Dial("tcp", up.Addr().String())
+		},
 	})
 	if err != nil {
 		t.Fatal(err)

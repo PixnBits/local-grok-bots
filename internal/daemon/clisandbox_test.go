@@ -25,7 +25,9 @@ func TestGeneratedSettingsDenyDaemonSecrets(t *testing.T) {
 	secrets := app.daemonSecrets()
 	admin := filepath.Join(dir, adminTokenFile)
 	cliDir := filepath.Join(dir, "cli")
-	for _, want := range []string{admin, policyPath, cliDir} {
+	proxyDir := filepath.Join(dir, "cli-proxy")
+	egressDir := filepath.Join(dir, "cli-egress")
+	for _, want := range []string{admin, policyPath, cliDir, proxyDir, egressDir} {
 		if !strings.Contains("\n"+strings.Join(secrets, "\n")+"\n", "\n"+want+"\n") {
 			t.Fatalf("secrets %v lack %s", secrets, want)
 		}
@@ -33,8 +35,11 @@ func TestGeneratedSettingsDenyDaemonSecrets(t *testing.T) {
 	if strings.Contains("\n"+strings.Join(secrets, "\n")+"\n", "\n"+filepath.Join(dir, "workspace")+"\n") {
 		t.Fatalf("workspace is denied: %v", secrets)
 	}
-	if st, err := os.Stat(cliDir); err != nil || !st.IsDir() || st.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("cli dir %v %v", st, err)
+	for _, d := range []string{cliDir, proxyDir, egressDir} {
+		st, err := os.Stat(d)
+		if err != nil || !st.IsDir() || st.Mode().Perm()&0o077 != 0 {
+			t.Fatalf("secret dir %s %v %v", d, st, err)
+		}
 	}
 	home := t.TempDir()
 	iso, err := clisession.PrepareIsolation(clisession.IsolationOptions{
@@ -63,7 +68,7 @@ func TestGeneratedSettingsDenyDaemonSecrets(t *testing.T) {
 		m := f.(map[string]any)
 		modes[m["path"].(string)] = m["mode"].(string)
 	}
-	for _, p := range []string{admin, policyPath, cliDir} {
+	for _, p := range []string{admin, policyPath, cliDir, proxyDir, egressDir} {
 		if !strings.Contains("\n"+strings.Join(deny, "\n")+"\n", "\nRead(/"+p+")\n") {
 			t.Fatalf("deny lacks %s: %v", p, deny)
 		}
@@ -84,7 +89,7 @@ func TestGeneratedSettingsDenyDaemonSecrets(t *testing.T) {
 	}
 	// DATA_DIR/cli is denied around this bot's GROK_HOME: another bot's
 	// state is denied, the path down to grok-home is not.
-	for _, p := range []string{admin, policyPath, filepath.Join(cliDir, "bot")} {
+	for _, p := range []string{admin, policyPath, filepath.Join(cliDir, "bot"), proxyDir, egressDir} {
 		if !strings.Contains(string(toml), strconv.Quote(p)) {
 			t.Fatalf("grok deny lacks %s:\n%s", p, toml)
 		}
