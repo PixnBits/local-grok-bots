@@ -4,6 +4,8 @@ package clisession
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -630,4 +632,165 @@ func sameOpenInode(dirfd int, name string, real os.FileInfo) bool {
 		return false
 	}
 	return sameStatInode(st, real)
+}
+
+// writeFileInDir creates dir if needed and replaces name inside it.
+// The walk uses O_NOFOLLOW. macOS uses symlinks for /tmp, /var, and /etc;
+// those three, and only when they point under /private, are crossed.
+// Any other symlink is refused.
+func writeFileInDir(dir, name string, data []byte, mode os.FileMode) error {
+	if !safeComponent(name) {
+		return errors.New("bad path component")
+	}
+	parent, err := ensureDirNoFollow(dir, 0)
+	if err != nil {
+		return err
+	}
+	defer parent.close()
+	return writeReplacingAt(parent, name, data, mode)
+}
+
+func ensureDirNoFollow(path string, depth int) (*dirFD, error) {
+	if depth > 4 {
+		return nil, ErrCredSymlink
+	}
+	path, err := absClean(path)
+	if err != nil {
+		return nil, err
+	}
+	fd, err := unix.Open("/", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	cur := &dirFD{fd: fd}
+	walked := "/"
+	parts := strings.Split(strings.TrimPrefix(path, string(filepath.Separator)), string(filepath.Separator))
+	for i, name := range parts {
+		if name == "" {
+			continue
+		}
+		next, err := cur.openDir(name)
+		if err != nil && errors.Is(err, unix.ENOENT) {
+			if mk := unix.Mkdirat(cur.fd, name, 0o700); mk != nil && !errors.Is(mk, unix.EEXIST) {
+				cur.close()
+				return nil, mk
+			}
+			next, err = cur.openDir(name)
+		}
+		if err != nil && isSymlinkAt(cur.fd, name) {
+			target, ok := osDirSymlink(walked, name, cur.fd)
+			cur.close()
+			if !ok {
+				return nil, ErrCredSymlink
+			}
+			rest := append([]string{target}, parts[i+1:]...)
+			return ensureDirNoFollow(filepath.Join(rest...), depth+1)
+		}
+		cur.close()
+		if err != nil {
+			return nil, err
+		}
+		cur = next
+		if walked == "/" {
+			walked = "/" + name
+		} else {
+			walked += "/" + name
+		}
+	}
+	return cur, nil
+}
+
+// osDirSymlink allows the macOS /tmp, /var, and /etc links into /private.
+func osDirSymlink(parent, name string, fd int) (string, bool) {
+	linkPath := "/" + name
+	if parent != "/" {
+		linkPath = parent + "/" + name
+	}
+	switch linkPath {
+	case "/tmp", "/var", "/etc":
+	default:
+		return "", false
+	}
+	target, err := readlinkAt(fd, name)
+	if err != nil || target == "" {
+		return "", false
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(parent, target)
+	}
+	target = filepath.Clean(target)
+	if !strings.HasPrefix(target, "/private/") {
+		return "", false
+	}
+	return target, true
+}
+
+func writeReplacingAt(parent *dirFD, base string, data []byte, mode os.FileMode) error {
+	if parent == nil || parent.fd < 0 {
+		return errors.New("directory is closed")
+	}
+	if isSymlinkAt(parent.fd, base) {
+		return ErrCredSymlink
+	}
+	if st, err := lstatAt(parent.fd, base); err == nil {
+		if st.Mode&unix.S_IFMT != unix.S_IFREG {
+			return errNotRegular
+		}
+	} else if !errors.Is(err, unix.ENOENT) {
+		return err
+	}
+	var tmp string
+	var fd int
+	var err error
+	for attempt := 0; attempt < 4; attempt++ {
+		tmp, err = siblingTemp(base)
+		if err != nil {
+			return err
+		}
+		fd, err = unix.Openat(parent.fd, tmp, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, uint32(mode.Perm()))
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, unix.EEXIST) {
+			if isSymlinkAt(parent.fd, tmp) {
+				return ErrCredSymlink
+			}
+			return err
+		}
+	}
+	if err != nil {
+		return err
+	}
+	if err := unix.Fchmod(fd, uint32(mode.Perm())); err != nil {
+		_ = unix.Close(fd)
+		_ = unix.Unlinkat(parent.fd, tmp, 0)
+		return err
+	}
+	writeErr := writeFull(fd, data)
+	_ = unix.Close(fd)
+	if writeErr != nil {
+		_ = unix.Unlinkat(parent.fd, tmp, 0)
+		return writeErr
+	}
+	if isSymlinkAt(parent.fd, base) {
+		_ = unix.Unlinkat(parent.fd, tmp, 0)
+		return ErrCredSymlink
+	}
+	if err := unix.Renameat(parent.fd, tmp, parent.fd, base); err != nil {
+		_ = unix.Unlinkat(parent.fd, tmp, 0)
+		return err
+	}
+	return nil
+}
+
+func siblingTemp(base string) (string, error) {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	name := "." + base + "." + hex.EncodeToString(buf[:])
+	if !safeComponent(name) {
+		return "", errors.New("bad path component")
+	}
+	return name, nil
 }

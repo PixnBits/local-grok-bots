@@ -70,6 +70,10 @@ func claudeSettingsJSON(o IsolationOptions) ([]byte, error) {
 		deny = append(deny, "Read(/"+p+")", "Read(/"+p+"/**)", "Edit(/"+p+")", "Edit(/"+p+"/**)")
 		creds = append(creds, map[string]string{"path": p, "mode": "deny"})
 	}
+	for _, p := range existingRuleFiles(o.StateDir) {
+		deny = append(deny, "Read(/"+p+")", "Read(/"+p+"/**)", "Edit(/"+p+")", "Edit(/"+p+"/**)")
+		creds = append(creds, map[string]string{"path": p, "mode": "deny"})
+	}
 	doc := map[string]any{
 		"disableAllHooks":            true,
 		"enableAllProjectMcpServers": false,
@@ -626,6 +630,8 @@ func grokSandboxTOML(o IsolationOptions) string {
 			deny = append(deny, denyAround(filepath.Clean(p), keep)...)
 		}
 	}
+	deny = append(deny, existingRuleFiles(o.StateDir)...)
+	deny = dedupePaths(deny)
 	var b strings.Builder
 	b.WriteString("# Written by local-grok-bots for each turn. Do not edit.\n")
 	fmt.Fprintf(&b, "[profiles.%s]\nextends = \"strict\"\n", GrokProfile)
@@ -647,6 +653,40 @@ func grokDisallowed(g Grants) []string {
 		return nil
 	}
 	return []string{"web_fetch", "web_search"}
+}
+
+// existingRuleFiles lists the durable permission files in the bot state
+// directory when they are regular files. A missing path is omitted: Grok
+// refuses to start when a deny path cannot be bound. A symlink is omitted
+// so the deny does not follow it.
+func existingRuleFiles(state string) []string {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return nil
+	}
+	var out []string
+	for _, name := range []string{"user-permissions.json", "grok-permission-rules"} {
+		p := filepath.Join(filepath.Clean(state), name)
+		st, err := os.Lstat(p)
+		if err != nil || !st.Mode().IsRegular() {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func dedupePaths(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range in {
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
 }
 
 // denyAround returns p, or, when p contains one of keep (the bot's own HOME

@@ -335,6 +335,14 @@
   .composer textarea { min-height: 44px; max-height: 40vh; height: 44px; resize: none; overflow-y: hidden; }
   .routine { display: grid; gap: 4px; padding: 8px 0; border-top: 1px solid var(--line); }
   .routine .meta { color: var(--muted); font-size: 12px; }
+  .perm-list { display: grid; gap: 8px; }
+  .perm-card { border: 1px solid var(--line); border-radius: 12px; padding: 10px; display: grid; gap: 6px; }
+  .perm-card code { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+  .risk { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; border-radius: 99px; padding: 2px 8px; width: max-content; }
+  .risk.low { background: var(--accent-2); color: var(--accent); }
+  .risk.medium { background: #f6ead2; color: var(--run); }
+  .risk.high { background: var(--err-bg); color: var(--err); }
+  .risk.deny, .risk.ask { background: var(--paper); color: var(--muted); border: 1px solid var(--line); }
   .filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .log { flex: 1; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
   .event { padding: 8px 10px; border-bottom: 1px solid var(--line); }
@@ -449,7 +457,25 @@
         </fieldset>
         <label>Network allowlist<input id="profile-net" placeholder="example.com, api.github.com" autocomplete="off"></label>
         <label>SSH allowlist<input id="profile-ssh" placeholder="host.example" autocomplete="off"></label>
-        <p class="empty" style="padding:0">Only you can set grants. Bots cannot grant them to themselves.</p>
+        <p class="empty" style="padding:0">Only you can set grants. Bots cannot grant them to themselves. Durable permission rules are the same: nothing is auto-allowed until you accept it, and a write still asks.</p>
+        <h2>Permission rules</h2>
+        <div id="perm-rules" class="perm-list"></div>
+        <div class="routine">
+          <label>Pattern<input id="perm-pattern" placeholder="Bash(gh pr view *)" autocomplete="off"></label>
+          <label>Effect
+            <select id="perm-effect">
+              <option value="allow">allow</option>
+              <option value="ask">ask</option>
+              <option value="deny">deny</option>
+            </select>
+          </label>
+          <div class="row">
+            <button type="button" id="perm-add">Add rule</button>
+            <button type="button" id="perm-analyze" class="ghost">Analyze history</button>
+          </div>
+        </div>
+        <h2>Suggestions</h2>
+        <div id="perm-suggestions" class="perm-list"></div>
         <div class="row">
           <button class="primary" type="submit">Save</button>
         </div>
@@ -1721,6 +1747,7 @@ async function openProfile(id) {
   }
   paintMarkPicker();
   await loadRoutines();
+  await loadPermPanel();
   setView("profile");
 }
 async function loadRoutines() {
@@ -1808,6 +1835,94 @@ $("#routine-add").addEventListener("click", async () => {
     $("#routine-schedule").value = "";
     $("#routine-prompt").value = "";
     await loadRoutines();
+  } catch (err) { $("#profile-err").textContent = err.message; }
+});
+function riskBadge(risk, effect) {
+  const label = risk || effect || "rule";
+  return el("span", "risk " + (risk || effect || ""), label);
+}
+async function loadPermPanel() {
+  const rulesBox = $("#perm-rules");
+  const sugBox = $("#perm-suggestions");
+  if (!rulesBox || !state.botId) return;
+  rulesBox.replaceChildren();
+  sugBox.replaceChildren();
+  const rules = await api("/api/bots/" + state.botId + "/permission-rules");
+  const list = (rules && rules.rules) || [];
+  if (!list.length) rulesBox.append(el("p", "empty", "No durable rules."));
+  for (const rule of list) {
+    const card = el("div", "perm-card");
+    const head = el("div", "row");
+    head.append(riskBadge(rule.risk, rule.effect));
+    head.append(el("strong", null, rule.effect));
+    card.append(head);
+    card.append(el("code", null, rule.pattern));
+    if (rule.reason) card.append(el("div", "meta", rule.reason));
+    const revoke = el("button", "ghost", "Revoke");
+    revoke.type = "button";
+    revoke.addEventListener("click", async () => {
+      await api("/api/bots/" + state.botId + "/permission-rules/" + encodeURIComponent(rule.id), {method: "DELETE"});
+      await loadPermPanel();
+    });
+    card.append(revoke);
+    rulesBox.append(card);
+  }
+  const sug = await api("/api/bots/" + state.botId + "/permission-suggestions");
+  const pending = (sug && sug.suggestions) || [];
+  if (!pending.length) sugBox.append(el("p", "empty", "No suggestions."));
+  for (const s of pending) {
+    const card = el("div", "perm-card");
+    const head = el("div", "row");
+    head.append(riskBadge(s.risk, s.status === "refused" ? "high" : s.effect));
+    head.append(el("strong", null, s.status === "refused" ? "refused" : "suggestion"));
+    card.append(head);
+    const pattern = el("input");
+    pattern.value = s.pattern || "";
+    card.append(pattern);
+    card.append(el("div", "meta", s.summary || ""));
+    const examples = (s.examples || []).join(" · ");
+    if (examples) card.append(el("div", "meta", examples));
+    const actions = el("div", "row");
+    const accept = el("button", "primary", "Accept");
+    accept.type = "button";
+    accept.addEventListener("click", async () => {
+      try {
+        await api("/api/bots/" + state.botId + "/permission-suggestions/" + encodeURIComponent(s.id) + "/accept", {
+          method: "POST",
+          body: JSON.stringify({effect: "allow", pattern: pattern.value})
+        });
+        await loadPermPanel();
+      } catch (err) { $("#profile-err").textContent = err.message; }
+    });
+    const dismiss = el("button", "ghost", "Dismiss");
+    dismiss.type = "button";
+    dismiss.addEventListener("click", async () => {
+      await api("/api/bots/" + state.botId + "/permission-suggestions/" + encodeURIComponent(s.id) + "/dismiss", {method: "POST"});
+      await loadPermPanel();
+    });
+    actions.append(accept, dismiss);
+    card.append(actions);
+    sugBox.append(card);
+  }
+}
+$("#perm-add").addEventListener("click", async () => {
+  if (!state.botId) return;
+  $("#profile-err").textContent = "";
+  try {
+    await api("/api/bots/" + state.botId + "/permission-rules", {method: "POST", body: JSON.stringify({
+      effect: $("#perm-effect").value,
+      pattern: $("#perm-pattern").value.trim()
+    })});
+    $("#perm-pattern").value = "";
+    await loadPermPanel();
+  } catch (err) { $("#profile-err").textContent = err.message; }
+});
+$("#perm-analyze").addEventListener("click", async () => {
+  if (!state.botId) return;
+  $("#profile-err").textContent = "";
+  try {
+    await api("/api/bots/" + state.botId + "/permission-suggestions/analyze", {method: "POST", body: "{}"});
+    await loadPermPanel();
   } catch (err) { $("#profile-err").textContent = err.message; }
 });
 function fillKinds() {

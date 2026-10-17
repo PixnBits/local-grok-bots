@@ -346,7 +346,7 @@ func (a *App) callApprove(w http.ResponseWriter, r *http.Request, id json.RawMes
 	defer cancel()
 	stop := context.AfterFunc(a.ctx, cancel)
 	defer stop()
-	out := a.perm.Evaluate(ctx, a.policy.Permission(), permission.Request{
+	out := a.perm.Evaluate(ctx, a.policy.Permission(), a.withUserRules(bind.botID, permission.Request{
 		RunID:     bind.runID,
 		BotID:     bind.botID,
 		SessionID: bind.sessionID,
@@ -354,7 +354,7 @@ func (a *App) callApprove(w http.ResponseWriter, r *http.Request, id json.RawMes
 		Args:      args.Input,
 		ToolUseID: args.ToolUseID,
 		Transport: policy.TransportMCP,
-	})
+	}))
 	var text []byte
 	if out.Behavior == "allow" {
 		updated := args.Input

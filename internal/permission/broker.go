@@ -62,6 +62,17 @@ type Request struct {
 	Answered int
 	// AuditAnswers is the accepted answer map. Emit redacts it.
 	AuditAnswers map[string]string
+	// UserRules are durable allow/ask/deny patterns for this bot.
+	// Empty leaves behavior unchanged.
+	UserRules []UserRule
+	// Workspace is the bot directory used to classify paths.
+	Workspace string
+	// RuleID, Classification, Sensitivity, and Risk are filled when a
+	// durable user rule decided the call. Emit copies them onto the audit.
+	RuleID         string
+	Classification string
+	Sensitivity    string
+	Risk           string
 }
 
 // Outcome is the broker's decision. Behavior is allow or deny, which is the
@@ -162,9 +173,20 @@ func (b *Broker) AddHook(h Hook) {
 	b.mu.Unlock()
 }
 
-// Evaluate decides a tool call. The order is hooks, deny rules, ask rules,
-// then AskUserQuestion (always a UI question), then a hook allow, bypass
-// mode, allow rules, a session grant, and canUseTool. Deny wins over a later allow.
+// UserRule is a durable allow, ask, or deny pattern accepted by the user.
+// Effect is allow, ask, or deny. Pattern is the broker glob, such as
+// Bash(gh pr view *).
+type UserRule struct {
+	ID      string
+	Effect  string
+	Pattern string
+}
+
+// Evaluate decides a tool call. The order is hooks, managed deny, user deny,
+// managed ask, user ask, then AskUserQuestion (always a UI question), then a
+// hook allow, bypass mode, managed allow, a user allow that still classifies
+// as low-risk read-only, a session grant, and canUseTool. Deny wins over a
+// later allow. A user allow never overrides the hard floor.
 func (b *Broker) Evaluate(ctx context.Context, pol policy.Permission, req Request) Outcome {
 	if ctx == nil {
 		ctx = context.Background()
@@ -200,8 +222,15 @@ func (b *Broker) Evaluate(ctx context.Context, pol policy.Permission, req Reques
 	if rule := matchRules(pol.Deny, req.Tool, text); rule != "" {
 		return b.complete(req, Deny, "policy", rule)
 	}
+	if pattern, id := matchUser(req.UserRules, "deny", req.Tool, text); pattern != "" {
+		return b.complete(stampUser(req, id, ClassifyCall(req.Tool, req.Args, req.Workspace)), Deny, "user", pattern)
+	}
 	if rule := matchRules(pol.Ask, req.Tool, text); rule != "" && askRule == "" {
 		askRule = rule
+	}
+	if pattern, id := matchUser(req.UserRules, "ask", req.Tool, text); pattern != "" && askRule == "" {
+		askRule = pattern
+		req = stampUser(req, id, ClassifyCall(req.Tool, req.Args, req.Workspace))
 	}
 	if isInteractiveQuestion(req.Tool) {
 		qs, err := parseQuestions(req.Args)
@@ -228,6 +257,12 @@ func (b *Broker) Evaluate(ctx context.Context, pol policy.Permission, req Reques
 	}
 	if rule := matchRules(pol.Allow, req.Tool, text); rule != "" {
 		return b.complete(req, Allow, "policy", rule)
+	}
+	if pattern, id := matchUser(req.UserRules, "allow", req.Tool, text); pattern != "" {
+		class := ClassifyCall(req.Tool, req.Args, req.Workspace)
+		if class.AutoAllow {
+			return b.complete(stampUser(req, id, class), Allow, "user", pattern)
+		}
 	}
 	if b.granted(req) {
 		return b.complete(req, Allow, "ui", "session")
@@ -522,6 +557,18 @@ func (b *Broker) emit(req Request, decision, source, rule string) {
 		payload["kind"] = "question"
 		payload["answered"] = req.Answered
 	}
+	if req.RuleID != "" {
+		payload["rule_id"] = req.RuleID
+	}
+	if req.Classification != "" {
+		payload["classification"] = req.Classification
+	}
+	if req.Sensitivity != "" {
+		payload["sensitivity"] = req.Sensitivity
+	}
+	if req.Risk != "" {
+		payload["risk"] = req.Risk
+	}
 	b.publish(req.RunID, "permission_decision", payload)
 	if b.audit == nil {
 		return
@@ -548,6 +595,18 @@ func (b *Broker) emit(req Request, decision, source, rule string) {
 		if req.AuditAnswers != nil {
 			rec["answers"] = redactAnswers(req.AuditAnswers)
 		}
+	}
+	if req.RuleID != "" {
+		rec["rule_id"] = req.RuleID
+	}
+	if req.Classification != "" {
+		rec["classification"] = req.Classification
+	}
+	if req.Sensitivity != "" {
+		rec["sensitivity"] = req.Sensitivity
+	}
+	if req.Risk != "" {
+		rec["risk"] = req.Risk
 	}
 	b.audit(withTransport(rec, req.Transport))
 }
@@ -623,6 +682,11 @@ func denyMessage(behavior, source, rule string) string {
 		return "denied by hook"
 	case "ui":
 		return "denied by user"
+	case "user":
+		if rule != "" {
+			return "denied by user rule " + rule
+		}
+		return "denied by user rule"
 	default:
 		if rule != "" {
 			return "denied by policy rule " + rule

@@ -94,3 +94,28 @@ func globExpr(pattern string, fold bool) string {
 	b.WriteByte('$')
 	return b.String()
 }
+
+func matchUser(rules []UserRule, effect, tool, text string) (pattern, id string) {
+	effect = strings.ToLower(effect)
+	for _, rule := range rules {
+		if strings.ToLower(strings.TrimSpace(rule.Effect)) != effect {
+			continue
+		}
+		if ruleMatches(rule.Pattern, tool, text) {
+			pat := rule.Pattern
+			if pat == "" {
+				pat = rule.ID
+			}
+			return pat, rule.ID
+		}
+	}
+	return "", ""
+}
+
+func stampUser(req Request, id string, class Class) Request {
+	req.RuleID = id
+	req.Classification = class.Kind
+	req.Sensitivity = class.Sensitivity
+	req.Risk = class.Risk
+	return req
+}

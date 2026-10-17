@@ -407,3 +407,52 @@ func TestGrokDenyKeepsOwnHomeWritable(t *testing.T) {
 		}
 	}
 }
+
+func TestRuleFilesAreDeniedWhenPresent(t *testing.T) {
+	cli := filepath.Join(t.TempDir(), "cli")
+	state := filepath.Join(cli, "bot")
+	home := filepath.Join(state, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var files []string
+	for _, name := range []string{"user-permissions.json", "grok-permission-rules"} {
+		p := filepath.Join(state, name)
+		if err := os.WriteFile(p, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, p)
+	}
+	opts := IsolationOptions{StateDir: state, Home: home, Protect: []string{cli}}
+	toml := grokSandboxTOML(opts)
+	for _, p := range files {
+		if strings.Count(toml, strconv.Quote(p)) != 1 {
+			t.Fatalf("deny count for %s:\n%s", p, toml)
+		}
+	}
+	if strings.Contains(toml, strconv.Quote(home)) {
+		t.Fatalf("home denied:\n%s", toml)
+	}
+	empty := filepath.Join(t.TempDir(), "cli", "bot")
+	if err := os.MkdirAll(filepath.Join(empty, "home"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	absent := grokSandboxTOML(IsolationOptions{StateDir: empty, Home: filepath.Join(empty, "home"), Protect: []string{filepath.Dir(empty)}})
+	if strings.Contains(absent, "user-permissions.json") || strings.Contains(absent, "grok-permission-rules") {
+		t.Fatalf("missing rule file was denied:\n%s", absent)
+	}
+	raw, err := claudeSettingsJSON(IsolationOptions{
+		Backend: "claude", StateDir: state, UserHome: t.TempDir(), Protect: []string{cli},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	for _, p := range files {
+		for _, want := range []string{"Read(/" + p + ")", "Edit(/" + p + ")"} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("claude settings missing %s:\n%s", want, body)
+			}
+		}
+	}
+}

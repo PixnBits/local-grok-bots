@@ -43,6 +43,8 @@ Claude is unchanged: the daemon does not wrap it. Claude's own sandbox plus mana
 
 The daemon is a thin orchestrator: it spawns or resumes the CLI headless, injects timer prompts via a narrow append-only channel that the CLI's own tools read, and relays the CLI's streaming output to the web portal. It never executes shell commands or file operations on the bot's behalf. Sensitive-path restrictions (SSH keys, `.env` files, etc.) are enforced by the CLI's existing policy, not re-implemented by the daemon.
 
+Durable low-risk auto-grants and the static suggestion pass live in the permission broker (see `docs/cli-permissions.md`). They do not change the sandbox. The broker decides Claude permission-host requests and writes `user-permissions.json` and `grok-permission-rules` beside the bot CLI state. Those files are not mounted into the Linux Grok jail and are not passed as allow flags. Grok's own tool loop does not call the broker. A user allow does not auto-allow a Grok tool.
+
 The host CLI broker later in this document is a different path. There the daemon's bubblewrap or Seatbelt jail is the only sandbox. The inner CLI is not given a second sandbox profile.
 
 ### Remaining isolation limits

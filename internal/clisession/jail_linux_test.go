@@ -163,6 +163,70 @@ func TestGrokBwrapForwarderBindsSockets(t *testing.T) {
 	}
 }
 
+func TestGrokBwrapDoesNotBindRuleFiles(t *testing.T) {
+	ws := t.TempDir()
+	state := t.TempDir()
+	home := filepath.Join(state, "home")
+	if err := os.MkdirAll(filepath.Join(home, ".grok"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(ws, "grok")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var files []string
+	for _, name := range []string{"user-permissions.json", "grok-permission-rules"} {
+		p := filepath.Join(state, name)
+		if err := os.WriteFile(p, []byte("rules\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, p)
+	}
+	args, err := grokBwrapArgs(bin, []string{"-p", "hi"}, Spec{
+		Workspace: ws,
+		Isolate: &Isolation{Home: home, Env: []string{
+			"HOME=" + home,
+			"GROK_HOME=" + filepath.Join(home, ".grok"),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, "\n")
+	if !strings.Contains(joined, "--bind\n"+home+"\n"+home) {
+		t.Fatalf("home not bound:\n%s", joined)
+	}
+	for _, p := range files {
+		if strings.Contains(joined, p) {
+			t.Fatalf("rule file bound %s\n%s", p, joined)
+		}
+	}
+	userHome := t.TempDir()
+	grokHome := filepath.Join(state, "grok-home")
+	if err := os.MkdirAll(grokHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	args, err = grokBwrapArgs(bin, []string{"-p", "hi"}, Spec{
+		Workspace: ws,
+		Isolate: &Isolation{Home: userHome, Env: []string{
+			"HOME=" + userHome,
+			"GROK_HOME=" + grokHome,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined = strings.Join(args, "\n")
+	if !strings.Contains(joined, "--bind\n"+grokHome+"\n"+grokHome) {
+		t.Fatalf("grok home not bound:\n%s", joined)
+	}
+	for _, p := range files {
+		if strings.Contains(joined, p) {
+			t.Fatalf("rule file bound beside grok home %s\n%s", p, joined)
+		}
+	}
+}
+
 func TestGrokBwrapRejectsMissingBridge(t *testing.T) {
 	ws := t.TempDir()
 	bin := filepath.Join(ws, "grok")

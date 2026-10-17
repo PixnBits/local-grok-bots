@@ -380,6 +380,35 @@ CREATE TABLE IF NOT EXISTS coi_cap (
   ts TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_coi_cap ON coi_cap(bot_id, cli, ts);
+CREATE TABLE IF NOT EXISTS user_perm_rules (
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  effect TEXT NOT NULL,
+  pattern TEXT NOT NULL,
+  classification TEXT NOT NULL DEFAULT '',
+  sensitivity TEXT NOT NULL DEFAULT '',
+  risk TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_user_perm_rules_bot ON user_perm_rules(bot_id, created_at);
+CREATE TABLE IF NOT EXISTS perm_suggestions (
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  pattern TEXT NOT NULL,
+  effect TEXT NOT NULL,
+  classification TEXT NOT NULL DEFAULT '',
+  sensitivity TEXT NOT NULL DEFAULT '',
+  risk TEXT NOT NULL DEFAULT '',
+  count INTEGER NOT NULL DEFAULT 0,
+  examples TEXT NOT NULL DEFAULT '[]',
+  summary TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_perm_suggestions_bot ON perm_suggestions(bot_id, status, created_at);
 `)
 	if err != nil {
 		return err
