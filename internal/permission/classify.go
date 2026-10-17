@@ -253,6 +253,11 @@ func classifyGit(toks []string, workspace string) Class {
 	if !gitReadOnly[sub] {
 		return blocked("write", "unknown", "high", "git "+sub+" is not a known read-only subcommand")
 	}
+	for _, t := range toks {
+		if t == "--output" || strings.HasPrefix(t, "--output=") {
+			return blocked("write", "unknown", "high", "git "+sub+" --output writes a file")
+		}
+	}
 	if sens, ok := toksInside(toks, workspace); !ok {
 		return blocked(sens, sens, "high", "git "+sub+" path is outside the workspace")
 	}
@@ -461,13 +466,13 @@ func credentialPath(p string) bool {
 	for _, s := range splitSegs(p) {
 		s = strings.ToLower(s)
 		switch s {
-		case ".ssh", ".aws", ".gnupg", ".netrc", ".kube", ".azure", ".docker",
+		case ".ssh", ".aws", ".gnupg", ".netrc", ".kube", ".azure", ".docker", ".grok",
 			"credentials", "credentials.json", "id_rsa", "id_ed25519", "id_ecdsa",
 			"auth.json", "admin-token", "policy.toml", ".git-credentials", ".npmrc",
-			".pypirc", "cookies":
+			".pypirc", "cookies", "user-permissions.json", "grok-permission-rules":
 			return true
 		}
-		if s == ".env" || strings.HasPrefix(s, ".env.") {
+		if s == ".env" || strings.HasPrefix(s, ".env.") || s == "state.db" || strings.HasPrefix(s, "state.db-") {
 			return true
 		}
 		if strings.HasSuffix(s, ".pem") || strings.HasSuffix(s, ".key") {

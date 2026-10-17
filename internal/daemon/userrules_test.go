@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
@@ -109,4 +111,102 @@ func TestDurableAllowAutoAllowsReadOnly(t *testing.T) {
 	if push.Source != "timeout" {
 		t.Fatalf("push was not asked: %+v", push)
 	}
+}
+
+type captureRunner struct {
+	spec clisession.Spec
+}
+
+func (r *captureRunner) Run(_ context.Context, spec clisession.Spec, _ func(clisession.Event)) (clisession.Result, error) {
+	r.spec = spec
+	return clisession.Result{Text: "ok", SessionID: "sess-rules"}, nil
+}
+
+func TestUserRulesDoNotWidenCLI(t *testing.T) {
+	dir := t.TempDir()
+	app := newApp(t, dir, nil)
+	cap := &captureRunner{}
+	app.runner = cap
+	app.rtMu.Lock()
+	app.policy = policy.Policy{
+		Backend: "claude", CLIPermitted: true, DaemonJail: false,
+		TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute,
+		ToolAllow: []string{"Read"},
+		ToolDeny:  []string{"Bash(rm *)"},
+	}
+	app.rtMu.Unlock()
+	bot, err := app.st.CreateBot("rules", "", nil, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := serve(t, app)
+	base := srv.URL + "/api/bots/" + bot.ID
+	res, body := do(t, "POST", base+"/permission-rules", map[string]any{
+		"effect": "allow", "pattern": "Bash(git status*)",
+	}, "")
+	if res.StatusCode != 201 {
+		t.Fatalf("allow %d %s", res.StatusCode, body)
+	}
+	res, body = do(t, "POST", base+"/permission-rules", map[string]any{
+		"effect": "deny", "pattern": "Bash(*push*)",
+	}, "")
+	if res.StatusCode != 201 {
+		t.Fatalf("deny %d %s", res.StatusCode, body)
+	}
+	res, body = do(t, "POST", base+"/thread/messages", map[string]any{"content": "go"}, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("post %d %s", res.StatusCode, body)
+	}
+	waitIdle(t, srv.URL, bot.ID, "")
+	got, err := app.st.GetBot(bot.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LastRunStatus != "done" {
+		t.Fatalf("run %s %s", got.LastRunStatus, got.LastRunError)
+	}
+	if !containsRule(cap.spec.AllowRules, "Read") {
+		t.Fatalf("policy allow missing: %v", cap.spec.AllowRules)
+	}
+	for _, rule := range append(append([]string{}, cap.spec.AllowRules...), cap.spec.DenyRules...) {
+		if strings.Contains(rule, "git status") || strings.Contains(rule, "push") {
+			t.Fatalf("user rule on argv spec: %v deny %v", cap.spec.AllowRules, cap.spec.DenyRules)
+		}
+	}
+	if !containsRule(cap.spec.DenyRules, "Bash(rm *)") {
+		t.Fatalf("policy deny missing: %v", cap.spec.DenyRules)
+	}
+	argv, err := clisession.Args(cap.spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < len(argv); i++ {
+		switch argv[i] {
+		case "--allowedTools", "--disallowedTools", "--allow", "--deny":
+			if i+1 >= len(argv) {
+				continue
+			}
+			rule := argv[i+1]
+			if strings.Contains(rule, "git status") || strings.Contains(rule, "push") {
+				t.Fatalf("user pattern on %s %s", argv[i], rule)
+			}
+		}
+	}
+	settings, err := os.ReadFile(filepath.Join(dir, "cli", bot.ID, "claude-settings.json"))
+	if err != nil || strings.Contains(string(settings), "git status") || strings.Contains(string(settings), `Bash(*push*)`) {
+		t.Fatalf("settings %v %s", err, settings)
+	}
+	native, err := os.ReadFile(filepath.Join(dir, "cli", bot.ID, "user-permissions.json"))
+	if err != nil || !strings.Contains(string(native), "Bash(git status*)") || !strings.Contains(string(native), "Bash(*push*)") {
+		t.Fatalf("native %v %s", err, native)
+	}
+}
+
+func containsRule(rules []string, want string) bool {
+	for _, rule := range rules {
+		if rule == want {
+			return true
+		}
+	}
+	return false
 }
