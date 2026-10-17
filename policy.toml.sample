@@ -102,8 +102,10 @@ imminent_timer_minutes = 2
 # none always passes --permission-prompts none.
 # claude_transport = "mcp"
 # Optional binary pins. Prefer path + SHA-256. Empty keeps PATH launch.
+# A grok pin's sha256 is compared before grok --version. A mismatch does not run the binary.
 # pins = [
 #   { path = "/usr/local/bin/claude", sha256 = "..." },
+#   { backend = "grok", path = "/usr/local/bin/grok", sha256 = "..." },
 # ]
 
 # [tools]

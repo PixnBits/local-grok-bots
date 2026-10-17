@@ -154,7 +154,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		botID := bot.ID
 		spec.ACP = &clisession.ACPHooks{
 			Decide: func(ctx context.Context, ask clisession.ACPAsk) (clisession.ACPDecision, error) {
-				return a.decideGrokACP(ctx, botID, runID, sessionID, ask)
+				return a.decideGrokACP(ctx, botID, runID, sessionID, ask, envField(iso.Env, "GROK_HOME"))
 			},
 			Fail: func(tool string, args map[string]any, reason string) {
 				a.recordACPHostFail(botID, runID, tool, args, reason)
@@ -391,14 +391,15 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 	}
 	state := filepath.Join(filepath.Dir(a.ws), "cli", botID)
 	opts := clisession.IsolationOptions{
-		Backend:  backend,
-		StateDir: state,
-		Base:     os.Environ(),
-		Extra:    a.policy.CLIEnv,
-		Secrets:  []string{a.cfg.AuthToken},
-		Grants:   botGrants(bot),
-		Protect:  a.daemonSecrets(),
-		CredRoot: a.cfg.DataDir,
+		Backend:   backend,
+		StateDir:  state,
+		Workspace: ws,
+		Base:      os.Environ(),
+		Extra:     a.policy.CLIEnv,
+		Secrets:   []string{a.cfg.AuthToken},
+		Grants:    botGrants(bot),
+		Protect:   a.daemonSecrets(),
+		CredRoot:  a.cfg.DataDir,
 	}
 	if strings.EqualFold(backend, "claude") && a.policy.CLIClaudeSandbox != policy.SandboxOff {
 		if missing := claudeSandboxMissing(); len(missing) > 0 {
@@ -457,7 +458,7 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 		}
 		iso, err = clisession.PrepareIsolation(opts)
 		if err == nil && opts.ProxyGate != "" {
-			iso.ReleaseGate = a.trackGrokGate(bot.ID, runID, opts.ProxyGate)
+			iso.ReleaseGate = a.trackGrokGate(bot.ID, runID, opts.ProxyGate, opts.Grants.Net)
 		}
 		a.credMu.Unlock()
 	} else {
@@ -520,7 +521,7 @@ type gateHold struct {
 // trackGrokGate admits the secret and remembers it until the turn ends or
 // the bot is deleted. The caller holds credMu, which is also held across
 // releaseBotGates, so a delete cannot miss a secret admitted after it starts.
-func (a *App) trackGrokGate(botID, runID, secret string) func() {
+func (a *App) trackGrokGate(botID, runID, secret string, net bool) func() {
 	if a == nil {
 		return func() {}
 	}
@@ -530,7 +531,7 @@ func (a *App) trackGrokGate(botID, runID, secret string) func() {
 	if eg == nil {
 		return func() {}
 	}
-	release := eg.Admit(botID, runID, secret)
+	release := eg.AdmitNet(botID, runID, secret, net)
 	hold := &gateHold{}
 	var once sync.Once
 	hold.drop = func() {
@@ -656,6 +657,9 @@ func (a *App) ensureGrokProxy(userHome string) (string, error) {
 	eg.SetAudit(func(botID, runID, path string, status int, suppressed int) {
 		a.auditProxyRequest(botID, runID, path, status, suppressed)
 	})
+	eg.SetRefuseAudit(func(botID, runID, path, reason string) {
+		a.auditProxyRefused(botID, runID, path, reason)
+	})
 	a.grokProxy = eg
 	return eg.Base(), nil
 }
@@ -715,6 +719,22 @@ func (a *App) auditProxyRequest(botID, runID, path string, status int, suppresse
 		}
 	}
 	a.audit.Write(rec)
+}
+
+func (a *App) auditProxyRefused(botID, runID, path, reason string) {
+	if a == nil || a.audit == nil || !a.audit.Enabled() {
+		return
+	}
+	if reason != "unparsed" && reason != "server_tool" {
+		reason = "server_tool"
+	}
+	a.audit.Write(map[string]any{
+		"event":  "cli_proxy_refused",
+		"bot_id": botID,
+		"run_id": runID,
+		"path":   path,
+		"reason": reason,
+	})
 }
 
 var errGrokProxy = errors.New("grok credential proxy is not available, so the turn was refused")
@@ -1233,7 +1253,7 @@ func (a *App) decideStreamControl(ctx context.Context, botID, runID, sessionID s
 	return clisession.ControlDecision{Behavior: permission.Deny, Message: msg}
 }
 
-func (a *App) decideGrokACP(ctx context.Context, botID, runID, sessionID string, ask clisession.ACPAsk) (clisession.ACPDecision, error) {
+func (a *App) decideGrokACP(ctx context.Context, botID, runID, sessionID string, ask clisession.ACPAsk, grokHome string) (clisession.ACPDecision, error) {
 	// Prefer the id Grok returned. A fresh turn starts under a daemon id and
 	// then stores Grok's id; a grant under the daemon id would not match the
 	// next turn.
@@ -1248,6 +1268,7 @@ func (a *App) decideGrokACP(ctx context.Context, botID, runID, sessionID string,
 		RunID: runID, BotID: botID, SessionID: sessionID,
 		Tool: tool, Args: ask.Args, ToolUseID: ask.ToolUseID,
 		Transport: policy.TransportACP,
+		GrokHome:  grokHome,
 	}
 	if tool == "unknown" {
 		req.Classification = "unknown"
@@ -1323,6 +1344,16 @@ func (a *App) auditVersionRefused(botID, runID, backend, version string) {
 		Args:      map[string]any{"version": version},
 		Transport: transport,
 	}, permission.Deny, "host", "cli version is not allowed")
+}
+
+func envField(env []string, key string) string {
+	prefix := key + "="
+	for _, e := range env {
+		if strings.HasPrefix(e, prefix) {
+			return e[len(prefix):]
+		}
+	}
+	return ""
 }
 
 func oneLine(s string) string {

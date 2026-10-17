@@ -121,6 +121,37 @@ func TestMapACPTool(t *testing.T) {
 	if err != nil || search != "WebSearch" {
 		t.Fatalf("search %s %v", search, err)
 	}
+	mon, args, _, err := mapACPTool(map[string]any{
+		"rawInput": map[string]any{"variant": "Monitor", "command": "tail -f log"},
+		"_meta":    map[string]any{"x.ai/tool": map[string]any{"name": "monitor"}},
+	})
+	if err != nil || mon != "Bash" || args["command"] != "tail -f log" {
+		t.Fatalf("monitor %s %#v %v", mon, args, err)
+	}
+	task, _, _, err := mapACPTool(map[string]any{
+		"_meta": map[string]any{"x.ai/tool": map[string]any{"name": "task"}},
+	})
+	if err != nil || task != "Task" {
+		t.Fatalf("task %s %v", task, err)
+	}
+	flow, _, _, err := mapACPTool(map[string]any{
+		"_meta": map[string]any{"x.ai/tool": map[string]any{"name": "workflow"}},
+	})
+	if err != nil || flow != "Workflow" {
+		t.Fatalf("workflow %s %v", flow, err)
+	}
+	sched, _, _, err := mapACPTool(map[string]any{
+		"_meta": map[string]any{"x.ai/tool": map[string]any{"name": "scheduler_create"}},
+	})
+	if err != nil || sched != "Scheduler" {
+		t.Fatalf("scheduler %s %v", sched, err)
+	}
+	img, _, _, err := mapACPTool(map[string]any{
+		"_meta": map[string]any{"x.ai/tool": map[string]any{"name": "image_gen"}},
+	})
+	if err != nil || img != "ImageGen" {
+		t.Fatalf("image %s %v", img, err)
+	}
 	unknown, _, _, err := mapACPTool(map[string]any{
 		"title": "Custom",
 		"_meta": map[string]any{"x.ai/tool": map[string]any{"name": "custom_widget"}},

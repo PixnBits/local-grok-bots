@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
 
 func TestGrokVersionAllowList(t *testing.T) {
@@ -52,5 +54,43 @@ func TestGrokVersionRefusesBeforeStart(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "9.9.9") || strings.Contains(err.Error(), "should-not-run") {
 		t.Fatalf("error text %q", err.Error())
+	}
+}
+
+func TestVersionHashBeforeProbe(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "grok")
+	stamp := filepath.Join(dir, "stamp")
+	body := "#!/bin/sh\nif [ \"$1\" = --version ]; then echo probed > \"" + stamp + "\"; echo grok 1.0.62; exit 0; fi\necho should-not-run\n"
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sum, err := hashFile(path)
+	if err != nil || sum == "" {
+		t.Fatal(err)
+	}
+	_, err = (ExecRunner{Policy: policy.Policy{Pins: []policy.Pin{{
+		Backend: "grok", Path: path, SHA256: "deadbeef",
+	}}}}).Run(context.Background(), Spec{
+		Backend: "grok", Bin: path, Prompt: "hi", Workspace: t.TempDir(),
+		Isolate: &Isolation{GrokSandbox: GrokProfile},
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "cli pin: grok hash mismatch") {
+		t.Fatalf("%v", err)
+	}
+	if _, statErr := os.Stat(stamp); !os.IsNotExist(statErr) {
+		t.Fatal(statErr)
+	}
+	_, err = (ExecRunner{Policy: policy.Policy{Pins: []policy.Pin{{
+		Backend: "grok", Path: path, SHA256: sum,
+	}}}}).Run(context.Background(), Spec{
+		Backend: "grok", Bin: path, Prompt: "hi", Workspace: t.TempDir(),
+		Isolate: &Isolation{GrokSandbox: GrokProfile},
+	}, nil)
+	if _, statErr := os.Stat(stamp); statErr != nil {
+		t.Fatal(statErr)
+	}
+	if err != nil && strings.Contains(err.Error(), "hash mismatch") {
+		t.Fatal(err)
 	}
 }

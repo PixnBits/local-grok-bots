@@ -67,6 +67,9 @@ type Request struct {
 	UserRules []UserRule
 	// Workspace is the bot directory used to classify paths.
 	Workspace string
+	// GrokHome is the bot GROK_HOME. Empty skips the home-path floor.
+	// A write, an edit, or a shell target under it is denied.
+	GrokHome string
 	// RuleID, Classification, Sensitivity, and Risk are filled when a
 	// durable user rule decided the call. Emit copies them onto the audit.
 	RuleID         string
@@ -196,6 +199,13 @@ func (b *Broker) Evaluate(ctx context.Context, pol policy.Permission, req Reques
 		req.ID = b.newID()
 	}
 	req.Tool = strings.TrimSpace(req.Tool)
+	if tool, rule, hit := refusedTool(req.Tool); hit {
+		req.Tool = tool
+		return b.denyFloor(req, rule)
+	}
+	if grokHomeDenied(req) {
+		return b.denyFloor(req, "grok_home")
+	}
 	text := argText(req.Args)
 
 	var askRule string
@@ -520,6 +530,14 @@ func (w *wait) resolve(decision string) bool {
 		w.ch <- decision
 	})
 	return won
+}
+
+func (b *Broker) denyFloor(req Request, rule string) Outcome {
+	class := ClassifyCall(req.Tool, req.Args, req.Workspace)
+	req.Classification = class.Kind
+	req.Sensitivity = class.Sensitivity
+	req.Risk = class.Risk
+	return b.complete(req, Deny, "policy", rule)
 }
 
 func (b *Broker) complete(req Request, decision, source, rule string) Outcome {

@@ -88,6 +88,12 @@ func metaModeProblem(meta map[string]any) string {
 }
 
 func changedProblem(m map[string]any) string {
+	if m == nil {
+		return acpModeRefused
+	}
+	if p := upsertedYoloProblem(upsertedValue(m)); p != "" {
+		return p
+	}
 	return notificationProblem(m)
 }
 
@@ -96,12 +102,86 @@ func sessionChangedMethod(method string) bool {
 }
 
 // sessionsChangedProblem checks a top-level session-changed notification.
-// Entries may be nested in lists.
+// Every upserted entry must carry yolo as a JSON boolean false.
+// Entries may be nested in lists. A missing list fails closed.
 func sessionsChangedProblem(raw map[string]any) string {
 	if raw == nil {
+		return acpModeRefused
+	}
+	params := asMap(raw["params"])
+	if params == nil {
+		return acpModeRefused
+	}
+	upserted, ok := params["upserted"]
+	if !ok {
+		return acpModeRefused
+	}
+	if p := upsertedEntriesProblem(upserted); p != "" {
+		return p
+	}
+	return walkModeValue(params)
+}
+
+// upsertedValue finds the upserted list on a session-changed object.
+// A missing list is nil, which fails closed.
+func upsertedValue(m map[string]any) any {
+	if m == nil {
+		return nil
+	}
+	if v, ok := m["upserted"]; ok {
+		return v
+	}
+	if p := asMap(m["params"]); p != nil {
+		if v, ok := p["upserted"]; ok {
+			return v
+		}
+		return nil
+	}
+	return nil
+}
+
+func upsertedYoloProblem(v any) string {
+	if v == nil {
+		return acpModeRefused
+	}
+	return upsertedEntriesProblem(v)
+}
+
+func upsertedEntriesProblem(v any) string {
+	items, ok := v.([]any)
+	if !ok {
+		return acpModeRefused
+	}
+	for _, item := range items {
+		if p := oneUpserted(item); p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
+func oneUpserted(item any) string {
+	if items, ok := item.([]any); ok {
+		for _, sub := range items {
+			if p := oneUpserted(sub); p != "" {
+				return p
+			}
+		}
 		return ""
 	}
-	return walkModeValue(raw["params"])
+	m := asMap(item)
+	if m == nil {
+		return acpModeRefused
+	}
+	y, ok := m["yolo"]
+	if !ok {
+		return acpModeRefused
+	}
+	b, isBool := y.(bool)
+	if !isBool || b {
+		return acpModeRefused
+	}
+	return ""
 }
 
 func notificationProblem(n map[string]any) string {

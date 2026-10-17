@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,15 +86,18 @@ func SealGrokHome(root, grokHome string) error {
 			return err
 		}
 	}
-	return sealSessionPermissions(grokHome)
+	if err := sealSessionPermissions(grokHome); err != nil {
+		return err
+	}
+	return grokHomeNames(grokHome)
 }
 
 func ensureGrokSeal(root, rel string, ent grokSealEntry) error {
 	path := filepath.Join(root, rel)
 	match, missing, err := grokSealMatches(path, ent)
 	if err != nil || (!match && !missing) {
-		if ent.name == "requirements.toml" && !ent.dir {
-			if upgraded, uerr := upgradeRequirementsMarker(root, rel, ent.body); upgraded {
+		if err == nil && !ent.dir {
+			if upgraded, uerr := upgradeKnownSeal(root, rel, ent); upgraded {
 				return uerr
 			}
 		}
@@ -159,6 +163,9 @@ func grokSealBinds(grokHome string) ([]string, error) {
 	if err != nil || st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
 		return nil, fmt.Errorf("grok home config is incomplete, so the turn was refused")
 	}
+	if err := grokHomeNames(grokHome); err != nil {
+		return nil, err
+	}
 	var args []string
 	for _, ent := range grokSealEntries() {
 		p := filepath.Join(grokHome, ent.name)
@@ -196,16 +203,33 @@ func sealFileState(path string, body []byte) (match, missing bool, err error) {
 	return true, false, nil
 }
 
+// upgradeKnownSeal rewrites only a previous daemon body for this name.
+// Any other body, link, or extra name stays in place.
+func upgradeKnownSeal(root, rel string, ent grokSealEntry) (bool, error) {
+	switch ent.name {
+	case "requirements.toml":
+		return upgradePreviousBody(root, rel, []byte(grokSealMarker), ent.body)
+	case "config.toml":
+		return upgradePreviousBody(root, rel, []byte(grokPermissionTOMLPrevious()), ent.body)
+	default:
+		return false, nil
+	}
+}
+
 // upgradeRequirementsMarker rewrites only the daemon's previous marker.
 // Any other body, link, or extra name stays in place.
 func upgradeRequirementsMarker(root, rel string, want []byte) (bool, error) {
+	return upgradePreviousBody(root, rel, []byte(grokSealMarker), want)
+}
+
+func upgradePreviousBody(root, rel string, prev, want []byte) (bool, error) {
 	path := filepath.Join(root, rel)
 	st, err := os.Lstat(path)
 	if err != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || tooManyLinks(st) {
 		return false, nil
 	}
 	got, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(got, []byte(grokSealMarker)) {
+	if err != nil || !bytes.Equal(got, prev) {
 		return false, nil
 	}
 	return true, writeFileNoFollow(root, rel, want, 0o600)
@@ -300,7 +324,7 @@ func walkSessionPermissions(grokHome string) (bad []string, binds []string, err 
 			return nil
 		}
 		body, readErr := os.ReadFile(path)
-		if readErr != nil || !bytes.Equal(body, []byte(grokSealMarker)) {
+		if readErr != nil || !sessionPermissionOK(body) {
 			bad = append(bad, rel)
 			return nil
 		}
@@ -415,6 +439,287 @@ func ensureShellRCFile(home, name string, body []byte) error {
 		return err
 	}
 	return nil
+}
+
+// sessionPermissionOK accepts an empty placeholder or the daemon marker.
+// Whitespace is neither, and the file is left in place.
+func sessionPermissionOK(body []byte) bool {
+	if len(body) == 0 {
+		return true
+	}
+	return bytes.Equal(body, []byte(grokSealMarker))
+}
+
+// ensureWorkspacePermission creates the scope's session permission file when
+// it is missing. The directory name is the URL path-encoding of the absolute
+// workspace path. The file is empty and mode 0400. A different body is left
+// in place. An empty workspace or home is a no-op.
+func ensureWorkspacePermission(root, grokHome, workspace string) error {
+	root = filepath.Clean(strings.TrimSpace(root))
+	grokHome = filepath.Clean(strings.TrimSpace(grokHome))
+	workspace = strings.TrimSpace(workspace)
+	if root == "" || root == "." || grokHome == "" || grokHome == "." || workspace == "" {
+		return nil
+	}
+	if !filepath.IsAbs(root) || !filepath.IsAbs(grokHome) {
+		return nil
+	}
+	abs, err := filepath.Abs(workspace)
+	if err != nil {
+		return nil
+	}
+	abs = filepath.Clean(abs)
+	if !filepath.IsAbs(abs) {
+		return nil
+	}
+	key := url.PathEscape(abs)
+	if !safeSessionKey(key) {
+		return fmt.Errorf("grok home config is incomplete, so the turn was refused")
+	}
+	relFile, err := relUnder(root, filepath.Join(grokHome, "sessions", key, "permission.toml"))
+	if err != nil {
+		return err
+	}
+	if err := mkdirNoFollow(root, filepath.Dir(relFile)); err != nil {
+		return err
+	}
+	dest := filepath.Join(root, relFile)
+	st, err := os.Lstat(dest)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err := writeFileNoFollow(root, relFile, nil, 0o400); err != nil {
+			return err
+		}
+		return os.Chmod(dest, 0o400)
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || tooManyLinks(st) {
+		return &UntrustedConfigError{Names: []string{filepath.Join("sessions", key, "permission.toml")}}
+	}
+	body, readErr := os.ReadFile(dest)
+	if readErr != nil || !sessionPermissionOK(body) {
+		return &UntrustedConfigError{Names: []string{filepath.Join("sessions", key, "permission.toml")}}
+	}
+	return nil
+}
+
+func safeSessionKey(key string) bool {
+	if key == "" || key == "." || key == ".." || strings.Contains(key, "..") {
+		return false
+	}
+	if strings.ContainsAny(key, `/\`) {
+		return false
+	}
+	return true
+}
+
+// grokHomeAllowed is the top-level GROK_HOME name list. A name outside it,
+// or a top-level symlink, refuses the turn.
+func grokHomeAllowed(name string) bool {
+	switch name {
+	case "sessions", "logs", "auth.json", "sandbox.toml", "version.json", "cache":
+		return true
+	}
+	for _, n := range grokLockFiles {
+		if n == name {
+			return true
+		}
+	}
+	for _, ent := range grokSealEntries() {
+		if ent.name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func grokHomeNames(grokHome string) error {
+	grokHome = filepath.Clean(strings.TrimSpace(grokHome))
+	if grokHome == "" || !filepath.IsAbs(grokHome) {
+		return nil
+	}
+	entries, err := os.ReadDir(grokHome)
+	if err != nil {
+		return fmt.Errorf("grok home config is incomplete, so the turn was refused")
+	}
+	var bad []string
+	for _, ent := range entries {
+		name := ent.Name()
+		info, infoErr := ent.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !grokHomeAllowed(name) {
+			bad = append(bad, name)
+		}
+	}
+	if len(bad) > 0 {
+		return &UntrustedConfigError{Names: bad}
+	}
+	return nil
+}
+
+// homeSeal is one path under HOME that is an empty placeholder.
+// A directory holds only an empty placeholder file.
+type homeSeal struct {
+	rel string
+	dir bool
+}
+
+var homeSealEntries = []homeSeal{
+	{rel: ".agents/skills", dir: true},
+	{rel: ".claude", dir: true},
+	{rel: ".cursor/mcp.json"},
+	{rel: ".gitconfig"},
+}
+
+// prepareHomeSeals creates a missing home placeholder. A different body or
+// a symlink is left in place. An empty or relative home is a no-op.
+func prepareHomeSeals(home string) error {
+	home = filepath.Clean(strings.TrimSpace(home))
+	if home == "" || home == "." || !filepath.IsAbs(home) {
+		return nil
+	}
+	st, err := os.Lstat(home)
+	if err != nil || st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
+		return nil
+	}
+	for _, ent := range homeSealEntries {
+		var err error
+		if ent.dir {
+			err = ensureHomeDirSeal(home, ent.rel)
+		} else {
+			err = ensureHomeFileSeal(home, ent.rel)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureHomeFileSeal(home, rel string) error {
+	parent := filepath.Dir(rel)
+	if parent != "." {
+		if err := ensurePlainDir(home, parent); err != nil {
+			return err
+		}
+	}
+	dest := filepath.Join(home, rel)
+	match, missing, err := sealFileState(dest, nil)
+	if err != nil {
+		return err
+	}
+	if match {
+		return nil
+	}
+	if !missing {
+		return &UntrustedConfigError{Names: []string{rel}}
+	}
+	if err := writeFileNoFollow(home, rel, nil, 0o600); err != nil {
+		match, missing, err2 := sealFileState(dest, nil)
+		if err2 == nil && match {
+			return nil
+		}
+		if err2 == nil && !missing {
+			return &UntrustedConfigError{Names: []string{rel}}
+		}
+		return err
+	}
+	return nil
+}
+
+func ensureHomeDirSeal(home, rel string) error {
+	dest := filepath.Join(home, rel)
+	st, err := os.Lstat(dest)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err == nil && (st.Mode()&os.ModeSymlink != 0 || !st.IsDir()) {
+		return &UntrustedConfigError{Names: []string{rel}}
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		parent := filepath.Dir(rel)
+		if parent != "." {
+			if err := ensurePlainDir(home, parent); err != nil {
+				return err
+			}
+		}
+		if err := mkdirNoFollow(home, rel); err != nil {
+			return err
+		}
+		return writeFileNoFollow(home, filepath.Join(rel, grokSealDirEntry), nil, 0o600)
+	}
+	entries, err := os.ReadDir(dest)
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		return writeFileNoFollow(home, filepath.Join(rel, grokSealDirEntry), nil, 0o600)
+	}
+	if !emptyDirSeal(dest) {
+		return &UntrustedConfigError{Names: []string{rel}}
+	}
+	return nil
+}
+
+func emptyDirSeal(path string) bool {
+	entries, err := os.ReadDir(path)
+	if err != nil || len(entries) != 1 || entries[0].Name() != grokSealDirEntry {
+		return false
+	}
+	info, err := entries[0].Info()
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || tooManyLinks(info) {
+		return false
+	}
+	body, err := os.ReadFile(filepath.Join(path, grokSealDirEntry))
+	return err == nil && len(body) == 0
+}
+
+func ensurePlainDir(root, rel string) error {
+	path := filepath.Join(root, rel)
+	st, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return mkdirNoFollow(root, rel)
+		}
+		return err
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
+		return &UntrustedConfigError{Names: []string{rel}}
+	}
+	return nil
+}
+
+func homeSealBinds(home string) ([]string, error) {
+	home = filepath.Clean(strings.TrimSpace(home))
+	if home == "" || home == "." || !filepath.IsAbs(home) {
+		return nil, nil
+	}
+	st, err := os.Lstat(home)
+	if err != nil || st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
+		return nil, nil
+	}
+	if err := prepareHomeSeals(home); err != nil {
+		return nil, err
+	}
+	var args []string
+	for _, ent := range homeSealEntries {
+		p := filepath.Join(home, ent.rel)
+		if ent.dir {
+			if !emptyDirSeal(p) {
+				return nil, &UntrustedConfigError{Names: []string{ent.rel}}
+			}
+		} else {
+			match, missing, err := sealFileState(p, nil)
+			if err != nil || missing || !match {
+				return nil, &UntrustedConfigError{Names: []string{ent.rel}}
+			}
+		}
+		args = append(args, "--ro-bind", p, p)
+	}
+	return args, nil
 }
 
 func shellRCBinds(home string) ([]string, error) {

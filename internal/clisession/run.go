@@ -59,7 +59,11 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 		path = looked
 	}
 	if strings.EqualFold(spec.Backend, "grok") {
-		if err := checkGrokVersion(ctx, path); err != nil {
+		pinSHA := ""
+		if pin, ok := e.Policy.CLIPinFor("grok"); ok {
+			pinSHA = pin.SHA256
+		}
+		if err := checkGrokVersion(ctx, path, pinSHA); err != nil {
 			return Result{}, err
 		}
 	}

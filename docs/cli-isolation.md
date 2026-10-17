@@ -211,27 +211,42 @@ Grok has no flag to skip setting sources. The daemon:
   exact previous requirements marker is replaced with the current
   requirements body. `requirements.toml` sets
   `[ui] remember_tool_approvals = false`. Any
-  `sessions/**/permission*.toml` that already exists must be the daemon
-  placeholder. A different body is left in place and the turn is refused.
-  Missing permission files are not created;
+  `sessions/**/permission*.toml` that already exists must be empty or the
+  daemon placeholder. A different body is left in place and the turn is
+  refused. The scope's `sessions/<encoded workspace>/permission.toml` is
+  created when it is missing: the directory name is the URL path-encoding
+  of the absolute workspace path, the file is empty, and the jail
+  bind-mounts it read-only over the writable `sessions/` mount. Other
+  missing permission files are not created. An exact previous
+  `config.toml` body is replaced with the current body, which includes
+  `disable_web_search = true`;
 - mounts `GROK_HOME` read-only, then mounts `sessions/` and `logs/`
   writable, then mounts the sealed names and matching permission files
   read-only on top. The same startup files are checked in `HOME` and
   mounted read-only: `.bashrc`, `.bash_profile`, `.bash_login`,
   `.profile`, and `.zshrc`. A missing startup file is created as the
   daemon placeholder. A different file refuses the turn and is left in
-  place.
+  place. The same check covers `.agents/skills`, `.claude`,
+  `.cursor/mcp.json`, and `.gitconfig`. A missing path is an empty
+  placeholder (a directory holds only an empty `placeholder` file) and
+  is mounted read-only. A different body or a symlink is left in place
+  and the turn is refused.
 
 Writable inside the jail: the workspace, the fresh `/tmp`, the bot `HOME`
-except those startup files and except the read-only `GROK_HOME` tree,
+except those startup files, the empty home placeholders, and the read-only `GROK_HOME` tree,
 `GROK_HOME/sessions` except matching `permission*.toml` files, and
 `GROK_HOME/logs`. Not writable: `lsp.json`,
 `installed-plugins/registry.json`, `trusted-plugins`,
 `trusted-hook-projects`, `disabled-hooks`, `mcp_preferences.json`,
 `commands/`, `rules/`, `personas/`, `roles/`, `workflows/`, `bundled/`,
 `AGENTS.md`, `CLAUDE.md`, `sandbox.toml`, `auth.json`, and the sealed
-names. A permission file created during a turn is caught on the next
-turn's check.
+names. Top-level names in `GROK_HOME` must be the sealed names,
+`sessions`, `logs`, `auth.json`, `sandbox.toml`, `version.json`,
+`cache`, or the lock files `managed_config.lock` and `auth.json.lock`.
+Any other top-level name, including `lsp.json`, `commands/`, or
+`AGENTS.md`, or a top-level symlink, refuses the turn as untrusted
+config. A permission file created during a turn, other than the
+pre-created scope file, is caught on the next turn's check.
 
 `/etc/grok/requirements.toml`, `/etc/grok/managed_config.toml`, and
 `/etc/claude-code/managed-settings.json` refuse the turn when they are
@@ -240,8 +255,13 @@ present, for both backends, unless managed policy sets
 bind does not hide them. A refusal is audited as `cli_untrusted_config`
 and as a host permission denial.
 
-Before a Grok turn the daemon reads `grok --version` and allows only
-1.0.52 and 1.0.62. The result is cached for that binary's path, size,
+Before a Grok turn the daemon hashes the `grok` binary. When managed
+policy sets a `tools.cli` pin for grok, that SHA-256 is compared before
+anything is executed. A mismatch refuses the turn and does not run
+`--version`. A pin is recommended: set `sha256` on the grok entry so a
+replaced binary is refused before it runs. When the hash matches, or no
+pin is set, the daemon reads `grok --version` and allows only 1.0.52
+and 1.0.62. The version result is cached for that binary's path, size,
 and modification time. Any other release, or a check that does not
 return a version, refuses the turn and is audited as
 `cli_version_refused`.
@@ -356,14 +376,24 @@ deny = ["/home/u/.ssh", ...]  # existing credential paths, admin-token, state.db
 and passes `--sandbox lgb` plus `--tools`, a global flag before `agent`.
 The list is the tools an ask rule can force to prompt:
 `run_terminal_command`, `read_file`, `search_replace`, `grep`, and `write`.
-`web_fetch` and `web_search` are added only with a net grant.
-`list_dir`, `x_keyword_search`, and `x_semantic_search` stay off.
-Everything else stays off because it is not on the list (`todo_write`,
-subagent and scheduler tools, `monitor`, `workflow`, plan mode,
+`web_fetch` and `web_search` are added to `--tools` only with a net grant.
+That flag does not stop server-side search. `grok agent stdio` ignores
+`--tools` and `--disallowed-tools` for tools the model runs at the
+provider. Without a net grant the loopback proxy refuses a model request
+(`/v1/responses` or a chat completions body) whose `tools` entry has a
+type other than `function`, including `web_search` and `x_search`, and
+audits `cli_proxy_refused`. A function-only list, or no tools key, is
+forwarded. With a net grant the proxy does not inspect tools.
+`list_dir`, `x_keyword_search`, and `x_semantic_search` are not on
+`--tools`. Everything else stays off that list (`todo_write`, subagent
+and scheduler tools, `monitor`, `workflow`, plan mode,
 `ask_user_question`, `send_feedback`, image tools, `search_tool`,
-`use_tool`). The same directory gets `config.toml`:
-`permission_mode = "default"` and a catch-all ask list, so read-only tools
-send `session/request_permission` instead of running on their own.
+`use_tool`). The broker still denies Task, Workflow, Scheduler, and
+image or video generation tools if a permission request arrives, and it
+denies a write, an edit, or a shell target under `GROK_HOME`. The same
+directory gets `config.toml`: `disable_web_search = true`,
+`permission_mode = "default"`, and a catch-all ask list, so read-only
+tools send `session/request_permission` instead of running on their own.
 
 A custom profile fails closed: Grok refuses to start if it can't
 apply it (unknown profile, bad `sandbox.toml`, or no `bwrap` for a deny list on
@@ -656,14 +686,20 @@ Residuals:
   did not have one at the start, is caught on the next turn's check.
   `remember_tool_approvals` is off in the sealed requirements file.
 - With `home = "user"`, a missing shell startup file is created as the
-  daemon placeholder in that home. A different file is left in place and
-  the turn is refused. The user's `~/.grok` is still not written.
+  daemon placeholder in that home. A missing `.agents/skills`, `.claude`,
+  `.cursor/mcp.json`, or `.gitconfig` is created as an empty placeholder.
+  A different file is left in place and the turn is refused. The user's
+  `~/.grok` is still not written.
 - `hooks-paths` is sealed as a file. A directory of that name is refused.
 - A path or symlink can change between `ClassifyCall` and the tool. The jail
   and the sandbox deny list remain the backstop.
 - `list_dir` is not on `--tools`. If a permission request for it still
-  arrives, it is classified as Glob. `x_keyword_search` and
-  `x_semantic_search` stay off even with a net grant.
+  arrives, it is classified as Glob. Server-side `web_search` and
+  `x_search` tools do not reach the host. Without a net grant the
+  loopback proxy refuses them (`cli_proxy_refused`). With a net grant
+  those requests are forwarded. `x_keyword_search` and
+  `x_semantic_search` stay off the `--tools` list either way; that list
+  does not stop a server-side tool.
 - Isolated `GROK_HOME` and no `--trust` still mean a project `.grok/config.toml`
   is not loaded. The ask rules in the per-bot `GROK_HOME` are what make Grok
   request permission. A managed allow does not skip that ask.
@@ -673,9 +709,10 @@ Residuals:
 Before each turn the daemon scans the bot workspace (three levels, skipping
 `.git` and `node_modules`) for `.claude/settings.json`,
 `.claude/settings.local.json`, `.claude/CLAUDE*.md`, `.mcp.json`, `CLAUDE.md`,
-`CLAUDE.local.md`, `AGENTS.md`, anything under `.grok/`, and `.cursor/mcp.json`
-or `.cursor/hooks.json`. A hit is written to the bot log and the audit sink as
-`cli_override` with the files, the mode, and the action.
+`CLAUDE.local.md`, `AGENTS.md`, anything under `.grok/` (including
+`.grok/hooks`, `.grok/skills`, and `.grok/lsp.json`), `.envrc`, and
+`.cursor/mcp.json` or `.cursor/hooks.json`. A hit is written to the bot log
+and the audit sink as `cli_override` with the files, the mode, and the action.
 
 | Backend, home | Neutralized | Not neutralized (refused even under `ignore`) |
 | --- | --- | --- |

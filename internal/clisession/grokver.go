@@ -45,7 +45,7 @@ type grokVerKey struct {
 
 var grokVersionCache sync.Map
 
-func checkGrokVersion(ctx context.Context, path string) error {
+func checkGrokVersion(ctx context.Context, path, pinSHA string) error {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return &VersionError{Version: "unknown"}
@@ -55,8 +55,17 @@ func checkGrokVersion(ctx context.Context, path string) error {
 		resolved = real
 	}
 	st, err := os.Stat(resolved)
-	if err != nil || !st.Mode().IsRegular() {
+	if err != nil || !st.Mode().IsRegular() || st.Size() > maxPinnedBinary {
 		return &VersionError{Version: "unknown"}
+	}
+	// Hash before any version probe, including a cached version.
+	sum, err := hashFile(resolved)
+	if err != nil || sum == "" {
+		return &VersionError{Version: "unknown"}
+	}
+	pinSHA = strings.TrimSpace(pinSHA)
+	if pinSHA != "" && !strings.EqualFold(sum, pinSHA) {
+		return fmt.Errorf("cli pin: grok hash mismatch")
 	}
 	key := grokVerKey{path: resolved, size: st.Size(), mtime: st.ModTime().UnixNano()}
 	if v, ok := grokVersionCache.Load(key); ok {

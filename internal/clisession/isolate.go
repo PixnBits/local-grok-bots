@@ -72,6 +72,9 @@ type IsolationOptions struct {
 	Backend string
 	// StateDir is the per-bot daemon directory for the settings file.
 	StateDir string
+	// Workspace is the bot directory. A Grok turn seals one session
+	// permission file for this path. Empty skips that file.
+	Workspace string
 	// Home is the per-bot HOME. Empty shares the user's HOME.
 	Home string
 	// UserHome is the daemon user's HOME, used to link credentials.
@@ -343,7 +346,13 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 		if err := SealGrokHome(root, grokHome); err != nil {
 			return Isolation{}, err
 		}
+		if err := ensureWorkspacePermission(root, grokHome, o.Workspace); err != nil {
+			return Isolation{}, err
+		}
 		if err := prepareShellRC(home); err != nil {
+			return Isolation{}, err
+		}
+		if err := prepareHomeSeals(home); err != nil {
 			return Isolation{}, err
 		}
 		iso.GrokSandbox = GrokProfile
@@ -529,7 +538,8 @@ func writeGrokAuth(root, rel, key string) error {
 var overrideNames = []string{
 	".claude/settings.json", ".claude/settings.local.json", ".claude/CLAUDE.md",
 	".claude/CLAUDE.local.md", ".mcp.json", "CLAUDE.md", "CLAUDE.local.md",
-	"AGENTS.md", ".grok/config.toml", ".cursor/mcp.json", ".cursor/hooks.json",
+	"AGENTS.md", ".grok/config.toml", ".grok/hooks", ".grok/skills", ".grok/lsp.json",
+	".cursor/mcp.json", ".cursor/hooks.json", ".envrc",
 }
 
 // ScanOverrides lists override files under the workspace, relative to it.
@@ -545,16 +555,27 @@ func ScanOverrides(ws string) []string {
 			if rel != "." && (d.Name() == ".git" || d.Name() == "node_modules" || strings.Count(rel, string(filepath.Separator)) >= 3) {
 				return filepath.SkipDir
 			}
+			if rel != "." {
+				slash := filepath.ToSlash(rel)
+				for _, n := range overrideNames {
+					if slash == n || strings.HasSuffix(slash, "/"+n) {
+						out = append(out, slash)
+						break
+					}
+				}
+			}
 			return nil
 		}
 		slash := filepath.ToSlash(rel)
+		matched := false
 		for _, n := range overrideNames {
 			if slash == n || strings.HasSuffix(slash, "/"+n) {
 				out = append(out, slash)
+				matched = true
 				break
 			}
 		}
-		if strings.Contains("/"+slash, "/.grok/") && !strings.HasSuffix(slash, ".grok/config.toml") {
+		if !matched && strings.Contains("/"+slash, "/.grok/") && !strings.HasSuffix(slash, ".grok/config.toml") {
 			out = append(out, slash)
 		}
 		return nil

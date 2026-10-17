@@ -668,7 +668,18 @@ func grokAllowedTools(g Grants) []string {
 
 // grokPermissionTOML forces default mode and a catch-all ask list.
 // Without the ask list, read-only tools run with no session/request_permission.
+// disable_web_search is sealed with the file. The loopback proxy is what
+// refuses a server-side search tool when the bot has no net grant.
 func grokPermissionTOML() string {
+	return "# Written by local-grok-bots for each turn. Do not edit.\n" +
+		"disable_web_search = true\n\n" +
+		"[ui]\npermission_mode = \"default\"\n\n" +
+		"[permission]\nask = [\"Bash\", \"Read\", \"Grep\", \"Glob\", \"Edit\", \"Write\", \"WebFetch\", \"WebSearch\", \"MCPTool\"]\n"
+}
+
+// grokPermissionTOMLPrevious is the last daemon body. Only that exact text
+// is rewritten. Any other body stays in place and refuses the turn.
+func grokPermissionTOMLPrevious() string {
 	return "# Written by local-grok-bots for each turn. Do not edit.\n" +
 		"[ui]\npermission_mode = \"default\"\n\n" +
 		"[permission]\nask = [\"Bash\", \"Read\", \"Grep\", \"Glob\", \"Edit\", \"Write\", \"WebFetch\", \"WebSearch\", \"MCPTool\"]\n"

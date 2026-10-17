@@ -73,7 +73,7 @@ func ClassifyCall(tool string, args map[string]any, workspace string) Class {
 		return blocked("write", pathLabel(argText(args), workspace), "high", "file write")
 	case "webfetch", "websearch":
 		return blocked("network", "unknown", "high", "network tool")
-	case "bash":
+	case "bash", "monitor":
 		return classifyBash(argText(args), workspace)
 	default:
 		return blocked("unknown", "unknown", "high", "tool is not a known read-only command")

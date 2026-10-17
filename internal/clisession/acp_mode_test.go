@@ -58,9 +58,15 @@ func TestUpdateModeAndBypass(t *testing.T) {
 	}
 	if acpUpdateModeProblem(map[string]any{
 		"sessionUpdate": "_x.ai/sessions/changed",
-		"info":          map[string]any{"mode": "default"},
+		"upserted":      []any{map[string]any{"yolo": false, "mode": "default"}},
 	}) != "" {
 		t.Fatal("changed default")
+	}
+	if acpUpdateModeProblem(map[string]any{
+		"sessionUpdate": "_x.ai/sessions/changed",
+		"info":          map[string]any{"mode": "default"},
+	}) == "" {
+		t.Fatal("changed without yolo")
 	}
 	if acpUpdateModeProblem(map[string]any{
 		"sessionUpdate": "_x.ai/sessions/changed",
@@ -157,6 +163,29 @@ func TestSessionChangedUpsert(t *testing.T) {
 	nested := map[string]any{"params": map[string]any{"upserted": []any{[]any{map[string]any{"yolo": true}}}}}
 	if sessionsChangedProblem(nested) == "" {
 		t.Fatal("nested list")
+	}
+	nestedOK := map[string]any{"params": map[string]any{"upserted": []any{[]any{map[string]any{"yolo": false}}}}}
+	if sessionsChangedProblem(nestedOK) != "" {
+		t.Fatal(sessionsChangedProblem(nestedOK))
+	}
+	if sessionsChangedProblem(map[string]any{"method": "_x.ai/sessions/changed"}) == "" {
+		t.Fatal("missing params")
+	}
+	missing := map[string]any{"params": map[string]any{"upserted": []any{map[string]any{"mode": "default"}}}}
+	if sessionsChangedProblem(missing) == "" {
+		t.Fatal("missing yolo")
+	}
+	text := map[string]any{"params": map[string]any{"upserted": []any{map[string]any{"yolo": "false"}}}}
+	if sessionsChangedProblem(text) == "" {
+		t.Fatal("string yolo")
+	}
+	num := map[string]any{"params": map[string]any{"upserted": []any{map[string]any{"yolo": float64(0)}}}}
+	if sessionsChangedProblem(num) == "" {
+		t.Fatal("number yolo")
+	}
+	empty := map[string]any{"params": map[string]any{"upserted": []any{}, "removed": []any{map[string]any{"sessionId": "s"}}}}
+	if sessionsChangedProblem(empty) != "" {
+		t.Fatal(sessionsChangedProblem(empty))
 	}
 	if sessionChangedMethod("session/update") {
 		t.Fatal("ordinary update")

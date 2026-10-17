@@ -87,6 +87,25 @@ func mapACPTool(call map[string]any) (tool string, args map[string]any, useID st
 		}
 	case name == "web_search" || name == "websearch" || variant == "websearch":
 		tool = "WebSearch"
+	case variant == "monitor" || name == "monitor":
+		tool = "Bash"
+		if cmd := strOf(args, "command", "cmd"); cmd != "" {
+			args["command"] = cmd
+		}
+	case name == "task" || variant == "task":
+		tool = "Task"
+	case name == "workflow" || variant == "workflow":
+		tool = "Workflow"
+	case name == "scheduler" || variant == "scheduler" || name == "scheduler_create" || name == "scheduler_delete" || name == "scheduler_list":
+		tool = "Scheduler"
+	case name == "image_gen" || variant == "image_gen":
+		tool = "ImageGen"
+	case name == "image_edit" || variant == "image_edit":
+		tool = "ImageEdit"
+	case name == "image_to_video" || variant == "image_to_video":
+		tool = "ImageToVideo"
+	case name == "reference_to_video" || variant == "reference_to_video":
+		tool = "ReferenceToVideo"
 	default:
 		if strings.TrimSpace(metaName) == "" && strOf(raw, "variant") == "" && strOf(call, "title") == "" && strOf(call, "kind") == "" {
 			return "", nil, useID, fmt.Errorf("malformed permission request")
