@@ -142,6 +142,107 @@ func TestLGBPolicyKeys(t *testing.T) {
 	}
 }
 
+func TestEgressPortPolicyNarrows(t *testing.T) {
+	if ports := Defaults().EgressPorts(); strings.Join(portText(ports), ",") != "443,80" {
+		t.Fatalf("default %v", ports)
+	}
+	dir := t.TempDir()
+	local := filepath.Join(dir, "policy.toml")
+	write := func(body string) Policy {
+		t.Helper()
+		if err := os.WriteFile(local, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		p, err := Load(Options{Path: local})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	p := write("[cli.isolation]\nnet_ports = [80, 443, 8443]\n")
+	if strings.Join(portText(p.EgressPorts()), ",") != "443,80" {
+		t.Fatalf("local widen %v", p.EgressPorts())
+	}
+	if !strings.Contains(strings.Join(p.Warnings, "\n"), "8443") || !strings.Contains(strings.Join(p.Warnings, "\n"), "can only narrow") {
+		t.Fatalf("warnings %v", p.Warnings)
+	}
+	p = write("[cli.isolation]\nnet_ports = [443]\n")
+	if strings.Join(portText(p.EgressPorts()), ",") != "443" {
+		t.Fatalf("narrow %v", p.EgressPorts())
+	}
+	p = write("[cli.isolation]\nnet_ports = []\n")
+	if len(p.EgressPorts()) != 0 {
+		t.Fatalf("empty %v", p.EgressPorts())
+	}
+	p = write("[backend]\nbackend = \"ollama\"\n")
+	if strings.Join(portText(p.EgressPorts()), ",") != "443,80" {
+		t.Fatalf("unset %v", p.EgressPorts())
+	}
+	managed := filepath.Join(dir, "managed.json")
+	if err := os.WriteFile(managed, []byte(`{"cli":{"isolation":{"net_ports":[443,8443]}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(local, []byte("[cli.isolation]\nnet_ports = [8443]\n"), 0o644)
+	p, err := Load(Options{Path: local, ManagedPath: managed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(portText(p.EgressPorts()), ",") != "8443" || len(p.Warnings) != 0 {
+		t.Fatalf("managed widen kept by local: %v %v", p.EgressPorts(), p.Warnings)
+	}
+	_ = os.WriteFile(local, []byte("[cli.isolation]\nnet_ports = [80, 443]\n"), 0o644)
+	p, err = Load(Options{Path: local, ManagedPath: managed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(portText(p.EgressPorts()), ",") != "443" || !strings.Contains(strings.Join(p.Warnings, "\n"), "80") {
+		t.Fatalf("local could not add 80 back: %v %v", p.EgressPorts(), p.Warnings)
+	}
+	_ = os.WriteFile(local, []byte("[backend]\nbackend = \"ollama\"\n"), 0o644)
+	if err := os.WriteFile(managed, []byte(`{"cli":{"isolation":{"net_ports":[22,443]}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err = Load(Options{Path: local, ManagedPath: managed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(portText(p.EgressPorts()), ",") != "22,443" {
+		t.Fatalf("managed list %v", p.EgressPorts())
+	}
+	for _, body := range []string{
+		"[cli.isolation]\nnet_ports = [0]\n",
+		"[cli.isolation]\nnet_ports = [70000]\n",
+	} {
+		_ = os.WriteFile(local, []byte(body), 0o644)
+		p, err = Load(Options{Path: local})
+		if err == nil && !strings.Contains(strings.Join(p.Warnings, "\n"), "unparseable") {
+			t.Fatalf("accepted %q %v", body, p.Warnings)
+		}
+	}
+}
+
+func portText(ports []int) []string {
+	out := make([]string, len(ports))
+	for i, n := range ports {
+		out[i] = itoa(n)
+	}
+	return out
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b [8]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(b[i:])
+}
+
 func TestLGBTimerPolicy(t *testing.T) {
 	if min, per := Defaults().BotTimerLimits(); min != 0 || per != 0 {
 		t.Fatalf("ollama defaults %s %d", min, per)

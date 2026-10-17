@@ -26,6 +26,10 @@ claude_sandbox = "required"
 lgb = true
 # Let lgb create and update other bots (default false).
 lgb_manage_bots = false
+# Egress ports for a bot net grant. Default 443 and 80.
+# Local policy can only narrow the list. An empty list allows no port.
+# Managed policy can set a different list. Local policy still only narrows that.
+# net_ports = [443]
 # Added to the scrubbed environment. Only managed policy can set this.
 # env = { ANTHROPIC_BASE_URL = "https://gateway.corp.example" }
 ```
