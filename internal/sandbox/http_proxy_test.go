@@ -338,7 +338,7 @@ func TestConnectRequiresMatchingSNI(t *testing.T) {
 				n, _ := c.Read(buf)
 				got <- append([]byte(nil), buf[:n]...)
 			}()
-			var events []EgressEvent
+			evCh := make(chan EgressEvent, 1)
 			p, err := StartHTTPAllowProxy(t.TempDir(), EgressConfig{
 				Allow: []string{"allowed.test"},
 				Resolve: func(context.Context, string) ([]net.IP, error) {
@@ -350,7 +350,7 @@ func TestConnectRequiresMatchingSNI(t *testing.T) {
 					}
 					return net.Dial("tcp", up.Addr().String())
 				},
-				Audit: func(ev EgressEvent) { events = append(events, ev) },
+				Audit: func(ev EgressEvent) { evCh <- ev },
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -372,9 +372,13 @@ func TestConnectRequiresMatchingSNI(t *testing.T) {
 			case <-time.After(2 * time.Second):
 				t.Fatal("upstream timed out")
 			}
-			if len(events) != 1 || events[0].Allow != tc.allow || events[0].Reason != tc.reason ||
-				events[0].Host != "allowed.test" || events[0].Port != 443 {
-				t.Fatalf("audit %+v", events)
+			select {
+			case ev := <-evCh:
+				if ev.Allow != tc.allow || ev.Reason != tc.reason || ev.Host != "allowed.test" || ev.Port != 443 {
+					t.Fatalf("audit %+v", ev)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("no audit")
 			}
 		})
 	}
