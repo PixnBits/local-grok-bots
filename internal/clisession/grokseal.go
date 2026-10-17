@@ -338,7 +338,38 @@ func grokWritableBinds(grokHome string) ([]string, error) {
 		}
 		args = append(args, "--bind", p, p)
 	}
+	for _, name := range grokLockFiles {
+		p := filepath.Join(grokHome, name)
+		if err := ensureLockFile(p); err != nil {
+			return nil, err
+		}
+		args = append(args, "--bind", p, p)
+	}
 	return args, nil
+}
+
+// grokLockFiles are lock files Grok must open for writing at start even when
+// the rest of GROK_HOME is read-only. Their content is never read as config.
+var grokLockFiles = []string{"managed_config.lock", "auth.json.lock"}
+
+// ensureLockFile creates an empty lock file, or accepts an existing plain
+// file with one link. A symlink, a directory, or an extra link refuses.
+func ensureLockFile(p string) error {
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err == nil {
+		return f.Close()
+	}
+	if !errors.Is(err, os.ErrExist) {
+		return fmt.Errorf("grok home config is incomplete, so the turn was refused")
+	}
+	st, err := os.Lstat(p)
+	if err != nil {
+		return fmt.Errorf("grok home config is incomplete, so the turn was refused")
+	}
+	if !st.Mode().IsRegular() || tooManyLinks(st) {
+		return &UntrustedConfigError{Names: []string{filepath.Base(p)}}
+	}
+	return nil
 }
 
 // prepareShellRC creates a missing startup file as the daemon placeholder.

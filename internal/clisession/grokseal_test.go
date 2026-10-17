@@ -345,3 +345,33 @@ func TestShellStartupPlaceholder(t *testing.T) {
 		t.Fatalf("binds %v", binds)
 	}
 }
+
+// Grok opens lock files at start; they stay writable while the rest of
+// GROK_HOME is read-only. A symlinked lock file refuses the turn.
+func TestGrokLockFilesStayWritableAndRefuseSymlinks(t *testing.T) {
+	home := t.TempDir()
+	args, err := grokWritableBinds(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, " ")
+	for _, name := range grokLockFiles {
+		p := filepath.Join(home, name)
+		if st, err := os.Lstat(p); err != nil || !st.Mode().IsRegular() {
+			t.Fatalf("%s not created: %v", name, err)
+		}
+		if !strings.Contains(joined, "--bind "+p+" "+p) {
+			t.Fatalf("%s not writable in %q", name, joined)
+		}
+	}
+	other := t.TempDir()
+	if err := os.Remove(filepath.Join(other, "x")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/etc/hostname", filepath.Join(other, grokLockFiles[0])); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := grokWritableBinds(other); err == nil {
+		t.Fatal("symlinked lock file accepted")
+	}
+}
