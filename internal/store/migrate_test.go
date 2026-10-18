@@ -58,7 +58,7 @@ VALUES('t1', 'b1', '1h', 'do it', 1, '2999-01-01T00:00:00.000000000Z');
 	if bot.Description != "keep" || bot.Label != "" || bot.Mark.Shape != "circle" {
 		t.Fatalf("migrated bot %#v", bot)
 	}
-	if len(bot.Grants) != 0 || len(bot.NetAllow) != 0 || len(bot.SSHAllow) != 0 {
+	if len(bot.Grants) != 0 || len(bot.NetAllow) != 0 || len(bot.SSHAllow) != 0 || bot.ServerTools != nil {
 		t.Fatalf("migrated grants %#v", bot)
 	}
 	timers, err := st.ListTimers("b1")
@@ -68,7 +68,7 @@ VALUES('t1', 'b1', '1h', 'do it', 1, '2999-01-01T00:00:00.000000000Z');
 	if len(timers) != 1 || timers[0].Name != "" || timers[0].Prompt != "do it" {
 		t.Fatalf("migrated timers %#v", timers)
 	}
-	for _, col := range []string{"cli_pid", "cli_pgid", "cli_start", "cli_exe", "cli_marker"} {
+	for _, col := range []string{"cli_pid", "cli_pgid", "cli_start", "cli_exe", "cli_marker", "server_tools"} {
 		ok, err := st.hasColumn("bots", col)
 		if err != nil {
 			t.Fatal(err)

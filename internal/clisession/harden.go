@@ -668,8 +668,10 @@ func grokAllowedTools(g Grants) []string {
 
 // grokPermissionTOML forces default mode and a catch-all ask list.
 // Without the ask list, read-only tools run with no session/request_permission.
-// disable_web_search is sealed with the file. The loopback proxy is what
-// refuses a server-side search tool when the bot has no net grant.
+// disable_web_search is sealed with the file. It does not stop Grok's
+// server-side search; the loopback proxy strips those tools. A bot without
+// a net grant loses every non-function tool. A net grant keeps only the
+// types on the effective server_tools list.
 func grokPermissionTOML() string {
 	return "# Written by local-grok-bots for each turn. Do not edit.\n" +
 		"disable_web_search = true\n\n" +

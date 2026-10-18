@@ -50,6 +50,17 @@ imminent_timer_minutes = 2
 # Managed policy can cap it with max_turn_timeout. See docs/cli-isolation.md
 # (Timeouts) for every run limit.
 # turn_timeout = "2h"
+# server_tools lists non-function model tool types a net-granted bot may
+# keep, such as web_search or x_search. Function tools are unchanged.
+# Omitted means the default, an empty list: the loopback proxy strips
+# every such type. An explicit empty list is a set layer and narrows a
+# managed ceiling to nothing. Managed policy sets the ceiling. This file
+# and a bot's server_tools field can only narrow it (intersection).
+# A bot without a net grant loses every non-function tool. Policy cannot
+# keep one, because server-side search is network access.
+# disable_web_search in the sealed Grok config has no effect on that
+# path. The proxy strips the tools. See docs/cli-isolation.md.
+# server_tools = ["web_search"]
 # Permission mode is a policy setting.
 # Unspecified (empty): the CLI prompts when a person can answer on a TTY.
 # If it prompts and there is no controlling terminal, the turn fails instead

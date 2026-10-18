@@ -41,6 +41,16 @@ lgb_manage_bots = false
 # trust_system_config = false
 ```
 
+`[cli].server_tools` is the allow list of non-function model tool types
+(`web_search`, `x_search`, and the same kind of provider tool) a
+net-granted bot may keep. Function tools are not part of that list.
+Omitted, the list is empty and the loopback proxy strips every such
+type. An explicit empty list is set: it narrows a managed ceiling to
+nothing. Managed policy sets the ceiling. Local policy and each bot's
+`server_tools` field can only narrow it. A bot without a net grant loses
+every non-function tool. The proxy applies this on each model request.
+Permission mode still uses the snapshot from daemon start.
+
 ## Timeouts
 
 Every limit on a run is a policy key. Precedence is the same as other keys:
@@ -219,7 +229,8 @@ Grok has no flag to skip setting sources. The daemon:
   bind-mounts it read-only over the writable `sessions/` mount. Other
   missing permission files are not created. An exact previous
   `config.toml` body is replaced with the current body, which includes
-  `disable_web_search = true`;
+  `disable_web_search = true` (defense in depth; it has no effect on
+  Grok server-side search);
 - mounts `GROK_HOME` read-only, then mounts `sessions/` and `logs/`
   writable, then mounts the sealed names and matching permission files
   read-only on top. The same startup files are checked in `HOME` and
@@ -379,19 +390,35 @@ The list is the tools an ask rule can force to prompt:
 `web_fetch` and `web_search` are added to `--tools` only with a net grant.
 That flag does not stop server-side search. `grok agent stdio` ignores
 `--tools` and `--disallowed-tools` for tools the model runs at the
-provider. Without a net grant the loopback proxy refuses a model request
-(`/v1/responses` or a chat completions body) whose `tools` entry has a
-type other than `function`, including `web_search` and `x_search`, and
-audits `cli_proxy_refused`. A function-only list, or no tools key, is
-forwarded. With a net grant the proxy does not inspect tools.
-`list_dir`, `x_keyword_search`, and `x_semantic_search` are not on
-`--tools`. Everything else stays off that list (`todo_write`, subagent
-and scheduler tools, `monitor`, `workflow`, plan mode,
-`ask_user_question`, `send_feedback`, image tools, `search_tool`,
-`use_tool`). The broker still denies Task, Workflow, Scheduler, and
-image or video generation tools if a permission request arrives, and it
-denies a write, an edit, or a shell target under `GROK_HOME`. The same
-directory gets `config.toml`: `disable_web_search = true`,
+provider. The loopback proxy strips non-function tools from a model
+request (`/v1/responses` or a chat completions body). A `function` tool
+stays. A missing `tools` key, or a list that needs no change, is
+forwarded as it arrived. A bot without a net grant loses every
+non-function tool, including `web_search` and `x_search`. Server-side
+search is network access, so policy cannot keep one. A net grant keeps
+only the types on the effective `[cli].server_tools` list. The default
+list is empty. Managed policy sets the ceiling. Local policy and the
+bot's `server_tools` field can only narrow it. Omitting the key leaves
+the default. An explicit empty list is a set layer and narrows a
+managed ceiling to nothing. A tool entry that is not an object, has no
+string type, or names a type outside the list is stripped. Each strip
+is audited as `cli_proxy_stripped` with `bot_id`, `run_id`, `path`, the
+removed types, and the policy source (`managed`, `local`, `bot`,
+`default`, or `no_net`). The row records types only. A body that cannot
+be filtered (invalid JSON, `tools` not an array, or an unsupported
+content encoding) is refused with 403 and audited as
+`cli_proxy_refused` with reason `unparsed`. The proxy reads this list
+on each model request. Permission mode still uses the snapshot from
+daemon start. `list_dir`, `x_keyword_search`, and `x_semantic_search`
+are not on `--tools`. Everything else stays off that list
+(`todo_write`, subagent and scheduler tools, `monitor`, `workflow`,
+plan mode, `ask_user_question`, `send_feedback`, image tools,
+`search_tool`, `use_tool`). The broker still denies Task, Workflow,
+Scheduler, and image or video generation tools if a permission request
+arrives, and it denies a write, an edit, or a shell target under
+`GROK_HOME`. The same directory gets `config.toml`:
+`disable_web_search = true` (defense in depth; it has no effect on Grok
+server-side search; the proxy strips those tools),
 `permission_mode = "default"`, and a catch-all ask list, so read-only
 tools send `session/request_permission` instead of running on their own.
 
@@ -695,11 +722,14 @@ Residuals:
   and the sandbox deny list remain the backstop.
 - `list_dir` is not on `--tools`. If a permission request for it still
   arrives, it is classified as Glob. Server-side `web_search` and
-  `x_search` tools do not reach the host. Without a net grant the
-  loopback proxy refuses them (`cli_proxy_refused`). With a net grant
-  those requests are forwarded. `x_keyword_search` and
-  `x_semantic_search` stay off the `--tools` list either way; that list
-  does not stop a server-side tool.
+  `x_search` tools do not reach the host. The loopback proxy strips
+  non-function tools from the model request. A bot without a net grant
+  loses every one of them (`cli_proxy_stripped`, source `no_net`). A net
+  grant keeps only the effective `server_tools` list. A body that cannot
+  be filtered is still `cli_proxy_refused` with reason `unparsed`.
+  `x_keyword_search` and `x_semantic_search` stay off the `--tools`
+  list either way; that list does not stop a server-side tool.
+  `disable_web_search` in the sealed config has no effect on Grok.
 - Isolated `GROK_HOME` and no `--trust` still mean a project `.grok/config.toml`
   is not loaded. The ask rules in the per-bot `GROK_HOME` are what make Grok
   request permission. A managed allow does not skip that ask.

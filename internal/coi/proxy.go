@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -14,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,21 +45,27 @@ type Egress struct {
 	// onAudit records one request. Headers and bodies are not passed.
 	// suppressed counts 403 rows omitted since the previous 403 row.
 	onAudit func(botID, runID, path string, status int, suppressed int)
-	// onRefuse records a model request refused for its tools list.
-	// The reason is a fixed label. Headers and bodies are not passed.
-	onRefuse   func(botID, runID, path, reason string)
-	routeBot   string
-	routeRun   string
-	denyMu     sync.Mutex
-	denyAt     []time.Time
-	suppressed int
+	// onRefuse records a model request refused because its body could not
+	// be filtered. The reason is a fixed label. Headers and bodies are not passed.
+	onRefuse func(botID, runID, path, reason string)
+	// onStrip records non-function tools removed from a model request.
+	// removed is tool types only. source is managed, local, bot, default, or no_net.
+	onStrip func(botID, runID, path string, removed []string, source string)
+	// serverTools is the allow list for a net-granted bot. A nil function
+	// denies every non-function type. The callback must not expect a body.
+	serverTools func(botID string) (allow []string, source string)
+	routeBot    string
+	routeRun    string
+	denyMu      sync.Mutex
+	denyAt      []time.Time
+	suppressed  int
 }
 
 // denyAuditLimit is how many 403 rows one proxy writes per second.
 var denyAuditLimit = 20
 
 // gateBinding is the bot and run a placeholder bearer was admitted for.
-// net is that bot's net grant. A false grant refuses server-side tools.
+// net is that bot's net grant. Without it every non-function tool is stripped.
 type gateBinding struct {
 	botID string
 	runID string
@@ -73,7 +79,7 @@ const (
 )
 
 // maxModelBody is how much of a model request is inspected. A larger body
-// is refused when the bot has no net grant.
+// is refused.
 const maxModelBody = 32 << 20
 
 // StartEgress listens on a unix socket in a private 0700 directory under parent.
@@ -191,7 +197,8 @@ func (e *Egress) Admit(botID, runID, secret string) func() {
 }
 
 // AdmitNet is Admit with the bot's net grant. Without that grant the
-// loopback proxy refuses a model request whose tools are not all functions.
+// loopback proxy strips every non-function tool from a model request.
+// With that grant it keeps only the types the server-tools policy allows.
 func (e *Egress) AdmitNet(botID, runID, secret string, net bool) func() {
 	return e.admitGate(botID, runID, secret, net)
 }
@@ -241,6 +248,32 @@ func (e *Egress) SetRefuseAudit(fn func(botID, runID, path, reason string)) {
 	}
 	e.gateMu.Lock()
 	e.onRefuse = fn
+	e.gateMu.Unlock()
+}
+
+// SetStripAudit registers the record written when non-function tools are
+// removed. removed is tool types. source is managed, local, bot, default,
+// or no_net. A nil function disables it. The callback must not expect
+// headers, a body, or the presented bearer.
+func (e *Egress) SetStripAudit(fn func(botID, runID, path string, removed []string, source string)) {
+	if e == nil {
+		return
+	}
+	e.gateMu.Lock()
+	e.onStrip = fn
+	e.gateMu.Unlock()
+}
+
+// SetServerTools registers the allow list for a net-granted bot. allow is
+// the non-function types that may stay. source is managed, local, bot, or
+// default. A nil function denies every non-function type. The callback
+// must not expect a body.
+func (e *Egress) SetServerTools(fn func(botID string) (allow []string, source string)) {
+	if e == nil {
+		return
+	}
+	e.gateMu.Lock()
+	e.serverTools = fn
 	e.gateMu.Unlock()
 }
 
@@ -302,6 +335,55 @@ func (e *Egress) noteRefuse(botID, runID, path, reason string) {
 		return
 	}
 	fn(botID, runID, path, reason)
+}
+
+func (e *Egress) noteStrip(botID, runID, path string, removed []string, source string) {
+	if e == nil || len(removed) == 0 {
+		return
+	}
+	switch source {
+	case sourceManaged, sourceLocal, sourceBot, sourceDefault, sourceNoNet:
+	default:
+		source = sourceDefault
+	}
+	removed = uniqueToolTypes(removed)
+	if len(removed) == 0 {
+		return
+	}
+	e.gateMu.Lock()
+	fn := e.onStrip
+	if botID == "" {
+		botID = e.routeBot
+	}
+	if runID == "" {
+		runID = e.routeRun
+	}
+	e.gateMu.Unlock()
+	if fn == nil {
+		return
+	}
+	fn(botID, runID, path, removed, source)
+}
+
+// serverToolAllow is the non-function types a model request may keep.
+// A bot without a net grant keeps none. The source names that decision.
+func (e *Egress) serverToolAllow(presented, botID string) ([]string, string) {
+	if e == nil || !e.grantedNet(presented) {
+		return nil, sourceNoNet
+	}
+	e.gateMu.Lock()
+	fn := e.serverTools
+	e.gateMu.Unlock()
+	if fn == nil {
+		return nil, sourceDefault
+	}
+	allow, source := fn(botID)
+	switch source {
+	case sourceManaged, sourceLocal, sourceBot, sourceDefault:
+		return allow, source
+	default:
+		return nil, sourceDefault
+	}
 }
 
 // grantedNet reports whether the presented bearer was admitted with a net grant.
@@ -454,13 +536,17 @@ func (e *Egress) serve(trip http.RoundTripper) {
 				e.note(botID, runID, norm, http.StatusForbidden)
 				return
 			}
-			if e.requireGate && !e.grantedNet(presentedBearer(r)) {
-				reason, refused := refuseServerTools(fwd)
+			if e.requireGate && modelRequest(fwd) {
+				allow, source := e.serverToolAllow(presentedBearer(r), botID)
+				removed, refused := filterServerTools(fwd, allow)
 				if refused {
 					http.Error(w, "forbidden", http.StatusForbidden)
-					e.noteRefuse(botID, runID, norm, reason)
+					e.noteRefuse(botID, runID, norm, refuseUnparsed)
 					e.note(botID, runID, norm, http.StatusForbidden)
 					return
+				}
+				if len(removed) > 0 {
+					e.noteStrip(botID, runID, norm, removed, source)
 				}
 			}
 			tok, err := e.currentToken()
@@ -955,40 +1041,17 @@ func dialAllowlisted(ctx context.Context, network, addr string, allow map[string
 	return d.DialContext(ctx, network, addr)
 }
 
-// refuseServerTools reports whether a model request must be refused because
-// its tools list is missing, unreadable, or not limited to functions.
-// A passing request keeps a readable body. A non-model request is left as it arrived.
-func refuseServerTools(r *http.Request) (string, bool) {
-	if !modelRequest(r) {
-		return "", false
-	}
-	if r.Body == nil || r.ContentLength == 0 {
-		return "", false
-	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxModelBody+1))
-	if err != nil {
-		return refuseUnparsed, true
-	}
-	if len(body) > maxModelBody {
-		return refuseUnparsed, true
-	}
-	reason, refused := toolsReason(body)
-	if refused {
-		return reason, true
-	}
-	restoreBody(r, body)
-	return "", false
-}
-
 func restoreBody(r *http.Request, body []byte) {
 	if r == nil {
 		return
 	}
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
+	r.Header.Set("Content-Length", strconv.Itoa(len(body)))
 	r.GetBody = func() (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(body)), nil
 	}
+	r.TransferEncoding = nil
 }
 
 func modelRequest(r *http.Request) bool {
@@ -1004,46 +1067,4 @@ func modelRequest(r *http.Request) bool {
 		return true
 	}
 	return strings.Contains(p, "/chat/completions")
-}
-
-// toolsReason classifies a model body. Valid JSON with no tools list, an
-// empty list, or only function tools is forwarded. Anything else is refused.
-// Unparsed JSON is refused only when it still contains a tools key.
-func toolsReason(body []byte) (string, bool) {
-	if len(body) == 0 {
-		return "", false
-	}
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(body, &top); err != nil {
-		if bytes.Contains(body, []byte(`"tools"`)) {
-			return refuseUnparsed, true
-		}
-		return "", false
-	}
-	raw, ok := top["tools"]
-	if !ok || len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return "", false
-	}
-	var tools []json.RawMessage
-	if err := json.Unmarshal(raw, &tools); err != nil {
-		return refuseServerTool, true
-	}
-	if len(tools) == 0 {
-		return "", false
-	}
-	for _, entry := range tools {
-		var obj map[string]json.RawMessage
-		if err := json.Unmarshal(entry, &obj); err != nil {
-			return refuseServerTool, true
-		}
-		typeRaw, ok := obj["type"]
-		if !ok {
-			return refuseServerTool, true
-		}
-		var typ string
-		if err := json.Unmarshal(typeRaw, &typ); err != nil || typ != "function" {
-			return refuseServerTool, true
-		}
-	}
-	return "", false
 }

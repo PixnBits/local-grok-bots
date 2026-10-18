@@ -221,6 +221,7 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 		Grants       []string    `json:"grants"`
 		NetAllow     []string    `json:"net_allow"`
 		SSHAllow     []string    `json:"ssh_allow"`
+		ServerTools  *[]string   `json:"server_tools"`
 	}
 	if err := readJSON(w, r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -247,7 +248,7 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 	}
 	b, err := a.st.InsertBot(store.BotDraft{
 		Name: name, Label: body.Label, Description: description, Mark: mark, Model: modelPtr,
-		Grants: body.Grants, NetAllow: body.NetAllow, SSHAllow: body.SSHAllow,
+		Grants: body.Grants, NetAllow: body.NetAllow, SSHAllow: body.SSHAllow, ServerTools: body.ServerTools,
 	}, "user")
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
@@ -373,6 +374,17 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 		}
 		patch.SSHSet = true
 		patch.SSHAllow = list
+	}
+	if v, ok := raw["server_tools"]; ok {
+		patch.ServerToolsSet = true
+		if strings.TrimSpace(string(v)) != "null" {
+			list, err := decodeStringList(v)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid server_tools"})
+				return
+			}
+			patch.ServerTools = &list
+		}
 	}
 	if v, ok := raw["model"]; ok {
 		patch.ModelSet = true

@@ -258,11 +258,11 @@ The page is a client. Refreshing reloads from the daemon. Four surfaces. The con
 - Default model is the local Ollama endpoint, overridable by `OLLAMA_MODEL` and per bot. If Ollama is down, runs fail with a clear log line and do not hang.
 - Clean shutdown writes `daemon_stop`. Crash does not; the next start writes `daemon_start` and reconciles runs as above.
 - `bwrap` or `unshare` must be usable for `run_shell` in Ollama mode. Missing, the tool fails; the daemon still serves.
-- Policy loading: precedence is managed settings > `policy.toml` > built-in defaults. Fail-closed: if the policy file is missing or unparseable, the daemon defaults to the strictest mode (daemon jail ON, CLI backends OFF) and logs loudly. When a user-level setting conflicts with a managed policy, the daemon refuses to start or logs the conflict according to `conflict_policy`.
+- Policy loading: precedence is managed settings > `policy.toml` > built-in defaults. Fail-closed: if the policy file is missing or unparseable, the daemon defaults to the strictest mode (daemon jail ON, CLI backends OFF) and logs loudly. When a user-level setting conflicts with a managed policy, the daemon refuses to start or logs the conflict according to `conflict_policy`. `[cli].server_tools` names the non-function model tool types a net-granted bot may keep. The default is empty, so the loopback proxy strips every such type. Managed policy sets the ceiling. Local policy and a bot's `server_tools` field can only narrow it. A bot without a net grant loses every non-function tool. The proxy reads that list on each model request.
 
 ## 9. Policy
 
-The declarative policy file (`policy.toml`) controls the backend and jail behavior. One `backend` knob (`ollama` | `claude` | `grok`) automatically sets jail mode: Ollama implies daemon jail ON; CLI backends imply daemon jail OFF because the CLI's own sandbox is the boundary. See `policy.toml.sample` for the annotated schema. Managed settings (server-managed or MDM) always override the local file.
+The declarative policy file (`policy.toml`) controls the backend and jail behavior. One `backend` knob (`ollama` | `claude` | `grok`) automatically sets jail mode: Ollama implies daemon jail ON; CLI backends imply daemon jail OFF because the CLI's own sandbox is the boundary. See `policy.toml.sample` for the annotated schema. Managed settings (server-managed or MDM) always override the local file. For `server_tools`, managed policy is the ceiling and local policy can only narrow it. An omitted list is empty. An explicit empty list narrows a managed ceiling to nothing.
 
 ## Out of these specs
 

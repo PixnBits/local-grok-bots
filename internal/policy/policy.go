@@ -124,6 +124,15 @@ type Policy struct {
 	netPortsAskedSet   bool
 	netPortsManaged    []int
 	netPortsManagedSet bool
+	// ServerTools is the effective allow list of non-function model tool
+	// types after managed and local policy. Empty strips every such type.
+	// ServerToolsSource is managed, local, or default.
+	ServerTools           []string
+	ServerToolsSource     string
+	serverToolsManaged    []string
+	serverToolsManagedSet bool
+	serverToolsLocal      []string
+	serverToolsLocalSet   bool
 	// CLITools are host CLIs the credential broker may run. Empty denies every coi call.
 	CLITools []CLITool
 	// cliLocal is the local file's CLI table before managed merge.
@@ -229,6 +238,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 	}
 	if path == "" {
 		p.finishEgressPorts()
+		p.finishServerTools()
 		p.dropIncompleteCLI()
 		return p, nil
 	}
@@ -273,6 +283,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 	}
 	base.DaemonJail = !base.UsesCLI()
 	base.finishEgressPorts()
+	base.finishServerTools()
 	base.dropIncompleteCLI()
 	return base, nil
 }
@@ -697,6 +708,147 @@ func normPorts(in []int) ([]int, error) {
 	return out, nil
 }
 
+// EffectiveServerTools intersects the policy allow list with a per-bot list.
+// botSet false inherits the policy list. A set bot list can only narrow it.
+// The source is managed, local, bot, or default: the layer that last reduced
+// the set. A lower layer that only tries to add types does not change it.
+func (p Policy) EffectiveServerTools(bot []string, botSet bool) ([]string, string) {
+	allow := append([]string(nil), p.ServerTools...)
+	if allow == nil {
+		allow = []string{}
+	}
+	source := p.ServerToolsSource
+	switch source {
+	case "managed", "local", "default":
+	default:
+		source = "default"
+	}
+	if !botSet {
+		return allow, source
+	}
+	kept, _ := narrowNames(allow, bot)
+	if !sameNames(kept, allow) {
+		source = "bot"
+	}
+	return kept, source
+}
+
+func (p *Policy) finishServerTools() {
+	if p == nil {
+		return
+	}
+	switch {
+	case !p.serverToolsManagedSet && !p.serverToolsLocalSet:
+		p.ServerTools = []string{}
+		p.ServerToolsSource = "default"
+	case p.serverToolsManagedSet && !p.serverToolsLocalSet:
+		p.ServerTools = append([]string(nil), p.serverToolsManaged...)
+		if p.ServerTools == nil {
+			p.ServerTools = []string{}
+		}
+		p.ServerToolsSource = "managed"
+	case !p.serverToolsManagedSet && p.serverToolsLocalSet:
+		p.ServerTools = append([]string(nil), p.serverToolsLocal...)
+		if p.ServerTools == nil {
+			p.ServerTools = []string{}
+		}
+		p.ServerToolsSource = "local"
+	default:
+		kept, extra := narrowNames(p.serverToolsManaged, p.serverToolsLocal)
+		p.ServerTools = kept
+		if len(extra) > 0 {
+			p.Warnings = append(p.Warnings, "cli.server_tools "+strings.Join(extra, ", ")+" ignored; local policy can only narrow server tools")
+		}
+		if sameNames(kept, p.serverToolsManaged) {
+			p.ServerToolsSource = "managed"
+		} else {
+			p.ServerToolsSource = "local"
+		}
+	}
+}
+
+// normServerTools checks non-function model tool types. function is rejected.
+// Names are matched exactly, in lower case.
+func normServerTools(in []string) ([]string, error) {
+	if len(in) > 32 {
+		return nil, fmt.Errorf("cli.server_tools lists too many names")
+	}
+	out := []string{}
+	seen := map[string]bool{}
+	for _, s := range in {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s == "" {
+			return nil, fmt.Errorf("cli.server_tools contains an empty name")
+		}
+		if s == "function" {
+			return nil, fmt.Errorf("cli.server_tools cannot list function")
+		}
+		if !serverToolName(s) {
+			return nil, fmt.Errorf("cli.server_tools has an invalid name")
+		}
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+func serverToolName(s string) bool {
+	if s == "" || len(s) > 64 || s[0] == '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func narrowNames(ceiling, asked []string) (kept, extra []string) {
+	have := map[string]bool{}
+	for _, n := range ceiling {
+		have[n] = true
+	}
+	want := map[string]bool{}
+	for _, n := range asked {
+		if !have[n] {
+			extra = append(extra, n)
+			continue
+		}
+		want[n] = true
+	}
+	kept = []string{}
+	for _, n := range ceiling {
+		if want[n] {
+			kept = append(kept, n)
+		}
+	}
+	return kept, extra
+}
+
+func sameNames(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	have := map[string]int{}
+	for _, n := range a {
+		have[n]++
+	}
+	for _, n := range b {
+		if have[n] == 0 {
+			return false
+		}
+		have[n]--
+	}
+	return true
+}
+
 func narrowPorts(ceiling, asked []int) (kept, extra []int) {
 	have := map[int]bool{}
 	for _, n := range ceiling {
@@ -906,6 +1058,9 @@ type cliDoc struct {
 	Pins           *[]Pin      `toml:"pins" json:"pins"`
 	Isolation      *cliIsoDoc  `toml:"isolation" json:"isolation"`
 	LGB            *cliLGBDoc  `toml:"lgb" json:"lgb"`
+	// ServerTools lists non-function model tool types a net-granted bot may
+	// keep. Empty strips them. Local policy can only narrow a managed list.
+	ServerTools *[]string `toml:"server_tools" json:"server_tools"`
 }
 
 // cliLGBDoc is [cli.lgb]. Both keys are optional. Zero turns the check off.
@@ -1172,6 +1327,19 @@ func (p *Policy) apply(doc document, trusted bool) error {
 			return err
 		}
 		p.Pins = pins
+	}
+	if doc.CLI.ServerTools != nil {
+		names, err := normServerTools(*doc.CLI.ServerTools)
+		if err != nil {
+			return err
+		}
+		if trusted {
+			p.serverToolsManaged = names
+			p.serverToolsManagedSet = true
+		} else {
+			p.serverToolsLocal = names
+			p.serverToolsLocalSet = true
+		}
 	}
 	if doc.Timers.Enabled != nil {
 		p.TimersEnabled = *doc.Timers.Enabled

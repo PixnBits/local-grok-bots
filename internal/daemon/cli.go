@@ -660,6 +660,12 @@ func (a *App) ensureGrokProxy(userHome string) (string, error) {
 	eg.SetRefuseAudit(func(botID, runID, path, reason string) {
 		a.auditProxyRefused(botID, runID, path, reason)
 	})
+	eg.SetStripAudit(func(botID, runID, path string, removed []string, source string) {
+		a.auditProxyStripped(botID, runID, path, removed, source)
+	})
+	eg.SetServerTools(func(botID string) ([]string, string) {
+		return a.serverToolsFor(botID)
+	})
 	a.grokProxy = eg
 	return eg.Base(), nil
 }
@@ -719,6 +725,85 @@ func (a *App) auditProxyRequest(botID, runID, path string, status int, suppresse
 		}
 	}
 	a.audit.Write(rec)
+}
+
+// serverToolsFor is the non-function tool types one net-granted bot may
+// keep, and the layer that last reduced that set. An unreadable policy
+// or a missing bot record fail-closes to an empty list.
+func (a *App) serverToolsFor(botID string) ([]string, string) {
+	if a == nil {
+		return []string{}, "default"
+	}
+	pol, err := a.policyNow()
+	if err != nil || (strings.TrimSpace(a.cfg.PolicyPath) != "" && !pol.Loaded) {
+		return []string{}, "default"
+	}
+	var botList []string
+	botSet := false
+	if a.st != nil && botID != "" {
+		b, err := a.st.GetBot(botID)
+		if err != nil {
+			return []string{}, "default"
+		}
+		if b.ServerTools != nil {
+			botList = append([]string(nil), (*b.ServerTools)...)
+			botSet = true
+		}
+	}
+	return pol.EffectiveServerTools(botList, botSet)
+}
+
+func (a *App) auditProxyStripped(botID, runID, path string, removed []string, source string) {
+	if a == nil || a.audit == nil || !a.audit.Enabled() || len(removed) == 0 {
+		return
+	}
+	switch source {
+	case "managed", "local", "bot", "default", "no_net":
+	default:
+		source = "default"
+	}
+	types := make([]string, 0, len(removed))
+	seen := map[string]bool{}
+	for _, name := range removed {
+		name = strings.ToLower(strings.TrimSpace(name))
+		if name == "" || seen[name] {
+			continue
+		}
+		if !serverToolAuditName(name) {
+			name = "invalid"
+			if seen[name] {
+				continue
+			}
+		}
+		seen[name] = true
+		types = append(types, name)
+	}
+	if len(types) == 0 {
+		return
+	}
+	a.audit.Write(map[string]any{
+		"event":   "cli_proxy_stripped",
+		"bot_id":  botID,
+		"run_id":  runID,
+		"path":    path,
+		"removed": types,
+		"source":  source,
+	})
+}
+
+func serverToolAuditName(s string) bool {
+	if s == "" || s == "function" || len(s) > 64 || s[0] == '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (a *App) auditProxyRefused(botID, runID, path, reason string) {

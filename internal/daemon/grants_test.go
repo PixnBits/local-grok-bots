@@ -101,6 +101,7 @@ func TestMetaToolsDoNotGrant(t *testing.T) {
 	ctx := context.Background()
 	if _, err := app.dispatchTool(ctx, caller, "update_bot", map[string]any{
 		"id": target.ID, "label": "renamed", "grants": []any{"net"}, "net_allow": []any{"evil.test"},
+		"server_tools": []any{"web_search"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -108,11 +109,12 @@ func TestMetaToolsDoNotGrant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Label != "renamed" || strings.Join(got.Grants, ",") != "git" || len(got.NetAllow) != 0 {
+	if got.Label != "renamed" || strings.Join(got.Grants, ",") != "git" || len(got.NetAllow) != 0 || got.ServerTools != nil {
 		t.Fatalf("update_bot changed grants %#v", got)
 	}
 	out, err := app.dispatchTool(ctx, caller, "create_bot", map[string]any{
 		"name": "Spawn", "description": "stay", "grants": []any{"ssh"}, "ssh_allow": []any{"evil.test"},
+		"server_tools": []any{"web_search"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +126,7 @@ func TestMetaToolsDoNotGrant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(spawn.Grants) != 0 || len(spawn.SSHAllow) != 0 {
+	if len(spawn.Grants) != 0 || len(spawn.SSHAllow) != 0 || spawn.ServerTools != nil {
 		t.Fatalf("create_bot copied grants %#v", spawn)
 	}
 }
@@ -137,7 +139,7 @@ func TestDuplicateOmitsGrants(t *testing.T) {
 		t.Fatal("duplicateBot missing")
 	}
 	body := src[i:j]
-	if strings.Contains(body, "grants") || strings.Contains(body, "net_allow") || strings.Contains(body, "ssh_allow") {
+	if strings.Contains(body, "grants") || strings.Contains(body, "net_allow") || strings.Contains(body, "ssh_allow") || strings.Contains(body, "server_tools") {
 		t.Fatalf("duplicate copies grants:\n%s", body)
 	}
 }
