@@ -265,7 +265,7 @@ func (r *lgbRun) noteInnerPrompt(ctx context.Context, pol policy.Permission, nam
 	_ = r.a.perm.Evaluate(ctx, pol, req)
 }
 
-func (r *lgbRun) auditCOIProxy(botID, runID, path string, status int, suppressed int) {
+func (r *lgbRun) auditCOIProxy(botID, runID, path string, status int, suppressed int, _ string) {
 	if r == nil || r.a == nil || r.a.audit == nil || !r.a.audit.Enabled() {
 		return
 	}

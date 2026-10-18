@@ -310,8 +310,10 @@ func (st *streamAcc) apply(ev Event, onEvent func(Event), failPrompt bool) error
 		if ev.NeedsInput {
 			st.out.NeedsInput = true
 		}
-		if ev.Final && strings.TrimSpace(ev.Text) != "" {
-			st.out.Text = ev.Text
+		if ev.Final {
+			// Clone so a later builder write cannot change the snapshot.
+			// Whitespace-only text is a real reply.
+			st.out.Text = strings.Clone(ev.Text)
 		}
 		if onEvent != nil {
 			onEvent(ev)
@@ -332,20 +334,20 @@ func (st *streamAcc) apply(ev Event, onEvent func(Event), failPrompt bool) error
 func (st *streamAcc) finish(scanErr error) (Result, error) {
 	if scanErr != nil {
 		st.out.Interrupted = true
-		if st.sawDelta && strings.TrimSpace(st.out.Text) == "" {
-			st.out.Text = st.b.String()
+		if st.sawDelta && st.out.Text == "" {
+			st.out.Text = strings.Clone(st.b.String())
 		}
 		return st.out, fmt.Errorf("cli stream: %w", scanErr)
 	}
 	if !st.sawFinal {
 		st.out.Interrupted = true
-		if st.sawDelta {
-			st.out.Text = st.b.String()
+		if st.sawDelta && st.out.Text == "" {
+			st.out.Text = strings.Clone(st.b.String())
 		}
 		return st.out, nil
 	}
-	if strings.TrimSpace(st.out.Text) == "" && st.sawDelta {
-		st.out.Text = st.b.String()
+	if st.out.Text == "" && st.sawDelta {
+		st.out.Text = strings.Clone(st.b.String())
 	}
 	if st.errMsg != "" && strings.TrimSpace(st.out.Text) == "" {
 		msg := st.errMsg

@@ -212,6 +212,9 @@ func rewriteTools(body []byte, allowOf func() ([]string, string)) (out []byte, r
 	if err := dec.Decode(&v); err != nil {
 		return nil, nil, "", refuseUnparsed
 	}
+	if reason := refusedToolsSpelling(v); reason != "" {
+		return nil, nil, "", reason
+	}
 	removed, source, bad := filterToolsValue(v, allowOf)
 	if bad {
 		return nil, nil, "", refuseUnparsed
@@ -328,6 +331,25 @@ const (
 	toolKeepFunction
 	toolKeepAllowed
 )
+
+// refusedToolsSpelling rejects a top-level key that equals "tools" or
+// "tool_choice" ignoring case but is not that exact spelling. The exact
+// keys are filtered. A different spelling would otherwise be forwarded whole.
+func refusedToolsSpelling(v any) string {
+	top, ok := v.(map[string]any)
+	if !ok {
+		return ""
+	}
+	for k := range top {
+		if k == "tools" || k == "tool_choice" {
+			continue
+		}
+		if strings.EqualFold(k, "tools") || strings.EqualFold(k, "tool_choice") {
+			return refuseToolsKey
+		}
+	}
+	return ""
+}
 
 // filterToolsValue strips non-function tools from a top-level tools key.
 // A value that is not an object, or an object with no tools key, is kept.

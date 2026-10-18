@@ -54,13 +54,16 @@ func (t *cliTrace) tool(name string, redacted any) {
 
 // result pairs with the oldest open call. Claude names a result by its
 // tool_use_id, not the tool, so order is what pairs them.
-func (t *cliTrace) result(name, body string) {
+func (t *cliTrace) result(name, body string, ok bool) {
 	call := pendingCall{name: name, args: json.RawMessage(`{}`)}
 	if len(t.pending) > 0 {
 		call = t.pending[0]
 		t.pending = t.pending[1:]
 	}
-	t.add(store.ToolRecord{Name: call.name, Arguments: call.args, OK: true, Result: clip(audit.RedactText(body), 4000)})
+	if !ok && strings.TrimSpace(body) == "" {
+		body = "error"
+	}
+	t.add(store.ToolRecord{Name: call.name, Arguments: call.args, OK: ok, Result: clip(audit.RedactText(body), 4000)})
 }
 
 // finish stores calls that never got a result, as not ok.
@@ -79,7 +82,8 @@ func (t *cliTrace) reply(final string) string {
 		return final
 	}
 	if strings.TrimSpace(final) == strings.TrimSpace(t.all.String()) {
-		return strings.TrimSpace(t.buf.String())
+		// The buffer is the reply. Keep its interior whitespace.
+		return t.buf.String()
 	}
 	return final
 }

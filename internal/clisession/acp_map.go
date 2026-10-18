@@ -156,6 +156,22 @@ func strOf(m map[string]any, keys ...string) string {
 	return ""
 }
 
+// strExact returns the first string stored under keys, including a
+// whitespace-only value. A missing key or a non-string is skipped.
+// Ids and names stay on strOf, which ignores blank values.
+func strExact(m map[string]any, keys ...string) (string, bool) {
+	if m == nil {
+		return "", false
+	}
+	for _, k := range keys {
+		s, ok := m[k].(string)
+		if ok {
+			return s, true
+		}
+	}
+	return "", false
+}
+
 // selectACPOption picks allow-once or reject-once. allow_always is never a
 // valid choice, including when it is the only allow option.
 func selectACPOption(opts []acpOption, allow bool) (string, error) {

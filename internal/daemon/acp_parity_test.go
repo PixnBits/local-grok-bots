@@ -599,7 +599,7 @@ func TestACPCardAllowOnceDenyAndSession(t *testing.T) {
 		id, _ := f.waitCard()
 		f.decide(id, "deny")
 		got := f.waitDone()
-		if got.LastRunStatus != "done" || got.LastRunError != "" {
+		if got.LastRunStatus != "stopped" || got.LastRunError != "stopped after denial" {
 			t.Fatalf("run %s %s", got.LastRunStatus, got.LastRunError)
 		}
 		raw := f.auditText()
@@ -607,6 +607,35 @@ func TestACPCardAllowOnceDenyAndSession(t *testing.T) {
 			t.Fatalf("audit %s", raw)
 		}
 		assertWireOnce(t, f.stdinText(), "reject-once")
+		tools, err := f.app.st.RunTools([]string{f.runID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		denied := false
+		for _, rec := range tools[f.runID] {
+			if rec.Kind == "permission" {
+				continue
+			}
+			if rec.Name == "Bash" && !rec.OK && rec.Result == "denied" {
+				denied = true
+			}
+		}
+		if !denied {
+			t.Fatalf("tool records %+v", tools[f.runID])
+		}
+		msgs, err := f.app.st.ListMessages(f.bot.ID, "user", "", 20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sawNotice := false
+		for _, m := range msgs {
+			if m.Content == "Notice: Stopped after denial." {
+				sawNotice = true
+			}
+		}
+		if !sawNotice {
+			t.Fatalf("thread %+v", msgs)
+		}
 	})
 	t.Run("allow-session", func(t *testing.T) {
 		f := cardTurn(t, true, 2)

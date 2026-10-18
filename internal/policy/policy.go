@@ -1461,15 +1461,33 @@ func normBackends(in []string) ([]string, error) {
 	return out, nil
 }
 
+// CanonicalRule collapses runs of whitespace and trims a permission pattern.
+// "Bash(cat  *)" is the same rule as "Bash(cat *)". A newline or a NUL is
+// rejected rather than folded into the pattern. The result is what is stored,
+// compared, and matched.
+func CanonicalRule(s string) (string, error) {
+	if strings.ContainsAny(s, "\r\n\x00") {
+		return "", fmt.Errorf("permission rule contains a newline")
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", fmt.Errorf("permission rule is empty")
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	s = strings.ReplaceAll(s, "( ", "(")
+	s = strings.ReplaceAll(s, " )", ")")
+	if s == "" {
+		return "", fmt.Errorf("permission rule is empty")
+	}
+	return s, nil
+}
+
 func normRules(in []string) ([]string, error) {
 	out := make([]string, 0, len(in))
 	for _, rule := range in {
-		rule = strings.TrimSpace(rule)
-		if rule == "" {
-			return nil, fmt.Errorf("permission rule is empty")
-		}
-		if strings.ContainsAny(rule, "\r\n\x00") {
-			return nil, fmt.Errorf("permission rule contains a newline")
+		rule, err := CanonicalRule(rule)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, rule)
 	}

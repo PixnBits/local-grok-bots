@@ -272,12 +272,13 @@ and as a host permission denial.
 Before a Grok turn the daemon hashes the `grok` binary. When managed
 policy sets a `tools.cli` pin for grok, that SHA-256 is compared before
 anything is executed. A mismatch refuses the turn and does not run
-`--version`. A pin is recommended: set `sha256` on the grok entry so a
-replaced binary is refused before it runs. When the hash matches, or no
-pin is set, the daemon reads `grok --version` and allows only 1.0.52
-and 1.0.62. The version result is cached for that binary's path, size,
-and modification time. Any other release, or a check that does not
-return a version, refuses the turn and is audited as
+`--version`. Hardened setups should set `sha256` on the grok entry.
+The version gate trusts the text `--version` prints, so the pin is what
+stops a replaced binary that still prints an allowed version. When the
+hash matches, or no pin is set, the daemon reads `grok --version` and
+allows only 1.0.52 and 1.0.62. The version result is cached for that
+binary's path, size, and modification time. Any other release, or a
+check that does not return a version, refuses the turn and is audited as
 `cli_version_refused`.
 
 ## Sandbox and tools
@@ -697,7 +698,9 @@ What changed around that jail:
   characters, is refused before the process starts. A solidus counts as a
   slash.
 - `grok --version` must be 1.0.52 or 1.0.62. Any other release refuses the
-  turn and is audited as `cli_version_refused`.
+  turn and is audited as `cli_version_refused`. That check trusts the
+  text the binary prints. Hardened setups set `sha256` on the grok
+  `tools.cli` pin so a replaced binary is refused before `--version`.
 - `HOME` startup files listed above are the daemon placeholder and are
   mounted read-only. A different file refuses the turn.
 - Allow is answered `allow-once`. Deny is `reject-once`. An option whose id,

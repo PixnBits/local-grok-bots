@@ -34,6 +34,9 @@ const out = [
   permissionLine({kind:"permission", name:"Bash", ok:false, arguments:{command:"ls"}, result_or_error:'{"decision":"allow_session","source":"ui"}'}),
   String(hasToolRecords([{kind:"text"},{kind:"permission"}])),
   String(hasToolRecords([{kind:"text"}])),
+  toolVerdict(false, "denied", "denied"),
+  toolVerdict(true, "ok", ""),
+  toolVerdict(false, "boom", ""),
 ];
 console.log(out.join("\n"));
 `
@@ -47,7 +50,7 @@ console.log(out.join("\n"));
 	if err != nil {
 		t.Fatalf("node: %v\n%s", err, out)
 	}
-	want := "✅ allowed Bash(git status) · ui\n⛔ denied Bash(rm -rf build) · policy · Bash(rm *)\n⛔ denied Edit\n✅ allowed Bash(ls) · ui\n✅ allowed Bash(ls) · ui\ntrue\nfalse"
+	want := "✅ allowed Bash(git status) · ui\n⛔ denied Bash(rm -rf build) · policy · Bash(rm *)\n⛔ denied Edit\n✅ allowed Bash(ls) · ui\n✅ allowed Bash(ls) · ui\ntrue\nfalse\ndenied\nok\nerror"
 	if got := strings.TrimSpace(string(out)); got != want {
 		t.Fatalf("got\n%s\nwant\n%s", got, want)
 	}

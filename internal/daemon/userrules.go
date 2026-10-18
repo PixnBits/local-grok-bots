@@ -11,6 +11,7 @@ import (
 
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
@@ -166,14 +167,18 @@ func (a *App) saveCards(botID string, cards []permission.Card, min int) {
 	active := map[string]bool{}
 	if rows, err := a.st.ListUserPermRules(botID); err == nil {
 		for _, r := range rows {
-			active[r.Effect+"\x00"+r.Pattern] = true
+			active[ruleKey(r.Effect, r.Pattern)] = true
 		}
 	}
 	for _, c := range cards {
 		if c.Count < min || c.Pattern == "" {
 			continue
 		}
-		if active["allow\x00"+c.Pattern] {
+		pattern := c.Pattern
+		if canon, err := policy.CanonicalRule(c.Pattern); err == nil {
+			pattern = canon
+		}
+		if active[ruleKey("allow", pattern)] {
 			continue
 		}
 		status := "pending"
@@ -181,7 +186,7 @@ func (a *App) saveCards(botID string, cards []permission.Card, min int) {
 			status = "refused"
 		}
 		_, _ = a.st.SaveSuggestion(store.PermSuggestion{
-			BotID: botID, Pattern: c.Pattern, Effect: c.Effect,
+			BotID: botID, Pattern: pattern, Effect: c.Effect,
 			Classification: c.Class.Kind, Sensitivity: c.Class.Sensitivity, Risk: c.Class.Risk,
 			Count: c.Count, Examples: c.Examples, Summary: c.Summary, Status: status,
 		})
@@ -211,7 +216,11 @@ func (a *App) handleListPermRules(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"rules": rules})
+	out := make([]permRuleOut, 0, len(rules))
+	for _, rule := range rules {
+		out = append(out, withRuleWarning(rule))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rules": out})
 }
 
 func (a *App) handleCreatePermRule(w http.ResponseWriter, r *http.Request) {
@@ -232,7 +241,7 @@ func (a *App) handleCreatePermRule(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusCreated, rule)
+	writeJSON(w, http.StatusCreated, withRuleWarning(rule))
 }
 
 func (a *App) handleDeletePermRule(w http.ResponseWriter, r *http.Request) {
@@ -260,7 +269,7 @@ func (a *App) handleListPermSuggestions(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"suggestions": rows})
+	writeJSON(w, http.StatusOK, map[string]any{"suggestions": withSuggestionWarnings(rows)})
 }
 
 func (a *App) handleAnalyzePerms(w http.ResponseWriter, r *http.Request) {
@@ -280,7 +289,7 @@ func (a *App) handleAnalyzePerms(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"suggestions": rows})
+	writeJSON(w, http.StatusOK, map[string]any{"suggestions": withSuggestionWarnings(rows)})
 }
 
 func (a *App) handleAcceptSuggestion(w http.ResponseWriter, r *http.Request) {
@@ -321,7 +330,7 @@ func (a *App) handleAcceptSuggestion(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, rule)
+	writeJSON(w, http.StatusCreated, withRuleWarning(rule))
 }
 
 func (a *App) handleDismissSuggestion(w http.ResponseWriter, r *http.Request) {
@@ -334,13 +343,18 @@ func (a *App) handleDismissSuggestion(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) acceptPermRule(w http.ResponseWriter, botID, effect, pattern string) (store.UserPermRule, bool) {
-	class, err := permission.CheckUserRule(effect, pattern, a.botWorkspace(botID))
+	canon, cerr := policy.CanonicalRule(pattern)
+	if cerr != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid pattern"})
+		return store.UserPermRule{}, false
+	}
+	class, err := permission.CheckUserRule(effect, canon, a.botWorkspace(botID))
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return store.UserPermRule{}, false
 	}
 	effect = strings.ToLower(strings.TrimSpace(effect))
-	pattern = strings.TrimSpace(pattern)
+	pattern = canon
 	draft := store.UserPermRule{
 		BotID: botID, Effect: effect, Pattern: pattern,
 		Classification: class.Kind, Sensitivity: class.Sensitivity, Risk: class.Risk, Reason: class.Reason,
@@ -392,9 +406,44 @@ func sameRulePattern(a, b string) bool {
 }
 
 func normRulePattern(s string) string {
+	if c, err := policy.CanonicalRule(s); err == nil {
+		return c
+	}
 	s = strings.TrimSpace(s)
 	s = strings.Join(strings.Fields(s), " ")
 	s = strings.ReplaceAll(s, "( ", "(")
 	s = strings.ReplaceAll(s, " )", ")")
 	return s
+}
+
+func ruleKey(effect, pattern string) string {
+	return strings.ToLower(strings.TrimSpace(effect)) + "\x00" + normRulePattern(pattern)
+}
+
+// permRuleOut is a stored rule plus the unprefixed-command warning.
+// The warning is computed on read. It is not a database column.
+type permRuleOut struct {
+	store.UserPermRule
+	Warning   string `json:"warning,omitempty"`
+	MatchForm string `json:"match_form,omitempty"`
+}
+
+type permSugOut struct {
+	store.PermSuggestion
+	Warning   string `json:"warning,omitempty"`
+	MatchForm string `json:"match_form,omitempty"`
+}
+
+func withRuleWarning(rule store.UserPermRule) permRuleOut {
+	warning, form := permission.RuleWarning(rule.Effect, rule.Pattern)
+	return permRuleOut{UserPermRule: rule, Warning: warning, MatchForm: form}
+}
+
+func withSuggestionWarnings(rows []store.PermSuggestion) []permSugOut {
+	out := make([]permSugOut, 0, len(rows))
+	for _, row := range rows {
+		warning, form := permission.RuleWarning(row.Effect, row.Pattern)
+		out = append(out, permSugOut{PermSuggestion: row, Warning: warning, MatchForm: form})
+	}
+	return out
 }

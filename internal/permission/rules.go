@@ -3,6 +3,8 @@ package permission
 import (
 	"regexp"
 	"strings"
+
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
 
 func matchRules(rules []string, req Request, text string) string {
@@ -26,6 +28,9 @@ func inferMatchArgs(tool, text string) map[string]any {
 }
 
 func ruleMatchesCall(rule string, req Request, text string) bool {
+	if canon, err := policy.CanonicalRule(rule); err == nil {
+		rule = canon
+	}
 	name, pattern, scoped := splitRule(rule)
 	if !nameMatches(name, req.Tool) {
 		return false

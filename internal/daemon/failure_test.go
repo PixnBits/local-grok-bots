@@ -192,11 +192,12 @@ func TestOllamaErrorKeepsPartialToolsAndNotice(t *testing.T) {
 
 func TestRunNoticeText(t *testing.T) {
 	cases := map[string]string{
-		runNoticeText("cancelled", ""):         "Notice: Run cancelled.",
-		runNoticeText("error", "interrupted"):  "Notice: Run interrupted before it finished.",
-		runNoticeText("error", "turn_timeout"): "Notice: Run timed out (turn_timeout). Partial output and tool results are kept above.",
-		runNoticeText("error", ""):             "Notice: Run failed.",
-		runNoticeText("error", "boom"):         "Notice: Run failed: boom",
+		runNoticeText("cancelled", ""):                   "Notice: Run cancelled.",
+		runNoticeText("error", "interrupted"):            "Notice: Run interrupted before it finished.",
+		runNoticeText("error", "turn_timeout"):           "Notice: Run timed out (turn_timeout). Partial output and tool results are kept above.",
+		runNoticeText("error", ""):                       "Notice: Run failed.",
+		runNoticeText("error", "boom"):                   "Notice: Run failed: boom",
+		runNoticeText("stopped", "stopped after denial"): "Notice: Stopped after denial.",
 	}
 	for got, want := range cases {
 		if got != want {

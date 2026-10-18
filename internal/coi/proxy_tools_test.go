@@ -576,6 +576,38 @@ func TestEgressDoesNotStripServerTools(t *testing.T) {
 	}
 }
 
+func TestProxyRefusesOddToolsKey(t *testing.T) {
+	p := newStripProxy(t)
+	const gate = "unit-loopback-gate1"
+	stop := p.eg.AdmitNet("bot-a", "run-1", gate, true)
+	defer stop()
+	route := "/bots/bot-a/runs/run-1/v1/responses"
+	for _, body := range []string{
+		`{"Tools":[{"type":"web_search"}]}`,
+		`{"TOOLS":[{"type":"function","name":"read_file"}]}`,
+		`{"input":"hi","Tool_choice":"required"}`,
+	} {
+		p.reset()
+		before := p.calls()
+		if p.post(route, body, gate, nil) != http.StatusForbidden || p.calls() != before {
+			t.Fatalf("forwarded %s", body)
+		}
+		p.mu.Lock()
+		refuses := append([]string(nil), p.refuses...)
+		p.mu.Unlock()
+		if len(refuses) != 1 || !strings.HasPrefix(refuses[0], "tools_key ") {
+			t.Fatalf("audit %#v body %s", refuses, body)
+		}
+		if strings.Contains(refuses[0], "web_search") || strings.Contains(refuses[0], "read_file") {
+			t.Fatalf("audit carried body %s", refuses[0])
+		}
+	}
+	p.reset()
+	if p.post(route, `{"tools":[{"type":"function","name":"read_file"}]}`, gate, nil) != http.StatusOK || len(p.refuses) != 0 {
+		t.Fatal("exact tools key was refused")
+	}
+}
+
 func TestProxyRefusesDuplicateKeys(t *testing.T) {
 	p := newStripProxy(t)
 	const gate = "unit-loopback-gate1"

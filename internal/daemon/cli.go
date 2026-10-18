@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/audit"
@@ -147,6 +148,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	// none, and mcp with no host, pass --permission-prompts none.
 	cliDenySource := "cli"
 	eventTransport := ""
+	var cardDenied atomic.Bool
 	host := strings.TrimSpace(a.permBase) != ""
 	switch {
 	case strings.EqualFold(backend, "grok"):
@@ -154,7 +156,11 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		botID := bot.ID
 		spec.ACP = &clisession.ACPHooks{
 			Decide: func(ctx context.Context, ask clisession.ACPAsk) (clisession.ACPDecision, error) {
-				return a.decideGrokACP(ctx, botID, runID, sessionID, ask, envField(iso.Env, "GROK_HOME"))
+				dec, err := a.decideGrokACP(ctx, botID, runID, sessionID, ask, envField(iso.Env, "GROK_HOME"))
+				if dec.UserDenied {
+					cardDenied.Store(true)
+				}
+				return dec, err
 			},
 			Fail: func(tool string, args map[string]any, reason string) {
 				a.recordACPHostFail(botID, runID, tool, args, reason)
@@ -239,10 +245,21 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 			if name == "" {
 				name = "tool"
 			}
-			body := clip(audit.RedactText(ev.Text), 4000)
-			trace.result(name, ev.Text)
-			a.bus.Publish(runID, "tool_result", map[string]any{"name": name, "ok": true, "result_or_error": body})
-			a.log(bot.ID, "tool_end", map[string]any{"name": name, "ok": true})
+			ok := !ev.Denied && !ev.Failed
+			body := ev.Text
+			if ev.Denied && strings.TrimSpace(body) == "" {
+				body = "denied"
+			}
+			trace.result(name, body, ok)
+			shown := clip(audit.RedactText(body), 4000)
+			payload := map[string]any{"name": name, "ok": ok, "result_or_error": shown}
+			if ev.Denied {
+				payload["status"] = "denied"
+			} else if ev.Failed {
+				payload["status"] = "error"
+			}
+			a.bus.Publish(runID, "tool_result", payload)
+			a.log(bot.ID, "tool_end", map[string]any{"name": name, "ok": ok})
 		case "permission_decision":
 			a.noteCLIPermission(bot.ID, runID, ev.ToolName, ev.ToolArgs, "", cliDenySource, eventTransport)
 		case "end":
@@ -274,7 +291,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		sessionID = res.SessionID
 	}
 	trace.finish()
-	text := strings.TrimSpace(trace.reply(audit.RedactText(strings.TrimSpace(res.Text))))
+	text := strings.TrimSpace(trace.reply(audit.RedactText(res.Text)))
 	if text == "" && (err != nil || turnCtx.Err() != nil) {
 		// A turn that failed or timed out has no result text. What it
 		// streamed after its last tool call is still the reply so far.
@@ -341,8 +358,23 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		if text != "" {
 			a.persistBotText(bot.ID, runID, text)
 		}
+		// A card denial cancels the turn. Other denials keep the existing end state.
+		if cardDenied.Load() && cancelledStop(res.StopReason) {
+			_, _ = a.finishRun(runID, "stopped", "stopped after denial")
+			a.bus.Publish(runID, "done", map[string]any{"run_id": runID, "status": "stopped", "reason": "stopped after denial"})
+			break
+		}
 		_, _ = a.finishRun(runID, "done", "")
 		a.bus.Publish(runID, "done", map[string]any{"run_id": runID})
+	}
+}
+
+func cancelledStop(reason string) bool {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "cancelled", "canceled":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -654,8 +686,8 @@ func (a *App) ensureGrokProxy(userHome string) (string, error) {
 	if err != nil {
 		return "", errGrokProxy
 	}
-	eg.SetAudit(func(botID, runID, path string, status int, suppressed int) {
-		a.auditProxyRequest(botID, runID, path, status, suppressed)
+	eg.SetAudit(func(botID, runID, path string, status int, suppressed int, reason string) {
+		a.auditProxyRequest(botID, runID, path, status, suppressed, reason)
 	})
 	eg.SetRefuseAudit(func(botID, runID, path, reason string) {
 		a.auditProxyRefused(botID, runID, path, reason)
@@ -707,7 +739,7 @@ func (a *App) egressPorts() []int {
 	return pol.EgressPorts()
 }
 
-func (a *App) auditProxyRequest(botID, runID, path string, status int, suppressed int) {
+func (a *App) auditProxyRequest(botID, runID, path string, status int, suppressed int, reason string) {
 	if a == nil || a.audit == nil || !a.audit.Enabled() {
 		return
 	}
@@ -720,6 +752,9 @@ func (a *App) auditProxyRequest(botID, runID, path string, status int, suppresse
 	}
 	if status == 403 {
 		rec["auth"] = "none"
+		if reason == "probe" {
+			rec["reason"] = "probe"
+		}
 		if suppressed > 0 {
 			rec["suppressed"] = suppressed
 		}
@@ -811,7 +846,7 @@ func (a *App) auditProxyRefused(botID, runID, path, reason string) {
 		return
 	}
 	switch reason {
-	case "unparsed", "duplicate_key", "server_tool":
+	case "unparsed", "duplicate_key", "server_tool", "tools_key":
 	default:
 		reason = "server_tool"
 	}
@@ -1372,7 +1407,9 @@ func (a *App) decideGrokACP(ctx context.Context, botID, runID, sessionID string,
 	if out.Behavior == permission.Allow {
 		return clisession.ACPDecision{Allow: true}, nil
 	}
-	return clisession.ACPDecision{}, nil
+	// Only the person's card deny is a user denial. Policy, a user rule,
+	// a timeout, and a cancel keep their existing end state.
+	return clisession.ACPDecision{UserDenied: out.Source == "ui" && out.Decision == permission.Deny}, nil
 }
 
 func (a *App) recordACPNote(botID, runID, kind, tool string, args map[string]any, reason string) {

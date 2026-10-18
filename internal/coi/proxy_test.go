@@ -270,6 +270,69 @@ func TestLoopbackRejectsMismatchedBotRun(t *testing.T) {
 	}
 }
 
+func TestUnroutableEmptyPathIsProbe(t *testing.T) {
+	eg, err := StartLoopback([]string{GrokChatHost}, nil, func() (string, error) {
+		return "real-token-value", nil
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer eg.Close()
+	var mu sync.Mutex
+	type row struct {
+		bot, run, path, reason string
+		status                 int
+	}
+	var rows []row
+	eg.SetAudit(func(botID, runID, path string, status int, _ int, reason string) {
+		mu.Lock()
+		rows = append(rows, row{botID, runID, path, reason, status})
+		mu.Unlock()
+	})
+	get := func(url string) int {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+	if get(eg.Base()+"/") != http.StatusForbidden {
+		t.Fatal("root status")
+	}
+	if get(eg.Base()+"/v1/ping") != http.StatusForbidden {
+		t.Fatal("unprefixed status")
+	}
+	if get(eg.Base()+"/bots/bot-a/runs/run-1/v1/ping") != http.StatusForbidden {
+		t.Fatal("gated status")
+	}
+	if !probeRequest(&http.Request{Method: http.MethodConnect}, "", "", "") {
+		t.Fatal("connect was not a probe")
+	}
+	if probeRequest(&http.Request{Method: http.MethodGet, Header: http.Header{"Authorization": []string{"Bearer x"}}}, "", "", "/") {
+		t.Fatal("a presented bearer was labeled a probe")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(rows) != 3 {
+		t.Fatalf("rows %#v", rows)
+	}
+	if rows[0].path != "/" || rows[0].reason != "probe" || rows[0].bot != "" || rows[0].run != "" || rows[0].status != http.StatusForbidden {
+		t.Fatalf("root %#v", rows[0])
+	}
+	if rows[1].path != "/v1/ping" || rows[1].reason != "" || rows[1].bot != "" || rows[1].run != "" {
+		t.Fatalf("unprefixed %#v", rows[1])
+	}
+	if rows[2].path != "/v1/ping" || rows[2].reason != "" || rows[2].bot != "bot-a" || rows[2].run != "run-1" {
+		t.Fatalf("gated %#v", rows[2])
+	}
+}
+
 func TestLoopbackAuditsRequest(t *testing.T) {
 	pr, pw := io.Pipe()
 	defer pw.Close()
@@ -294,7 +357,7 @@ func TestLoopbackAuditsRequest(t *testing.T) {
 	const queryMark = "unit-query-marker"
 	var mu sync.Mutex
 	var lines []string
-	eg.SetAudit(func(botID, runID, path string, status int, suppressed int) {
+	eg.SetAudit(func(botID, runID, path string, status int, suppressed int, _ string) {
 		mu.Lock()
 		lines = append(lines, fmt.Sprintf("bot=%s run=%s path=%s status=%d", botID, runID, path, status))
 		mu.Unlock()
@@ -395,7 +458,7 @@ func TestEgressAuditsUnixSocketRequest(t *testing.T) {
 	var mu sync.Mutex
 	var lines []string
 	eg.BindRoute("bot-coi", "run-coi")
-	eg.SetAudit(func(botID, runID, path string, status int, suppressed int) {
+	eg.SetAudit(func(botID, runID, path string, status int, suppressed int, _ string) {
 		mu.Lock()
 		lines = append(lines, fmt.Sprintf("bot=%s run=%s path=%s status=%d", botID, runID, path, status))
 		mu.Unlock()
@@ -450,7 +513,7 @@ func TestForbiddenProxyAuditIsRateLimited(t *testing.T) {
 	eg, addr := startBridge(t, nil, nil)
 	var mu sync.Mutex
 	var n int
-	eg.SetAudit(func(botID, runID, path string, status int, suppressed int) {
+	eg.SetAudit(func(botID, runID, path string, status int, suppressed int, _ string) {
 		mu.Lock()
 		n++
 		mu.Unlock()
@@ -481,7 +544,7 @@ func TestLoopbackForbiddenAuditIsRateLimited(t *testing.T) {
 	defer eg.Close()
 	var mu sync.Mutex
 	var n int
-	eg.SetAudit(func(botID, runID, path string, status int, suppressed int) {
+	eg.SetAudit(func(botID, runID, path string, status int, suppressed int, _ string) {
 		mu.Lock()
 		n++
 		mu.Unlock()
@@ -516,7 +579,7 @@ func TestForbiddenAuditReportsSuppressed(t *testing.T) {
 	var mu sync.Mutex
 	var suppressed int
 	var rows int
-	eg.SetAudit(func(botID, runID, path string, status int, n int) {
+	eg.SetAudit(func(botID, runID, path string, status int, n int, _ string) {
 		if status != http.StatusForbidden {
 			return
 		}

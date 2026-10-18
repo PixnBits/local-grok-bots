@@ -63,6 +63,11 @@ type Event struct {
 	Final      bool
 	// Denials are permission_denials on a result event. They do not fail the turn.
 	Denials []Denial
+	// Failed is a tool_result that did not succeed. Denied is a call the
+	// person refused on the card. Neither is a success. Both stay false
+	// on a normal result so older emitters still count as ok.
+	Failed bool
+	Denied bool
 }
 
 // Denial is one tool call the CLI refused.

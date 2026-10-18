@@ -3,7 +3,10 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"strings"
+
 	"github.com/PixnBits/local-grok-bots/internal/id"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
 
 // UserPermRule is one durable allow, ask, or deny pattern for a bot.
@@ -48,14 +51,13 @@ type PermSample struct {
 func (s *Store) InsertUserPermRule(rule UserPermRule) (UserPermRule, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var existing string
-	err := s.db.QueryRow(`SELECT id FROM user_perm_rules WHERE bot_id=? AND effect=? AND pattern=? AND revoked_at IS NULL`,
-		rule.BotID, rule.Effect, rule.Pattern).Scan(&existing)
-	if err == nil {
-		return UserPermRule{}, ErrConflict
-	}
-	if err != sql.ErrNoRows {
+	rule.Pattern = canonicalPattern(rule.Pattern)
+	taken, err := rulePatternTaken(s.db, rule.BotID, rule.Effect, rule.Pattern)
+	if err != nil {
 		return UserPermRule{}, err
+	}
+	if taken {
+		return UserPermRule{}, ErrConflict
 	}
 	if rule.ID == "" {
 		rule.ID = id.New()
@@ -80,6 +82,56 @@ type ruleQuery interface {
 	Query(query string, args ...any) (*sql.Rows, error)
 	QueryRow(query string, args ...any) *sql.Row
 	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func canonicalPattern(pattern string) string {
+	if c, err := policy.CanonicalRule(pattern); err == nil {
+		return c
+	}
+	return strings.TrimSpace(pattern)
+}
+
+func sameCanonicalPattern(a, b string) bool {
+	return canonicalPattern(a) == canonicalPattern(b)
+}
+
+// rulePatternTaken reports a live rule with the same bot, effect, and
+// canonical pattern. Whitespace-only differences are the same rule.
+func rulePatternTaken(q ruleQuery, botID, effect, pattern string) (bool, error) {
+	rows, err := listUserPermRules(q, botID)
+	if err != nil {
+		return false, err
+	}
+	for _, row := range rows {
+		if !strings.EqualFold(row.Effect, effect) {
+			continue
+		}
+		if sameCanonicalPattern(row.Pattern, pattern) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func findSuggestion(q ruleQuery, botID, pattern string) (id, status string, err error) {
+	rows, err := q.Query(`SELECT id, pattern, status FROM perm_suggestions WHERE bot_id=? ORDER BY created_at DESC, id`, botID)
+	if err != nil {
+		return "", "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var rowID, rowPattern, rowStatus string
+		if err := rows.Scan(&rowID, &rowPattern, &rowStatus); err != nil {
+			return "", "", err
+		}
+		if sameCanonicalPattern(rowPattern, pattern) {
+			return rowID, rowStatus, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", "", err
+	}
+	return "", "", sql.ErrNoRows
 }
 
 func listUserPermRules(q ruleQuery, botID string) ([]UserPermRule, error) {
@@ -109,14 +161,13 @@ func (s *Store) AcceptUserPermRule(rule UserPermRule, audit any, write func([]Us
 		return UserPermRule{}, err
 	}
 	defer tx.Rollback()
-	var existing string
-	err = tx.QueryRow(`SELECT id FROM user_perm_rules WHERE bot_id=? AND effect=? AND pattern=? AND revoked_at IS NULL`,
-		rule.BotID, rule.Effect, rule.Pattern).Scan(&existing)
-	if err == nil {
-		return UserPermRule{}, ErrConflict
-	}
-	if err != sql.ErrNoRows {
+	rule.Pattern = canonicalPattern(rule.Pattern)
+	taken, err := rulePatternTaken(tx, rule.BotID, rule.Effect, rule.Pattern)
+	if err != nil {
 		return UserPermRule{}, err
+	}
+	if taken {
+		return UserPermRule{}, ErrConflict
 	}
 	if rule.ID == "" {
 		rule.ID = id.New()
@@ -255,16 +306,16 @@ func (s *Store) SaveSuggestion(sug PermSuggestion) (PermSuggestion, error) {
 	if sug.Status == "" {
 		sug.Status = "pending"
 	}
-	var existingID, status string
-	err = s.db.QueryRow(`SELECT id, status FROM perm_suggestions WHERE bot_id=? AND pattern=? ORDER BY created_at DESC LIMIT 1`, sug.BotID, sug.Pattern).Scan(&existingID, &status)
+	sug.Pattern = canonicalPattern(sug.Pattern)
+	existingID, status, err := findSuggestion(s.db, sug.BotID, sug.Pattern)
 	if err == nil {
 		if status == "dismissed" || status == "accepted" {
 			sug.ID = existingID
 			sug.Status = status
 			return sug, nil
 		}
-		_, err = s.db.Exec(`UPDATE perm_suggestions SET effect=?, classification=?, sensitivity=?, risk=?, count=?, examples=?, summary=?, status=? WHERE id=?`,
-			sug.Effect, sug.Classification, sug.Sensitivity, sug.Risk, sug.Count, string(examples), sug.Summary, sug.Status, existingID)
+		_, err = s.db.Exec(`UPDATE perm_suggestions SET pattern=?, effect=?, classification=?, sensitivity=?, risk=?, count=?, examples=?, summary=?, status=? WHERE id=?`,
+			sug.Pattern, sug.Effect, sug.Classification, sug.Sensitivity, sug.Risk, sug.Count, string(examples), sug.Summary, sug.Status, existingID)
 		if err != nil {
 			return PermSuggestion{}, err
 		}

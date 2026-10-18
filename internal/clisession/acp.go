@@ -25,8 +25,10 @@ type ACPAsk struct {
 
 // ACPDecision is the broker's answer. Allow is sent as allow-once.
 // A deny is sent as reject-once. The host never selects allow_always.
+// UserDenied is set only when the person denied the permission card.
 type ACPDecision struct {
-	Allow bool
+	Allow      bool
+	UserDenied bool
 }
 
 // ACPHooks connect a Grok ACP session to the permission broker.
@@ -81,6 +83,20 @@ type acpSession struct {
 	results   map[string]bool
 	asked     map[string]bool
 	exited    chan struct{}
+	// gen is the prompt currently open. openGen is 0 when no prompt is
+	// in flight. acc is that prompt's text, created in writePrompt.
+	gen     uint64
+	openGen uint64
+	acc     *streamAcc
+	// deniedTool is a card denial keyed by tool-call id. The reader
+	// records it. The permission goroutine must not touch acc.
+	deniedTool map[string]deniedCall
+}
+
+// deniedCall is one tool the person refused on the card.
+type deniedCall struct {
+	name string
+	args map[string]any
 }
 
 func runACPSession(ctx context.Context, cmd *exec.Cmd, stdout io.Reader, stdin io.WriteCloser, spec Spec, onEvent func(Event)) (Result, error) {
@@ -89,18 +105,19 @@ func runACPSession(ctx context.Context, cmd *exec.Cmd, stdout io.Reader, stdin i
 		hooks = *spec.ACP
 	}
 	s := &acpSession{
-		turn:    ctx,
-		cmd:     cmd,
-		w:       stdin,
-		hooks:   hooks,
-		onEvent: onEvent,
-		ws:      spec.Workspace,
-		pending: map[string]chan acpReply{},
-		tools:   map[string]string{},
-		results: map[string]bool{},
-		asked:   map[string]bool{},
-		exited:  make(chan struct{}),
-		done:    make(chan struct{}),
+		turn:       ctx,
+		cmd:        cmd,
+		w:          stdin,
+		hooks:      hooks,
+		onEvent:    onEvent,
+		ws:         spec.Workspace,
+		pending:    map[string]chan acpReply{},
+		tools:      map[string]string{},
+		results:    map[string]bool{},
+		asked:      map[string]bool{},
+		deniedTool: map[string]deniedCall{},
+		exited:     make(chan struct{}),
+		done:       make(chan struct{}),
 	}
 	go s.read(stdout)
 	if spec.ACP == nil || spec.ACP.Decide == nil {
@@ -239,8 +256,13 @@ func (s *acpSession) writePrompt(prompt, sid string) (string, error) {
 	key := strconv.Itoa(id)
 	// Store the id before the write. A fast agent can answer on the same
 	// line, and the reader must already know which id ends the turn.
+	// The accumulator starts here, so a session/load replay that arrived
+	// earlier is not part of this prompt.
 	s.mu.Lock()
 	s.promptID = key
+	s.gen++
+	s.openGen = s.gen
+	s.acc = &streamAcc{}
 	s.mu.Unlock()
 	err := s.writeJSON(rpcRequest{
 		JSONRPC: "2.0",
@@ -255,10 +277,23 @@ func (s *acpSession) writePrompt(prompt, sid string) (string, error) {
 		s.mu.Lock()
 		if s.promptID == key {
 			s.promptID = ""
+			s.openGen = 0
 		}
 		s.mu.Unlock()
 	}
 	return key, err
+}
+
+// liveAcc is the accumulator for the prompt that is open now.
+// It is nil during session/load replay and after the prompt result,
+// so a chunk from another turn cannot join this reply.
+func (s *acpSession) liveAcc() *streamAcc {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.openGen == 0 {
+		return nil
+	}
+	return s.acc
 }
 
 func (s *acpSession) allocID() int {
@@ -269,23 +304,26 @@ func (s *acpSession) allocID() int {
 }
 
 func (s *acpSession) read(r io.Reader) {
-	var st streamAcc
 	defer func() {
 		s.cancelAsks()
 		s.wg.Wait()
 		s.mu.Lock()
-		if s.sessionID != "" {
-			st.out.SessionID = s.sessionID
+		acc := s.acc
+		if acc == nil {
+			acc = &streamAcc{}
 		}
-		st.out.Interrupted = false
-		s.res = st.out
+		if s.sessionID != "" {
+			acc.out.SessionID = s.sessionID
+		}
+		acc.out.Interrupted = false
+		s.res = acc.out
 		s.mu.Unlock()
 		close(s.exited)
 	}()
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for sc.Scan() {
-		if err := s.dispatch(sc.Text(), &st); err != nil {
+		if err := s.dispatch(sc.Text()); err != nil {
 			return
 		}
 	}
@@ -294,7 +332,7 @@ func (s *acpSession) read(r io.Reader) {
 	}
 }
 
-func (s *acpSession) dispatch(line string, st *streamAcc) error {
+func (s *acpSession) dispatch(line string) error {
 	line = strings.TrimSpace(line)
 	if line == "" || line[0] != '{' {
 		return nil
@@ -308,7 +346,7 @@ func (s *acpSession) dispatch(line string, st *streamAcc) error {
 	_, hasID := raw["id"]
 	switch {
 	case method == "session/update":
-		s.onUpdate(raw, st)
+		s.onUpdate(raw)
 		if s.failed() {
 			return s.fatalErr()
 		}
@@ -347,7 +385,7 @@ func (s *acpSession) dispatch(line string, st *streamAcc) error {
 		})
 		return nil
 	case method == "" && hasID:
-		s.deliver(raw["id"], raw, st)
+		s.deliver(raw["id"], raw)
 		return nil
 	default:
 		ev, ok := Parse(line)
@@ -358,12 +396,14 @@ func (s *acpSession) dispatch(line string, st *streamAcc) error {
 			s.hostFail("permission request was not answered", "", nil)
 			return s.fatalErr()
 		}
-		s.feed(st, ev)
+		if st := s.liveAcc(); st != nil {
+			s.feed(st, ev)
+		}
 		return nil
 	}
 }
 
-func (s *acpSession) onUpdate(raw map[string]any, st *streamAcc) {
+func (s *acpSession) onUpdate(raw map[string]any) {
 	params := asMap(raw["params"])
 	reason := ""
 	if params != nil {
@@ -390,14 +430,27 @@ func (s *acpSession) onUpdate(raw map[string]any, st *streamAcc) {
 	if upd == nil {
 		return
 	}
+	// A chunk counts only while its prompt is open. session/load replays
+	// history before writePrompt, and a trailing delta can arrive after
+	// the prompt result. Either one is another turn. The observed carry
+	// was a single trailing rune (the last delta, and the rune
+	// hexSuffixHold would withhold).
+	st := s.liveAcc()
+	if st == nil {
+		return
+	}
 	sid := s.currentSession()
 	switch strOf(upd, "sessionUpdate") {
 	case "agent_message_chunk":
-		text := chunkText(upd["content"])
-		if text == "" {
+		text, ok := chunkText(upd["content"])
+		if !ok {
 			return
 		}
 		s.feed(st, Event{Kind: "token", Text: text, SessionID: sid})
+	case "agent_thought_chunk":
+		// Thoughts are not shown. Do not append them to the reply, and
+		// do not drop a whitespace-only thought by treating it as absent.
+		_, _ = chunkText(upd["content"])
 	case "tool_call":
 		s.emitTool(st, upd, sid)
 	case "tool_call_update":
@@ -438,11 +491,33 @@ func (s *acpSession) emitTool(st *streamAcc, upd map[string]any, sid string) {
 }
 
 func (s *acpSession) emitToolResult(st *streamAcc, upd map[string]any, sid string) {
+	id := strOf(upd, "toolCallId", "tool_call_id")
+	s.mu.Lock()
+	if id != "" {
+		if call, denied := s.deniedTool[id]; denied {
+			if s.results[id] {
+				s.mu.Unlock()
+				return
+			}
+			s.results[id] = true
+			delete(s.deniedTool, id)
+			name := s.tools[id]
+			if name == "" {
+				name = call.name
+			}
+			s.mu.Unlock()
+			if name == "" {
+				name = "tool"
+			}
+			s.feed(st, Event{Kind: "tool_result", ToolName: name, Text: "denied", Denied: true, SessionID: sid})
+			return
+		}
+	}
+	s.mu.Unlock()
 	status := strings.ToLower(strOf(upd, "status"))
 	if status != "completed" && status != "failed" {
 		return
 	}
-	id := strOf(upd, "toolCallId", "tool_call_id")
 	s.mu.Lock()
 	if id != "" && s.results[id] {
 		s.mu.Unlock()
@@ -476,14 +551,14 @@ func (s *acpSession) emitToolResult(st *streamAcc, upd map[string]any, sid strin
 	s.feed(st, Event{Kind: "tool_result", ToolName: name, Text: text, SessionID: sid})
 }
 
-func (s *acpSession) deliver(id any, raw map[string]any, st *streamAcc) {
+func (s *acpSession) deliver(id any, raw map[string]any) {
 	key := idKey(id)
 	s.mu.Lock()
 	ch := s.pending[key]
 	prompt := key != "" && key == s.promptID
 	s.mu.Unlock()
 	if prompt {
-		s.finishPrompt(raw, st)
+		s.finishPrompt(raw)
 	}
 	if ch == nil {
 		return
@@ -494,23 +569,80 @@ func (s *acpSession) deliver(id any, raw map[string]any, st *streamAcc) {
 	}
 }
 
-func (s *acpSession) finishPrompt(raw map[string]any, st *streamAcc) {
+func (s *acpSession) finishPrompt(raw map[string]any) {
 	if raw["error"] != nil {
+		s.mu.Lock()
+		s.openGen = 0
+		s.mu.Unlock()
 		s.hostFail("session/prompt: "+acpErrText(raw["error"]), "", nil)
 		return
 	}
 	stop := "end_turn"
 	if result := asMap(raw["result"]); result != nil {
-		if s := strOf(result, "stopReason", "stop_reason"); s != "" {
-			stop = s
+		if reason := strOf(result, "stopReason", "stop_reason"); reason != "" {
+			stop = reason
 		}
 	}
+	// Close the generation before the end event is published. A chunk
+	// that arrives on a later line belongs to a finished turn.
+	s.mu.Lock()
+	st := s.acc
+	s.openGen = 0
+	s.mu.Unlock()
+	if st == nil {
+		st = &streamAcc{}
+	}
+	s.flushDenied(st)
+	text := strings.Clone(st.b.String())
+	final := st.sawDelta || strings.TrimSpace(text) != ""
 	defer s.doneOnce.Do(func() { close(s.done) })
-	text := st.b.String()
 	s.feed(st, Event{
 		Kind: "end", SessionID: s.currentSession(), StopReason: stop,
-		Text: text, Final: strings.TrimSpace(text) != "",
+		Text: text, Final: final,
 	})
+}
+
+// flushDenied records card denials that never received a tool update.
+// It runs on the reader. The permission goroutine only fills deniedTool.
+func (s *acpSession) flushDenied(st *streamAcc) {
+	if st == nil {
+		return
+	}
+	type item struct {
+		name     string
+		args     map[string]any
+		needTool bool
+	}
+	s.mu.Lock()
+	var items []item
+	for id, call := range s.deniedTool {
+		if s.results[id] {
+			continue
+		}
+		s.results[id] = true
+		_, have := s.tools[id]
+		if !have && call.name != "" {
+			s.tools[id] = call.name
+		}
+		items = append(items, item{name: call.name, args: call.args, needTool: !have})
+	}
+	s.deniedTool = map[string]deniedCall{}
+	sid := s.sessionID
+	s.mu.Unlock()
+	for _, it := range items {
+		name := it.name
+		if name == "" {
+			name = "tool"
+		}
+		args := it.args
+		if args == nil {
+			args = map[string]any{}
+		}
+		if it.needTool {
+			s.feed(st, Event{Kind: "tool", ToolName: name, ToolArgs: args, SessionID: sid})
+		}
+		s.feed(st, Event{Kind: "tool_result", ToolName: name, Text: "denied", Denied: true, SessionID: sid})
+	}
 }
 
 func (s *acpSession) onPermission(ctx context.Context, raw map[string]any) {
@@ -559,6 +691,27 @@ func (s *acpSession) onPermission(ctx context.Context, raw map[string]any) {
 		s.hostFail(err.Error(), tool, args)
 		return
 	}
+	// Record the card denial before the reject is written. The reader
+	// emits the tool record. This goroutine must not touch the accumulator.
+	if !dec.Allow && dec.UserDenied {
+		id := useID
+		if id == "" {
+			id = strOf(call, "toolCallId", "tool_call_id")
+		}
+		if id == "" {
+			id = "denied"
+		}
+		name := tool
+		if name == "" {
+			name = "tool"
+		}
+		if args == nil {
+			args = map[string]any{}
+		}
+		s.mu.Lock()
+		s.deniedTool[id] = deniedCall{name: name, args: args}
+		s.mu.Unlock()
+	}
 	if err := s.writeJSON(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      raw["id"],
@@ -584,10 +737,10 @@ func (s *acpSession) feed(st *streamAcc, ev Event) {
 		s.sawFinal = true
 		s.mu.Unlock()
 		// A legacy end line has no result text. The accumulated tokens are
-		// the final text, so the reply tail matches a streaming-json fixture.
-		if strings.TrimSpace(ev.Text) == "" && st.sawDelta {
-			ev.Text = st.b.String()
-			ev.Final = strings.TrimSpace(ev.Text) != ""
+		// the final text, including a reply that is only whitespace.
+		if ev.Text == "" && st.sawDelta {
+			ev.Text = strings.Clone(st.b.String())
+			ev.Final = true
 		}
 	}
 	_ = st.apply(ev, s.onEvent, false)
@@ -700,15 +853,17 @@ func (s *acpSession) writeJSON(v any) error {
 	return err
 }
 
-func chunkText(v any) string {
+// chunkText is the agent_message_chunk body, kept exactly. A whitespace-only
+// string is present. A missing text field is not.
+func chunkText(v any) (string, bool) {
 	if s, ok := v.(string); ok {
-		return s
+		return s, true
 	}
 	m := asMap(v)
 	if m == nil {
-		return ""
+		return "", false
 	}
-	return strOf(m, "text")
+	return strExact(m, "text")
 }
 
 func outputText(upd map[string]any) string {
@@ -724,7 +879,7 @@ func outputText(upd map[string]any) string {
 	case string:
 		return c
 	case map[string]any:
-		if s := strOf(c, "text"); s != "" {
+		if s, ok := strExact(c, "text"); ok {
 			return s
 		}
 	case []any:
@@ -735,7 +890,9 @@ func outputText(upd map[string]any) string {
 				continue
 			}
 			if m := asMap(item); m != nil {
-				b.WriteString(strOf(m, "text"))
+				if s, ok := strExact(m, "text"); ok {
+					b.WriteString(s)
+				}
 			}
 		}
 		return b.String()

@@ -9,6 +9,34 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/audit"
 )
 
+func TestProbeRequestAuditLabel(t *testing.T) {
+	dir := t.TempDir()
+	app := newApp(t, dir, nil)
+	auditPath := filepath.Join(dir, "audit.log")
+	lg, err := audit.Open(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.audit = lg
+	app.auditProxyRequest("", "", "/", 403, 0, "probe")
+	app.auditProxyRequest("b1", "run-1", "/v1/ping", 403, 0, "")
+	app.auditProxyRequest("", "", "/admin", 403, 0, "not-a-probe")
+	if err := lg.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if strings.Count(text, `"reason":"probe"`) != 1 || strings.Contains(text, "not-a-probe") {
+		t.Fatalf("audit %s", text)
+	}
+	if !strings.Contains(text, `"path":"/"`) || !strings.Contains(text, `"path":"/v1/ping"`) || !strings.Contains(text, `"path":"/admin"`) {
+		t.Fatalf("audit %s", text)
+	}
+}
+
 func TestProxyRefusalAudit(t *testing.T) {
 	dir := t.TempDir()
 	app := newApp(t, dir, nil)

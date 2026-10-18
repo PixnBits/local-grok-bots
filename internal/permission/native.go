@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
 
 // NativeRule is one accepted durable pattern written for a CLI the user
@@ -71,7 +72,10 @@ func WriteNativeRules(dir string, rules []NativeRule) error {
 func splitNative(rules []NativeRule) (allow, deny, ask []string) {
 	allow, deny, ask = []string{}, []string{}, []string{}
 	for _, r := range rules {
-		p := strings.TrimSpace(r.Pattern)
+		p, err := policy.CanonicalRule(r.Pattern)
+		if err != nil {
+			p = strings.TrimSpace(r.Pattern)
+		}
 		if p == "" {
 			continue
 		}

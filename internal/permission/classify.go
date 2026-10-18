@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode"
+
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
 
 // Class is the static, deterministic label for one command or pattern.
@@ -100,13 +102,13 @@ func CheckUserRule(effect, pattern, workspace string) (Class, error) {
 
 func normalizeRule(effect, pattern string) (string, string, error) {
 	effect = strings.ToLower(strings.TrimSpace(effect))
-	pattern = strings.TrimSpace(pattern)
 	switch effect {
 	case "allow", "ask", "deny":
 	default:
 		return "", "", fmt.Errorf("effect must be allow, ask, or deny")
 	}
-	if pattern == "" || len(pattern) > 400 || strings.ContainsAny(pattern, "\r\n") {
+	pattern, err := policy.CanonicalRule(pattern)
+	if err != nil || len(pattern) > 400 {
 		return "", "", fmt.Errorf("invalid pattern")
 	}
 	name, _, _ := splitRule(pattern)
@@ -1162,4 +1164,74 @@ func isSystem(p string) bool {
 		}
 	}
 	return false
+}
+
+// RuleWarning reports when an allow pattern matches the common unprefixed
+// command but the auto-allow floor still requires "--". Deny and ask patterns
+// are not warned. The pattern is not rewritten.
+func RuleWarning(effect, pattern string) (warning, matchForm string) {
+	if strings.ToLower(strings.TrimSpace(effect)) != "allow" {
+		return "", ""
+	}
+	return UnprefixedAllowWarning(pattern)
+}
+
+// UnprefixedAllowWarning returns a warning and the command form that matches
+// and is auto-allowed, such as "cat -- file". An empty warning means the
+// pattern does not have that gap. The "--" requirement is unchanged.
+func UnprefixedAllowWarning(pattern string) (warning, matchForm string) {
+	if canon, err := policy.CanonicalRule(pattern); err == nil {
+		pattern = canon
+	}
+	name, glob, scoped := splitRule(pattern)
+	if !scoped || !strings.EqualFold(name, "Bash") || !trailingWild(glob) {
+		return "", ""
+	}
+	bin := firstField(glob)
+	if !supportsEndOfOptions(bin) {
+		return "", ""
+	}
+	plain, dashed := dashExamples(bin, glob)
+	if plain == "" || dashed == "" || !globMatch(glob, plain) || !globMatch(glob, dashed) {
+		return "", ""
+	}
+	if ClassifyCall("Bash", map[string]any{"command": plain}, "").AutoAllow {
+		return "", ""
+	}
+	if !ClassifyCall("Bash", map[string]any{"command": dashed}, "").AutoAllow {
+		return "", ""
+	}
+	return "This allow does not cover the unprefixed command. The command that matches is " + dashed + ".", dashed
+}
+
+func trailingWild(glob string) bool {
+	if glob == "" {
+		return false
+	}
+	last := glob[len(glob)-1]
+	return last == '*' || last == '?'
+}
+
+func firstField(s string) string {
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
+func dashExamples(bin, glob string) (plain, dashed string) {
+	prefix := strings.TrimRight(glob, "*?")
+	prefix = strings.TrimRight(prefix, " \t")
+	if prefix == "" {
+		prefix = bin
+	}
+	switch bin {
+	case "grep", "rg":
+		return prefix + " pattern file", prefix + " pattern -- file"
+	case "find":
+		return "find file", "find -- file"
+	default:
+		return prefix + " file", prefix + " -- file"
+	}
 }

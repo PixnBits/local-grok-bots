@@ -707,7 +707,10 @@ function paintHeader(b) {
     return;
   }
   note.className = "note";
-  if (!state.streaming && b.status !== "running" && b.last_run_status === "error" && b.last_run_error) {
+  if (!state.streaming && b.status !== "running" && b.last_run_status === "stopped") {
+    note.hidden = false;
+    note.textContent = "Stopped after denial";
+  } else if (!state.streaming && b.status !== "running" && b.last_run_status === "error" && b.last_run_error) {
     note.hidden = false;
     note.textContent = "Run failed: " + b.last_run_error;
   } else if (!state.streaming) {
@@ -832,6 +835,10 @@ function copyButton(cls, label, getText) {
 // toolSummary is the collapsed "N tool calls: a, b" line on a reply.
 // It opens to show each call with its arguments and result.
 // permline:begin
+function toolVerdict(ok, result, status) {
+  if (ok === false && (status === "denied" || result === "denied")) return "denied";
+  return ok ? "ok" : "error";
+}
 // permissionLine is one stored permission decision, e.g.
 // "✅ allowed Bash(git status) · ui". Plain text; callers use textContent.
 function permissionLine(r) {
@@ -881,7 +888,7 @@ function toolSummary(recs) {
     }
     const call = el("div", "tool");
     call.append(el("div", null, r.name + " " + JSON.stringify(r.arguments || {})));
-    call.append(el("div", "tool-result", (r.ok ? "ok" : "error") + ": " + (r.result_or_error || "")));
+    call.append(el("div", "tool-result", toolVerdict(r.ok, r.result_or_error, r.status) + ": " + (r.result_or_error || "")));
     d.append(call);
   }
   return d;
@@ -1052,7 +1059,7 @@ function mdLines(lines, parent) {
     const p = el("p");
     para.forEach((l, k) => {
       if (k) p.append(el("br"));
-      mdInline(l.replace(/\s+$/, ""), p);
+      mdInline(l, p);
     });
     parent.append(p);
   }
@@ -1579,15 +1586,17 @@ async function follow(runId) {
           bubble = null;
           live.append(el("div", "tool", "tool " + (payload.name || "") + " " + JSON.stringify(payload.arguments || {})));
         } else if (event === "tool_result") {
-          const ok = payload.ok ? "ok" : "error";
-          live.append(el("div", "tool", (payload.name || "tool") + " " + ok + ": " + (payload.result_or_error || "")));
+          const mark = toolVerdict(payload.ok, payload.result_or_error, payload.status);
+          live.append(el("div", "tool", (payload.name || "tool") + " " + mark + ": " + (payload.result_or_error || "")));
         } else if (event === "permission_request") {
           showPermissionRequest(payload, runId);
         } else if (event === "permission_decision") {
           showPermissionDecision(payload);
         } else if (event === "done" || event === "error") {
           setWorking(false);
-          if (event === "error" && payload.error !== "tool round limit") {
+          if (event === "done" && payload.status === "stopped") {
+            showRunError("Stopped after denial");
+          } else if (event === "error" && payload.error !== "tool round limit") {
             showRunError("Run failed: " + (payload.error || "unknown error"));
           }
           stopStream();
@@ -1923,6 +1932,8 @@ async function loadPermPanel() {
     head.append(el("strong", null, rule.effect));
     card.append(head);
     card.append(el("code", null, rule.pattern));
+    if (rule.warning) card.append(el("div", "meta", rule.warning));
+    if (rule.match_form) card.append(el("div", "meta", "Matches: " + rule.match_form));
     if (rule.reason) card.append(el("div", "meta", rule.reason));
     const revoke = el("button", "ghost", "Revoke");
     revoke.type = "button";
@@ -1953,6 +1964,8 @@ async function loadPermPanel() {
     lab.append(pattern);
     card.append(lab);
     card.append(el("div", "meta", s.summary || ""));
+    if (s.warning) card.append(el("div", "meta", s.warning));
+    if (s.match_form) card.append(el("div", "meta", "Matches: " + s.match_form));
     const examples = (s.examples || []).join(" · ");
     if (examples) card.append(el("div", "meta", examples));
     const actions = el("div", "row");
