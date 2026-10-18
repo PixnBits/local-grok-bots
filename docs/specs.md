@@ -167,8 +167,8 @@ Belief lint: `write_memory` rejects notes whose key or value claim tool availabi
 | list_bots | | `[{id, name, label, status}]` |
 | read_bot | `{name or id}` | description and memory keys/values |
 | send_dm | `{to, content}` | persists a DM, queues a turn on the recipient |
-| create_bot | `{name, label?, description, model?}` | same as `POST /api/bots` |
-| update_bot | `{id or name, name?, label?, description?, model?}` | same as `PATCH`; rename requires `id` |
+| create_bot | `{name, label?, description, model?, server_tools?}` | same as `POST /api/bots`. Omit `server_tools`, or send `null`, to inherit policy. `[]` allows none of those types. |
+| update_bot | `{id or name, name?, label?, description?, model?, server_tools?}` | same as `PATCH`; rename requires `id`. Omit `server_tools` to leave it unchanged. `null` inherits policy. `[]` allows none. |
 | write_memory | `{key, value}` | upsert on the calling bot |
 | delete_memory | `{key}` | |
 | set_timer | `{prompt, in? \| at? \| every?, name?}`, exactly one of `in` (one-shot duration like `5m`), `at` (one-shot RFC 3339 time with offset, must be in the future), `every` (repeating interval) | creates an enabled timer on the calling bot and returns `{id, schedule, prompt, next_fire_at, fires_at_local}`. Also accepted: `schedule` (as `every`, or as `in` when `repeat` is false), `seconds` / `in_seconds` / `minutes` numbers, and `message` / `text` / `reminder` for `prompt` |
@@ -198,7 +198,7 @@ Writes to `.git/hooks`, shell rc names, and executable git settings are blocked.
 
 A bot that reports its workspace as `/work` is reporting the jail. Giving a bot material means mounting or copying it into `workspace/`. It does not mean relaxing the jail.
 
-Named grants (`net`, `git`, `ssh`, `build`) live on the bot. The profile and the bot API set and clear them, along with `net_allow` and `ssh_allow`. The meta tools do not. A missing grant fails closed and is logged. `git push` returns the diff and does not push. The browser grant in `docs/sandbox.md` is not implemented.
+Named grants (`net`, `git`, `ssh`, `build`) live on the bot. The profile and the bot API set and clear them, along with `net_allow` and `ssh_allow`. The meta tools do not set grants. They do set `server_tools`: `create_bot` inherits when the field is omitted or `null`, and `update_bot` leaves it unchanged when the field is omitted. `null` on update inherits again. `[]` allows none. A missing grant fails closed and is logged. `git push` returns the diff and does not push. The browser grant in `docs/sandbox.md` is not implemented.
 
 ## 5. Log schema
 
@@ -246,7 +246,7 @@ The page is a client. Refreshing reloads from the daemon. Four surfaces. The con
 
 **Bot menu.** Opened from the conversation header, not as a side panel. Items: View profile, Pin, Hide, Duplicate, Delete.
 
-**Profile.** A separate view. Mark, name, label, description, model override, grants, network and SSH allowlists, and the routines list (add, pause, delete, next run). This is the only place the description and the grants are edited.
+**Profile.** A separate view. Mark, name, label, description, model override, grants, network and SSH allowlists, server tools, and the routines list (add, pause, delete, next run). Server tools is either "Inherit from policy" or an explicit list. An explicit list with nothing checked allows none. Saving sends that choice. Duplicate copies `server_tools` and does not copy grants. This is the only place the description, the grants, and server tools are edited.
 
 **Log.** Filterable by bot and by kind. The verification surface.
 
@@ -258,11 +258,11 @@ The page is a client. Refreshing reloads from the daemon. Four surfaces. The con
 - Default model is the local Ollama endpoint, overridable by `OLLAMA_MODEL` and per bot. If Ollama is down, runs fail with a clear log line and do not hang.
 - Clean shutdown writes `daemon_stop`. Crash does not; the next start writes `daemon_start` and reconciles runs as above.
 - `bwrap` or `unshare` must be usable for `run_shell` in Ollama mode. Missing, the tool fails; the daemon still serves.
-- Policy loading: precedence is managed settings > `policy.toml` > built-in defaults. Fail-closed: if the policy file is missing or unparseable, the daemon defaults to the strictest mode (daemon jail ON, CLI backends OFF) and logs loudly. When a user-level setting conflicts with a managed policy, the daemon refuses to start or logs the conflict according to `conflict_policy`.
+- Policy loading: precedence is managed settings > `policy.toml` > built-in defaults. Fail-closed: if the policy file is missing or unparseable, the daemon defaults to the strictest mode (daemon jail ON, CLI backends OFF) and logs loudly. When a user-level setting conflicts with a managed policy, the daemon refuses to start or logs the conflict according to `conflict_policy`. `[cli].server_tools` names the non-function model tool types a net-granted bot may keep. The default is empty, so the loopback proxy strips every such type. Managed policy sets the ceiling. Local policy and a bot's `server_tools` field can only narrow it. Leaving the bot field out inherits policy. A bot without a net grant loses every non-function tool. The proxy applies that list to every non-empty body on the loopback credential proxy. A duplicate object key is refused. A non-JSON body is refused.
 
 ## 9. Policy
 
-The declarative policy file (`policy.toml`) controls the backend and jail behavior. One `backend` knob (`ollama` | `claude` | `grok`) automatically sets jail mode: Ollama implies daemon jail ON; CLI backends imply daemon jail OFF because the CLI's own sandbox is the boundary. See `policy.toml.sample` for the annotated schema. Managed settings (server-managed or MDM) always override the local file.
+The declarative policy file (`policy.toml`) controls the backend and jail behavior. One `backend` knob (`ollama` | `claude` | `grok`) automatically sets jail mode: Ollama implies daemon jail ON; CLI backends imply daemon jail OFF because the CLI's own sandbox is the boundary. See `policy.toml.sample` for the annotated schema. Managed settings (server-managed or MDM) always override the local file. For `server_tools`, managed policy is the ceiling and local policy can only narrow it. An omitted policy list is empty. An explicit empty list narrows a managed ceiling to nothing. Leaving a bot's `server_tools` out means inherit that list.
 
 ## Out of these specs
 

@@ -50,6 +50,20 @@ imminent_timer_minutes = 2
 # Managed policy can cap it with max_turn_timeout. See docs/cli-isolation.md
 # (Timeouts) for every run limit.
 # turn_timeout = "2h"
+# server_tools lists non-function model tool types a net-granted bot may
+# keep, such as web_search or x_search. Function tools are unchanged.
+# Omitted means the default, an empty list: the loopback proxy strips
+# every such type. That is not inherit. An explicit empty list is a set
+# layer and narrows a managed ceiling to nothing. Managed policy sets
+# the ceiling. This file and a bot's server_tools field can only narrow
+# it (intersection). Leaving a bot's server_tools out, or setting it to
+# null, means inherit this list. An explicit empty bot list allows none.
+# A bot without a net grant loses every non-function tool. Policy cannot
+# keep one, because server-side search is network access.
+# disable_web_search in the sealed Grok config has no effect on that
+# path. The proxy strips the tools from every non-empty body. See
+# docs/cli-isolation.md.
+# server_tools = ["web_search"]
 # Permission mode is a policy setting.
 # Unspecified (empty): the CLI prompts when a person can answer on a TTY.
 # If it prompts and there is no controlling terminal, the turn fails instead
@@ -67,6 +81,10 @@ imminent_timer_minutes = 2
 # home = "isolated"
 # claude_home = "auto"   # macOS: user's HOME (Keychain login); Linux: isolated
 # claude_sandbox = "required"  # Claude Bash sandbox on, fail closed; "off" is managed-only
+# trust_system_config = false  # managed only; host CLI config stays untrusted
+# Managed env cannot set GROK_CONFIG, GROK_CONFIG_PATH,
+# GROK_DEFAULT_SELECTED_PERMISSION, or a GROK_* name that selects
+# permission, config, mode, sandbox, hooks, plugins, skills, agents, or home.
 #
 # [cli.lgb]
 # Floor for a repeating timer a bot creates, and how many scheduled turns
@@ -98,8 +116,12 @@ imminent_timer_minutes = 2
 # none always passes --permission-prompts none.
 # claude_transport = "mcp"
 # Optional binary pins. Prefer path + SHA-256. Empty keeps PATH launch.
+# Hardened setups should set sha256 for the grok binary. The version gate
+# trusts the text grok --version prints (only 1.0.52 and 1.0.62). The pin
+# is compared first. A mismatch does not run the binary.
 # pins = [
 #   { path = "/usr/local/bin/claude", sha256 = "..." },
+#   { backend = "grok", path = "/usr/local/bin/grok", sha256 = "..." },
 # ]
 
 # [tools]

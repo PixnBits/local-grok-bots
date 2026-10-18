@@ -1,9 +1,11 @@
 package coi
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -11,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -41,22 +44,49 @@ type Egress struct {
 	gates       map[string]gateBinding
 	// onAudit records one request. Headers and bodies are not passed.
 	// suppressed counts 403 rows omitted since the previous 403 row.
-	onAudit    func(botID, runID, path string, status int, suppressed int)
-	routeBot   string
-	routeRun   string
-	denyMu     sync.Mutex
-	denyAt     []time.Time
-	suppressed int
+	onAudit func(botID, runID, path string, status int, suppressed int, reason string)
+	// onRefuse records a request refused because its body could not be
+	// filtered. The reason is a fixed label. Headers and bodies are not passed.
+	onRefuse func(botID, runID, path, reason string)
+	// onStrip records non-function tools removed from a model request.
+	// removed is tool types only. source is managed, local, bot, default, or no_net.
+	onStrip func(botID, runID, path string, removed []string, source string)
+	// serverTools is the allow list for a net-granted bot. A nil function
+	// denies every non-function type. The callback must not expect a body.
+	serverTools func(botID string) (allow []string, source string)
+	routeBot    string
+	routeRun    string
+	denyMu      sync.Mutex
+	denyAt      []time.Time
+	suppressed  int
 }
 
 // denyAuditLimit is how many 403 rows one proxy writes per second.
 var denyAuditLimit = 20
 
 // gateBinding is the bot and run a placeholder bearer was admitted for.
+// net is that bot's net grant. Without it every non-function tool is stripped.
 type gateBinding struct {
 	botID string
 	runID string
+	net   bool
 }
+
+// Refusal labels for a filtered request. They name the failure, not the body.
+// duplicate_key means an object key was repeated at any nesting level.
+// unparsed means the body was not JSON, was invalid, or could not be decoded.
+const (
+	refuseUnparsed     = "unparsed"
+	refuseDuplicateKey = "duplicate_key"
+	refuseServerTool   = "server_tool"
+	// refuseToolsKey is a top-level key that equals tools or tool_choice
+	// ignoring case but is not that exact spelling. It is not forwarded.
+	refuseToolsKey = "tools_key"
+)
+
+// maxModelBody is how much of a model request is inspected. A larger body
+// is refused.
+const maxModelBody = 32 << 20
 
 // StartEgress listens on a unix socket in a private 0700 directory under parent.
 // prefixes nil means policy.DefaultProxyPathPrefix (/v1). An empty non-nil
@@ -163,12 +193,23 @@ func StartLoopback(hosts, prefixes []string, bearer func() (string, error), trip
 	return eg, nil
 }
 
-// Admit registers one placeholder bearer for one bot and one run. The
-// loopback proxy replaces that bearer only when the request names the same
-// bot and run. Every other bearer is rejected, including the well-known
-// placeholder. The returned function removes it and is safe to call more
-// than once. A unix-socket proxy does not consult this set.
+// Admit registers one placeholder bearer for one bot and one run, with no
+// net grant. The loopback proxy replaces that bearer only when the request
+// names the same bot and run. Every other bearer is rejected, including the
+// well-known placeholder. The returned function removes it and is safe to
+// call more than once. A unix-socket proxy does not consult this set.
 func (e *Egress) Admit(botID, runID, secret string) func() {
+	return e.admitGate(botID, runID, secret, false)
+}
+
+// AdmitNet is Admit with the bot's net grant. Without that grant the
+// loopback proxy strips every non-function tool from a model request.
+// With that grant it keeps only the types the server-tools policy allows.
+func (e *Egress) AdmitNet(botID, runID, secret string, net bool) func() {
+	return e.admitGate(botID, runID, secret, net)
+}
+
+func (e *Egress) admitGate(botID, runID, secret string, net bool) func() {
 	if e == nil || !e.requireGate || !acceptableGate(secret) || !SafeRouteID(botID) || !SafeRouteID(runID) {
 		return func() {}
 	}
@@ -176,7 +217,7 @@ func (e *Egress) Admit(botID, runID, secret string) func() {
 	if e.gates == nil {
 		e.gates = map[string]gateBinding{}
 	}
-	e.gates[secret] = gateBinding{botID: botID, runID: runID}
+	e.gates[secret] = gateBinding{botID: botID, runID: runID, net: net}
 	e.gateMu.Unlock()
 	var once sync.Once
 	return func() {
@@ -195,12 +236,50 @@ func (e *Egress) Admit(botID, runID, secret string) func() {
 // were omitted since the previous 403 row. It is zero for other statuses.
 // A nil function disables it. The callback must not expect headers, a body,
 // or the presented bearer.
-func (e *Egress) SetAudit(fn func(botID, runID, path string, status int, suppressed int)) {
+func (e *Egress) SetAudit(fn func(botID, runID, path string, status int, suppressed int, reason string)) {
 	if e == nil {
 		return
 	}
 	e.gateMu.Lock()
 	e.onAudit = fn
+	e.gateMu.Unlock()
+}
+
+// SetRefuseAudit registers the body-refusal record. The reason is
+// unparsed, duplicate_key, server_tool, or tools_key. A nil function disables it.
+// The callback must not expect headers, a body, or the presented bearer.
+func (e *Egress) SetRefuseAudit(fn func(botID, runID, path, reason string)) {
+	if e == nil {
+		return
+	}
+	e.gateMu.Lock()
+	e.onRefuse = fn
+	e.gateMu.Unlock()
+}
+
+// SetStripAudit registers the record written when non-function tools are
+// removed. removed is tool types. source is managed, local, bot, default,
+// or no_net. A nil function disables it. The callback must not expect
+// headers, a body, or the presented bearer.
+func (e *Egress) SetStripAudit(fn func(botID, runID, path string, removed []string, source string)) {
+	if e == nil {
+		return
+	}
+	e.gateMu.Lock()
+	e.onStrip = fn
+	e.gateMu.Unlock()
+}
+
+// SetServerTools registers the allow list for a net-granted bot. allow is
+// the non-function types that may stay. source is managed, local, bot, or
+// default. A nil function denies every non-function type. The callback
+// must not expect a body.
+func (e *Egress) SetServerTools(fn func(botID string) (allow []string, source string)) {
+	if e == nil {
+		return
+	}
+	e.gateMu.Lock()
+	e.serverTools = fn
 	e.gateMu.Unlock()
 }
 
@@ -215,7 +294,7 @@ func (e *Egress) BindRoute(botID, runID string) {
 	e.gateMu.Unlock()
 }
 
-func (e *Egress) note(botID, runID, path string, status int) {
+func (e *Egress) note(botID, runID, path string, status int, reason string) {
 	if e == nil {
 		return
 	}
@@ -239,7 +318,103 @@ func (e *Egress) note(botID, runID, path string, status int) {
 		}
 		suppressed = n
 	}
-	fn(botID, runID, path, status, suppressed)
+	if reason != "probe" {
+		reason = ""
+	}
+	fn(botID, runID, path, status, suppressed, reason)
+}
+
+func (e *Egress) noteRefuse(botID, runID, path, reason string) {
+	if e == nil {
+		return
+	}
+	switch reason {
+	case refuseUnparsed, refuseDuplicateKey, refuseServerTool, refuseToolsKey:
+	default:
+		reason = refuseServerTool
+	}
+	e.gateMu.Lock()
+	fn := e.onRefuse
+	if botID == "" {
+		botID = e.routeBot
+	}
+	if runID == "" {
+		runID = e.routeRun
+	}
+	e.gateMu.Unlock()
+	if fn == nil {
+		return
+	}
+	fn(botID, runID, path, reason)
+}
+
+func (e *Egress) noteStrip(botID, runID, path string, removed []string, source string) {
+	if e == nil || len(removed) == 0 {
+		return
+	}
+	switch source {
+	case sourceManaged, sourceLocal, sourceBot, sourceDefault, sourceNoNet:
+	default:
+		source = sourceDefault
+	}
+	removed = uniqueToolTypes(removed)
+	if len(removed) == 0 {
+		return
+	}
+	e.gateMu.Lock()
+	fn := e.onStrip
+	if botID == "" {
+		botID = e.routeBot
+	}
+	if runID == "" {
+		runID = e.routeRun
+	}
+	e.gateMu.Unlock()
+	if fn == nil {
+		return
+	}
+	fn(botID, runID, path, removed, source)
+}
+
+// serverToolAllow is the non-function types a model request may keep.
+// A bot without a net grant keeps none. The source names that decision.
+func (e *Egress) serverToolAllow(presented, botID string) ([]string, string) {
+	if e == nil || !e.grantedNet(presented) {
+		return nil, sourceNoNet
+	}
+	e.gateMu.Lock()
+	fn := e.serverTools
+	e.gateMu.Unlock()
+	if fn == nil {
+		return nil, sourceDefault
+	}
+	allow, source := fn(botID)
+	switch source {
+	case sourceManaged, sourceLocal, sourceBot, sourceDefault:
+		return allow, source
+	default:
+		return nil, sourceDefault
+	}
+}
+
+// grantedNet reports whether the presented bearer was admitted with a net grant.
+func (e *Egress) grantedNet(presented string) bool {
+	if e == nil || presented == "" {
+		return false
+	}
+	e.gateMu.Lock()
+	defer e.gateMu.Unlock()
+	net := 0
+	pb := []byte(presented)
+	for secret, g := range e.gates {
+		match := subtle.ConstantTimeCompare(pb, []byte(secret))
+		bit := 0
+		if g.net {
+			bit = 1
+		}
+		net |= match & bit
+	}
+	return net == 1
 }
 
 // allowDenyAudit reports whether this 403 may be recorded. The count is how
@@ -364,23 +539,42 @@ func (e *Egress) serve(trip http.RoundTripper) {
 			botID, runID, norm, fwd, ok := e.prepare(r)
 			if !ok || fwd == nil {
 				http.Error(w, "forbidden", http.StatusForbidden)
-				e.note(botID, runID, norm, http.StatusForbidden)
+				reason := ""
+				if probeRequest(r, botID, runID, norm) {
+					reason = "probe"
+				}
+				e.note(botID, runID, norm, http.StatusForbidden, reason)
 				return
 			}
 			if e.requireGate && !e.admits(botID, runID, presentedBearer(r)) {
 				http.Error(w, "forbidden", http.StatusForbidden)
-				e.note(botID, runID, norm, http.StatusForbidden)
+				e.note(botID, runID, norm, http.StatusForbidden, "")
 				return
+			}
+			if e.requireGate {
+				presented := presentedBearer(r)
+				removed, source, reason := filterServerTools(fwd, func() ([]string, string) {
+					return e.serverToolAllow(presented, botID)
+				})
+				if reason != "" {
+					http.Error(w, "forbidden", http.StatusForbidden)
+					e.noteRefuse(botID, runID, norm, reason)
+					e.note(botID, runID, norm, http.StatusForbidden, "")
+					return
+				}
+				if len(removed) > 0 {
+					e.noteStrip(botID, runID, norm, removed, source)
+				}
 			}
 			tok, err := e.currentToken()
 			if err != nil || tok == "" {
 				http.Error(w, "proxy is not available", http.StatusServiceUnavailable)
-				e.note(botID, runID, norm, http.StatusServiceUnavailable)
+				e.note(botID, runID, norm, http.StatusServiceUnavailable, "")
 				return
 			}
 			sw := &statusWriter{ResponseWriter: w}
 			proxy.ServeHTTP(sw, fwd.WithContext(context.WithValue(fwd.Context(), egressToken{}, tok)))
-			e.note(botID, runID, norm, sw.status())
+			e.note(botID, runID, norm, sw.status(), "")
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -541,7 +735,10 @@ func (e *Egress) prepare(r *http.Request) (botID, runID, path string, fwd *http.
 	}
 	botID, runID, rest, split := splitBotRun(r.URL.Path)
 	if !split {
-		return "", "", "", nil, false
+		// Keep the path that was requested. An unroutable check used to be
+		// audited as an empty path because the route split discarded it.
+		raw := r.URL.Path
+		return "", "", raw, nil, false
 	}
 	norm, normOK := normalizeProxyPath(rest)
 	if !normOK {
@@ -552,6 +749,24 @@ func (e *Egress) prepare(r *http.Request) (botID, runID, path string, fwd *http.
 		return botID, runID, norm, nil, false
 	}
 	return botID, runID, norm, fwd, true
+}
+
+// probeRequest is the unauthenticated client check that does not name a
+// bot or a run: CONNECT, PRI, or a path of "", "/", or "*". A request
+// that names some other path stays unlabeled so a scan is not called a probe.
+func probeRequest(r *http.Request, botID, runID, path string) bool {
+	if r == nil || botID != "" || runID != "" || presentedBearer(r) != "" {
+		return false
+	}
+	switch r.Method {
+	case http.MethodConnect, "PRI":
+		return true
+	}
+	switch path {
+	case "", "/", "*":
+		return true
+	}
+	return false
 }
 
 func splitBotRun(p string) (botID, runID, rest string, ok bool) {
@@ -862,4 +1077,17 @@ func dialAllowlisted(ctx context.Context, network, addr string, allow map[string
 	var d net.Dialer
 	d.Timeout = 15 * time.Second
 	return d.DialContext(ctx, network, addr)
+}
+
+func restoreBody(r *http.Request, body []byte) {
+	if r == nil {
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	r.ContentLength = int64(len(body))
+	r.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	r.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(body)), nil
+	}
+	r.TransferEncoding = nil
 }

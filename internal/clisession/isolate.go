@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
 
 // Isolation is the daemon-owned CLI configuration for one turn.
@@ -22,8 +24,9 @@ type Isolation struct {
 	Env []string
 	// GrokSandbox is the --sandbox profile for Grok.
 	GrokSandbox string
-	// GrokDisallow are built-in Grok tools passed to --disallowed-tools.
-	GrokDisallow []string
+	// GrokTools is the --tools allowlist. Empty on a Grok turn uses the
+	// no-net list, so an unset list does not leave every built-in enabled.
+	GrokTools []string
 	// ClaudeSandbox is whether the settings file turns Claude's sandbox on.
 	ClaudeSandbox bool
 	// Protect is the path deny list written into this turn's settings.
@@ -69,6 +72,9 @@ type IsolationOptions struct {
 	Backend string
 	// StateDir is the per-bot daemon directory for the settings file.
 	StateDir string
+	// Workspace is the bot directory. A Grok turn seals one session
+	// permission file for this path. Empty skips that file.
+	Workspace string
 	// Home is the per-bot HOME. Empty shares the user's HOME.
 	Home string
 	// UserHome is the daemon user's HOME, used to link credentials.
@@ -304,7 +310,7 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 			env[k] = "false"
 		}
 		env["GROK_DISABLE_AUTOUPDATER"] = "1"
-		iso.GrokDisallow = grokDisallowed(o.Grants)
+		iso.GrokTools = grokAllowedTools(o.Grants)
 		// Built-in profiles fail open. The custom profile lives in GROK_HOME:
 		// the per-bot home, or a daemon directory when HOME is the user's
 		// (that directory is not ~/.grok, so the user's sandbox.toml is untouched).
@@ -337,9 +343,24 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 			}
 			return Isolation{}, &SandboxError{Backend: "grok", Err: fmt.Errorf("Grok's sandbox profile could not be written (%v), so the turn was refused", err)}
 		}
+		if err := SealGrokHome(root, grokHome); err != nil {
+			return Isolation{}, err
+		}
+		if err := ensureWorkspacePermission(root, grokHome, o.Workspace); err != nil {
+			return Isolation{}, err
+		}
+		if err := prepareShellRC(home); err != nil {
+			return Isolation{}, err
+		}
+		if err := prepareHomeSeals(home); err != nil {
+			return Isolation{}, err
+		}
 		iso.GrokSandbox = GrokProfile
 	}
 	for k, v := range o.Extra {
+		if policy.BlockedCLIEnv(k) {
+			return Isolation{}, fmt.Errorf("cli environment cannot set %s, so the turn was refused", k)
+		}
 		env[k] = v
 	}
 	if backend == "grok" {
@@ -517,7 +538,8 @@ func writeGrokAuth(root, rel, key string) error {
 var overrideNames = []string{
 	".claude/settings.json", ".claude/settings.local.json", ".claude/CLAUDE.md",
 	".claude/CLAUDE.local.md", ".mcp.json", "CLAUDE.md", "CLAUDE.local.md",
-	"AGENTS.md", ".grok/config.toml", ".cursor/mcp.json", ".cursor/hooks.json",
+	"AGENTS.md", ".grok/config.toml", ".grok/hooks", ".grok/skills", ".grok/lsp.json",
+	".cursor/mcp.json", ".cursor/hooks.json", ".envrc",
 }
 
 // ScanOverrides lists override files under the workspace, relative to it.
@@ -533,16 +555,27 @@ func ScanOverrides(ws string) []string {
 			if rel != "." && (d.Name() == ".git" || d.Name() == "node_modules" || strings.Count(rel, string(filepath.Separator)) >= 3) {
 				return filepath.SkipDir
 			}
+			if rel != "." {
+				slash := filepath.ToSlash(rel)
+				for _, n := range overrideNames {
+					if slash == n || strings.HasSuffix(slash, "/"+n) {
+						out = append(out, slash)
+						break
+					}
+				}
+			}
 			return nil
 		}
 		slash := filepath.ToSlash(rel)
+		matched := false
 		for _, n := range overrideNames {
 			if slash == n || strings.HasSuffix(slash, "/"+n) {
 				out = append(out, slash)
+				matched = true
 				break
 			}
 		}
-		if strings.Contains("/"+slash, "/.grok/") && !strings.HasSuffix(slash, ".grok/config.toml") {
+		if !matched && strings.Contains("/"+slash, "/.grok/") && !strings.HasSuffix(slash, ".grok/config.toml") {
 			out = append(out, slash)
 		}
 		return nil

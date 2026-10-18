@@ -164,6 +164,9 @@ func TestSamplePolicy(t *testing.T) {
 	if p.PermissionMode != "" {
 		t.Fatalf("sample permission %q", p.PermissionMode)
 	}
+	if len(p.ServerTools) != 0 || p.ServerToolsSource != "default" {
+		t.Fatalf("sample server tools %#v %s", p.ServerTools, p.ServerToolsSource)
+	}
 }
 
 func TestExplicitPermissionMode(t *testing.T) {

@@ -461,13 +461,13 @@ func TestExecRunnerUsesOnlyIsolatedEnv(t *testing.T) {
 
 func TestScanOverridesAndNeutralized(t *testing.T) {
 	ws := t.TempDir()
-	for _, f := range []string{".claude/settings.json", ".mcp.json", "sub/CLAUDE.md", ".grok/config.toml", ".grok/hooks/x.sh", "AGENTS.md", "notes.md", ".git/CLAUDE.md", "node_modules/p/.mcp.json"} {
+	for _, f := range []string{".claude/settings.json", ".mcp.json", "sub/CLAUDE.md", ".grok/config.toml", ".grok/hooks/x.sh", ".grok/skills/s.md", ".grok/lsp.json", ".envrc", "AGENTS.md", "notes.md", ".git/CLAUDE.md", "node_modules/p/.mcp.json"} {
 		p := filepath.Join(ws, f)
 		_ = os.MkdirAll(filepath.Dir(p), 0o755)
 		_ = os.WriteFile(p, nil, 0o644)
 	}
 	got := ScanOverrides(ws)
-	want := []string{".claude/settings.json", ".grok/config.toml", ".grok/hooks/x.sh", ".mcp.json", "AGENTS.md", "sub/CLAUDE.md"}
+	want := []string{".claude/settings.json", ".envrc", ".grok/config.toml", ".grok/hooks", ".grok/hooks/x.sh", ".grok/lsp.json", ".grok/skills", ".grok/skills/s.md", ".mcp.json", "AGENTS.md", "sub/CLAUDE.md"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("got %v want %v", got, want)
 	}

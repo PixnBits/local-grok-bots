@@ -22,6 +22,17 @@ func prop(typ, desc string) map[string]any {
 	return map[string]any{"type": typ, "description": desc}
 }
 
+// serverToolsProp is the create_bot and update_bot argument for the
+// per-bot allow list. Leaving it out inherits on create and leaves the
+// stored list unchanged on update.
+func serverToolsProp(desc string) map[string]any {
+	return map[string]any{
+		"type":        "array",
+		"description": desc,
+		"items":       map[string]any{"type": "string", "description": "One non-function model tool type. Example: \"web_search\"."},
+	}
+}
+
 // schemaObj is a JSON Schema object. additionalProperties stays open so
 // documented aliases keep working.
 func schemaObj(props map[string]any, req ...string) map[string]any {
@@ -82,15 +93,16 @@ func toolDefs() []model.Tool {
 				"to":      name("Recipient bot name or id."),
 				"content": prop("string", "Message text."),
 			}, "to", "content")},
-		{Name: "create_bot", Description: "Create a new bot. description is the standing prompt the new bot is given. instructions is an accepted alias for description.",
+		{Name: "create_bot", Description: "Create a new bot. description is the standing prompt the new bot is given. instructions is an accepted alias for description. server_tools omitted or null inherits policy; an empty array allows none.",
 			Parameters: schemaObj(map[string]any{
 				"name":         name("Unique bot name (case-insensitive)."),
 				"description":  prop("string", "Standing prompt for the new bot. Example: \"You summarize the news each morning.\""),
 				"label":        prop("string", "Optional short role line. Example: \"news digest\"."),
 				"instructions": prop("string", "Alias for description."),
 				"model":        prop("string", "Optional Ollama model name; omit to use the default."),
+				"server_tools": serverToolsProp("Non-function model tool types this bot may keep. Omit or null inherits policy. An empty array allows none. Example: [\"web_search\"]."),
 			}, "name", "description")},
-		{Name: "update_bot", Description: "Change another bot's name, label, description, or model. Identify it by id or name; renaming requires id. instructions is an accepted alias for description.",
+		{Name: "update_bot", Description: "Change another bot's name, label, description, model, or server_tools. Identify it by id or name; renaming requires id. instructions is an accepted alias for description. server_tools omitted leaves the field unchanged; null inherits policy; an empty array allows none.",
 			Parameters: schemaObj(map[string]any{
 				"id":           prop("string", "Target bot id. Required to rename."),
 				"name":         name("Target bot name, or the new name when id is given."),
@@ -98,6 +110,7 @@ func toolDefs() []model.Tool {
 				"description":  prop("string", "New standing prompt."),
 				"instructions": prop("string", "Alias for description."),
 				"model":        prop("string", "New Ollama model name; empty string resets to the default."),
+				"server_tools": serverToolsProp("Non-function model tool types this bot may keep. Omit to leave unchanged. Null inherits policy. An empty array allows none. Example: [\"web_search\"]."),
 			})},
 	}
 }
@@ -278,8 +291,15 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		if m := strings.TrimSpace(strArg(args, "model")); m != "" {
 			modelPtr = &m
 		}
+		var tools *[]string
+		if v, ok := args["server_tools"]; ok {
+			tools, err = serverToolsArg(v)
+			if err != nil {
+				return "", err
+			}
+		}
 		created, err := a.st.InsertBot(store.BotDraft{
-			Name: name, Label: strArg(args, "label"), Description: description, Model: modelPtr,
+			Name: name, Label: strArg(args, "label"), Description: description, Model: modelPtr, ServerTools: tools,
 		}, bot.ID)
 		if err != nil {
 			return "", err
@@ -324,6 +344,14 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			if m != "" {
 				patch.Model = &m
 			}
+		}
+		if v, ok := args["server_tools"]; ok {
+			tools, err := serverToolsArg(v)
+			if err != nil {
+				return "", err
+			}
+			patch.ServerToolsSet = true
+			patch.ServerTools = tools
 		}
 		updated, err := a.st.UpdateBot(target.ID, patch)
 		if err != nil {
@@ -486,6 +514,31 @@ func dirOf(path string) string {
 		return "."
 	}
 	return path[:i]
+}
+
+// serverToolsArg reads a create_bot or update_bot server_tools value.
+// Null inherits. An array is stored after the same name check as the API.
+func serverToolsArg(v any) (*[]string, error) {
+	if v == nil {
+		return nil, nil
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		return nil, errors.New("invalid server_tools")
+	}
+	names := make([]string, 0, len(arr))
+	for _, item := range arr {
+		s, ok := item.(string)
+		if !ok {
+			return nil, errors.New("invalid server_tools")
+		}
+		names = append(names, s)
+	}
+	norm, err := store.NormalizeServerTools(names)
+	if err != nil {
+		return nil, err
+	}
+	return &norm, nil
 }
 
 func strArg(args map[string]any, key string) string {

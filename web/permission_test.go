@@ -32,10 +32,17 @@ func TestPermissionHandlersPresent(t *testing.T) {
 		"perm-question",
 		"ExitPlanMode",
 		`kind === "question"`,
+		`placeholder="Read(./src/**)"`,
+		`clearPermErr`,
+		`showPermErr`,
+		`s.status !== "refused"`,
 	} {
 		if !strings.Contains(src, s) {
 			t.Errorf("index.html missing %s", s)
 		}
+	}
+	if strings.Contains(src, `placeholder="Bash(gh pr view *)"`) {
+		t.Error("pattern input still uses a network-client placeholder")
 	}
 	i := strings.Index(src, "// perm:begin")
 	j := strings.Index(src, "// perm:end")

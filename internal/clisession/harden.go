@@ -70,6 +70,10 @@ func claudeSettingsJSON(o IsolationOptions) ([]byte, error) {
 		deny = append(deny, "Read(/"+p+")", "Read(/"+p+"/**)", "Edit(/"+p+")", "Edit(/"+p+"/**)")
 		creds = append(creds, map[string]string{"path": p, "mode": "deny"})
 	}
+	for _, p := range existingRuleFiles(o.StateDir) {
+		deny = append(deny, "Read(/"+p+")", "Read(/"+p+"/**)", "Edit(/"+p+")", "Edit(/"+p+"/**)")
+		creds = append(creds, map[string]string{"path": p, "mode": "deny"})
+	}
 	doc := map[string]any{
 		"disableAllHooks":            true,
 		"enableAllProjectMcpServers": false,
@@ -626,6 +630,8 @@ func grokSandboxTOML(o IsolationOptions) string {
 			deny = append(deny, denyAround(filepath.Clean(p), keep)...)
 		}
 	}
+	deny = append(deny, existingRuleFiles(o.StateDir)...)
+	deny = dedupePaths(deny)
 	var b strings.Builder
 	b.WriteString("# Written by local-grok-bots for each turn. Do not edit.\n")
 	fmt.Fprintf(&b, "[profiles.%s]\nextends = \"strict\"\n", GrokProfile)
@@ -641,12 +647,78 @@ func grokSandboxTOML(o IsolationOptions) string {
 	return b.String()
 }
 
-// grokDisallowed are built-in Grok tools removed unless granted.
-func grokDisallowed(g Grants) []string {
+// grokAllowedTools is the --tools allowlist. Each name is one an ask rule
+// can force to prompt. lgb and coi are shell commands, so they need
+// run_terminal_command. list_dir is omitted until an ask rule is confirmed
+// to make it ask. x_keyword_search and x_semantic_search stay off.
+// Web tools are added only with a net grant.
+func grokAllowedTools(g Grants) []string {
+	out := []string{
+		"run_terminal_command",
+		"read_file",
+		"search_replace",
+		"grep",
+		"write",
+	}
 	if g.Net {
+		out = append(out, "web_fetch", "web_search")
+	}
+	return out
+}
+
+// grokPermissionTOML forces default mode and a catch-all ask list.
+// Without the ask list, read-only tools run with no session/request_permission.
+// disable_web_search is sealed with the file. It does not stop Grok's
+// server-side search; the loopback proxy strips those tools. A bot without
+// a net grant loses every non-function tool. A net grant keeps only the
+// types on the effective server_tools list.
+func grokPermissionTOML() string {
+	return "# Written by local-grok-bots for each turn. Do not edit.\n" +
+		"disable_web_search = true\n\n" +
+		"[ui]\npermission_mode = \"default\"\n\n" +
+		"[permission]\nask = [\"Bash\", \"Read\", \"Grep\", \"Glob\", \"Edit\", \"Write\", \"WebFetch\", \"WebSearch\", \"MCPTool\"]\n"
+}
+
+// grokPermissionTOMLPrevious is the last daemon body. Only that exact text
+// is rewritten. Any other body stays in place and refuses the turn.
+func grokPermissionTOMLPrevious() string {
+	return "# Written by local-grok-bots for each turn. Do not edit.\n" +
+		"[ui]\npermission_mode = \"default\"\n\n" +
+		"[permission]\nask = [\"Bash\", \"Read\", \"Grep\", \"Glob\", \"Edit\", \"Write\", \"WebFetch\", \"WebSearch\", \"MCPTool\"]\n"
+}
+
+// existingRuleFiles lists the durable permission files in the bot state
+// directory when they are regular files. A missing path is omitted: Grok
+// refuses to start when a deny path cannot be bound. A symlink is omitted
+// so the deny does not follow it.
+func existingRuleFiles(state string) []string {
+	state = strings.TrimSpace(state)
+	if state == "" {
 		return nil
 	}
-	return []string{"web_fetch", "web_search"}
+	var out []string
+	for _, name := range []string{"user-permissions.json", "grok-permission-rules"} {
+		p := filepath.Join(filepath.Clean(state), name)
+		st, err := os.Lstat(p)
+		if err != nil || !st.Mode().IsRegular() {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func dedupePaths(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range in {
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
 }
 
 // denyAround returns p, or, when p contains one of keep (the bot's own HOME

@@ -46,6 +46,25 @@ func TestToolSchemasComplete(t *testing.T) {
 			t.Errorf("%s: no usage", tool.Name)
 		}
 	}
+	for _, tool := range toolDefs() {
+		if tool.Name != "create_bot" && tool.Name != "update_bot" {
+			continue
+		}
+		props := tool.Parameters["properties"].(map[string]any)
+		field, ok := props["server_tools"].(map[string]any)
+		if !ok || field["type"] != "array" {
+			t.Errorf("%s server_tools %#v", tool.Name, props["server_tools"])
+			continue
+		}
+		desc, _ := field["description"].(string)
+		low := strings.ToLower(desc)
+		if !strings.Contains(low, "null") || !strings.Contains(low, "empty") || !strings.Contains(low, "inherit") {
+			t.Errorf("%s server_tools description %q", tool.Name, desc)
+		}
+		if tool.Name == "update_bot" && !strings.Contains(low, "unchanged") {
+			t.Errorf("update_bot omits the unchanged rule: %s", desc)
+		}
+	}
 	for _, want := range []string{"set_timer", "list_timers", "clear_timer", "write_memory", "delete_memory", "read_file", "write_file", "run_shell", "list_bots", "read_bot", "send_dm", "create_bot", "update_bot"} {
 		if !seen[want] {
 			t.Errorf("tool %s missing", want)

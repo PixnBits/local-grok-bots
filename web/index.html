@@ -335,6 +335,14 @@
   .composer textarea { min-height: 44px; max-height: 40vh; height: 44px; resize: none; overflow-y: hidden; }
   .routine { display: grid; gap: 4px; padding: 8px 0; border-top: 1px solid var(--line); }
   .routine .meta { color: var(--muted); font-size: 12px; }
+  .perm-list { display: grid; gap: 8px; }
+  .perm-card { border: 1px solid var(--line); border-radius: 12px; padding: 10px; display: grid; gap: 6px; }
+  .perm-card code { font-family: var(--mono); font-size: 12px; word-break: break-all; }
+  .risk { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; border-radius: 99px; padding: 2px 8px; width: max-content; }
+  .risk.low { background: var(--accent-2); color: var(--accent); }
+  .risk.medium { background: #f6ead2; color: var(--run); }
+  .risk.high { background: var(--err-bg); color: var(--err); }
+  .risk.deny, .risk.ask { background: var(--paper); color: var(--muted); border: 1px solid var(--line); }
   .filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .log { flex: 1; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
   .event { padding: 8px 10px; border-bottom: 1px solid var(--line); }
@@ -447,9 +455,34 @@
           <label><input type="checkbox" name="grant" value="ssh"> ssh</label>
           <label><input type="checkbox" name="grant" value="build"> build</label>
         </fieldset>
-        <label>Network allowlist<input id="profile-net" placeholder="example.com, api.github.com" autocomplete="off"></label>
+        <label>Network allowlist<input id="profile-net" placeholder="host.example" autocomplete="off"></label>
         <label>SSH allowlist<input id="profile-ssh" placeholder="host.example" autocomplete="off"></label>
-        <p class="empty" style="padding:0">Only you can set grants. Bots cannot grant them to themselves.</p>
+        <fieldset class="grants" id="server-tools">
+          <legend>Server tools</legend>
+          <label><input type="radio" name="server-tools-mode" id="server-tools-inherit" value="inherit" checked> Inherit from policy</label>
+          <label><input type="radio" name="server-tools-mode" id="server-tools-explicit" value="explicit"> Explicit list</label>
+          <span id="server-tools-picks"></span>
+        </fieldset>
+        <p class="empty" id="server-tools-hint" style="padding:0">Inherit from policy uses the effective list. An explicit list with nothing checked allows none. A bot without a net grant still loses every non-function tool.</p>
+        <p class="empty" style="padding:0">Only you can set grants. Bots cannot grant them to themselves. Durable permission rules are the same: nothing is auto-allowed until you accept it, and a write still asks.</p>
+        <h2>Permission rules</h2>
+        <div id="perm-rules" class="perm-list"></div>
+        <div class="routine">
+          <label>Pattern<input id="perm-pattern" placeholder="Read(./src/**)" autocomplete="off"></label>
+          <label>Effect
+            <select id="perm-effect">
+              <option value="allow">allow</option>
+              <option value="ask">ask</option>
+              <option value="deny">deny</option>
+            </select>
+          </label>
+          <div class="row">
+            <button type="button" id="perm-add">Add rule</button>
+            <button type="button" id="perm-analyze" class="ghost">Analyze history</button>
+          </div>
+        </div>
+        <h2>Suggestions</h2>
+        <div id="perm-suggestions" class="perm-list"></div>
         <div class="row">
           <button class="primary" type="submit">Save</button>
         </div>
@@ -674,7 +707,10 @@ function paintHeader(b) {
     return;
   }
   note.className = "note";
-  if (!state.streaming && b.status !== "running" && b.last_run_status === "error" && b.last_run_error) {
+  if (!state.streaming && b.status !== "running" && b.last_run_status === "stopped") {
+    note.hidden = false;
+    note.textContent = "Stopped after denial";
+  } else if (!state.streaming && b.status !== "running" && b.last_run_status === "error" && b.last_run_error) {
     note.hidden = false;
     note.textContent = "Run failed: " + b.last_run_error;
   } else if (!state.streaming) {
@@ -799,6 +835,10 @@ function copyButton(cls, label, getText) {
 // toolSummary is the collapsed "N tool calls: a, b" line on a reply.
 // It opens to show each call with its arguments and result.
 // permline:begin
+function toolVerdict(ok, result, status) {
+  if (ok === false && (status === "denied" || result === "denied")) return "denied";
+  return ok ? "ok" : "error";
+}
 // permissionLine is one stored permission decision, e.g.
 // "✅ allowed Bash(git status) · ui". Plain text; callers use textContent.
 function permissionLine(r) {
@@ -848,7 +888,7 @@ function toolSummary(recs) {
     }
     const call = el("div", "tool");
     call.append(el("div", null, r.name + " " + JSON.stringify(r.arguments || {})));
-    call.append(el("div", "tool-result", (r.ok ? "ok" : "error") + ": " + (r.result_or_error || "")));
+    call.append(el("div", "tool-result", toolVerdict(r.ok, r.result_or_error, r.status) + ": " + (r.result_or_error || "")));
     d.append(call);
   }
   return d;
@@ -1019,7 +1059,7 @@ function mdLines(lines, parent) {
     const p = el("p");
     para.forEach((l, k) => {
       if (k) p.append(el("br"));
-      mdInline(l.replace(/\s+$/, ""), p);
+      mdInline(l, p);
     });
     parent.append(p);
   }
@@ -1546,15 +1586,17 @@ async function follow(runId) {
           bubble = null;
           live.append(el("div", "tool", "tool " + (payload.name || "") + " " + JSON.stringify(payload.arguments || {})));
         } else if (event === "tool_result") {
-          const ok = payload.ok ? "ok" : "error";
-          live.append(el("div", "tool", (payload.name || "tool") + " " + ok + ": " + (payload.result_or_error || "")));
+          const mark = toolVerdict(payload.ok, payload.result_or_error, payload.status);
+          live.append(el("div", "tool", (payload.name || "tool") + " " + mark + ": " + (payload.result_or_error || "")));
         } else if (event === "permission_request") {
           showPermissionRequest(payload, runId);
         } else if (event === "permission_decision") {
           showPermissionDecision(payload);
         } else if (event === "done" || event === "error") {
           setWorking(false);
-          if (event === "error" && payload.error !== "tool round limit") {
+          if (event === "done" && payload.status === "stopped") {
+            showRunError("Stopped after denial");
+          } else if (event === "error" && payload.error !== "tool round limit") {
             showRunError("Run failed: " + (payload.error || "unknown error"));
           }
           stopStream();
@@ -1634,7 +1676,8 @@ async function duplicateBot(id) {
     try {
       created = await api("/api/bots", {method:"POST", body: JSON.stringify({
         name, label: full.label || "", description: full.description || "",
-        mark: full.mark, model: full.model
+        mark: full.mark, model: full.model,
+        server_tools: full.server_tools == null ? null : full.server_tools
       })});
       break;
     } catch (err) {
@@ -1710,6 +1753,11 @@ async function openProfile(id) {
   }
   $("#profile-net").value = (b.net_allow || []).join(", ");
   $("#profile-ssh").value = (b.ssh_allow || []).join(", ");
+  const tools = b.server_tools;
+  $("#server-tools-inherit").checked = tools == null;
+  $("#server-tools-explicit").checked = tools != null;
+  paintServerTools(Array.isArray(tools) ? tools : []);
+  syncServerToolsMode();
   $("#profile-err").textContent = "";
   const warn = $("#profile-warn");
   if (b.warnings && b.warnings.length) {
@@ -1721,6 +1769,7 @@ async function openProfile(id) {
   }
   paintMarkPicker();
   await loadRoutines();
+  await loadPermPanel();
   setView("profile");
 }
 async function loadRoutines() {
@@ -1755,6 +1804,45 @@ async function loadRoutines() {
 function splitList(s) {
   return String(s || "").split(/[\s,]+/).map(x => x.trim()).filter(Boolean);
 }
+const SERVER_TOOL_NAMES = ["web_search", "x_search"];
+function paintServerTools(selected) {
+  const box = $("#server-tools-picks");
+  if (!box) return;
+  box.replaceChildren();
+  const have = new Set(selected || []);
+  const names = SERVER_TOOL_NAMES.slice();
+  for (const n of have) if (!names.includes(n)) names.push(n);
+  for (const name of names) {
+    const label = el("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = "server-tool";
+    input.value = name;
+    input.checked = have.has(name);
+    label.append(input, document.createTextNode(" " + name));
+    box.append(label);
+  }
+  syncServerToolsMode();
+}
+function syncServerToolsMode() {
+  const picked = document.querySelector('#profile-form input[name="server-tools-mode"]:checked');
+  const on = !!(picked && picked.value === "explicit");
+  for (const box of document.querySelectorAll('#profile-form input[name="server-tool"]')) {
+    box.disabled = !on;
+  }
+}
+function serverToolsPayload() {
+  const picked = document.querySelector('#profile-form input[name="server-tools-mode"]:checked');
+  if (!picked || picked.value !== "explicit") return null;
+  const list = [];
+  for (const box of document.querySelectorAll('#profile-form input[name="server-tool"]')) {
+    if (box.checked) list.push(box.value);
+  }
+  return list;
+}
+for (const mode of document.querySelectorAll('#profile-form input[name="server-tools-mode"]')) {
+  mode.addEventListener("change", syncServerToolsMode);
+}
 $("#profile-back").addEventListener("click", () => openBot(state.botId));
 $("#profile-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -1774,7 +1862,8 @@ $("#profile-form").addEventListener("submit", async (e) => {
       model: model || null,
       grants,
       net_allow: splitList($("#profile-net").value),
-      ssh_allow: splitList($("#profile-ssh").value)
+      ssh_allow: splitList($("#profile-ssh").value),
+      server_tools: serverToolsPayload()
     })});
     await loadBots();
     const note = $("#profile-err");
@@ -1810,6 +1899,126 @@ $("#routine-add").addEventListener("click", async () => {
     await loadRoutines();
   } catch (err) { $("#profile-err").textContent = err.message; }
 });
+function riskBadge(risk, effect) {
+  const label = risk || effect || "rule";
+  return el("span", "risk " + (risk || effect || ""), label);
+}
+// perm-rules:begin
+function clearPermErr() {
+  const note = $("#profile-err");
+  if (!note) return;
+  note.style.color = "";
+  note.textContent = "";
+}
+function showPermErr(err) {
+  const note = $("#profile-err");
+  if (!note) return;
+  note.style.color = "";
+  note.textContent = err && err.message ? err.message : String(err || "");
+}
+async function loadPermPanel() {
+  const rulesBox = $("#perm-rules");
+  const sugBox = $("#perm-suggestions");
+  if (!rulesBox || !state.botId) return;
+  rulesBox.replaceChildren();
+  sugBox.replaceChildren();
+  const rules = await api("/api/bots/" + state.botId + "/permission-rules");
+  const list = (rules && rules.rules) || [];
+  if (!list.length) rulesBox.append(el("p", "empty", "No durable rules."));
+  for (const rule of list) {
+    const card = el("div", "perm-card");
+    const head = el("div", "row");
+    head.append(riskBadge(rule.risk, rule.effect));
+    head.append(el("strong", null, rule.effect));
+    card.append(head);
+    card.append(el("code", null, rule.pattern));
+    if (rule.warning) card.append(el("div", "meta", rule.warning));
+    if (rule.match_form) card.append(el("div", "meta", "Matches: " + rule.match_form));
+    if (rule.reason) card.append(el("div", "meta", rule.reason));
+    const revoke = el("button", "ghost", "Revoke");
+    revoke.type = "button";
+    revoke.addEventListener("click", async () => {
+      clearPermErr();
+      try {
+        await api("/api/bots/" + state.botId + "/permission-rules/" + encodeURIComponent(rule.id), {method: "DELETE"});
+        await loadPermPanel();
+      } catch (err) { showPermErr(err); }
+    });
+    card.append(revoke);
+    rulesBox.append(card);
+  }
+  const sug = await api("/api/bots/" + state.botId + "/permission-suggestions");
+  const pending = (sug && sug.suggestions) || [];
+  if (!pending.length) sugBox.append(el("p", "empty", "No suggestions."));
+  for (const s of pending) {
+    const card = el("div", "perm-card");
+    card.dataset.status = s.status || "";
+    const head = el("div", "row");
+    head.append(riskBadge(s.risk, s.status === "refused" ? "high" : s.effect));
+    head.append(el("strong", null, s.status === "refused" ? "refused" : "suggestion"));
+    card.append(head);
+    const pattern = el("input");
+    pattern.value = s.pattern || "";
+    pattern.setAttribute("aria-label", "Pattern");
+    const lab = el("label", null, "Pattern");
+    lab.append(pattern);
+    card.append(lab);
+    card.append(el("div", "meta", s.summary || ""));
+    if (s.warning) card.append(el("div", "meta", s.warning));
+    if (s.match_form) card.append(el("div", "meta", "Matches: " + s.match_form));
+    const examples = (s.examples || []).join(" · ");
+    if (examples) card.append(el("div", "meta", examples));
+    const actions = el("div", "row");
+    if (s.status !== "refused") {
+      const accept = el("button", "primary", "Accept");
+      accept.type = "button";
+      accept.addEventListener("click", async () => {
+        clearPermErr();
+        try {
+          await api("/api/bots/" + state.botId + "/permission-suggestions/" + encodeURIComponent(s.id) + "/accept", {
+            method: "POST",
+            body: JSON.stringify({effect: "allow", pattern: pattern.value})
+          });
+          await loadPermPanel();
+        } catch (err) { showPermErr(err); }
+      });
+      actions.append(accept);
+    }
+    const dismiss = el("button", "ghost", "Dismiss");
+    dismiss.type = "button";
+    dismiss.addEventListener("click", async () => {
+      clearPermErr();
+      try {
+        await api("/api/bots/" + state.botId + "/permission-suggestions/" + encodeURIComponent(s.id) + "/dismiss", {method: "POST"});
+        await loadPermPanel();
+      } catch (err) { showPermErr(err); }
+    });
+    actions.append(dismiss);
+    card.append(actions);
+    sugBox.append(card);
+  }
+}
+$("#perm-add").addEventListener("click", async () => {
+  if (!state.botId) return;
+  clearPermErr();
+  try {
+    await api("/api/bots/" + state.botId + "/permission-rules", {method: "POST", body: JSON.stringify({
+      effect: $("#perm-effect").value,
+      pattern: $("#perm-pattern").value.trim()
+    })});
+    $("#perm-pattern").value = "";
+    await loadPermPanel();
+  } catch (err) { showPermErr(err); }
+});
+$("#perm-analyze").addEventListener("click", async () => {
+  if (!state.botId) return;
+  clearPermErr();
+  try {
+    await api("/api/bots/" + state.botId + "/permission-suggestions/analyze", {method: "POST", body: "{}"});
+    await loadPermPanel();
+  } catch (err) { showPermErr(err); }
+});
+// perm-rules:end
 function fillKinds() {
   const sel = $("#log-kind");
   for (const k of KINDS) sel.append(new Option(k, k));

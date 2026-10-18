@@ -52,7 +52,7 @@ type Policy struct {
 	TurnTimeout    time.Duration
 	PermissionMode string
 	// ToolAllow, ToolDeny, and ToolAsk are Claude-style tool rules
-	// such as "Bash(git status*)".
+	// such as "Bash(cat *)".
 	ToolAllow []string
 	ToolDeny  []string
 	ToolAsk   []string
@@ -111,7 +111,12 @@ type Policy struct {
 	LGBMaxSchedSet     bool
 	LGBMaxSchedPerHour int
 	// CLIEnv is added to the scrubbed CLI environment. Only managed policy sets it.
+	// GROK_* names that select permission or config are refused.
 	CLIEnv map[string]string
+	// CLITrustSystemConfig is true only when managed policy sets
+	// cli.isolation.trust_system_config. Default false: a host file the CLI
+	// still reads refuses the turn.
+	CLITrustSystemConfig bool
 	// NetPorts is the egress port list. Nil means 443 and 80. An empty
 	// slice allows no egress port. Local policy can only narrow the list.
 	NetPorts           []int
@@ -119,6 +124,15 @@ type Policy struct {
 	netPortsAskedSet   bool
 	netPortsManaged    []int
 	netPortsManagedSet bool
+	// ServerTools is the effective allow list of non-function model tool
+	// types after managed and local policy. Empty strips every such type.
+	// ServerToolsSource is managed, local, or default.
+	ServerTools           []string
+	ServerToolsSource     string
+	serverToolsManaged    []string
+	serverToolsManagedSet bool
+	serverToolsLocal      []string
+	serverToolsLocalSet   bool
 	// CLITools are host CLIs the credential broker may run. Empty denies every coi call.
 	CLITools []CLITool
 	// cliLocal is the local file's CLI table before managed merge.
@@ -224,6 +238,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 	}
 	if path == "" {
 		p.finishEgressPorts()
+		p.finishServerTools()
 		p.dropIncompleteCLI()
 		return p, nil
 	}
@@ -268,6 +283,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 	}
 	base.DaemonJail = !base.UsesCLI()
 	base.finishEgressPorts()
+	base.finishServerTools()
 	base.dropIncompleteCLI()
 	return base, nil
 }
@@ -474,6 +490,9 @@ const (
 	TransportStreamControl = "stream_control"
 	// TransportNone passes --permission-prompts none and attaches no host.
 	TransportNone = "none"
+	// TransportACP is the Grok stdio permission host. It is not a
+	// claude_transport value.
+	TransportACP = "acp"
 )
 
 const (
@@ -574,6 +593,17 @@ func (p *Policy) applyIsolation(iso *cliIsoDoc, trusted bool) error {
 			p.netPortsAskedSet = true
 		}
 	}
+	if iso.TrustSystemConfig != nil {
+		if *iso.TrustSystemConfig {
+			if trusted {
+				p.CLITrustSystemConfig = true
+			} else {
+				p.Warnings = append(p.Warnings, "cli.isolation.trust_system_config is ignored; only managed policy can trust host CLI config")
+			}
+		} else {
+			p.CLITrustSystemConfig = false
+		}
+	}
 	if iso.Env != nil {
 		if !trusted {
 			p.Warnings = append(p.Warnings, "cli.isolation.env is ignored; only managed policy can set CLI environment")
@@ -585,11 +615,36 @@ func (p *Policy) applyIsolation(iso *cliIsoDoc, trusted bool) error {
 			if k == "" || strings.ContainsAny(k, "=\x00") || strings.ContainsRune(v, 0) {
 				return fmt.Errorf("cli.isolation.env has an invalid entry %q", k)
 			}
+			if BlockedCLIEnv(k) {
+				return fmt.Errorf("cli.isolation.env cannot set %s", k)
+			}
 			env[k] = v
 		}
 		p.CLIEnv = env
 	}
 	return nil
+}
+
+// BlockedCLIEnv reports a managed environment name that selects CLI
+// permission or config. GROK_CONFIG and GROK_CONFIG_* are always blocked.
+func BlockedCLIEnv(key string) bool {
+	k := strings.ToUpper(strings.TrimSpace(key))
+	if k == "GROK_CONFIG" || strings.HasPrefix(k, "GROK_CONFIG_") || k == "GROK_DEFAULT_SELECTED_PERMISSION" {
+		return true
+	}
+	if !strings.HasPrefix(k, "GROK_") {
+		return false
+	}
+	for _, frag := range []string{
+		"PERMISSION", "CONFIG", "MODE", "YOLO", "TRUST", "SANDBOX",
+		"HOOK", "PLUGIN", "SKILL", "AGENT", "MANAGED", "ALWAYS",
+		"REQUIREMENT", "APPROVE", "BYPASS", "HOME",
+	} {
+		if strings.Contains(k, frag) {
+			return true
+		}
+	}
+	return false
 }
 
 // DefaultEgressPorts is the built-in CONNECT and forward port list.
@@ -651,6 +706,147 @@ func normPorts(in []int) ([]int, error) {
 		out = append(out, n)
 	}
 	return out, nil
+}
+
+// EffectiveServerTools intersects the policy allow list with a per-bot list.
+// botSet false inherits the policy list. A set bot list can only narrow it.
+// The source is managed, local, bot, or default: the layer that last reduced
+// the set. A lower layer that only tries to add types does not change it.
+func (p Policy) EffectiveServerTools(bot []string, botSet bool) ([]string, string) {
+	allow := append([]string(nil), p.ServerTools...)
+	if allow == nil {
+		allow = []string{}
+	}
+	source := p.ServerToolsSource
+	switch source {
+	case "managed", "local", "default":
+	default:
+		source = "default"
+	}
+	if !botSet {
+		return allow, source
+	}
+	kept, _ := narrowNames(allow, bot)
+	if !sameNames(kept, allow) {
+		source = "bot"
+	}
+	return kept, source
+}
+
+func (p *Policy) finishServerTools() {
+	if p == nil {
+		return
+	}
+	switch {
+	case !p.serverToolsManagedSet && !p.serverToolsLocalSet:
+		p.ServerTools = []string{}
+		p.ServerToolsSource = "default"
+	case p.serverToolsManagedSet && !p.serverToolsLocalSet:
+		p.ServerTools = append([]string(nil), p.serverToolsManaged...)
+		if p.ServerTools == nil {
+			p.ServerTools = []string{}
+		}
+		p.ServerToolsSource = "managed"
+	case !p.serverToolsManagedSet && p.serverToolsLocalSet:
+		p.ServerTools = append([]string(nil), p.serverToolsLocal...)
+		if p.ServerTools == nil {
+			p.ServerTools = []string{}
+		}
+		p.ServerToolsSource = "local"
+	default:
+		kept, extra := narrowNames(p.serverToolsManaged, p.serverToolsLocal)
+		p.ServerTools = kept
+		if len(extra) > 0 {
+			p.Warnings = append(p.Warnings, "cli.server_tools "+strings.Join(extra, ", ")+" ignored; local policy can only narrow server tools")
+		}
+		if sameNames(kept, p.serverToolsManaged) {
+			p.ServerToolsSource = "managed"
+		} else {
+			p.ServerToolsSource = "local"
+		}
+	}
+}
+
+// normServerTools checks non-function model tool types. function is rejected.
+// Names are matched exactly, in lower case.
+func normServerTools(in []string) ([]string, error) {
+	if len(in) > 32 {
+		return nil, fmt.Errorf("cli.server_tools lists too many names")
+	}
+	out := []string{}
+	seen := map[string]bool{}
+	for _, s := range in {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s == "" {
+			return nil, fmt.Errorf("cli.server_tools contains an empty name")
+		}
+		if s == "function" {
+			return nil, fmt.Errorf("cli.server_tools cannot list function")
+		}
+		if !serverToolName(s) {
+			return nil, fmt.Errorf("cli.server_tools has an invalid name")
+		}
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+func serverToolName(s string) bool {
+	if s == "" || len(s) > 64 || s[0] == '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func narrowNames(ceiling, asked []string) (kept, extra []string) {
+	have := map[string]bool{}
+	for _, n := range ceiling {
+		have[n] = true
+	}
+	want := map[string]bool{}
+	for _, n := range asked {
+		if !have[n] {
+			extra = append(extra, n)
+			continue
+		}
+		want[n] = true
+	}
+	kept = []string{}
+	for _, n := range ceiling {
+		if want[n] {
+			kept = append(kept, n)
+		}
+	}
+	return kept, extra
+}
+
+func sameNames(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	have := map[string]int{}
+	for _, n := range a {
+		have[n]++
+	}
+	for _, n := range b {
+		if have[n] == 0 {
+			return false
+		}
+		have[n]--
+	}
+	return true
 }
 
 func narrowPorts(ceiling, asked []int) (kept, extra []int) {
@@ -862,6 +1058,9 @@ type cliDoc struct {
 	Pins           *[]Pin      `toml:"pins" json:"pins"`
 	Isolation      *cliIsoDoc  `toml:"isolation" json:"isolation"`
 	LGB            *cliLGBDoc  `toml:"lgb" json:"lgb"`
+	// ServerTools lists non-function model tool types a net-granted bot may
+	// keep. Empty strips them. Local policy can only narrow a managed list.
+	ServerTools *[]string `toml:"server_tools" json:"server_tools"`
 }
 
 // cliLGBDoc is [cli.lgb]. Both keys are optional. Zero turns the check off.
@@ -871,14 +1070,15 @@ type cliLGBDoc struct {
 }
 
 type cliIsoDoc struct {
-	Overrides     *string            `toml:"overrides" json:"overrides"`
-	Home          *string            `toml:"home" json:"home"`
-	ClaudeHome    *string            `toml:"claude_home" json:"claude_home"`
-	ClaudeSandbox *string            `toml:"claude_sandbox" json:"claude_sandbox"`
-	LGB           *bool              `toml:"lgb" json:"lgb"`
-	LGBManageBots *bool              `toml:"lgb_manage_bots" json:"lgb_manage_bots"`
-	Env           *map[string]string `toml:"env" json:"env"`
-	NetPorts      *[]int             `toml:"net_ports" json:"net_ports"`
+	Overrides         *string            `toml:"overrides" json:"overrides"`
+	Home              *string            `toml:"home" json:"home"`
+	ClaudeHome        *string            `toml:"claude_home" json:"claude_home"`
+	ClaudeSandbox     *string            `toml:"claude_sandbox" json:"claude_sandbox"`
+	LGB               *bool              `toml:"lgb" json:"lgb"`
+	LGBManageBots     *bool              `toml:"lgb_manage_bots" json:"lgb_manage_bots"`
+	Env               *map[string]string `toml:"env" json:"env"`
+	NetPorts          *[]int             `toml:"net_ports" json:"net_ports"`
+	TrustSystemConfig *bool              `toml:"trust_system_config" json:"trust_system_config"`
 }
 
 type cliPermDoc struct {
@@ -1128,6 +1328,19 @@ func (p *Policy) apply(doc document, trusted bool) error {
 		}
 		p.Pins = pins
 	}
+	if doc.CLI.ServerTools != nil {
+		names, err := normServerTools(*doc.CLI.ServerTools)
+		if err != nil {
+			return err
+		}
+		if trusted {
+			p.serverToolsManaged = names
+			p.serverToolsManagedSet = true
+		} else {
+			p.serverToolsLocal = names
+			p.serverToolsLocalSet = true
+		}
+	}
 	if doc.Timers.Enabled != nil {
 		p.TimersEnabled = *doc.Timers.Enabled
 	}
@@ -1248,15 +1461,33 @@ func normBackends(in []string) ([]string, error) {
 	return out, nil
 }
 
+// CanonicalRule collapses runs of whitespace and trims a permission pattern.
+// "Bash(cat  *)" is the same rule as "Bash(cat *)". A newline or a NUL is
+// rejected rather than folded into the pattern. The result is what is stored,
+// compared, and matched.
+func CanonicalRule(s string) (string, error) {
+	if strings.ContainsAny(s, "\r\n\x00") {
+		return "", fmt.Errorf("permission rule contains a newline")
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", fmt.Errorf("permission rule is empty")
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	s = strings.ReplaceAll(s, "( ", "(")
+	s = strings.ReplaceAll(s, " )", ")")
+	if s == "" {
+		return "", fmt.Errorf("permission rule is empty")
+	}
+	return s, nil
+}
+
 func normRules(in []string) ([]string, error) {
 	out := make([]string, 0, len(in))
 	for _, rule := range in {
-		rule = strings.TrimSpace(rule)
-		if rule == "" {
-			return nil, fmt.Errorf("permission rule is empty")
-		}
-		if strings.ContainsAny(rule, "\r\n\x00") {
-			return nil, fmt.Errorf("permission rule contains a newline")
+		rule, err := CanonicalRule(rule)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, rule)
 	}

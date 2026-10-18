@@ -135,6 +135,58 @@ func NormalizeAllow(in []string) ([]string, error) {
 	return out, nil
 }
 
+// NormalizeServerTools keeps non-function model tool types. Nil input is
+// not used here; callers pass the slice they want stored. An empty slice
+// is a deliberate empty list. function is rejected. Names are lower case.
+func NormalizeServerTools(in []string) ([]string, error) {
+	if len(in) > 32 {
+		return nil, errors.New("invalid server_tools")
+	}
+	seen := map[string]bool{}
+	out := []string{}
+	for _, s := range in {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s == "" || s == "function" || !serverToolName(s) {
+			return nil, errors.New("invalid server_tools")
+		}
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+func serverToolName(s string) bool {
+	if s == "" || len(s) > 64 || s[0] == '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func encodeOptList(v *[]string) any {
+	if v == nil {
+		return nil
+	}
+	return encodeList(*v)
+}
+
+func sameServerTools(a, b *[]string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return slices.Equal(*a, *b)
+}
+
 func encodeList(v []string) string {
 	if v == nil {
 		v = []string{}
@@ -176,8 +228,11 @@ type Bot struct {
 	Grants   []string `json:"grants"`
 	NetAllow []string `json:"net_allow"`
 	SSHAllow []string `json:"ssh_allow"`
-	Status   string   `json:"status"`
-	Model    *string  `json:"model"`
+	// ServerTools narrows the policy allow list of non-function model tool
+	// types. Nil inherits policy. An empty slice allows none of them.
+	ServerTools *[]string `json:"server_tools"`
+	Status      string    `json:"status"`
+	Model       *string   `json:"model"`
 	// SessionID is the CLI session. It is not part of the web API.
 	SessionID     string  `json:"-"`
 	CreatedAt     string  `json:"created_at,omitempty"`
@@ -380,6 +435,35 @@ CREATE TABLE IF NOT EXISTS coi_cap (
   ts TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_coi_cap ON coi_cap(bot_id, cli, ts);
+CREATE TABLE IF NOT EXISTS user_perm_rules (
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  effect TEXT NOT NULL,
+  pattern TEXT NOT NULL,
+  classification TEXT NOT NULL DEFAULT '',
+  sensitivity TEXT NOT NULL DEFAULT '',
+  risk TEXT NOT NULL DEFAULT '',
+  reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_user_perm_rules_bot ON user_perm_rules(bot_id, created_at);
+CREATE TABLE IF NOT EXISTS perm_suggestions (
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  pattern TEXT NOT NULL,
+  effect TEXT NOT NULL,
+  classification TEXT NOT NULL DEFAULT '',
+  sensitivity TEXT NOT NULL DEFAULT '',
+  risk TEXT NOT NULL DEFAULT '',
+  count INTEGER NOT NULL DEFAULT 0,
+  examples TEXT NOT NULL DEFAULT '[]',
+  summary TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TEXT NOT NULL,
+  decided_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_perm_suggestions_bot ON perm_suggestions(bot_id, status, created_at);
 `)
 	if err != nil {
 		return err
@@ -426,6 +510,7 @@ func (s *Store) evolve() error {
 		{"timers", "archive_paused", "INTEGER NOT NULL DEFAULT 0"},
 		{"bots", "tool_hash", "TEXT"},
 		{"bots", "tool_snapshot", "TEXT"},
+		{"bots", "server_tools", "TEXT"},
 	}
 	for _, a := range adds {
 		ok, err := s.hasColumn(a.table, a.col)
@@ -665,6 +750,7 @@ type BotDraft struct {
 	Grants      []string
 	NetAllow    []string
 	SSHAllow    []string
+	ServerTools *[]string
 }
 
 // CreateBot inserts a bot with a default mark and no label.
@@ -692,15 +778,23 @@ func (s *Store) InsertBot(d BotDraft, by string) (Bot, error) {
 	if err != nil {
 		return Bot{}, err
 	}
+	var tools *[]string
+	if d.ServerTools != nil {
+		names, err := NormalizeServerTools(*d.ServerTools)
+		if err != nil {
+			return Bot{}, err
+		}
+		tools = &names
+	}
 	now := FormatTime(Now())
 	b := Bot{
 		ID: id.New(), Name: d.Name, Label: d.Label, Description: d.Description,
-		Mark: mark, Grants: grants, NetAllow: netAllow, SSHAllow: sshAllow,
+		Mark: mark, Grants: grants, NetAllow: netAllow, SSHAllow: sshAllow, ServerTools: tools,
 		Status: "idle", Model: d.Model, CreatedAt: now, UpdatedAt: now,
 	}
-	_, err = s.db.Exec(`INSERT INTO bots(id, name, name_lower, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, status, model, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		b.ID, b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, 0, 0, encodeList(grants), encodeList(netAllow), encodeList(sshAllow), b.Status, nullStr(d.Model), b.CreatedAt, b.UpdatedAt)
+	_, err = s.db.Exec(`INSERT INTO bots(id, name, name_lower, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, server_tools, status, model, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		b.ID, b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, 0, 0, encodeList(grants), encodeList(netAllow), encodeList(sshAllow), encodeOptList(tools), b.Status, nullStr(d.Model), b.CreatedAt, b.UpdatedAt)
 	if err != nil {
 		if isUnique(err) {
 			return Bot{}, ErrConflict
@@ -713,6 +807,9 @@ func (s *Store) InsertBot(d BotDraft, by string) (Bot, error) {
 	}
 	if d.Model != nil {
 		fields = append(fields, "model")
+	}
+	if d.ServerTools != nil {
+		fields = append(fields, "server_tools")
 	}
 	if err := s.logUnlocked(b.ID, "bot_created", map[string]any{
 		"fields": fields, "by": by, "bot_id": b.ID, "name": b.Name,
@@ -784,15 +881,16 @@ func (s *Store) attachRun(b *Bot) {
 	}
 }
 
-const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, status, model, session_id, created_at, updated_at, archived_at FROM bots`
+const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, server_tools, status, model, session_id, created_at, updated_at, archived_at FROM bots`
 
 func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	var b Bot
 	var model sql.NullString
 	var shape, color, grants, netAllow, sshAllow string
+	var serverTools sql.NullString
 	var pinned, hidden int
 	var archived sql.NullString
-	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &b.Status, &model, &b.SessionID, &b.CreatedAt, &b.UpdatedAt, &archived)
+	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &serverTools, &b.Status, &model, &b.SessionID, &b.CreatedAt, &b.UpdatedAt, &archived)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Bot{}, ErrNotFound
 	}
@@ -821,6 +919,13 @@ func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	b.SSHAllow, err = decodeList(sshAllow)
 	if err != nil {
 		return Bot{}, err
+	}
+	if serverTools.Valid {
+		list, err := decodeList(serverTools.String)
+		if err != nil {
+			return Bot{}, err
+		}
+		b.ServerTools = &list
 	}
 	if model.Valid && model.String != "" {
 		s := model.String
@@ -865,22 +970,24 @@ func (s *Store) ListBots() ([]Bot, error) {
 }
 
 type BotPatch struct {
-	Name        *string
-	Label       *string
-	Description *string
-	Mark        *Mark
-	Model       *string
-	ModelSet    bool
-	Status      *string
-	Pinned      *bool
-	Hidden      *bool
-	GrantsSet   bool
-	Grants      []string
-	NetSet      bool
-	NetAllow    []string
-	SSHSet      bool
-	SSHAllow    []string
-	By          string
+	Name           *string
+	Label          *string
+	Description    *string
+	Mark           *Mark
+	Model          *string
+	ModelSet       bool
+	Status         *string
+	Pinned         *bool
+	Hidden         *bool
+	GrantsSet      bool
+	Grants         []string
+	NetSet         bool
+	NetAllow       []string
+	SSHSet         bool
+	SSHAllow       []string
+	ServerToolsSet bool
+	ServerTools    *[]string
+	By             string
 }
 
 func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
@@ -959,6 +1066,20 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 			fields = append(fields, "ssh_allow")
 		}
 	}
+	if p.ServerToolsSet {
+		var next *[]string
+		if p.ServerTools != nil {
+			names, err := NormalizeServerTools(*p.ServerTools)
+			if err != nil {
+				return Bot{}, err
+			}
+			next = &names
+		}
+		if !sameServerTools(b.ServerTools, next) {
+			b.ServerTools = next
+			fields = append(fields, "server_tools")
+		}
+	}
 	if len(fields) == 0 {
 		s.attachRun(&b)
 		return b, nil
@@ -971,8 +1092,8 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 	if b.Hidden {
 		hide = 1
 	}
-	_, err = s.db.Exec(`UPDATE bots SET name=?, name_lower=?, label=?, description=?, mark_shape=?, mark_color=?, pinned=?, hidden=?, grants=?, net_allow=?, ssh_allow=?, model=?, status=?, updated_at=? WHERE id=?`,
-		b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, pin, hide, encodeList(b.Grants), encodeList(b.NetAllow), encodeList(b.SSHAllow), nullStr(b.Model), b.Status, b.UpdatedAt, b.ID)
+	_, err = s.db.Exec(`UPDATE bots SET name=?, name_lower=?, label=?, description=?, mark_shape=?, mark_color=?, pinned=?, hidden=?, grants=?, net_allow=?, ssh_allow=?, server_tools=?, model=?, status=?, updated_at=? WHERE id=?`,
+		b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, pin, hide, encodeList(b.Grants), encodeList(b.NetAllow), encodeList(b.SSHAllow), encodeOptList(b.ServerTools), nullStr(b.Model), b.Status, b.UpdatedAt, b.ID)
 	if err != nil {
 		if isUnique(err) {
 			return Bot{}, ErrConflict

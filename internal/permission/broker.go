@@ -53,7 +53,7 @@ type Request struct {
 	Tool      string
 	Args      map[string]any
 	ToolUseID string
-	// Transport is mcp, stream_control, or none. Empty omits the field.
+	// Transport is mcp, stream_control, acp, or none. Empty omits the field.
 	Transport string
 	// Kind is "question" for an interactive question, empty otherwise.
 	Kind string
@@ -62,6 +62,20 @@ type Request struct {
 	Answered int
 	// AuditAnswers is the accepted answer map. Emit redacts it.
 	AuditAnswers map[string]string
+	// UserRules are durable allow/ask/deny patterns for this bot.
+	// Empty leaves behavior unchanged.
+	UserRules []UserRule
+	// Workspace is the bot directory used to classify paths.
+	Workspace string
+	// GrokHome is the bot GROK_HOME. Empty skips the home-path floor.
+	// A write, an edit, or a shell target under it is denied.
+	GrokHome string
+	// RuleID, Classification, Sensitivity, and Risk are filled when a
+	// durable user rule decided the call. Emit copies them onto the audit.
+	RuleID         string
+	Classification string
+	Sensitivity    string
+	Risk           string
 }
 
 // Outcome is the broker's decision. Behavior is allow or deny, which is the
@@ -119,6 +133,7 @@ type wait struct {
 	runID     string
 	sessionID string
 	tool      string
+	subject   string
 	sessionOK bool
 	kind      string
 	questions []Question
@@ -162,9 +177,20 @@ func (b *Broker) AddHook(h Hook) {
 	b.mu.Unlock()
 }
 
-// Evaluate decides a tool call. The order is hooks, deny rules, ask rules,
-// then AskUserQuestion (always a UI question), then a hook allow, bypass
-// mode, allow rules, a session grant, and canUseTool. Deny wins over a later allow.
+// UserRule is a durable allow, ask, or deny pattern accepted by the user.
+// Effect is allow, ask, or deny. Pattern is the broker glob, such as
+// Bash(cat *).
+type UserRule struct {
+	ID      string
+	Effect  string
+	Pattern string
+}
+
+// Evaluate decides a tool call. The order is hooks, managed deny, user deny,
+// managed ask, user ask, then AskUserQuestion (always a UI question), then a
+// hook allow, bypass mode, managed allow, a user allow that still classifies
+// as low-risk read-only, a session grant, and canUseTool. Deny wins over a
+// later allow. A user allow never overrides the hard floor.
 func (b *Broker) Evaluate(ctx context.Context, pol policy.Permission, req Request) Outcome {
 	if ctx == nil {
 		ctx = context.Background()
@@ -173,6 +199,13 @@ func (b *Broker) Evaluate(ctx context.Context, pol policy.Permission, req Reques
 		req.ID = b.newID()
 	}
 	req.Tool = strings.TrimSpace(req.Tool)
+	if tool, rule, hit := refusedTool(req.Tool); hit {
+		req.Tool = tool
+		return b.denyFloor(req, rule)
+	}
+	if grokHomeDenied(req) {
+		return b.denyFloor(req, "grok_home")
+	}
 	text := argText(req.Args)
 
 	var askRule string
@@ -197,11 +230,18 @@ func (b *Broker) Evaluate(ctx context.Context, pol policy.Permission, req Reques
 			}
 		}
 	}
-	if rule := matchRules(pol.Deny, req.Tool, text); rule != "" {
+	if rule := matchRules(pol.Deny, req, text); rule != "" {
 		return b.complete(req, Deny, "policy", rule)
 	}
-	if rule := matchRules(pol.Ask, req.Tool, text); rule != "" && askRule == "" {
+	if pattern, id := matchUser(req.UserRules, "deny", req, text); pattern != "" {
+		return b.complete(stampUser(req, id, ClassifyCall(req.Tool, req.Args, req.Workspace)), Deny, "user", pattern)
+	}
+	if rule := matchRules(pol.Ask, req, text); rule != "" && askRule == "" {
 		askRule = rule
+	}
+	if pattern, id := matchUser(req.UserRules, "ask", req, text); pattern != "" && askRule == "" {
+		askRule = pattern
+		req = stampUser(req, id, ClassifyCall(req.Tool, req.Args, req.Workspace))
 	}
 	if isInteractiveQuestion(req.Tool) {
 		qs, err := parseQuestions(req.Args)
@@ -226,8 +266,16 @@ func (b *Broker) Evaluate(ctx context.Context, pol policy.Permission, req Reques
 	if policy.IsBypassMode(pol.Mode) {
 		return b.complete(req, Allow, "policy", pol.Mode)
 	}
-	if rule := matchRules(pol.Allow, req.Tool, text); rule != "" {
+	if rule := matchRules(pol.Allow, req, text); rule != "" {
 		return b.complete(req, Allow, "policy", rule)
+	}
+	if allowText, ok := userAllowText(req, text); ok {
+		if pattern, id := matchUser(req.UserRules, "allow", req, allowText); pattern != "" {
+			class := ClassifyCall(req.Tool, req.Args, req.Workspace)
+			if class.AutoAllow {
+				return b.complete(stampUser(req, id, class), Allow, "user", pattern)
+			}
+		}
 	}
 	if b.granted(req) {
 		return b.complete(req, Allow, "ui", "session")
@@ -394,6 +442,7 @@ func (b *Broker) canUseTool(ctx context.Context, pol policy.Permission, req Requ
 		runID:     req.RunID,
 		sessionID: req.SessionID,
 		tool:      req.Tool,
+		subject:   grantSubject(req),
 		sessionOK: sessionOK,
 		kind:      req.Kind,
 		questions: qs,
@@ -483,6 +532,14 @@ func (w *wait) resolve(decision string) bool {
 	return won
 }
 
+func (b *Broker) denyFloor(req Request, rule string) Outcome {
+	class := ClassifyCall(req.Tool, req.Args, req.Workspace)
+	req.Classification = class.Kind
+	req.Sensitivity = class.Sensitivity
+	req.Risk = class.Risk
+	return b.complete(req, Deny, "policy", rule)
+}
+
 func (b *Broker) complete(req Request, decision, source, rule string) Outcome {
 	behavior := Deny
 	if decision == Allow || decision == AllowOnce || decision == AllowSession || decision == Answer {
@@ -522,6 +579,18 @@ func (b *Broker) emit(req Request, decision, source, rule string) {
 		payload["kind"] = "question"
 		payload["answered"] = req.Answered
 	}
+	if req.RuleID != "" {
+		payload["rule_id"] = req.RuleID
+	}
+	if req.Classification != "" {
+		payload["classification"] = req.Classification
+	}
+	if req.Sensitivity != "" {
+		payload["sensitivity"] = req.Sensitivity
+	}
+	if req.Risk != "" {
+		payload["risk"] = req.Risk
+	}
 	b.publish(req.RunID, "permission_decision", payload)
 	if b.audit == nil {
 		return
@@ -549,6 +618,18 @@ func (b *Broker) emit(req Request, decision, source, rule string) {
 			rec["answers"] = redactAnswers(req.AuditAnswers)
 		}
 	}
+	if req.RuleID != "" {
+		rec["rule_id"] = req.RuleID
+	}
+	if req.Classification != "" {
+		rec["classification"] = req.Classification
+	}
+	if req.Sensitivity != "" {
+		rec["sensitivity"] = req.Sensitivity
+	}
+	if req.Risk != "" {
+		rec["risk"] = req.Risk
+	}
 	b.audit(withTransport(rec, req.Transport))
 }
 
@@ -574,10 +655,14 @@ func (b *Broker) hookSnapshot() []Hook {
 }
 
 func (b *Broker) granted(req Request) bool {
+	token := grantToken(req.Tool, grantSubject(req))
+	if token == "" {
+		return false
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for _, tool := range b.grants[grantKey(req)] {
-		if strings.EqualFold(tool, req.Tool) && req.Tool != "" {
+	for _, have := range b.grants[grantKey(req)] {
+		if have == token {
 			return true
 		}
 	}
@@ -585,16 +670,96 @@ func (b *Broker) granted(req Request) bool {
 }
 
 func (b *Broker) rememberLocked(w *wait) {
-	if w.tool == "" {
+	token := grantToken(w.tool, w.subject)
+	if token == "" {
 		return
 	}
 	key := grantKey(Request{BotID: w.botID, SessionID: w.sessionID, RunID: w.runID})
-	for _, tool := range b.grants[key] {
-		if strings.EqualFold(tool, w.tool) {
+	for _, have := range b.grants[key] {
+		if have == token {
 			return
 		}
 	}
-	b.grants[key] = append(b.grants[key], w.tool)
+	b.grants[key] = append(b.grants[key], token)
+}
+
+// grantToken is the tool plus the command or path the user approved.
+func grantToken(tool, subject string) string {
+	tool = strings.ToLower(strings.TrimSpace(tool))
+	if tool == "" {
+		return ""
+	}
+	return tool + "\x00" + subject
+}
+
+// grantSubject is the trimmed command, the resolved path, url for WebFetch,
+// or notebook_path for NotebookEdit. Other tools fall back to canonical JSON
+// arguments. Glob and Grep also include the pattern so two patterns do not
+// share a grant.
+func grantSubject(req Request) string {
+	name := strings.ToLower(strings.TrimSpace(req.Tool))
+	if name == "bash" {
+		return strings.TrimSpace(firstNonEmptyArg(req.Args, "command", "cmd"))
+	}
+	if name == "webfetch" {
+		if u := firstNonEmptyArg(req.Args, "url"); u != "" {
+			return strings.TrimSpace(u)
+		}
+	}
+	if name == "notebookedit" {
+		if p := firstNonEmptyArg(req.Args, "notebook_path"); p != "" {
+			return resolvedGrantPath(p, req.Workspace)
+		}
+	}
+	var parts []string
+	if p := firstNonEmptyArg(req.Args, "file_path", "filePath", "path"); p != "" {
+		parts = append(parts, resolvedGrantPath(p, req.Workspace))
+	}
+	if name == "glob" || name == "grep" {
+		if pat := firstNonEmptyArg(req.Args, "pattern"); pat != "" {
+			parts = append(parts, strings.TrimSpace(pat))
+		}
+	}
+	if name == "grep" {
+		if g := firstNonEmptyArg(req.Args, "glob"); g != "" {
+			parts = append(parts, strings.TrimSpace(g))
+		}
+	}
+	if len(parts) == 0 {
+		if cmd := strings.TrimSpace(firstNonEmptyArg(req.Args, "command", "cmd")); cmd != "" {
+			return cmd
+		}
+		return canonicalArgs(req.Args)
+	}
+	return strings.Join(parts, "\x00")
+}
+
+func canonicalArgs(args map[string]any) string {
+	if len(args) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(args)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func firstNonEmptyArg(args map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if s, ok := stringArg(args, key); ok && strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// userAllowText drops a Glob allow match when the path or pattern is refused.
+func userAllowText(req Request, text string) (string, bool) {
+	if strings.EqualFold(strings.TrimSpace(req.Tool), "glob") && !classifyGlobTool(req.Args, req.Workspace).AutoAllow {
+		return "", false
+	}
+	return text, true
 }
 
 func grantKey(req Request) string {
@@ -623,6 +788,11 @@ func denyMessage(behavior, source, rule string) string {
 		return "denied by hook"
 	case "ui":
 		return "denied by user"
+	case "user":
+		if rule != "" {
+			return "denied by user rule " + rule
+		}
+		return "denied by user rule"
 	default:
 		if rule != "" {
 			return "denied by policy rule " + rule

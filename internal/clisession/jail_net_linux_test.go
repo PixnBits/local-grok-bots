@@ -52,7 +52,7 @@ func TestGrokJailHidesHostNetwork(t *testing.T) {
 	home := t.TempDir()
 	out := filepath.Join(ws, "probe.out")
 	probe := filepath.Join(ws, "probe.sh")
-	body := "#!/bin/sh\n" +
+	body := withGrokVersionStub("#!/bin/sh\n" +
 		"python3 - <<'PY' > \"$HOST_PROBE_OUT\"\n" +
 		"import os, socket\n" +
 		"name = os.environ['HOST_ABS_NAME']\n" +
@@ -67,7 +67,7 @@ func TestGrokJailHidesHostNetwork(t *testing.T) {
 		"if timeout 1 bash -c 'echo >/dev/tcp/127.0.0.1/" + strconv.Itoa(port) + "'; then echo LOOP=reachable; else echo LOOP=unreachable; fi >> \"$HOST_PROBE_OUT\"\n" +
 		"if timeout 1 bash -c 'echo >/dev/tcp/203.0.113.1/9'; then echo LAN=reachable; else echo LAN=unreachable; fi >> \"$HOST_PROBE_OUT\"\n" +
 		"if [ -n \"$HTTP_PROXY$HTTPS_PROXY$http_proxy$https_proxy\" ]; then echo EGRESS=set; else echo EGRESS=unset; fi >> \"$HOST_PROBE_OUT\"\n" +
-		"printf '%s\\n' '{\"type\":\"result\",\"result\":\"ok\",\"session_id\":\"s\"}'\n"
+		acpShellTail())
 	if err := os.WriteFile(probe, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -77,6 +77,7 @@ func TestGrokJailHidesHostNetwork(t *testing.T) {
 	res, err := (ExecRunner{HasTTY: func() bool { return false }}).Run(ctx, Spec{
 		Backend: "grok", Bin: probe, Prompt: "hi", Workspace: ws,
 		PermissionMode: "always-allow",
+		ACP:            quietACP(),
 		OnStart: func(pid int) {
 			pgid, gerr := syscall.Getpgid(pid)
 			pgidOK = gerr == nil && pgid == pid
@@ -161,7 +162,7 @@ func TestGrokJailNetGrantAllowlistsEgress(t *testing.T) {
 	home := t.TempDir()
 	out := filepath.Join(ws, "probe.out")
 	probe := filepath.Join(ws, "probe.sh")
-	body := "#!/bin/sh\n" +
+	body := withGrokVersionStub("#!/bin/sh\n" +
 		"python3 - <<'PY' > \"$HOST_PROBE_OUT\"\n" +
 		"import os, urllib.request\n" +
 		"print('PROXY=' + ('set' if os.environ.get('HTTP_PROXY') and os.environ.get('HTTPS_PROXY') else 'unset'))\n" +
@@ -179,7 +180,7 @@ func TestGrokJailNetGrantAllowlistsEgress(t *testing.T) {
 		"os.environ.pop('no_proxy', None)\n" +
 		"hit('http://127.0.0.1:9/no')\n" +
 		"PY\n" +
-		"printf '%s\\n' '{\"type\":\"result\",\"result\":\"ok\",\"session_id\":\"s\"}'\n"
+		acpShellTail())
 	if err := os.WriteFile(probe, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -188,6 +189,7 @@ func TestGrokJailNetGrantAllowlistsEgress(t *testing.T) {
 	res, err := (ExecRunner{HasTTY: func() bool { return false }}).Run(ctx, Spec{
 		Backend: "grok", Bin: probe, Prompt: "hi", Workspace: ws,
 		PermissionMode: "always-allow",
+		ACP:            quietACP(),
 		Isolate: &Isolation{
 			Home:        home,
 			GrokSandbox: GrokProfile,
@@ -250,7 +252,7 @@ func TestGrokJailReachesCredentialProxy(t *testing.T) {
 	home := t.TempDir()
 	out := filepath.Join(ws, "probe.out")
 	probe := filepath.Join(ws, "probe.sh")
-	body := "#!/bin/sh\n" +
+	body := withGrokVersionStub("#!/bin/sh\n" +
 		"python3 - <<'PY' > \"$HOST_PROBE_OUT\"\n" +
 		"import os, urllib.request\n" +
 		"url = os.environ['GROK_CLI_CHAT_PROXY_BASE_URL'] + '/ping'\n" +
@@ -262,7 +264,7 @@ func TestGrokJailReachesCredentialProxy(t *testing.T) {
 		"    print('CRED=fail')\n" +
 		"print('KEY_KEPT=' + ('yes' if os.environ.get('XAI_API_KEY') == os.environ.get('HOST_GATE') else 'no'))\n" +
 		"PY\n" +
-		"printf '%s\\n' '{\"type\":\"result\",\"result\":\"ok\",\"session_id\":\"s\"}'\n"
+		acpShellTail())
 	if err := os.WriteFile(probe, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -271,6 +273,7 @@ func TestGrokJailReachesCredentialProxy(t *testing.T) {
 	res, err := (ExecRunner{HasTTY: func() bool { return false }}).Run(ctx, Spec{
 		Backend: "grok", Bin: probe, Prompt: "hi", Workspace: ws,
 		PermissionMode: "always-allow",
+		ACP:            quietACP(),
 		Isolate: &Isolation{
 			Home:        home,
 			GrokSandbox: GrokProfile,

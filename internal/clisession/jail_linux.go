@@ -73,12 +73,17 @@ func grokBwrapArgs(bin string, args []string, spec Spec) ([]string, error) {
 	if spec.Isolate != nil {
 		env = spec.Isolate.Env
 	}
-	for _, dir := range []string{envVal(env, "HOME"), envVal(env, "GROK_HOME"), spec.IsolateHome()} {
+	home := filepath.Clean(strings.TrimSpace(envVal(env, "HOME")))
+	grokHome := filepath.Clean(strings.TrimSpace(envVal(env, "GROK_HOME")))
+	// HOME stays writable. GROK_HOME is read-only, including when it sits
+	// inside HOME, so the home bind cannot leave it writable. Session data
+	// is opened afterward. Startup files are mounted after that.
+	for _, dir := range []string{home, spec.IsolateHome()} {
 		dir = filepath.Clean(strings.TrimSpace(dir))
-		if dir == "" || dir == "." || !filepath.IsAbs(dir) || seen[dir] {
+		if dir == "" || dir == "." || dir == grokHome || !filepath.IsAbs(dir) || seen[dir] {
 			continue
 		}
-		if st, err := os.Stat(dir); err != nil || !st.IsDir() {
+		if st, err := os.Lstat(dir); err != nil || st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
 			continue
 		}
 		if isWithin(ws, dir) {
@@ -86,6 +91,21 @@ func grokBwrapArgs(bin string, args []string, spec Spec) ([]string, error) {
 		}
 		out = append(out, "--bind", dir, dir)
 		seen[dir] = true
+	}
+	grokMounted := false
+	if grokHome != "" && grokHome != "." && filepath.IsAbs(grokHome) && !seen[grokHome] && !isWithin(ws, grokHome) {
+		if st, err := os.Lstat(grokHome); err == nil && st.Mode()&os.ModeSymlink == 0 && st.IsDir() {
+			out = append(out, "--ro-bind", grokHome, grokHome)
+			seen[grokHome] = true
+			grokMounted = true
+		}
+	}
+	if grokMounted {
+		writable, werr := grokWritableBinds(grokHome)
+		if werr != nil {
+			return nil, werr
+		}
+		out = append(out, writable...)
 	}
 	for _, e := range env {
 		k, v, ok := strings.Cut(e, "=")
@@ -106,6 +126,28 @@ func grokBwrapArgs(bin string, args []string, spec Spec) ([]string, error) {
 		out = append(out, "--bind", v, v)
 		seen[v] = true
 	}
+	// The scope permission file is created before the read-only overlay so
+	// it is mounted over the writable sessions bind.
+	if err := ensureWorkspacePermission(grokHome, grokHome, ws); err != nil {
+		return nil, err
+	}
+	// Read-only overlays sit on top of the writable session bind. A later
+	// mount must not cover them.
+	sealed, err := grokSealBinds(grokHome)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, sealed...)
+	startup, err := shellRCBinds(home)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, startup...)
+	sealedHome, err := homeSealBinds(home)
+	if err != nil {
+		return nil, err
+	}
+	out = append(out, sealedHome...)
 	out = append(out, "--setenv", "PATH", "/usr/bin:/bin", "--setenv", "PWD", ws, "--setenv", "TMPDIR", "/tmp")
 	for _, e := range env {
 		k, v, ok := strings.Cut(e, "=")

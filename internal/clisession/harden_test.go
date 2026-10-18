@@ -272,9 +272,24 @@ func TestGrokProfileAndFlags(t *testing.T) {
 	if strings.Contains(toml, strconv.Quote(filepath.Join(home, ".grok", "auth.json"))) {
 		t.Fatalf("profile denies the placeholder:\n%s", toml)
 	}
+	cfg, err := os.ReadFile(filepath.Join(home, ".grok", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`permission_mode = "default"`, `"Bash"`, `"Read"`, `"Grep"`, `"Glob"`, `"Edit"`, `"Write"`, `"WebFetch"`, `"WebSearch"`, `"MCPTool"`} {
+		if !strings.Contains(string(cfg), want) {
+			t.Fatalf("config lacks %q:\n%s", want, cfg)
+		}
+	}
 	argv := grokArgv(t, &iso)
-	if !strings.Contains(argv, "--sandbox lgb") || !strings.Contains(argv, "--disallowed-tools web_fetch,web_search") {
+	if !strings.Contains(argv, "--sandbox lgb") || !strings.Contains(argv, "--tools run_terminal_command,read_file,search_replace,grep,write") {
 		t.Fatalf("argv %s", argv)
+	}
+	if strings.Contains(argv, "web_fetch") || strings.Contains(argv, "web_search") || strings.Contains(argv, "list_dir") || strings.Contains(argv, "todo_write") || strings.Contains(argv, "x_keyword_search") || strings.Contains(argv, "x_semantic_search") || strings.Contains(argv, "--disallowed-tools") {
+		t.Fatalf("argv %s", argv)
+	}
+	if toolsAt, agentAt := strings.Index(argv, "--tools "), strings.Index(argv, " agent "); toolsAt < 0 || agentAt < 0 || toolsAt > agentAt {
+		t.Fatalf("tools after agent: %s", argv)
 	}
 
 	iso, err = PrepareIsolation(IsolationOptions{Backend: "grok", StateDir: t.TempDir(), Home: home, UserHome: user,
@@ -287,8 +302,11 @@ func TestGrokProfileAndFlags(t *testing.T) {
 		t.Fatalf("net/ssh grant profile:\n%s", b)
 	}
 	argv = grokArgv(t, &iso)
-	if strings.Contains(argv, "--disallowed-tools") {
-		t.Fatalf("net grant still disallows web tools: %s", argv)
+	if !strings.Contains(argv, "--tools run_terminal_command,read_file,search_replace,grep,write,web_fetch,web_search") {
+		t.Fatalf("net grant tools: %s", argv)
+	}
+	if strings.Contains(argv, "list_dir") || strings.Contains(argv, "todo_write") || strings.Contains(argv, "x_keyword_search") || strings.Contains(argv, "x_semantic_search") || strings.Contains(argv, "--disallowed-tools") {
+		t.Fatalf("net grant tools: %s", argv)
 	}
 
 	// home = "user" does not write ~/.grok/sandbox.toml. The custom profile
@@ -301,6 +319,9 @@ func TestGrokProfileAndFlags(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(user, ".grok", "sandbox.toml")); err == nil {
 		t.Fatalf("wrote the user's sandbox.toml")
 	}
+	if _, err := os.Stat(filepath.Join(user, ".grok", "config.toml")); err == nil {
+		t.Fatalf("wrote the user's config.toml")
+	}
 	if iso.GrokSandbox != GrokProfile {
 		t.Fatalf("user-home profile %q", iso.GrokSandbox)
 	}
@@ -312,6 +333,10 @@ func TestGrokProfileAndFlags(t *testing.T) {
 	b, err = os.ReadFile(filepath.Join(grokHome, "sandbox.toml"))
 	if err != nil || !strings.Contains(string(b), "[profiles.lgb]") || !strings.Contains(string(b), `extends = "strict"`) {
 		t.Fatalf("daemon profile: %s %v", b, err)
+	}
+	cfg, err = os.ReadFile(filepath.Join(grokHome, "config.toml"))
+	if err != nil || !strings.Contains(string(cfg), `permission_mode = "default"`) {
+		t.Fatalf("daemon permission config: %s %v", cfg, err)
 	}
 	real := filepath.Join(user, ".grok", "auth.json")
 	fi, err := os.Stat(real)
@@ -404,6 +429,55 @@ func TestGrokDenyKeepsOwnHomeWritable(t *testing.T) {
 	for _, bad := range []string{strconv.Quote(cli), strconv.Quote(state), strconv.Quote(filepath.Join(state, "home"))} {
 		if strings.Contains(toml, bad) {
 			t.Fatalf("own home denied (%s):\n%s", bad, toml)
+		}
+	}
+}
+
+func TestRuleFilesAreDeniedWhenPresent(t *testing.T) {
+	cli := filepath.Join(t.TempDir(), "cli")
+	state := filepath.Join(cli, "bot")
+	home := filepath.Join(state, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var files []string
+	for _, name := range []string{"user-permissions.json", "grok-permission-rules"} {
+		p := filepath.Join(state, name)
+		if err := os.WriteFile(p, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, p)
+	}
+	opts := IsolationOptions{StateDir: state, Home: home, Protect: []string{cli}}
+	toml := grokSandboxTOML(opts)
+	for _, p := range files {
+		if strings.Count(toml, strconv.Quote(p)) != 1 {
+			t.Fatalf("deny count for %s:\n%s", p, toml)
+		}
+	}
+	if strings.Contains(toml, strconv.Quote(home)) {
+		t.Fatalf("home denied:\n%s", toml)
+	}
+	empty := filepath.Join(t.TempDir(), "cli", "bot")
+	if err := os.MkdirAll(filepath.Join(empty, "home"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	absent := grokSandboxTOML(IsolationOptions{StateDir: empty, Home: filepath.Join(empty, "home"), Protect: []string{filepath.Dir(empty)}})
+	if strings.Contains(absent, "user-permissions.json") || strings.Contains(absent, "grok-permission-rules") {
+		t.Fatalf("missing rule file was denied:\n%s", absent)
+	}
+	raw, err := claudeSettingsJSON(IsolationOptions{
+		Backend: "claude", StateDir: state, UserHome: t.TempDir(), Protect: []string{cli},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(raw)
+	for _, p := range files {
+		for _, want := range []string{"Read(/" + p + ")", "Edit(/" + p + ")"} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("claude settings missing %s:\n%s", want, body)
+			}
 		}
 	}
 }

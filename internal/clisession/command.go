@@ -3,8 +3,6 @@ package clisession
 import (
 	"fmt"
 	"strings"
-
-	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
 
 // Spec is one headless CLI turn. A fresh session is created with --session-id.
@@ -39,6 +37,8 @@ type Spec struct {
 	StreamControl bool
 	// Control is the broker hook for a stream-json turn. Nil denies every ask.
 	Control *ControlHooks
+	// ACP is the broker hook for a Grok turn. Nil fails that turn closed.
+	ACP *ACPHooks
 	// Isolate, when set, replaces the inherited environment and tells Claude
 	// to load only daemon-provided settings and MCP servers.
 	Isolate *Isolation
@@ -63,6 +63,11 @@ type Event struct {
 	Final      bool
 	// Denials are permission_denials on a result event. They do not fail the turn.
 	Denials []Denial
+	// Failed is a tool_result that did not succeed. Denied is a call the
+	// person refused on the card. Neither is a success. Both stay false
+	// on a normal result so older emitters still count as ok.
+	Failed bool
+	Denied bool
 }
 
 // Denial is one tool call the CLI refused.
@@ -111,35 +116,48 @@ func grokFlags(spec Spec) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The prompt is a session/prompt message. Permission mode is not a flag:
+	// the ACP host asks the broker, which is what applies a bypass or an allow.
+	// --always-approve would skip that ask. User rules are not copied here.
 	var args []string
 	if spec.Model != "" {
 		args = append(args, "-m", spec.Model)
 	}
-	args = append(args, sessionFlags(spec)...)
+	// grok agent stdio takes no session flags of its own. Global flags go
+	// before the subcommand or Grok refuses to start.
 	args = append(args,
-		"-p", spec.Prompt,
 		"--sandbox", profile,
 		"--cwd", spec.Workspace,
-		"--output-format", "streaming-json",
 		"--no-auto-update",
 	)
-	if spec.Isolate != nil && len(spec.Isolate.GrokDisallow) > 0 {
-		args = append(args, "--disallowed-tools", strings.Join(spec.Isolate.GrokDisallow, ","))
+	if spec.Isolate != nil {
+		tools := spec.Isolate.GrokTools
+		if len(tools) == 0 {
+			tools = grokAllowedTools(Grants{})
+		}
+		args = append(args, "--tools", strings.Join(tools, ","))
 	}
 	for _, rule := range spec.AllowRules {
-		args = append(args, "--allow", rule)
+		if grokSpoolRule(rule) {
+			args = append(args, "--allow", rule)
+		}
 	}
 	for _, rule := range spec.DenyRules {
 		args = append(args, "--deny", rule)
 	}
-	// --always-approve is an explicit always-allow policy, never a default.
-	// Other modes are passed through. Grok does not speak the Claude mode names.
-	if alwaysAllow(spec.PermissionMode) {
-		args = append(args, "--always-approve")
-	} else if strings.TrimSpace(spec.PermissionMode) != "" {
-		args = append(args, "--permission-mode", spec.PermissionMode)
-	}
+	args = append(args, "agent", "--no-leader", "stdio")
 	return args, nil
+}
+
+// grokSpoolRule is the lgb and coi spool, which is not a permission intercept.
+// Every other allow stays off argv so Grok has to ask the host.
+func grokSpoolRule(rule string) bool {
+	switch strings.TrimSpace(rule) {
+	case "Bash(lgb)", "Bash(lgb *)", "Bash(coi)", "Bash(coi *)":
+		return true
+	default:
+		return false
+	}
 }
 
 // grokSandbox is the daemon's custom profile. Built-in names (and an empty
@@ -248,8 +266,4 @@ func sessionFlags(spec Spec) []string {
 		return []string{"--session-id", spec.SessionID}
 	}
 	return []string{"--resume", spec.SessionID}
-}
-
-func alwaysAllow(mode string) bool {
-	return policy.IsBypassMode(mode)
 }

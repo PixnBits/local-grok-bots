@@ -383,7 +383,7 @@ func TestGrokProxyRequestIsAudited(t *testing.T) {
 	const headerMark = "unit-header-marker"
 	const bodyMark = "unit-body-marker"
 	const queryMark = "unit-query-marker"
-	req, err := http.NewRequest(http.MethodPost, origin+"/v1/ping?q="+queryMark, strings.NewReader(bodyMark))
+	req, err := http.NewRequest(http.MethodPost, origin+"/v1/ping?q="+queryMark, strings.NewReader(`{"note":"`+bodyMark+`"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

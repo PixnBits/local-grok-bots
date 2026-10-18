@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -24,6 +25,18 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// Version probes run this binary with a clean environment. Answer before
+	// the fake agent and before the test runner.
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		fmt.Println("grok 1.0.52")
+		os.Exit(0)
+	}
+	// The jailed Grok binary is this test binary. Only the child sets the
+	// env, after this process has already passed TestMain.
+	if os.Getenv("LGB_ACP_FAKE") == "1" {
+		acpFakeMain()
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "--lgb-fake-claude" {
 		fakeClaudeMain()
 		return

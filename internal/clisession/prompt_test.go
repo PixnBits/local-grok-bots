@@ -77,7 +77,9 @@ sleep 120
 		Isolate: &Isolation{GrokSandbox: GrokProfile},
 		OnStart: func(p int) { pid = p },
 	}, nil)
-	if !errors.Is(err, ErrPermissionPrompt) {
+	// Grok turns use the ACP host. With no broker the host fails closed and
+	// kills the process. A stderr phrase is not ErrPermissionPrompt.
+	if err == nil || errors.Is(err, ErrPermissionPrompt) || !strings.Contains(err.Error(), "acp host") {
 		t.Fatalf("err %v", err)
 	}
 	if pid > 0 && pidRunning(pid) {
@@ -143,10 +145,20 @@ printf '%s\n' '{"type":"result","result":"permission prompt","session_id":"s"}'
 	}
 }
 
+const grokTestVersionStub = "case \"$1\" in --version) echo grok 1.0.52; exit 0;; esac\n"
+
+func withGrokVersionStub(body string) string {
+	const shebang = "#!/bin/sh\n"
+	if strings.HasPrefix(body, shebang) && !strings.Contains(body, "--version)") {
+		return shebang + grokTestVersionStub + body[len(shebang):]
+	}
+	return body
+}
+
 func writeScript(t *testing.T, dir, name, body string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+	if err := os.WriteFile(path, []byte(withGrokVersionStub(body)), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return path

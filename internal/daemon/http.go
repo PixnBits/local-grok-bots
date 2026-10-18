@@ -31,6 +31,13 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/permissions/{req_id}", a.handlePermissionDecision)
 	mux.HandleFunc("GET /api/bots/{id}/permissions", a.handlePendingPermissions)
 	mux.HandleFunc("GET /api/permissions", a.handleAllPendingPermissions)
+	mux.HandleFunc("GET /api/bots/{id}/permission-rules", a.handleListPermRules)
+	mux.HandleFunc("POST /api/bots/{id}/permission-rules", a.handleCreatePermRule)
+	mux.HandleFunc("DELETE /api/bots/{id}/permission-rules/{rule_id}", a.handleDeletePermRule)
+	mux.HandleFunc("GET /api/bots/{id}/permission-suggestions", a.handleListPermSuggestions)
+	mux.HandleFunc("POST /api/bots/{id}/permission-suggestions/analyze", a.handleAnalyzePerms)
+	mux.HandleFunc("POST /api/bots/{id}/permission-suggestions/{sug_id}/accept", a.handleAcceptSuggestion)
+	mux.HandleFunc("POST /api/bots/{id}/permission-suggestions/{sug_id}/dismiss", a.handleDismissSuggestion)
 	mux.HandleFunc("POST /api/mcp/permission", a.handleMCPPermission)
 	mux.HandleFunc("POST /api/mcp/permission/{token}", a.handleMCPPermission)
 	mux.HandleFunc("GET /api/bots/{id}/memory", a.handleListMemory)
@@ -56,7 +63,7 @@ func (a *App) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// A live lgb token or MCP permission token must not decide a card,
 		// including when the admin token is unset. Other routes stay 401.
-		if permissionDecisionPath(r) || pendingPermissionsPath(r) {
+		if permissionDecisionPath(r) || pendingPermissionsPath(r) || durablePermissionPath(r) {
 			if tok, ok := bearerToken(r); ok && a.liveRunCredential(tok) {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": "run token cannot decide permissions"})
 				return
@@ -105,6 +112,16 @@ func pendingPermissionsPath(r *http.Request) bool {
 		return true
 	}
 	return len(parts) == 4 && parts[0] == "api" && parts[1] == "bots" && parts[2] != "" && parts[3] == "permissions"
+}
+
+// durablePermissionPath is the user auto-grant API. A run token must not
+// read or write the rules it would be asking about.
+func durablePermissionPath(r *http.Request) bool {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) < 4 || parts[0] != "api" || parts[1] != "bots" || parts[2] == "" {
+		return false
+	}
+	return parts[3] == "permission-rules" || parts[3] == "permission-suggestions"
 }
 
 func bearerToken(r *http.Request) (string, bool) {
@@ -204,6 +221,7 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 		Grants       []string    `json:"grants"`
 		NetAllow     []string    `json:"net_allow"`
 		SSHAllow     []string    `json:"ssh_allow"`
+		ServerTools  *[]string   `json:"server_tools"`
 	}
 	if err := readJSON(w, r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -230,7 +248,7 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 	}
 	b, err := a.st.InsertBot(store.BotDraft{
 		Name: name, Label: body.Label, Description: description, Mark: mark, Model: modelPtr,
-		Grants: body.Grants, NetAllow: body.NetAllow, SSHAllow: body.SSHAllow,
+		Grants: body.Grants, NetAllow: body.NetAllow, SSHAllow: body.SSHAllow, ServerTools: body.ServerTools,
 	}, "user")
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
@@ -356,6 +374,17 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 		}
 		patch.SSHSet = true
 		patch.SSHAllow = list
+	}
+	if v, ok := raw["server_tools"]; ok {
+		patch.ServerToolsSet = true
+		if strings.TrimSpace(string(v)) != "null" {
+			list, err := decodeStringList(v)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid server_tools"})
+				return
+			}
+			patch.ServerTools = &list
+		}
 	}
 	if v, ok := raw["model"]; ok {
 		patch.ModelSet = true

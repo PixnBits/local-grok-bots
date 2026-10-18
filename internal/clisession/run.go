@@ -40,6 +40,12 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 	if err := ctx.Err(); err != nil {
 		return Result{}, err
 	}
+	if strings.EqualFold(spec.Backend, "grok") && SlashPrompt(spec.Prompt) {
+		if spec.ACP != nil && spec.ACP.Fail != nil {
+			spec.ACP.Fail("acp", map[string]any{}, ErrSlash.Error())
+		}
+		return Result{}, ErrSlash
+	}
 	argv, err := Args(spec)
 	if err != nil {
 		return Result{}, err
@@ -51,6 +57,15 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 			return Result{}, fmt.Errorf("%s not on PATH", path)
 		}
 		path = looked
+	}
+	if strings.EqualFold(spec.Backend, "grok") {
+		pinSHA := ""
+		if pin, ok := e.Policy.CLIPinFor("grok"); ok {
+			pinSHA = pin.SHA256
+		}
+		if err := checkGrokVersion(ctx, path, pinSHA); err != nil {
+			return Result{}, err
+		}
 	}
 	if err := e.notePin(ctx, spec.Backend, path); err != nil {
 		return Result{}, err
@@ -85,8 +100,9 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 	if err != nil {
 		return Result{}, err
 	}
+	grokACP := strings.EqualFold(spec.Backend, "grok")
 	var stdin io.WriteCloser
-	if spec.StreamControl {
+	if spec.StreamControl || grokACP {
 		stdin, err = cmd.StdinPipe()
 		if err != nil {
 			return Result{}, err
@@ -95,10 +111,10 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 	// Empty permission_mode lets the CLI prompt. With no controlling terminal,
 	// a prompt fails the turn. An explicit mode is passed through and is not
 	// treated as a prompt, even if the stream mentions one.
-	// Stream control is itself the permission host, so a can_use_tool line is
-	// not a headless prompt failure.
-	failPrompt := !spec.StreamControl && strings.TrimSpace(spec.PermissionMode) == "" && !e.interactive()
-	if !spec.StreamControl && e.interactive() && strings.TrimSpace(spec.PermissionMode) == "" {
+	// Stream control and the Grok ACP host are themselves the permission host,
+	// so a permission line is not a headless prompt failure.
+	failPrompt := !spec.StreamControl && !grokACP && strings.TrimSpace(spec.PermissionMode) == "" && !e.interactive()
+	if !spec.StreamControl && !grokACP && e.interactive() && strings.TrimSpace(spec.PermissionMode) == "" {
 		cmd.Stdin = os.Stdin
 	}
 	var stderr bytes.Buffer
@@ -136,10 +152,17 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 	var parseErr error
 	if spec.StreamControl {
 		res, parseErr = runControlSession(ctx, cmd, stdout, stdin, spec, onEvent)
+	} else if grokACP {
+		res, parseErr = runACPSession(ctx, cmd, stdout, stdin, spec, onEvent)
 	} else {
 		res, parseErr = readTurn(stdout, onEvent, failPrompt, promptCh, cmd)
 	}
 	waitErr := cmd.Wait()
+	if grokACP && parseErr == nil && res.StopReason != "" {
+		// The prompt was answered. The host closes stdin and stops a lingering
+		// agent, so its exit status says nothing about the turn.
+		waitErr = nil
+	}
 	if errors.Is(parseErr, ErrPermissionPrompt) {
 		return res, ErrPermissionPrompt
 	}
@@ -287,8 +310,10 @@ func (st *streamAcc) apply(ev Event, onEvent func(Event), failPrompt bool) error
 		if ev.NeedsInput {
 			st.out.NeedsInput = true
 		}
-		if ev.Final && strings.TrimSpace(ev.Text) != "" {
-			st.out.Text = ev.Text
+		if ev.Final {
+			// Clone so a later builder write cannot change the snapshot.
+			// Whitespace-only text is a real reply.
+			st.out.Text = strings.Clone(ev.Text)
 		}
 		if onEvent != nil {
 			onEvent(ev)
@@ -309,20 +334,20 @@ func (st *streamAcc) apply(ev Event, onEvent func(Event), failPrompt bool) error
 func (st *streamAcc) finish(scanErr error) (Result, error) {
 	if scanErr != nil {
 		st.out.Interrupted = true
-		if st.sawDelta && strings.TrimSpace(st.out.Text) == "" {
-			st.out.Text = st.b.String()
+		if st.sawDelta && st.out.Text == "" {
+			st.out.Text = strings.Clone(st.b.String())
 		}
 		return st.out, fmt.Errorf("cli stream: %w", scanErr)
 	}
 	if !st.sawFinal {
 		st.out.Interrupted = true
-		if st.sawDelta {
-			st.out.Text = st.b.String()
+		if st.sawDelta && st.out.Text == "" {
+			st.out.Text = strings.Clone(st.b.String())
 		}
 		return st.out, nil
 	}
-	if strings.TrimSpace(st.out.Text) == "" && st.sawDelta {
-		st.out.Text = st.b.String()
+	if st.out.Text == "" && st.sawDelta {
+		st.out.Text = strings.Clone(st.b.String())
 	}
 	if st.errMsg != "" && strings.TrimSpace(st.out.Text) == "" {
 		msg := st.errMsg
