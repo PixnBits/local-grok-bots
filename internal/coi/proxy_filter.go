@@ -22,51 +22,50 @@ const (
 	removedInvalid = "invalid"
 )
 
-// filterServerTools strips non-function tools from a model request.
-// allow is the set of non-function types that may stay. A nil or empty
-// allow list strips every non-function type. Function tools stay.
-// refuse is true when the body cannot be filtered safely. The caller
-// answers 403 and audits cli_proxy_refused. A passing call leaves a
-// readable body and a Content-Length that matches it.
-func filterServerTools(r *http.Request, allow []string) (removed []string, refuse bool) {
-	if !modelRequest(r) {
-		return nil, false
-	}
-	if r.Body == nil || r.ContentLength == 0 {
-		return nil, false
+// filterServerTools strips non-function tools from a gated request body.
+// allowOf is called only when the body has a tools array to filter. It
+// returns the non-function types that may stay, and the source of that
+// decision. A nil or empty allow list strips every non-function type.
+// Function tools stay. reason is empty on success. Otherwise it is
+// duplicate_key or unparsed, and the caller answers 403 and audits
+// cli_proxy_refused. A passing call with a non-empty body leaves a
+// freshly re-encoded body and a Content-Length that matches it. The
+// original bytes are not forwarded. An empty body is left unread.
+func filterServerTools(r *http.Request, allowOf func() ([]string, string)) (removed []string, source, reason string) {
+	if r == nil || r.Body == nil || r.ContentLength == 0 {
+		return nil, "", ""
 	}
 	raw, err := io.ReadAll(io.LimitReader(r.Body, maxModelBody+1))
 	if err != nil || len(raw) > maxModelBody {
-		return nil, true
+		return nil, "", refuseUnparsed
+	}
+	if len(raw) == 0 {
+		restoreBody(r, raw)
+		return nil, "", ""
 	}
 	encs, ok := contentEncodings(r.Header.Get("Content-Encoding"))
 	if !ok {
-		return nil, true
+		return nil, "", refuseUnparsed
 	}
 	decoded := raw
 	if len(encs) > 0 {
 		decoded, err = decodeEncodings(raw, encs)
 		if err != nil || len(decoded) > maxModelBody {
-			return nil, true
+			return nil, "", refuseUnparsed
 		}
 	}
-	rewritten, removed, changed, bad := rewriteTools(decoded, allow)
-	if bad {
-		return nil, true
+	if len(decoded) == 0 {
+		return nil, "", refuseUnparsed
+	}
+	rewritten, removed, source, reason := rewriteTools(decoded, allowOf)
+	if reason != "" {
+		return nil, "", reason
 	}
 	if strings.TrimSpace(r.Header.Get("Content-Encoding")) != "" {
 		r.Header.Del("Content-Encoding")
 	}
-	if changed {
-		restoreBody(r, rewritten)
-		return uniqueToolTypes(removed), false
-	}
-	if len(encs) > 0 {
-		restoreBody(r, decoded)
-		return nil, false
-	}
-	restoreBody(r, raw)
-	return nil, false
+	restoreBody(r, rewritten)
+	return uniqueToolTypes(removed), source, ""
 }
 
 func contentEncodings(h string) ([]string, bool) {
@@ -188,29 +187,177 @@ func readAtMost(r io.Reader) ([]byte, error) {
 	return b, nil
 }
 
-// rewriteTools returns the body to forward. changed is false when the
-// decoded bytes can be forwarded as they arrived. bad refuses the request.
-func rewriteTools(body []byte, allow []string) (out []byte, removed []string, changed, bad bool) {
+// maxJSONDepth is how deep a request object or array may nest. Deeper
+// input is refused so a nested document cannot exhaust the stack.
+const maxJSONDepth = 64
+
+var errDuplicateKey = errors.New("duplicate key")
+
+// rewriteTools checks the decoded body and returns the bytes to forward.
+// A successful parse is always re-encoded. Duplicate keys and invalid
+// JSON refuse. allowOf runs only when a tools array needs a decision.
+func rewriteTools(body []byte, allowOf func() ([]string, string)) (out []byte, removed []string, source, reason string) {
 	if len(bytes.TrimSpace(body)) == 0 {
-		return nil, nil, false, false
+		return nil, nil, "", refuseUnparsed
 	}
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(body, &top); err != nil || top == nil {
-		return nil, nil, false, true
+	if err := scanJSON(body); err != nil {
+		if errors.Is(err, errDuplicateKey) {
+			return nil, nil, "", refuseDuplicateKey
+		}
+		return nil, nil, "", refuseUnparsed
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, nil, "", refuseUnparsed
+	}
+	removed, source, bad := filterToolsValue(v, allowOf)
+	if bad {
+		return nil, nil, "", refuseUnparsed
+	}
+	encoded, err := marshalCanonical(v)
+	if err != nil {
+		return nil, nil, "", refuseUnparsed
+	}
+	return encoded, removed, source, ""
+}
+
+// scanJSON walks every token. A repeated object key at any depth is
+// errDuplicateKey. Trailing data and a nest past maxJSONDepth are errors.
+func scanJSON(body []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	dup, err := walkJSON(dec, 1)
+	if err != nil {
+		return err
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("trailing json")
+		}
+		return err
+	}
+	if dup {
+		return errDuplicateKey
+	}
+	return nil
+}
+
+func walkJSON(dec *json.Decoder, depth int) (bool, error) {
+	if depth > maxJSONDepth {
+		return false, errors.New("json is too deep")
+	}
+	tok, err := dec.Token()
+	if err != nil {
+		return false, err
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok {
+		return false, nil
+	}
+	switch delim {
+	case '{':
+		seen := map[string]struct{}{}
+		dup := false
+		for dec.More() {
+			keyTok, err := dec.Token()
+			if err != nil {
+				return false, err
+			}
+			key, ok := keyTok.(string)
+			if !ok {
+				return false, errors.New("object key")
+			}
+			if _, exists := seen[key]; exists {
+				dup = true
+			} else {
+				seen[key] = struct{}{}
+			}
+			child, err := walkJSON(dec, depth+1)
+			if err != nil {
+				return false, err
+			}
+			dup = dup || child
+		}
+		end, err := dec.Token()
+		if err != nil {
+			return false, err
+		}
+		if d, ok := end.(json.Delim); !ok || d != '}' {
+			return false, errors.New("object end")
+		}
+		return dup, nil
+	case '[':
+		dup := false
+		for dec.More() {
+			child, err := walkJSON(dec, depth+1)
+			if err != nil {
+				return false, err
+			}
+			dup = dup || child
+		}
+		end, err := dec.Token()
+		if err != nil {
+			return false, err
+		}
+		if d, ok := end.(json.Delim); !ok || d != ']' {
+			return false, errors.New("array end")
+		}
+		return dup, nil
+	default:
+		return false, errors.New("json delim")
+	}
+}
+
+// marshalCanonical writes v with sorted object keys and no HTML escaping.
+// json.Number values keep the literal from the request.
+func marshalCanonical(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
+const (
+	toolDrop = iota
+	toolKeepFunction
+	toolKeepAllowed
+)
+
+// filterToolsValue strips non-function tools from a top-level tools key.
+// A value that is not an object, or an object with no tools key, is kept.
+// tools that is not an array is bad. allowOf is not called unless tools
+// is a non-empty array.
+func filterToolsValue(v any, allowOf func() ([]string, string)) (removed []string, source string, bad bool) {
+	top, ok := v.(map[string]any)
+	if !ok {
+		return nil, "", false
 	}
 	raw, ok := top["tools"]
-	if !ok || len(bytes.TrimSpace(raw)) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return nil, nil, false, false
+	if !ok || raw == nil {
+		return nil, "", false
 	}
-	var entries []json.RawMessage
-	if err := json.Unmarshal(raw, &entries); err != nil {
-		return nil, nil, false, true
+	entries, ok := raw.([]any)
+	if !ok {
+		return nil, "", true
+	}
+	if len(entries) == 0 {
+		return nil, "", false
+	}
+	allow, source := []string(nil), sourceDefault
+	if allowOf != nil {
+		allow, source = allowOf()
 	}
 	allowSet := map[string]bool{}
 	for _, name := range normalizeAllow(allow) {
 		allowSet[name] = true
 	}
-	var kept []json.RawMessage
+	var kept []any
 	var gone []string
 	for _, entry := range entries {
 		typ, kind := toolEntryType(entry)
@@ -228,46 +375,24 @@ func rewriteTools(body []byte, allow []string) (out []byte, removed []string, ch
 		}
 	}
 	if len(gone) == 0 {
-		return nil, nil, false, false
+		return nil, "", false
 	}
 	if len(kept) == 0 {
 		delete(top, "tools")
 	} else {
-		top["tools"] = marshalRawArray(kept)
+		top["tools"] = kept
 	}
 	removedSet := map[string]bool{}
 	for _, name := range gone {
 		removedSet[name] = true
 	}
 	adjustToolChoice(top, removedSet, len(kept) > 0)
-	encoded, err := marshalTop(top)
-	if err != nil {
-		return nil, nil, false, true
-	}
-	return encoded, gone, true, false
+	return gone, source, false
 }
 
-// marshalTop writes the object without HTML escaping, so a kept tool
-// entry stays as it was decoded.
-func marshalTop(top map[string]json.RawMessage) ([]byte, error) {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(top); err != nil {
-		return nil, err
-	}
-	return bytes.TrimRight(buf.Bytes(), "\n"), nil
-}
-
-const (
-	toolDrop = iota
-	toolKeepFunction
-	toolKeepAllowed
-)
-
-func toolEntryType(entry json.RawMessage) (string, int) {
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(entry, &obj); err != nil || obj == nil {
+func toolEntryType(entry any) (string, int) {
+	obj, ok := entry.(map[string]any)
+	if !ok || obj == nil {
 		return "", toolDrop
 	}
 	raw, ok := obj["type"]
@@ -287,12 +412,9 @@ func toolEntryType(entry json.RawMessage) (string, int) {
 	return typ, toolKeepAllowed
 }
 
-func jsonTypeName(raw json.RawMessage) (string, bool) {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return "", false
-	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err != nil {
+func jsonTypeName(raw any) (string, bool) {
+	s, ok := raw.(string)
+	if !ok {
 		return "", false
 	}
 	s = strings.ToLower(strings.TrimSpace(s))
@@ -352,44 +474,29 @@ func uniqueToolTypes(in []string) []string {
 	return out
 }
 
-func marshalRawArray(items []json.RawMessage) json.RawMessage {
-	var buf bytes.Buffer
-	buf.WriteByte('[')
-	for i, item := range items {
-		if i > 0 {
-			buf.WriteByte(',')
-		}
-		buf.Write(bytes.TrimSpace(item))
-	}
-	buf.WriteByte(']')
-	return buf.Bytes()
-}
-
 // adjustToolChoice drops a choice that names a removed type, or that
 // requires a tool after the tools list is gone. When tools remain, a
 // choice that named a removed type becomes "auto".
-func adjustToolChoice(top map[string]json.RawMessage, removed map[string]bool, toolsLeft bool) {
+func adjustToolChoice(top map[string]any, removed map[string]bool, toolsLeft bool) {
 	raw, ok := top["tool_choice"]
 	if !ok {
 		return
 	}
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+	if raw == nil {
 		if !toolsLeft {
 			delete(top, "tool_choice")
 		}
 		return
 	}
-	var s string
-	if err := json.Unmarshal(trimmed, &s); err == nil {
+	if s, ok := raw.(string); ok {
 		low := strings.ToLower(s)
 		if removed[low] || (low == "required" && !toolsLeft) {
 			neutralizeChoice(top, toolsLeft)
 		}
 		return
 	}
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal(trimmed, &obj); err != nil || obj == nil {
+	obj, ok := raw.(map[string]any)
+	if !ok || obj == nil {
 		neutralizeChoice(top, toolsLeft)
 		return
 	}
@@ -398,15 +505,15 @@ func adjustToolChoice(top map[string]json.RawMessage, removed map[string]bool, t
 	}
 }
 
-func neutralizeChoice(top map[string]json.RawMessage, toolsLeft bool) {
+func neutralizeChoice(top map[string]any, toolsLeft bool) {
 	if toolsLeft {
-		top["tool_choice"] = json.RawMessage(`"auto"`)
+		top["tool_choice"] = "auto"
 		return
 	}
 	delete(top, "tool_choice")
 }
 
-func choiceIsRequired(obj map[string]json.RawMessage) bool {
+func choiceIsRequired(obj map[string]any) bool {
 	typ, ok := jsonTypeName(obj["type"])
 	if ok && typ == "required" {
 		return true
@@ -415,12 +522,12 @@ func choiceIsRequired(obj map[string]json.RawMessage) bool {
 	return ok && mode == "required" && !okType(obj, "function")
 }
 
-func okType(obj map[string]json.RawMessage, want string) bool {
+func okType(obj map[string]any, want string) bool {
 	typ, ok := jsonTypeName(obj["type"])
 	return ok && typ == want
 }
 
-func choicePointsAt(obj map[string]json.RawMessage, removed map[string]bool) bool {
+func choicePointsAt(obj map[string]any, removed map[string]bool) bool {
 	if raw, ok := obj["type"]; ok {
 		typ, good := jsonTypeName(raw)
 		if !good || removed[typ] {
@@ -437,13 +544,13 @@ func choicePointsAt(obj map[string]json.RawMessage, removed map[string]bool) boo
 	if !ok {
 		return false
 	}
-	var arr []json.RawMessage
-	if json.Unmarshal(raw, &arr) != nil {
+	arr, ok := raw.([]any)
+	if !ok {
 		return true
 	}
 	for _, el := range arr {
-		var one map[string]json.RawMessage
-		if json.Unmarshal(el, &one) != nil || one == nil {
+		one, ok := el.(map[string]any)
+		if !ok || one == nil {
 			return true
 		}
 		if raw, ok := one["type"]; ok {

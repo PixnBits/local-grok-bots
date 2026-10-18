@@ -45,8 +45,8 @@ type Egress struct {
 	// onAudit records one request. Headers and bodies are not passed.
 	// suppressed counts 403 rows omitted since the previous 403 row.
 	onAudit func(botID, runID, path string, status int, suppressed int)
-	// onRefuse records a model request refused because its body could not
-	// be filtered. The reason is a fixed label. Headers and bodies are not passed.
+	// onRefuse records a request refused because its body could not be
+	// filtered. The reason is a fixed label. Headers and bodies are not passed.
 	onRefuse func(botID, runID, path, reason string)
 	// onStrip records non-function tools removed from a model request.
 	// removed is tool types only. source is managed, local, bot, default, or no_net.
@@ -72,10 +72,13 @@ type gateBinding struct {
 	net   bool
 }
 
-// Refusal labels for a model request. They name the failure, not the body.
+// Refusal labels for a filtered request. They name the failure, not the body.
+// duplicate_key means an object key was repeated at any nesting level.
+// unparsed means the body was not JSON, was invalid, or could not be decoded.
 const (
-	refuseUnparsed   = "unparsed"
-	refuseServerTool = "server_tool"
+	refuseUnparsed     = "unparsed"
+	refuseDuplicateKey = "duplicate_key"
+	refuseServerTool   = "server_tool"
 )
 
 // maxModelBody is how much of a model request is inspected. A larger body
@@ -239,9 +242,9 @@ func (e *Egress) SetAudit(fn func(botID, runID, path string, status int, suppres
 	e.gateMu.Unlock()
 }
 
-// SetRefuseAudit registers the model-request refusal record. The reason is
-// unparsed or server_tool. A nil function disables it. The callback must
-// not expect headers, a body, or the presented bearer.
+// SetRefuseAudit registers the body-refusal record. The reason is
+// unparsed, duplicate_key, or server_tool. A nil function disables it.
+// The callback must not expect headers, a body, or the presented bearer.
 func (e *Egress) SetRefuseAudit(fn func(botID, runID, path, reason string)) {
 	if e == nil {
 		return
@@ -319,7 +322,9 @@ func (e *Egress) noteRefuse(botID, runID, path, reason string) {
 	if e == nil {
 		return
 	}
-	if reason != refuseUnparsed && reason != refuseServerTool {
+	switch reason {
+	case refuseUnparsed, refuseDuplicateKey, refuseServerTool:
+	default:
 		reason = refuseServerTool
 	}
 	e.gateMu.Lock()
@@ -536,12 +541,14 @@ func (e *Egress) serve(trip http.RoundTripper) {
 				e.note(botID, runID, norm, http.StatusForbidden)
 				return
 			}
-			if e.requireGate && modelRequest(fwd) {
-				allow, source := e.serverToolAllow(presentedBearer(r), botID)
-				removed, refused := filterServerTools(fwd, allow)
-				if refused {
+			if e.requireGate {
+				presented := presentedBearer(r)
+				removed, source, reason := filterServerTools(fwd, func() ([]string, string) {
+					return e.serverToolAllow(presented, botID)
+				})
+				if reason != "" {
 					http.Error(w, "forbidden", http.StatusForbidden)
-					e.noteRefuse(botID, runID, norm, refuseUnparsed)
+					e.noteRefuse(botID, runID, norm, reason)
 					e.note(botID, runID, norm, http.StatusForbidden)
 					return
 				}
@@ -1052,19 +1059,4 @@ func restoreBody(r *http.Request, body []byte) {
 		return io.NopCloser(bytes.NewReader(body)), nil
 	}
 	r.TransferEncoding = nil
-}
-
-func modelRequest(r *http.Request) bool {
-	if r == nil || r.URL == nil {
-		return false
-	}
-	switch r.Method {
-	case http.MethodGet, http.MethodHead:
-		return false
-	}
-	p := strings.TrimRight(r.URL.Path, "/")
-	if strings.HasSuffix(p, "/v1/responses") {
-		return true
-	}
-	return strings.Contains(p, "/chat/completions")
 }

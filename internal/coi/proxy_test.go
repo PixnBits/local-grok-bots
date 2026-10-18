@@ -226,7 +226,7 @@ func TestLoopbackRejectsMismatchedBotRun(t *testing.T) {
 	client := &http.Client{Timeout: 2 * time.Second}
 	code := func(url, bearer string) int {
 		t.Helper()
-		req, err := http.NewRequest(http.MethodGet, url, strings.NewReader("secret-body"))
+		req, err := http.NewRequest(http.MethodGet, url, strings.NewReader(`{"n":1}`))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -301,7 +301,7 @@ func TestLoopbackAuditsRequest(t *testing.T) {
 	})
 	stop := eg.Admit("bot-a", "run-1", gate)
 	defer stop()
-	req, err := http.NewRequest(http.MethodPost, eg.Base()+"/bots/bot-a/runs/run-1/v1/ping?q="+queryMark, strings.NewReader(bodyMark))
+	req, err := http.NewRequest(http.MethodPost, eg.Base()+"/bots/bot-a/runs/run-1/v1/ping?q="+queryMark, strings.NewReader(`{"note":"`+bodyMark+`"}`))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -457,6 +457,13 @@
         </fieldset>
         <label>Network allowlist<input id="profile-net" placeholder="host.example" autocomplete="off"></label>
         <label>SSH allowlist<input id="profile-ssh" placeholder="host.example" autocomplete="off"></label>
+        <fieldset class="grants" id="server-tools">
+          <legend>Server tools</legend>
+          <label><input type="radio" name="server-tools-mode" id="server-tools-inherit" value="inherit" checked> Inherit from policy</label>
+          <label><input type="radio" name="server-tools-mode" id="server-tools-explicit" value="explicit"> Explicit list</label>
+          <span id="server-tools-picks"></span>
+        </fieldset>
+        <p class="empty" id="server-tools-hint" style="padding:0">Inherit from policy uses the effective list. An explicit list with nothing checked allows none. A bot without a net grant still loses every non-function tool.</p>
         <p class="empty" style="padding:0">Only you can set grants. Bots cannot grant them to themselves. Durable permission rules are the same: nothing is auto-allowed until you accept it, and a write still asks.</p>
         <h2>Permission rules</h2>
         <div id="perm-rules" class="perm-list"></div>
@@ -1660,7 +1667,8 @@ async function duplicateBot(id) {
     try {
       created = await api("/api/bots", {method:"POST", body: JSON.stringify({
         name, label: full.label || "", description: full.description || "",
-        mark: full.mark, model: full.model
+        mark: full.mark, model: full.model,
+        server_tools: full.server_tools == null ? null : full.server_tools
       })});
       break;
     } catch (err) {
@@ -1736,6 +1744,11 @@ async function openProfile(id) {
   }
   $("#profile-net").value = (b.net_allow || []).join(", ");
   $("#profile-ssh").value = (b.ssh_allow || []).join(", ");
+  const tools = b.server_tools;
+  $("#server-tools-inherit").checked = tools == null;
+  $("#server-tools-explicit").checked = tools != null;
+  paintServerTools(Array.isArray(tools) ? tools : []);
+  syncServerToolsMode();
   $("#profile-err").textContent = "";
   const warn = $("#profile-warn");
   if (b.warnings && b.warnings.length) {
@@ -1782,6 +1795,45 @@ async function loadRoutines() {
 function splitList(s) {
   return String(s || "").split(/[\s,]+/).map(x => x.trim()).filter(Boolean);
 }
+const SERVER_TOOL_NAMES = ["web_search", "x_search"];
+function paintServerTools(selected) {
+  const box = $("#server-tools-picks");
+  if (!box) return;
+  box.replaceChildren();
+  const have = new Set(selected || []);
+  const names = SERVER_TOOL_NAMES.slice();
+  for (const n of have) if (!names.includes(n)) names.push(n);
+  for (const name of names) {
+    const label = el("label");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = "server-tool";
+    input.value = name;
+    input.checked = have.has(name);
+    label.append(input, document.createTextNode(" " + name));
+    box.append(label);
+  }
+  syncServerToolsMode();
+}
+function syncServerToolsMode() {
+  const picked = document.querySelector('#profile-form input[name="server-tools-mode"]:checked');
+  const on = !!(picked && picked.value === "explicit");
+  for (const box of document.querySelectorAll('#profile-form input[name="server-tool"]')) {
+    box.disabled = !on;
+  }
+}
+function serverToolsPayload() {
+  const picked = document.querySelector('#profile-form input[name="server-tools-mode"]:checked');
+  if (!picked || picked.value !== "explicit") return null;
+  const list = [];
+  for (const box of document.querySelectorAll('#profile-form input[name="server-tool"]')) {
+    if (box.checked) list.push(box.value);
+  }
+  return list;
+}
+for (const mode of document.querySelectorAll('#profile-form input[name="server-tools-mode"]')) {
+  mode.addEventListener("change", syncServerToolsMode);
+}
 $("#profile-back").addEventListener("click", () => openBot(state.botId));
 $("#profile-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -1801,7 +1853,8 @@ $("#profile-form").addEventListener("submit", async (e) => {
       model: model || null,
       grants,
       net_allow: splitList($("#profile-net").value),
-      ssh_allow: splitList($("#profile-ssh").value)
+      ssh_allow: splitList($("#profile-ssh").value),
+      server_tools: serverToolsPayload()
     })});
     await loadBots();
     const note = $("#profile-err");

@@ -810,7 +810,9 @@ func (a *App) auditProxyRefused(botID, runID, path, reason string) {
 	if a == nil || a.audit == nil || !a.audit.Enabled() {
 		return
 	}
-	if reason != "unparsed" && reason != "server_tool" {
+	switch reason {
+	case "unparsed", "duplicate_key", "server_tool":
+	default:
 		reason = "server_tool"
 	}
 	a.audit.Write(map[string]any{

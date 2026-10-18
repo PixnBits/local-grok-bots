@@ -109,8 +109,11 @@ func TestMetaToolsDoNotGrant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Label != "renamed" || strings.Join(got.Grants, ",") != "git" || len(got.NetAllow) != 0 || got.ServerTools != nil {
+	if got.Label != "renamed" || strings.Join(got.Grants, ",") != "git" || len(got.NetAllow) != 0 {
 		t.Fatalf("update_bot changed grants %#v", got)
+	}
+	if got.ServerTools == nil || strings.Join(*got.ServerTools, ",") != "web_search" {
+		t.Fatalf("update_bot server_tools %#v", got.ServerTools)
 	}
 	out, err := app.dispatchTool(ctx, caller, "create_bot", map[string]any{
 		"name": "Spawn", "description": "stay", "grants": []any{"ssh"}, "ssh_allow": []any{"evil.test"},
@@ -126,8 +129,94 @@ func TestMetaToolsDoNotGrant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(spawn.Grants) != 0 || len(spawn.SSHAllow) != 0 || spawn.ServerTools != nil {
+	if len(spawn.Grants) != 0 || len(spawn.SSHAllow) != 0 {
 		t.Fatalf("create_bot copied grants %#v", spawn)
+	}
+	if spawn.ServerTools == nil || strings.Join(*spawn.ServerTools, ",") != "web_search" {
+		t.Fatalf("create_bot server_tools %#v", spawn.ServerTools)
+	}
+}
+
+func TestMetaToolServerTools(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "no"}, nil
+	}})
+	caller, err := app.st.CreateBot("Caller", "tools", nil, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := app.dispatchTool(ctx, caller, "create_bot", map[string]any{
+		"name": "Inherit", "description": "stay",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	inherit, err := app.st.FindBot("Inherit")
+	if err != nil || inherit.ServerTools != nil {
+		t.Fatalf("omit %#v %v", inherit.ServerTools, err)
+	}
+	if _, err := app.dispatchTool(ctx, caller, "create_bot", map[string]any{
+		"name": "NullList", "description": "stay", "server_tools": nil,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	nullList, err := app.st.FindBot("NullList")
+	if err != nil || nullList.ServerTools != nil {
+		t.Fatalf("null %#v %v", nullList.ServerTools, err)
+	}
+	if _, err := app.dispatchTool(ctx, caller, "create_bot", map[string]any{
+		"name": "None", "description": "stay", "server_tools": []any{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	none, err := app.st.FindBot("None")
+	if err != nil || none.ServerTools == nil || len(*none.ServerTools) != 0 {
+		t.Fatalf("empty %#v %v", none.ServerTools, err)
+	}
+	if _, err := app.dispatchTool(ctx, caller, "create_bot", map[string]any{
+		"name": "Listed", "description": "stay", "server_tools": []any{" Web_Search ", "x_search"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := app.st.FindBot("Listed")
+	if err != nil || listed.ServerTools == nil || strings.Join(*listed.ServerTools, ",") != "web_search,x_search" {
+		t.Fatalf("list %#v %v", listed.ServerTools, err)
+	}
+	if _, err := app.dispatchTool(ctx, caller, "update_bot", map[string]any{
+		"id": listed.ID, "label": "kept",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	kept, err := app.st.GetBot(listed.ID)
+	if err != nil || kept.Label != "kept" || kept.ServerTools == nil || strings.Join(*kept.ServerTools, ",") != "web_search,x_search" {
+		t.Fatalf("omit update %#v %v", kept.ServerTools, err)
+	}
+	if _, err := app.dispatchTool(ctx, caller, "update_bot", map[string]any{
+		"id": listed.ID, "server_tools": nil,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cleared, err := app.st.GetBot(listed.ID)
+	if err != nil || cleared.ServerTools != nil {
+		t.Fatalf("null update %#v %v", cleared.ServerTools, err)
+	}
+	if _, err := app.dispatchTool(ctx, caller, "update_bot", map[string]any{
+		"id": listed.ID, "server_tools": []any{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	empty, err := app.st.GetBot(listed.ID)
+	if err != nil || empty.ServerTools == nil || len(*empty.ServerTools) != 0 {
+		t.Fatalf("empty update %#v %v", empty.ServerTools, err)
+	}
+	if _, err := app.dispatchTool(ctx, caller, "update_bot", map[string]any{
+		"id": listed.ID, "server_tools": []any{"bad name"},
+	}); err == nil || !strings.Contains(err.Error(), "invalid server_tools") || strings.Contains(err.Error(), "bad name") {
+		t.Fatalf("bad %v", err)
+	}
+	stuck, err := app.st.GetBot(listed.ID)
+	if err != nil || stuck.ServerTools == nil || len(*stuck.ServerTools) != 0 {
+		t.Fatalf("bad write stuck %#v %v", stuck.ServerTools, err)
 	}
 }
 
@@ -139,8 +228,82 @@ func TestDuplicateOmitsGrants(t *testing.T) {
 		t.Fatal("duplicateBot missing")
 	}
 	body := src[i:j]
-	if strings.Contains(body, "grants") || strings.Contains(body, "net_allow") || strings.Contains(body, "ssh_allow") || strings.Contains(body, "server_tools") {
+	if strings.Contains(body, "grants") || strings.Contains(body, "net_allow") || strings.Contains(body, "ssh_allow") {
 		t.Fatalf("duplicate copies grants:\n%s", body)
+	}
+	if !strings.Contains(body, "server_tools") || !strings.Contains(body, "full.server_tools") {
+		t.Fatalf("duplicate drops server_tools:\n%s", body)
+	}
+}
+
+func TestProfileSaveKeepsServerTools(t *testing.T) {
+	src := string(web.IndexHTML)
+	if !strings.Contains(src, "Inherit from policy") || !strings.Contains(src, "Explicit list") || !strings.Contains(src, "allows none") {
+		t.Fatal("profile does not distinguish inherit from an explicit list")
+	}
+	i := strings.Index(src, `$("#profile-form").addEventListener("submit"`)
+	j := strings.Index(src, `$("#routine-add")`)
+	if i < 0 || j < i {
+		t.Fatal("profile save missing")
+	}
+	save := src[i:j]
+	if !strings.Contains(save, "server_tools: serverToolsPayload()") {
+		t.Fatal("profile save drops server_tools")
+	}
+	if !strings.Contains(src, "function serverToolsPayload()") || !strings.Contains(src, `value !== "explicit"`) {
+		t.Fatal("inherit and explicit are not separate")
+	}
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "no"}, nil
+	}})
+	srv := serve(t, app)
+	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{
+		"name": "Ada", "description": "stay", "server_tools": []string{"x_search"},
+	}, "")
+	if res.StatusCode != 201 {
+		t.Fatalf("create %d %s", res.StatusCode, b)
+	}
+	var bot store.Bot
+	decodeJSON(t, b, &bot)
+	res, b = do(t, "PATCH", srv.URL+"/api/bots/"+bot.ID, map[string]any{
+		"name": "Ada", "label": "kept", "description": "stay", "model": nil,
+		"grants": []string{}, "net_allow": []string{}, "ssh_allow": []string{},
+		"server_tools": []string{"x_search"},
+	}, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("save %d %s", res.StatusCode, b)
+	}
+	decodeJSON(t, b, &bot)
+	if bot.Label != "kept" || bot.ServerTools == nil || strings.Join(*bot.ServerTools, ",") != "x_search" {
+		t.Fatalf("profile save %#v", bot.ServerTools)
+	}
+	res, b = do(t, "POST", srv.URL+"/api/bots", map[string]any{
+		"name": "Ada copy", "label": bot.Label, "description": bot.Description,
+		"mark": bot.Mark, "model": bot.Model, "server_tools": bot.ServerTools,
+	}, "")
+	if res.StatusCode != 201 {
+		t.Fatalf("duplicate %d %s", res.StatusCode, b)
+	}
+	var copy store.Bot
+	decodeJSON(t, b, &copy)
+	if copy.ID == bot.ID || len(copy.Grants) != 0 || copy.ServerTools == nil || strings.Join(*copy.ServerTools, ",") != "x_search" {
+		t.Fatalf("copy %#v", copy)
+	}
+	res, b = do(t, "PATCH", srv.URL+"/api/bots/"+bot.ID, map[string]any{"server_tools": []string{}}, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("none %d %s", res.StatusCode, b)
+	}
+	decodeJSON(t, b, &bot)
+	res, b = do(t, "POST", srv.URL+"/api/bots", map[string]any{
+		"name": "Ada none", "label": bot.Label, "description": bot.Description,
+		"server_tools": bot.ServerTools,
+	}, "")
+	if res.StatusCode != 201 {
+		t.Fatalf("duplicate none %d %s", res.StatusCode, b)
+	}
+	decodeJSON(t, b, &copy)
+	if copy.ServerTools == nil || len(*copy.ServerTools) != 0 {
+		t.Fatalf("none copy %#v", copy.ServerTools)
 	}
 }
 

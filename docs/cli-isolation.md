@@ -47,9 +47,12 @@ net-granted bot may keep. Function tools are not part of that list.
 Omitted, the list is empty and the loopback proxy strips every such
 type. An explicit empty list is set: it narrows a managed ceiling to
 nothing. Managed policy sets the ceiling. Local policy and each bot's
-`server_tools` field can only narrow it. A bot without a net grant loses
-every non-function tool. The proxy applies this on each model request.
-Permission mode still uses the snapshot from daemon start.
+`server_tools` field can only narrow it. Leaving the bot field out, or
+setting it to null, inherits this list. An explicit empty bot list
+allows none of those types. A bot without a net grant loses every
+non-function tool. The proxy applies this to every non-empty body on
+the loopback credential proxy, using the same normalized path as its
+allow decision. Permission mode still uses the snapshot from daemon start.
 
 ## Timeouts
 
@@ -390,26 +393,36 @@ The list is the tools an ask rule can force to prompt:
 `web_fetch` and `web_search` are added to `--tools` only with a net grant.
 That flag does not stop server-side search. `grok agent stdio` ignores
 `--tools` and `--disallowed-tools` for tools the model runs at the
-provider. The loopback proxy strips non-function tools from a model
-request (`/v1/responses` or a chat completions body). A `function` tool
-stays. A missing `tools` key, or a list that needs no change, is
-forwarded as it arrived. A bot without a net grant loses every
+provider. The loopback credential proxy reads every non-empty body, on
+any method and any path it has already allowed. The path is the same
+normalized path as that allow decision, so a trailing slash, another
+case, or an encoding that still normalizes to an allowed path does not
+skip the check. A path the allow decision rejects is not forwarded.
+A `function` tool stays. A JSON value with no top-level `tools` key is
+re-encoded and forwarded. A bot without a net grant loses every
 non-function tool, including `web_search` and `x_search`. Server-side
 search is network access, so policy cannot keep one. A net grant keeps
 only the types on the effective `[cli].server_tools` list. The default
 list is empty. Managed policy sets the ceiling. Local policy and the
-bot's `server_tools` field can only narrow it. Omitting the key leaves
-the default. An explicit empty list is a set layer and narrows a
-managed ceiling to nothing. A tool entry that is not an object, has no
-string type, or names a type outside the list is stripped. Each strip
-is audited as `cli_proxy_stripped` with `bot_id`, `run_id`, `path`, the
-removed types, and the policy source (`managed`, `local`, `bot`,
-`default`, or `no_net`). The row records types only. A body that cannot
-be filtered (invalid JSON, `tools` not an array, or an unsupported
-content encoding) is refused with 403 and audited as
-`cli_proxy_refused` with reason `unparsed`. The proxy reads this list
-on each model request. Permission mode still uses the snapshot from
-daemon start. `list_dir`, `x_keyword_search`, and `x_semantic_search`
+bot's `server_tools` field can only narrow it. Leaving the bot field
+out, or setting it to null, inherits policy. An explicit empty bot list
+allows none of those types. Omitting the policy key is the empty
+default, not an inherit. An explicit empty policy list is a set layer
+and narrows a managed ceiling to nothing. A tool entry that is not an
+object, has no string type, or names a type outside the list is
+stripped. Each strip is audited as `cli_proxy_stripped` with `bot_id`,
+`run_id`, `path`, the removed types, and the policy source (`managed`,
+`local`, `bot`, `default`, or `no_net`). The row records types only.
+After a body parses, the proxy forwards a freshly re-encoded JSON value,
+including when nothing was stripped. It does not forward the original
+bytes. Number literals stay as written, and `&`, `<`, and `>` are not
+escaped. A repeated object key at any depth is refused with 403 and
+audited as `cli_proxy_refused` with reason `duplicate_key`. Invalid
+JSON, a non-JSON body, `tools` that is not an array, an unsupported
+content encoding, or a body nested too deeply is refused with 403 and
+reason `unparsed`. An empty body is left alone. The proxy reads this
+list when a body has a `tools` array to filter. Permission mode still
+uses the snapshot from daemon start. `list_dir`, `x_keyword_search`, and `x_semantic_search`
 are not on `--tools`. Everything else stays off that list
 (`todo_write`, subagent and scheduler tools, `monitor`, `workflow`,
 plan mode, `ask_user_question`, `send_feedback`, image tools,
@@ -723,10 +736,12 @@ Residuals:
 - `list_dir` is not on `--tools`. If a permission request for it still
   arrives, it is classified as Glob. Server-side `web_search` and
   `x_search` tools do not reach the host. The loopback proxy strips
-  non-function tools from the model request. A bot without a net grant
-  loses every one of them (`cli_proxy_stripped`, source `no_net`). A net
-  grant keeps only the effective `server_tools` list. A body that cannot
-  be filtered is still `cli_proxy_refused` with reason `unparsed`.
+  non-function tools from every non-empty body, not only one model path.
+  A bot without a net grant loses every one of them (`cli_proxy_stripped`,
+  source `no_net`). A net grant keeps only the effective `server_tools`
+  list. A duplicate object key is `cli_proxy_refused` with reason
+  `duplicate_key`. Any other body that cannot be filtered, including a
+  non-JSON body, is `cli_proxy_refused` with reason `unparsed`.
   `x_keyword_search` and `x_semantic_search` stay off the `--tools`
   list either way; that list does not stop a server-side tool.
   `disable_web_search` in the sealed config has no effect on Grok.

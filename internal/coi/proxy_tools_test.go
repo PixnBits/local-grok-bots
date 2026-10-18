@@ -39,6 +39,11 @@ type stripProxy struct {
 
 func newStripProxy(t *testing.T) *stripProxy {
 	t.Helper()
+	return newStripProxyAt(t, nil)
+}
+
+func newStripProxyAt(t *testing.T, prefixes []string) *stripProxy {
+	t.Helper()
 	p := &stripProxy{t: t}
 	trip := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		body := ""
@@ -56,7 +61,7 @@ func newStripProxy(t *testing.T) *stripProxy {
 		p.mu.Unlock()
 		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader("ok"))}, nil
 	})
-	eg, err := StartLoopback([]string{GrokChatHost}, nil, func() (string, error) {
+	eg, err := StartLoopback([]string{GrokChatHost}, prefixes, func() (string, error) {
 		return "real-token-value", nil
 	}, trip)
 	if err != nil {
@@ -69,7 +74,7 @@ func newStripProxy(t *testing.T) *stripProxy {
 		p.mu.Unlock()
 	})
 	eg.SetRefuseAudit(func(botID, runID, path, reason string) {
-		if botID != "bot-a" || runID != "run-1" || (path != "/v1/responses" && path != "/v1/chat/completions") {
+		if botID != "bot-a" || runID != "run-1" {
 			t.Errorf("refuse route %s %s %s", botID, runID, path)
 		}
 		p.mu.Lock()
@@ -92,17 +97,19 @@ func (p *stripProxy) reset() {
 
 func (p *stripProxy) post(route, body, auth string, hdr map[string]string) int {
 	p.t.Helper()
-	return p.postBytes(route, []byte(body), auth, hdr)
+	return p.send(http.MethodPost, route, []byte(body), auth, hdr)
 }
 
-func (p *stripProxy) postBytes(route string, body []byte, auth string, hdr map[string]string) int {
+func (p *stripProxy) send(method, route string, body []byte, auth string, hdr map[string]string) int {
 	p.t.Helper()
-	req, err := http.NewRequest(http.MethodPost, p.base+route, bytes.NewReader(body))
+	req, err := http.NewRequest(method, p.base+route, bytes.NewReader(body))
 	if err != nil {
 		p.t.Fatal(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+auth)
-	req.Header.Set("Content-Type", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	for k, v := range hdr {
 		req.Header.Set(k, v)
 	}
@@ -116,6 +123,11 @@ func (p *stripProxy) postBytes(route string, body []byte, auth string, hdr map[s
 		p.t.Fatalf("response carried request text: %s", respBody)
 	}
 	return resp.StatusCode
+}
+
+func (p *stripProxy) postBytes(route string, body []byte, auth string, hdr map[string]string) int {
+	p.t.Helper()
+	return p.send(http.MethodPost, route, body, auth, hdr)
 }
 
 func (p *stripProxy) lastUp() upSnap {
@@ -211,11 +223,12 @@ func TestProxyStripsNonFunctionTools(t *testing.T) {
 	}
 
 	fnBody := `{"tools": [ {"type": "function", "name": "read_file"} ]}`
+	fnKept := `{"tools":[{"name":"read_file","type":"function"}]}`
 	if p.post(route, fnBody, gate, nil) != http.StatusOK {
 		t.Fatal("function")
 	}
-	if got := p.lastUp().body; got != fnBody {
-		t.Fatalf("function body changed %q", got)
+	if got := p.lastUp().body; got != fnKept {
+		t.Fatalf("function body %q", got)
 	}
 	p.mu.Lock()
 	if len(p.strips) != 1 {
@@ -232,7 +245,7 @@ func TestProxyStripsNonFunctionTools(t *testing.T) {
 		t.Fatalf("empty tools %q", p.lastUp().body)
 	}
 	nullTools := `{"tools":null,"input":"hi"}`
-	if p.post(route, nullTools, gate, nil) != http.StatusOK || p.lastUp().body != nullTools {
+	if p.post(route, nullTools, gate, nil) != http.StatusOK || p.lastUp().body != `{"input":"hi","tools":null}` {
 		t.Fatalf("null tools %q", p.lastUp().body)
 	}
 
@@ -324,7 +337,7 @@ func TestProxyStripsNonFunctionTools(t *testing.T) {
 		t.Fatal("allow")
 	}
 	got := p.lastUp().body
-	want := `{"n":2,"tools":[{"type":"web_search","foo":1},{"type":"function","name":"a&b"}]}`
+	want := `{"n":2,"tools":[{"foo":1,"type":"web_search"},{"name":"a&b","type":"function"}]}`
 	if got != want {
 		t.Fatalf("kept %s", got)
 	}
@@ -379,7 +392,7 @@ func TestProxyToolChoiceCleanup(t *testing.T) {
 	}{
 		{
 			`{"tools":[{"type":"function","name":"read_file"},{"type":"web_search"}],"tool_choice":"web_search"}`,
-			`{"tool_choice":"auto","tools":[{"type":"function","name":"read_file"}]}`,
+			`{"tool_choice":"auto","tools":[{"name":"read_file","type":"function"}]}`,
 		},
 		{
 			`{"input":"hi","tools":[{"type":"web_search"}],"tool_choice":"required"}`,
@@ -391,31 +404,31 @@ func TestProxyToolChoiceCleanup(t *testing.T) {
 		},
 		{
 			`{"tools":[{"type":"function","name":"read_file"},{"type":"web_search"}],"tool_choice":"required"}`,
-			`{"tool_choice":"required","tools":[{"type":"function","name":"read_file"}]}`,
+			`{"tool_choice":"required","tools":[{"name":"read_file","type":"function"}]}`,
 		},
 		{
 			`{"tools":[{"type":"function","name":"read_file"},{"type":"web_search"}],"tool_choice":{"type":"function","name":"read_file"}}`,
-			`{"tool_choice":{"type":"function","name":"read_file"},"tools":[{"type":"function","name":"read_file"}]}`,
+			`{"tool_choice":{"name":"read_file","type":"function"},"tools":[{"name":"read_file","type":"function"}]}`,
 		},
 		{
 			`{"tools":[{"type":"function","name":"web_search"},{"type":"web_search"}],"tool_choice":{"type":"function","name":"web_search"}}`,
-			`{"tool_choice":"auto","tools":[{"type":"function","name":"web_search"}]}`,
+			`{"tool_choice":"auto","tools":[{"name":"web_search","type":"function"}]}`,
 		},
 		{
 			`{"tools":[{"type":"function","name":"a"},{"type":"web_search"}],"tool_choice":{"type":"allowed_tools","tools":[{"type":"web_search"}]}}`,
-			`{"tool_choice":"auto","tools":[{"type":"function","name":"a"}]}`,
+			`{"tool_choice":"auto","tools":[{"name":"a","type":"function"}]}`,
 		},
 		{
 			`{"tools":[{"type":"web_search"},{"type":"function","name":"a"}],"tool_choice":"auto"}`,
-			`{"tool_choice":"auto","tools":[{"type":"function","name":"a"}]}`,
+			`{"tool_choice":"auto","tools":[{"name":"a","type":"function"}]}`,
 		},
 		{
 			`{"tools":[{"type":"web_search"},{"type":"function","name":"a"}],"tool_choice":"none"}`,
-			`{"tool_choice":"none","tools":[{"type":"function","name":"a"}]}`,
+			`{"tool_choice":"none","tools":[{"name":"a","type":"function"}]}`,
 		},
 		{
 			`{"tools":[{"type":"function","name":"a"},{"type":"web_search"}],"tool_choice":{"type":"required"}}`,
-			`{"tool_choice":{"type":"required"},"tools":[{"type":"function","name":"a"}]}`,
+			`{"tool_choice":{"type":"required"},"tools":[{"name":"a","type":"function"}]}`,
 		},
 		{
 			`{"tools":[{"type":"web_search"}],"tool_choice":{"type":"required"}}`,
@@ -427,7 +440,7 @@ func TestProxyToolChoiceCleanup(t *testing.T) {
 		},
 		{
 			`{"input":"hi","tools":["nope",{"type":"function","name":"a"}]}`,
-			`{"input":"hi","tools":[{"type":"function","name":"a"}]}`,
+			`{"input":"hi","tools":[{"name":"a","type":"function"}]}`,
 		},
 		{
 			`{"tools":[{"type":"code_interpreter"}]}`,
@@ -435,7 +448,7 @@ func TestProxyToolChoiceCleanup(t *testing.T) {
 		},
 		{
 			`{"tools":[{"type":1},{"type":"function","name":"a"}]}`,
-			`{"tools":[{"type":"function","name":"a"}]}`,
+			`{"tools":[{"name":"a","type":"function"}]}`,
 		},
 		{
 			`{"tools":[{}]}`,
@@ -481,7 +494,7 @@ func TestProxyStripsCompressedBodies(t *testing.T) {
 	})
 	route := "/bots/bot-a/runs/run-1/v1/responses"
 	raw := `{"tools":[{"type":"function","name":"read_file"},{"type":"x_search"}]}`
-	kept := `{"tools":[{"type":"function","name":"read_file"}]}`
+	kept := `{"tools":[{"name":"read_file","type":"function"}]}`
 	fnOnly := `{"tools":[{"type":"function","name":"read_file"}]}`
 
 	check := func(enc string, body []byte, want string) {
@@ -499,7 +512,7 @@ func TestProxyStripsCompressedBodies(t *testing.T) {
 	check("x-gzip", gzipBytes(t, raw), kept)
 	check("deflate", zlibBytes(t, raw), kept)
 	check("deflate", flateBytes(t, raw), kept)
-	check("gzip", gzipBytes(t, fnOnly), fnOnly)
+	check("gzip", gzipBytes(t, fnOnly), kept)
 
 	outer := gzipBytes(t, string(flateBytes(t, raw)))
 	check("deflate, gzip", outer, kept)
@@ -560,5 +573,176 @@ func TestEgressDoesNotStripServerTools(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK || got != body {
 		t.Fatalf("status %d body %q", resp.StatusCode, got)
+	}
+}
+
+func TestProxyRefusesDuplicateKeys(t *testing.T) {
+	p := newStripProxy(t)
+	const gate = "unit-loopback-gate1"
+	stop := p.eg.AdmitNet("bot-a", "run-1", gate, true)
+	defer stop()
+	p.eg.SetServerTools(func(string) ([]string, string) {
+		t.Fatal("duplicate key consulted the allow list")
+		return []string{"web_search"}, "managed"
+	})
+	route := "/bots/bot-a/runs/run-1/v1/responses"
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"top", `{"tools":[{"type":"function","name":"read_file"}],"input":"planted-phrase","tools":[{"type":"web_search"}]}`},
+		{"nested", `{"tools":[{"type":"web_search","type":"function","name":"do-not-audit-this-payload"}]}`},
+		{"choice", `{"tool_choice":{"type":"function","type":"web_search"},"input":"hi"}`},
+		{"escaped", `{"tools":[{"type":"function","ty\u0070e":"web_search","name":"a"}]}`},
+	}
+	for _, tc := range cases {
+		p.reset()
+		before := p.calls()
+		if p.post(route, tc.body, gate, nil) != http.StatusForbidden || p.calls() != before {
+			t.Fatalf("%s forwarded", tc.name)
+		}
+		p.mu.Lock()
+		refuses := append([]string(nil), p.refuses...)
+		strips := len(p.strips)
+		p.mu.Unlock()
+		if strips != 0 || len(refuses) != 1 || !strings.HasPrefix(refuses[0], "duplicate_key ") {
+			t.Fatalf("%s audit %#v strips %d", tc.name, refuses, strips)
+		}
+		if strings.Contains(refuses[0], "planted-phrase") || strings.Contains(refuses[0], "web_search") || strings.Contains(refuses[0], "do-not-audit") {
+			t.Fatalf("%s audit carried body %s", tc.name, refuses[0])
+		}
+	}
+}
+
+func TestProxyRemarshalsUnchangedBody(t *testing.T) {
+	p := newStripProxy(t)
+	const gate = "unit-loopback-gate1"
+	stop := p.eg.Admit("bot-a", "run-1", gate)
+	defer stop()
+	route := "/bots/bot-a/runs/run-1/v1/responses"
+	orig := "{\n  \"z\" : 1,\n  \"a\" : \"x<y&z\",\n  \"n\" : 9007199254740993\n}\n"
+	want := `{"a":"x<y&z","n":9007199254740993,"z":1}`
+	if p.post(route, orig, gate, nil) != http.StatusOK {
+		t.Fatal("status")
+	}
+	up := p.lastUp()
+	if up.body == orig || up.body != want || up.clen != int64(len(want)) || up.hdrLen != strconv.Itoa(len(want)) || up.enc != "" {
+		t.Fatalf("upstream %#v", up)
+	}
+	if strings.Contains(up.body, `\u003c`) || strings.Contains(up.body, `\u0026`) {
+		t.Fatalf("escaped %s", up.body)
+	}
+	p.mu.Lock()
+	if len(p.strips) != 0 || len(p.refuses) != 0 {
+		t.Fatalf("audited a clean body strips %#v refuses %#v", p.strips, p.refuses)
+	}
+	p.mu.Unlock()
+}
+
+func TestProxyFiltersToolsOnAnyPath(t *testing.T) {
+	p := newStripProxy(t)
+	const gate = "unit-loopback-gate1"
+	stop := p.eg.Admit("bot-a", "run-1", gate)
+	defer stop()
+	body := `{"tools":[{"type":"web_search"},{"type":"x_search"},{"type":"function","name":"read_file"}]}`
+	want := `{"tools":[{"name":"read_file","type":"function"}]}`
+	paths := []struct {
+		route string
+		audit string
+	}{
+		{"/bots/bot-a/runs/run-1/v1/responses/x", "/v1/responses/x"},
+		{"/bots/bot-a/runs/run-1/v1/responses:stream", "/v1/responses:stream"},
+		{"/bots/bot-a/runs/run-1/v1/responses/", "/v1/responses"},
+		{"/bots/bot-a/runs/run-1/v1/RESPONSES/x", "/v1/RESPONSES/x"},
+		{"/bots/bot-a/runs/run-1/v1/chat/completions/extra", "/v1/chat/completions/extra"},
+		{"/bots/bot-a/runs/run-1/v1/ping", "/v1/ping"},
+	}
+	for _, tc := range paths {
+		p.reset()
+		if p.post(tc.route, body, gate, nil) != http.StatusOK {
+			t.Fatalf("%s status", tc.route)
+		}
+		up := p.lastUp()
+		if up.body != want || strings.Contains(up.body, "web_search") || strings.Contains(up.body, "x_search") {
+			t.Fatalf("%s body %s", tc.route, up.body)
+		}
+		if up.clen != int64(len(want)) || up.hdrLen != strconv.Itoa(len(want)) {
+			t.Fatalf("%s length %#v", tc.route, up)
+		}
+		p.mu.Lock()
+		strips := append([]stripRec(nil), p.strips...)
+		p.mu.Unlock()
+		if len(strips) != 1 || strips[0].path != tc.audit || strips[0].source != "no_net" || strings.Join(strips[0].removed, ",") != "web_search,x_search" {
+			t.Fatalf("%s strip %#v", tc.route, strips)
+		}
+	}
+
+	p.reset()
+	if p.send(http.MethodPut, "/bots/bot-a/runs/run-1/v1/responses/x", []byte(body), gate, nil) != http.StatusOK || p.lastUp().body != want {
+		t.Fatalf("put %s", p.lastUp().body)
+	}
+	p.reset()
+	if p.send(http.MethodGet, "/bots/bot-a/runs/run-1/v1/ping", []byte(body), gate, nil) != http.StatusOK || strings.Contains(p.lastUp().body, "web_search") {
+		t.Fatalf("get body %s", p.lastUp().body)
+	}
+
+	p.reset()
+	plain := "{ \"b\" : 1, \"a\" : 2 }"
+	if p.post("/bots/bot-a/runs/run-1/v1/ping", plain, gate, nil) != http.StatusOK || p.lastUp().body != `{"a":2,"b":1}` {
+		t.Fatalf("no tools %q", p.lastUp().body)
+	}
+	p.mu.Lock()
+	if len(p.strips) != 0 {
+		t.Fatalf("plain stripped %#v", p.strips)
+	}
+	p.mu.Unlock()
+
+	before := p.calls()
+	if p.post("/bots/bot-a/runs/run-1/v1/ping", "not-json", gate, nil) != http.StatusForbidden || p.calls() != before {
+		t.Fatal("non-json forwarded")
+	}
+	if p.post("/bots/bot-a/runs/run-1/v1/models", "   ", gate, nil) != http.StatusForbidden || p.calls() != before {
+		t.Fatal("whitespace forwarded")
+	}
+	deep := strings.Repeat(`{"a":`, maxJSONDepth+1) + "1" + strings.Repeat("}", maxJSONDepth+1)
+	if p.post("/bots/bot-a/runs/run-1/v1/ping", deep, gate, nil) != http.StatusForbidden || p.calls() != before {
+		t.Fatal("deep body forwarded")
+	}
+	p.mu.Lock()
+	refuses := append([]string(nil), p.refuses...)
+	p.mu.Unlock()
+	if len(refuses) != 3 {
+		t.Fatalf("refuses %#v", refuses)
+	}
+	for _, r := range refuses {
+		if !strings.HasPrefix(r, "unparsed ") || strings.Contains(r, "not-json") {
+			t.Fatalf("refuse %q", r)
+		}
+	}
+
+	p.reset()
+	before = p.calls()
+	if p.post("/bots/bot-a/runs/run-1/v1//responses", body, gate, nil) != http.StatusForbidden || p.calls() != before {
+		t.Fatal("double slash forwarded")
+	}
+	p.mu.Lock()
+	if len(p.refuses) != 0 || len(p.strips) != 0 {
+		t.Fatalf("double slash filtered %#v %#v", p.refuses, p.strips)
+	}
+	p.mu.Unlock()
+
+	other := newStripProxyAt(t, []string{"/api"})
+	stopAPI := other.eg.Admit("bot-a", "run-1", gate)
+	defer stopAPI()
+	if other.post("/bots/bot-a/runs/run-1/api/chat", body, gate, nil) != http.StatusOK || strings.Contains(other.lastUp().body, "web_search") {
+		t.Fatalf("non-v1 %s", other.lastUp().body)
+	}
+	other.mu.Lock()
+	if len(other.strips) != 1 || other.strips[0].path != "/api/chat" || other.strips[0].source != "no_net" {
+		t.Fatalf("non-v1 strip %#v", other.strips)
+	}
+	other.mu.Unlock()
+	if other.post("/bots/bot-a/runs/run-1/api/chat", "not-json", gate, nil) != http.StatusForbidden || other.calls() != 1 {
+		t.Fatal("non-v1 non-json forwarded")
 	}
 }
