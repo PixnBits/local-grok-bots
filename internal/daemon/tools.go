@@ -94,6 +94,20 @@ func toolDefs() []model.Tool {
 			Parameters: schemaObj(map[string]any{"path": prop("string", "Path relative to the workspace. Example: \"notes/old.md\".")}, "path")},
 		{Name: "run_shell", Description: "Run a shell command inside the workspace jail and return its output. Paths outside the workspace are rejected. Network, git push, and SSH fail unless the user granted them.",
 			Parameters: schemaObj(map[string]any{"command": prop("string", "A bash command line. Example: \"ls -la && go version\".")}, "command")},
+		{Name: "create_pr", Description: "Open a pull request on an allowlisted GitHub repository. The daemon asks for approval on a card and sends it from the host. draft defaults to true. head cannot be the repository default branch.",
+			Parameters: schemaObj(map[string]any{
+				"repo":  prop("string", "Repository as owner/repo. Example: \"acme/widgets\"."),
+				"head":  prop("string", "Branch that contains the changes. Example: \"feature\"."),
+				"base":  prop("string", "Branch the pull request merges into. Example: \"main\"."),
+				"title": prop("string", "Pull request title. Example: \"Add a widget\"."),
+				"body":  prop("string", "Pull request text. Example: \"Fixes the empty state.\""),
+				"draft": prop("boolean", "Open as a draft. Omit to default to true. Example: true."),
+			}, "repo", "head", "base", "title")},
+		{Name: "pr_status", Description: "Read one pull request on an allowlisted GitHub repository. Returns the url, state, draft flag, head branch, and base branch. It does not change the pull request and does not ask for approval.",
+			Parameters: schemaObj(map[string]any{
+				"repo":   prop("string", "Repository as owner/repo. Example: \"acme/widgets\"."),
+				"number": prop("integer", "Pull request number. Example: 7."),
+			}, "repo", "number")},
 		{Name: "list_bots", Description: "List all bots with id, name, label, and status.",
 			Parameters: schemaObj(map[string]any{})},
 		{Name: "read_bot", Description: "Read one bot's description and memory.",
@@ -423,6 +437,10 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		return a.toolEditFile(bot.ID, args)
 	case "delete_file":
 		return a.toolDeleteFile(bot.ID, args)
+	case "create_pr":
+		return a.toolCreatePR(ctx, bot, args)
+	case "pr_status":
+		return a.toolPRStatus(ctx, bot, args)
 	case "run_shell":
 		command := strArg(args, "command")
 		current := bot
