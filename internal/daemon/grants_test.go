@@ -228,7 +228,7 @@ func TestDuplicateOmitsGrants(t *testing.T) {
 		t.Fatal("duplicateBot missing")
 	}
 	body := src[i:j]
-	if strings.Contains(body, "grants") || strings.Contains(body, "net_allow") || strings.Contains(body, "ssh_allow") {
+	if strings.Contains(body, "grants") || strings.Contains(body, "net_allow") || strings.Contains(body, "ssh_allow") || strings.Contains(body, "github_allow") {
 		t.Fatalf("duplicate copies grants:\n%s", body)
 	}
 	if !strings.Contains(body, "server_tools") || !strings.Contains(body, "full.server_tools") {

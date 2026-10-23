@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/github"
 	"github.com/PixnBits/local-grok-bots/internal/id"
 	_ "modernc.org/sqlite"
 )
@@ -81,7 +82,7 @@ func NormalizeMark(m Mark) (Mark, error) {
 	return Mark{Shape: shape, Color: color}, nil
 }
 
-// NormalizeGrants keeps net, git, ssh, and build. Anything else is an error.
+// NormalizeGrants keeps net, git, ssh, build, and github. Anything else is an error.
 // The browser grant is not settable yet.
 func NormalizeGrants(in []string) ([]string, error) {
 	seen := map[string]bool{}
@@ -91,19 +92,32 @@ func NormalizeGrants(in []string) ([]string, error) {
 			continue
 		}
 		switch g {
-		case "net", "git", "ssh", "build":
+		case "net", "git", "ssh", "build", "github":
 			seen[g] = true
 		default:
 			return nil, fmt.Errorf("unknown grant %q", g)
 		}
 	}
 	out := []string{}
-	for _, g := range []string{"net", "git", "ssh", "build"} {
+	for _, g := range []string{"net", "git", "ssh", "build", "github"} {
 		if seen[g] {
 			out = append(out, g)
 		}
 	}
 	return out, nil
+}
+
+// NormalizeGitHubAllow keeps owner/repo names. An empty list allows no
+// repository. It does not inherit a policy list.
+func NormalizeGitHubAllow(in []string) ([]string, error) {
+	repos, err := github.NormalizeRepos(in)
+	if err != nil {
+		return nil, errors.New("invalid github_allow")
+	}
+	if repos == nil {
+		repos = []string{}
+	}
+	return repos, nil
 }
 
 // NormalizeAllow keeps explicit hostnames. An empty list allows nothing.
@@ -228,6 +242,9 @@ type Bot struct {
 	Grants   []string `json:"grants"`
 	NetAllow []string `json:"net_allow"`
 	SSHAllow []string `json:"ssh_allow"`
+	// GitHubAllow narrows the policy repository ceiling. Empty allows none.
+	// It does not inherit the policy list.
+	GitHubAllow []string `json:"github_allow"`
 	// ServerTools narrows the policy allow list of non-function model tool
 	// types. Nil inherits policy. An empty slice allows none of them.
 	ServerTools *[]string `json:"server_tools"`
@@ -360,6 +377,7 @@ CREATE TABLE IF NOT EXISTS bots (
   grants TEXT NOT NULL DEFAULT '[]',
   net_allow TEXT NOT NULL DEFAULT '[]',
   ssh_allow TEXT NOT NULL DEFAULT '[]',
+  github_allow TEXT NOT NULL DEFAULT '[]',
   status TEXT NOT NULL DEFAULT 'idle',
   model TEXT,
   session_id TEXT NOT NULL DEFAULT '',
@@ -495,6 +513,7 @@ func (s *Store) evolve() error {
 		{"bots", "grants", "TEXT NOT NULL DEFAULT '[]'"},
 		{"bots", "net_allow", "TEXT NOT NULL DEFAULT '[]'"},
 		{"bots", "ssh_allow", "TEXT NOT NULL DEFAULT '[]'"},
+		{"bots", "github_allow", "TEXT NOT NULL DEFAULT '[]'"},
 		{"bots", "session_id", "TEXT NOT NULL DEFAULT ''"},
 		{"bots", "cli_pid", "INTEGER NOT NULL DEFAULT 0"},
 		{"bots", "cli_pgid", "INTEGER NOT NULL DEFAULT 0"},
@@ -750,6 +769,7 @@ type BotDraft struct {
 	Grants      []string
 	NetAllow    []string
 	SSHAllow    []string
+	GitHubAllow []string
 	ServerTools *[]string
 }
 
@@ -778,6 +798,10 @@ func (s *Store) InsertBot(d BotDraft, by string) (Bot, error) {
 	if err != nil {
 		return Bot{}, err
 	}
+	ghAllow, err := NormalizeGitHubAllow(d.GitHubAllow)
+	if err != nil {
+		return Bot{}, err
+	}
 	var tools *[]string
 	if d.ServerTools != nil {
 		names, err := NormalizeServerTools(*d.ServerTools)
@@ -789,12 +813,12 @@ func (s *Store) InsertBot(d BotDraft, by string) (Bot, error) {
 	now := FormatTime(Now())
 	b := Bot{
 		ID: id.New(), Name: d.Name, Label: d.Label, Description: d.Description,
-		Mark: mark, Grants: grants, NetAllow: netAllow, SSHAllow: sshAllow, ServerTools: tools,
+		Mark: mark, Grants: grants, NetAllow: netAllow, SSHAllow: sshAllow, GitHubAllow: ghAllow, ServerTools: tools,
 		Status: "idle", Model: d.Model, CreatedAt: now, UpdatedAt: now,
 	}
-	_, err = s.db.Exec(`INSERT INTO bots(id, name, name_lower, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, server_tools, status, model, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		b.ID, b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, 0, 0, encodeList(grants), encodeList(netAllow), encodeList(sshAllow), encodeOptList(tools), b.Status, nullStr(d.Model), b.CreatedAt, b.UpdatedAt)
+	_, err = s.db.Exec(`INSERT INTO bots(id, name, name_lower, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, github_allow, server_tools, status, model, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		b.ID, b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, 0, 0, encodeList(grants), encodeList(netAllow), encodeList(sshAllow), encodeList(ghAllow), encodeOptList(tools), b.Status, nullStr(d.Model), b.CreatedAt, b.UpdatedAt)
 	if err != nil {
 		if isUnique(err) {
 			return Bot{}, ErrConflict
@@ -881,16 +905,16 @@ func (s *Store) attachRun(b *Bot) {
 	}
 }
 
-const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, server_tools, status, model, session_id, created_at, updated_at, archived_at FROM bots`
+const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, github_allow, server_tools, status, model, session_id, created_at, updated_at, archived_at FROM bots`
 
 func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	var b Bot
 	var model sql.NullString
-	var shape, color, grants, netAllow, sshAllow string
+	var shape, color, grants, netAllow, sshAllow, githubAllow string
 	var serverTools sql.NullString
 	var pinned, hidden int
 	var archived sql.NullString
-	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &serverTools, &b.Status, &model, &b.SessionID, &b.CreatedAt, &b.UpdatedAt, &archived)
+	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &githubAllow, &serverTools, &b.Status, &model, &b.SessionID, &b.CreatedAt, &b.UpdatedAt, &archived)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Bot{}, ErrNotFound
 	}
@@ -917,6 +941,10 @@ func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 		return Bot{}, err
 	}
 	b.SSHAllow, err = decodeList(sshAllow)
+	if err != nil {
+		return Bot{}, err
+	}
+	b.GitHubAllow, err = decodeList(githubAllow)
 	if err != nil {
 		return Bot{}, err
 	}
@@ -985,6 +1013,8 @@ type BotPatch struct {
 	NetAllow       []string
 	SSHSet         bool
 	SSHAllow       []string
+	GitHubSet      bool
+	GitHubAllow    []string
 	ServerToolsSet bool
 	ServerTools    *[]string
 	By             string
@@ -1066,6 +1096,16 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 			fields = append(fields, "ssh_allow")
 		}
 	}
+	if p.GitHubSet {
+		repos, err := NormalizeGitHubAllow(p.GitHubAllow)
+		if err != nil {
+			return Bot{}, err
+		}
+		if !slices.Equal(repos, b.GitHubAllow) {
+			b.GitHubAllow = repos
+			fields = append(fields, "github_allow")
+		}
+	}
 	if p.ServerToolsSet {
 		var next *[]string
 		if p.ServerTools != nil {
@@ -1092,8 +1132,8 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 	if b.Hidden {
 		hide = 1
 	}
-	_, err = s.db.Exec(`UPDATE bots SET name=?, name_lower=?, label=?, description=?, mark_shape=?, mark_color=?, pinned=?, hidden=?, grants=?, net_allow=?, ssh_allow=?, server_tools=?, model=?, status=?, updated_at=? WHERE id=?`,
-		b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, pin, hide, encodeList(b.Grants), encodeList(b.NetAllow), encodeList(b.SSHAllow), encodeOptList(b.ServerTools), nullStr(b.Model), b.Status, b.UpdatedAt, b.ID)
+	_, err = s.db.Exec(`UPDATE bots SET name=?, name_lower=?, label=?, description=?, mark_shape=?, mark_color=?, pinned=?, hidden=?, grants=?, net_allow=?, ssh_allow=?, github_allow=?, server_tools=?, model=?, status=?, updated_at=? WHERE id=?`,
+		b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, pin, hide, encodeList(b.Grants), encodeList(b.NetAllow), encodeList(b.SSHAllow), encodeList(b.GitHubAllow), encodeOptList(b.ServerTools), nullStr(b.Model), b.Status, b.UpdatedAt, b.ID)
 	if err != nil {
 		if isUnique(err) {
 			return Bot{}, ErrConflict

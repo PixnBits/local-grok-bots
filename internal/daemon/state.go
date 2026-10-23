@@ -14,6 +14,7 @@ type botState struct {
 	Grants      []string       `json:"grants"`
 	NetAllow    []string       `json:"net_allow"`
 	SSHAllow    []string       `json:"ssh_allow"`
+	GitHubAllow []string       `json:"github_allow"`
 	ServerTools *[]string      `json:"server_tools"`
 	Tools       stateTools     `json:"tools"`
 	Runs        []store.Run    `json:"runs"`
@@ -35,7 +36,7 @@ func (a *App) handleBotState(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	out := botState{Grants: bot.Grants, NetAllow: bot.NetAllow, SSHAllow: bot.SSHAllow, ServerTools: bot.ServerTools, Warnings: descriptionWarnings(bot.Description)}
+	out := botState{Grants: bot.Grants, NetAllow: bot.NetAllow, SSHAllow: bot.SSHAllow, GitHubAllow: bot.GitHubAllow, ServerTools: bot.ServerTools, Warnings: descriptionWarnings(bot.Description)}
 	if out.Timers, err = a.st.ListTimers(id); err != nil {
 		writeErr(w, err)
 		return
