@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -75,13 +74,22 @@ func toolDefs() []model.Tool {
 			Parameters: schemaObj(map[string]any{})},
 		{Name: "clear_timer", Description: "Delete one of your timers. Get the id from list_timers or from set_timer's result.",
 			Parameters: schemaObj(map[string]any{"id": prop("string", "Timer id (a UUID). Example: \"b2af098c-57fc-4aa0-ba5d-bec6613f7a57\".")}, "id")},
-		{Name: "read_file", Description: "Read a UTF-8 text file inside the workspace.",
+		{Name: "read_file", Description: "Read a UTF-8 text file inside the workspace. Symlinks are refused and not followed.",
 			Parameters: schemaObj(map[string]any{"path": prop("string", "Path relative to the workspace. Example: \"notes/todo.md\".")}, "path")},
-		{Name: "write_file", Description: "Write a UTF-8 text file inside the workspace, replacing it if it exists. Creates parent directories.",
+		{Name: "write_file", Description: "Write a UTF-8 text file inside the workspace, replacing it if it exists. Creates parent directories. Symlinks are refused and not followed.",
 			Parameters: schemaObj(map[string]any{
 				"path":    prop("string", "Path relative to the workspace. Example: \"notes/todo.md\"."),
 				"content": prop("string", "Full file contents."),
 			}, "path", "content")},
+		{Name: "edit_file", Description: "Replace an exact string in an existing workspace file. Refuses zero matches and a match count other than expected_count. Omit expected_count to require exactly one match. Symlinks are refused.",
+			Parameters: schemaObj(map[string]any{
+				"path":           prop("string", "Path relative to the workspace. Example: \"notes/todo.md\"."),
+				"old_string":     prop("string", "Exact text to replace. Example: \"TODO\"."),
+				"new_string":     prop("string", "Replacement text. An empty string deletes the match."),
+				"expected_count": prop("integer", "How many times old_string must occur. Omit it to require one match. Example: 2."),
+			}, "path", "old_string")},
+		{Name: "delete_file", Description: "Delete one regular file inside the workspace. Directories and symlinks are refused.",
+			Parameters: schemaObj(map[string]any{"path": prop("string", "Path relative to the workspace. Example: \"notes/old.md\".")}, "path")},
 		{Name: "run_shell", Description: "Run a shell command inside the workspace jail and return its output. Paths outside the workspace are rejected. Network, git push, and SSH fail unless the user granted them.",
 			Parameters: schemaObj(map[string]any{"command": prop("string", "A bash command line. Example: \"ls -la && go version\".")}, "command")},
 		{Name: "list_bots", Description: "List all bots with id, name, label, and status.",
@@ -406,40 +414,13 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		}
 		return `{"ok":true}`, nil
 	case "read_file":
-		path, err := sandbox.Resolve(a.ws, strArg(args, "path"))
-		if err != nil {
-			return "", err
-		}
-		b, err := os.ReadFile(path)
-		if err != nil {
-			return "", err
-		}
-		const max = 256 * 1024
-		s := string(b)
-		if len(s) > max {
-			s = s[:max] + "\n…(truncated)"
-		}
-		return s, nil
+		return a.toolReadFile(args)
 	case "write_file":
-		path, err := sandbox.Resolve(a.ws, strArg(args, "path"))
-		if err != nil {
-			return "", err
-		}
-		if err := sandbox.CheckWrite(a.ws, path); err != nil {
-			a.log(bot.ID, "sandbox_block", map[string]any{"path": strArg(args, "path"), "detail": err.Error()})
-			return "", err
-		}
-		content := strArg(args, "content")
-		if len(content) > 1<<20 {
-			return "", errors.New("content too large")
-		}
-		if err := os.MkdirAll(dirOf(path), 0o755); err != nil {
-			return "", err
-		}
-		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-			return "", err
-		}
-		return `{"ok":true}`, nil
+		return a.toolWriteFile(bot.ID, args)
+	case "edit_file":
+		return a.toolEditFile(bot.ID, args)
+	case "delete_file":
+		return a.toolDeleteFile(bot.ID, args)
 	case "run_shell":
 		command := strArg(args, "command")
 		current := bot
@@ -519,14 +500,6 @@ func formatShell(stdout, stderr string) string {
 	b.WriteString("stderr:\n")
 	b.WriteString(stderr)
 	return b.String()
-}
-
-func dirOf(path string) string {
-	i := strings.LastIndex(path, "/")
-	if i <= 0 {
-		return "."
-	}
-	return path[:i]
 }
 
 // serverToolsArg reads a create_bot or update_bot server_tools value.

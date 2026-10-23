@@ -66,6 +66,18 @@ func scrubTree(dataDir, realPath string) ([]SymlinkNote, error) {
 	return nil, errors.New("credential directory walk is unavailable")
 }
 
+func ReadRegularInDir(root, rel string) ([]byte, error) {
+	return nil, errors.New("workspace file walk is unavailable")
+}
+
+func WriteRegularInDir(root, rel string, data []byte, mode os.FileMode) error {
+	return errors.New("workspace file walk is unavailable")
+}
+
+func RemoveRegularInDir(root, rel string) error {
+	return errors.New("workspace file walk is unavailable")
+}
+
 func readRegularNoFollow(path string) ([]byte, error) {
 	return nil, errors.New("credential directory walk is unavailable")
 }

@@ -379,9 +379,98 @@ func openRegularAt(dirfd int, name string, follow bool) (int, error) {
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		unix.Close(fd)
-		return -1, errNotRegular
+		return -1, ErrNotRegular
 	}
 	return fd, nil
+}
+
+// ReadRegularInDir reads a regular file under root. A symlink leaf or a
+// symlink parent is refused. A file larger than 1 MiB is refused whole.
+func ReadRegularInDir(root, rel string) ([]byte, error) {
+	d, err := openConfiguredRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	defer d.close()
+	parent, base, err := parentOf(d, rel, false)
+	if err != nil {
+		return nil, err
+	}
+	defer parent.close()
+	if isSymlinkAt(parent.fd, base) {
+		return nil, ErrCredSymlink
+	}
+	fd, err := openRegularAt(parent.fd, base, false)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), base)
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, 1<<20+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > 1<<20 {
+		return nil, errors.New("file too large")
+	}
+	return b, nil
+}
+
+// WriteRegularInDir creates or replaces a regular file. Symlink components
+// are refused and not followed. An existing directory is left in place.
+func WriteRegularInDir(root, rel string, data []byte, mode os.FileMode) error {
+	if len(data) > 1<<20 {
+		return errors.New("file too large")
+	}
+	if mode == 0 {
+		mode = 0o644
+	}
+	d, err := openConfiguredRoot(root)
+	if err != nil {
+		return err
+	}
+	defer d.close()
+	parent, base, err := parentOf(d, rel, true)
+	if err != nil {
+		return err
+	}
+	defer parent.close()
+	return writeReplacingAt(parent, base, data, mode)
+}
+
+// RemoveRegularInDir unlinks one regular file. Directories, symlink leaves,
+// and symlink parents are refused. It does not recurse.
+func RemoveRegularInDir(root, rel string) error {
+	d, err := openConfiguredRoot(root)
+	if err != nil {
+		return err
+	}
+	defer d.close()
+	parent, base, err := parentOf(d, rel, false)
+	if err != nil {
+		return err
+	}
+	defer parent.close()
+	if isSymlinkAt(parent.fd, base) {
+		return ErrCredSymlink
+	}
+	st, err := lstatAt(parent.fd, base)
+	if err != nil {
+		return err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		return ErrNotRegular
+	}
+	if isSymlinkAt(parent.fd, base) {
+		return ErrCredSymlink
+	}
+	if err := unix.Unlinkat(parent.fd, base, 0); err != nil {
+		if isSymlinkAt(parent.fd, base) {
+			return ErrCredSymlink
+		}
+		return err
+	}
+	return nil
 }
 
 func readFileAt(dirfd int, name string) ([]byte, error) {
@@ -416,7 +505,7 @@ func readRegularNoFollow(path string) ([]byte, error) {
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		unix.Close(fd)
-		return nil, errNotRegular
+		return nil, ErrNotRegular
 	}
 	f := os.NewFile(uintptr(fd), path)
 	defer f.Close()
@@ -734,7 +823,7 @@ func writeReplacingAt(parent *dirFD, base string, data []byte, mode os.FileMode)
 	}
 	if st, err := lstatAt(parent.fd, base); err == nil {
 		if st.Mode&unix.S_IFMT != unix.S_IFREG {
-			return errNotRegular
+			return ErrNotRegular
 		}
 	} else if !errors.Is(err, unix.ENOENT) {
 		return err

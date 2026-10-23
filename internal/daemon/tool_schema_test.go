@@ -65,7 +65,7 @@ func TestToolSchemasComplete(t *testing.T) {
 			t.Errorf("update_bot omits the unchanged rule: %s", desc)
 		}
 	}
-	for _, want := range []string{"set_timer", "list_timers", "clear_timer", "write_memory", "delete_memory", "read_file", "write_file", "run_shell", "list_bots", "read_bot", "send_dm", "create_bot", "update_bot"} {
+	for _, want := range []string{"set_timer", "list_timers", "clear_timer", "write_memory", "delete_memory", "read_file", "write_file", "edit_file", "delete_file", "run_shell", "list_bots", "read_bot", "send_dm", "create_bot", "update_bot"} {
 		if !seen[want] {
 			t.Errorf("tool %s missing", want)
 		}
