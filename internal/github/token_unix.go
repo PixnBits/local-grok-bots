@@ -32,7 +32,7 @@ func readTokenFile(path string) (string, error) {
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		return "", errToken("type")
 	}
-	perm := st.Mode & 0o7777
+	perm := uint32(st.Mode) & 0o7777
 	if tokenCheck != nil {
 		if err := tokenCheck(st.Uid, perm); err != nil {
 			return "", errToken("check")
