@@ -25,8 +25,11 @@ type Request struct {
 	SSHKey     string
 	// GitHubSock is the host credential-proxy socket. Empty leaves GitHub
 	// fetch unavailable. GitHubRepos is the allowlist copied into the wrapper.
-	GitHubSock  string
-	GitHubRepos []string
+	GitHubSock      string
+	GitHubRepos     []string
+	GitAuthor       string
+	GitAuthorEmail  string
+	GitAuthorRefuse bool
 	// Dial, when set, is the proxy's outbound TCP dial. Tests use it.
 	Dial func(context.Context, string, string) (net.Conn, error)
 }
@@ -195,9 +198,12 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 	}
 	if path, err := exec.LookPath("git"); err == nil {
 		if err := writeExec(filepath.Join(ro, "gitwrap"), gitWrap(gitWrapOpts{
-			Grant:  grants["git"],
-			Repos:  req.GitHubRepos,
-			Bridge: ghSock != "",
+			Grant:        grants["git"],
+			Repos:        req.GitHubRepos,
+			Bridge:       ghSock != "",
+			Name:         req.GitAuthor,
+			Email:        req.GitAuthorEmail,
+			RefuseAuthor: req.GitAuthorRefuse,
 		})); err != nil {
 			return nil, err
 		}

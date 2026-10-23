@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/github"
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 	"github.com/PixnBits/local-grok-bots/internal/store"
@@ -430,6 +431,10 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
 		ghSock, ghRepos := "", []string(nil)
+		author, email, aerr := github.CommitAuthor(current.Name, a.policy.GitHub.AuthorName, a.policy.GitHub.AuthorEmail)
+		if aerr != nil {
+			author, email = "", ""
+		}
 		if granted(current.Grants, "github") {
 			px, perr := a.openGitHubProxy(current)
 			if perr != nil || px == nil {
@@ -441,16 +446,19 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			}
 		}
 		res, err := sandbox.Run(sctx, sandbox.Request{
-			Workspace:   a.ws,
-			Command:     command,
-			Grants:      current.Grants,
-			NetAllow:    current.NetAllow,
-			SSHAllow:    current.SSHAllow,
-			BuildBinds:  a.cfg.BuildBinds,
-			SSHKey:      a.sshKeyPath(),
-			GitHubSock:  ghSock,
-			GitHubRepos: ghRepos,
-			Dial:        a.shellDial,
+			Workspace:       a.ws,
+			Command:         command,
+			Grants:          current.Grants,
+			NetAllow:        current.NetAllow,
+			SSHAllow:        current.SSHAllow,
+			BuildBinds:      a.cfg.BuildBinds,
+			SSHKey:          a.sshKeyPath(),
+			GitHubSock:      ghSock,
+			GitHubRepos:     ghRepos,
+			GitAuthor:       author,
+			GitAuthorEmail:  email,
+			GitAuthorRefuse: aerr != nil,
+			Dial:            a.shellDial,
 		})
 		for _, ev := range res.Events {
 			a.recordSandbox(current.ID, ev)

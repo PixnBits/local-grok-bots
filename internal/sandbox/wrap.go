@@ -20,9 +20,14 @@ type gitWrapOpts struct {
 	Bridge bool
 	Name   string
 	Email  string
+	// RefuseAuthor denies every git command and embeds no author value.
+	RefuseAuthor bool
 }
 
 func gitWrap(opts gitWrapOpts) string {
+	if opts.RefuseAuthor {
+		return denyAuthorScript
+	}
 	if opts.Name == "" {
 		opts.Name = "local-grok-bots"
 	}
@@ -30,10 +35,7 @@ func gitWrap(opts gitWrapOpts) string {
 		opts.Email = "bot@localhost"
 	}
 	if !authorEmbeddable(opts.Name, opts.Email) {
-		return "#!/bin/sh\n" +
-			"echo \"git denied: invalid author\" >&2\n" +
-			"printf '%s\\n' \"deny git author\" >> /lgb/events/log\n" +
-			"exit 1\n"
+		return denyAuthorScript
 	}
 	grant, bridge := "0", "0"
 	if opts.Grant {
@@ -58,6 +60,11 @@ func gitWrap(opts gitWrapOpts) string {
 	script = strings.ReplaceAll(script, "@@REPOS@@", arms.String())
 	return script
 }
+
+const denyAuthorScript = "#!/bin/sh\n" +
+	"echo \"git denied: invalid author\" >&2\n" +
+	"printf '%s\\n' \"deny git author\" >> /lgb/events/log\n" +
+	"exit 1\n"
 
 func authorEmbeddable(name, email string) bool {
 	if !github.ValidAuthorName(name) {
