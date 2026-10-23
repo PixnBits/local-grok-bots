@@ -17,8 +17,8 @@ func WriteFileInDir(dir, name string, data []byte, mode os.FileMode) error {
 	return writeFileInDir(dir, name, data, mode)
 }
 
-// errNotRegular means an open found a non-regular file (fifo, device, dir).
-var errNotRegular = errors.New("not a regular file")
+// ErrNotRegular means an open found a directory, fifo, or other non-regular file.
+var ErrNotRegular = errors.New("not a regular file")
 
 // Symlink note events. The path field is the walk path, never the link target.
 const (

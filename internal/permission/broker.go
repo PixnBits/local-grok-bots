@@ -65,6 +65,10 @@ type Request struct {
 	// UserRules are durable allow/ask/deny patterns for this bot.
 	// Empty leaves behavior unchanged.
 	UserRules []UserRule
+	// ForceAsk shows the approval card after deny rules. A hook allow,
+	// bypass mode, managed allow, durable user allow, and a session grant
+	// do not skip it. ui_prompts off still denies.
+	ForceAsk bool
 	// Workspace is the bot directory used to classify paths.
 	Workspace string
 	// GrokHome is the bot GROK_HOME. Empty skips the home-path floor.
@@ -187,10 +191,12 @@ type UserRule struct {
 }
 
 // Evaluate decides a tool call. The order is hooks, managed deny, user deny,
-// managed ask, user ask, then AskUserQuestion (always a UI question), then a
-// hook allow, bypass mode, managed allow, a user allow that still classifies
-// as low-risk read-only, a session grant, and canUseTool. Deny wins over a
-// later allow. A user allow never overrides the hard floor.
+// managed ask, user ask, then AskUserQuestion (always a UI question), then
+// ForceAsk, a hook allow, bypass mode, managed allow, a user allow that still
+// classifies as low-risk read-only, a session grant, and canUseTool. Deny
+// wins over a later allow. A user allow never overrides the hard floor.
+// ForceAsk does not skip a deny. It does skip every allow that would
+// otherwise avoid the card.
 func (b *Broker) Evaluate(ctx context.Context, pol policy.Permission, req Request) Outcome {
 	if ctx == nil {
 		ctx = context.Background()
@@ -255,6 +261,9 @@ func (b *Broker) Evaluate(ctx context.Context, pol policy.Permission, req Reques
 	}
 	if askRule != "" {
 		return b.canUseTool(ctx, pol, req, askRule, nil)
+	}
+	if req.ForceAsk {
+		return b.canUseTool(ctx, pol, req, "", nil)
 	}
 	if sawAllow {
 		rule := allowHook.Rule
@@ -435,7 +444,7 @@ func (b *Broker) canUseTool(ctx context.Context, pol policy.Permission, req Requ
 	if !pol.UIPrompts {
 		return b.complete(req, Deny, "no_ui", rule)
 	}
-	sessionOK := pol.AllowSessionGrants && !question
+	sessionOK := pol.AllowSessionGrants && !question && !req.ForceAsk
 	w := &wait{
 		id:        req.ID,
 		botID:     req.BotID,

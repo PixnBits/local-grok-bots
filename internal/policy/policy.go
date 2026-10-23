@@ -150,6 +150,16 @@ type Policy struct {
 
 	Warnings []string
 
+	// GitHub is the allowlist ceiling for Ollama GitHub operations.
+	// An empty Repos list allows no repository.
+	GitHub           GitHub
+	githubLocal      githubLayer
+	githubManaged    githubLayer
+	githubLocalSet   bool
+	githubManagedSet bool
+	githubLocalBad   bool
+	githubManagedBad bool
+
 	managedBind  bool
 	managedHost  bool
 	managedModel bool
@@ -239,6 +249,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 	if path == "" {
 		p.finishEgressPorts()
 		p.finishServerTools()
+		p.finishGitHub()
 		p.dropIncompleteCLI()
 		return p, nil
 	}
@@ -284,6 +295,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 	base.DaemonJail = !base.UsesCLI()
 	base.finishEgressPorts()
 	base.finishServerTools()
+	base.finishGitHub()
 	base.dropIncompleteCLI()
 	return base, nil
 }
@@ -1027,6 +1039,7 @@ type document struct {
 	Security securityDoc `toml:"security" json:"security"`
 	Managed  managedDoc  `toml:"managed" json:"managed"`
 	Tools    toolsDoc    `toml:"tools" json:"tools"`
+	GitHub   *githubDoc  `toml:"github" json:"github"`
 }
 
 type daemonDoc struct {
@@ -1392,6 +1405,7 @@ func (p *Policy) apply(doc document, trusted bool) error {
 	if err := p.applyCLITools(doc.Tools, trusted); err != nil {
 		return err
 	}
+	p.takeGitHub(doc.GitHub, trusted)
 	if doc.Managed.Path != nil {
 		v := strings.TrimSpace(*doc.Managed.Path)
 		if v != "" && !filepath.IsAbs(v) {

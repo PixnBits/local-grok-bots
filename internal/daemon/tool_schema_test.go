@@ -65,9 +65,17 @@ func TestToolSchemasComplete(t *testing.T) {
 			t.Errorf("update_bot omits the unchanged rule: %s", desc)
 		}
 	}
-	for _, want := range []string{"set_timer", "list_timers", "clear_timer", "write_memory", "delete_memory", "read_file", "write_file", "run_shell", "list_bots", "read_bot", "send_dm", "create_bot", "update_bot"} {
+	for _, want := range []string{"set_timer", "list_timers", "clear_timer", "write_memory", "delete_memory", "read_file", "write_file", "edit_file", "delete_file", "run_shell", "create_pr", "pr_status", "list_bots", "read_bot", "send_dm", "create_bot", "update_bot"} {
 		if !seen[want] {
 			t.Errorf("tool %s missing", want)
+		}
+	}
+	for _, tool := range toolDefs() {
+		if tool.Name != "run_shell" {
+			continue
+		}
+		if !strings.Contains(tool.Description, "approval card") || strings.Contains(tool.Description, "git push, and SSH") {
+			t.Errorf("run_shell description %q", tool.Description)
 		}
 	}
 	timer := toolDefs()[2]

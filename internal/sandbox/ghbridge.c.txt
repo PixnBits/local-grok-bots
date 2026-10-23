@@ -1,0 +1,231 @@
+#define _GNU_SOURCE
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+/* Bridge plain HTTP from 127.0.0.1 to the host GitHub credential socket.
+   The token is not in this program. */
+
+static int dial_unix(const char *path) {
+    int fd;
+    struct sockaddr_un un;
+    if (!path || !path[0]) return -1;
+    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    memset(&un, 0, sizeof un);
+    un.sun_family = AF_UNIX;
+    if (strlen(path) >= sizeof un.sun_path) {
+        close(fd);
+        return -1;
+    }
+    memcpy(un.sun_path, path, strlen(path) + 1);
+    if (connect(fd, (struct sockaddr *)&un, sizeof un) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static void copy_one(int from, int to) {
+    char buf[8192];
+    for (;;) {
+        ssize_t n = read(from, buf, sizeof buf);
+        if (n == 0) {
+            shutdown(to, SHUT_WR);
+            return;
+        }
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return;
+        }
+        ssize_t off = 0;
+        while (off < n) {
+            ssize_t w = write(to, buf + off, (size_t)(n - off));
+            if (w < 0) {
+                if (errno == EINTR) continue;
+                return;
+            }
+            if (w == 0) return;
+            off += w;
+        }
+    }
+}
+
+static int serve_http(const char *sock) {
+    int ln, one = 1;
+    struct sockaddr_in in;
+    socklen_t sl;
+    ln = socket(AF_INET, SOCK_STREAM, 0);
+    if (ln < 0) return 1;
+    setsockopt(ln, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    memset(&in, 0, sizeof in);
+    in.sin_family = AF_INET;
+    in.sin_addr.s_addr = htonl(0x7f000001);
+    in.sin_port = 0;
+    if (bind(ln, (struct sockaddr *)&in, sizeof in) < 0) return 1;
+    sl = sizeof in;
+    if (getsockname(ln, (struct sockaddr *)&in, &sl) < 0) return 1;
+    if (listen(ln, 16) < 0) return 1;
+    printf("%u\n", (unsigned)ntohs(in.sin_port));
+    fflush(stdout);
+    for (;;) {
+        int c = accept(ln, 0, 0);
+        if (c < 0) {
+            if (errno == EINTR) continue;
+            return 1;
+        }
+        if (fork() == 0) {
+            int u;
+            close(ln);
+            u = dial_unix(sock);
+            if (u < 0) _exit(0);
+            if (fork() == 0) {
+                copy_one(c, u);
+                _exit(0);
+            }
+            copy_one(u, c);
+            _exit(0);
+        }
+        close(c);
+    }
+}
+
+#define PUSH_ARG_MAX 4096
+#define PUSH_ARGS_MAX 32
+#define PUSH_OUT_MAX (1 << 20)
+
+static int write_all(int fd, const void *buf, size_t n) {
+    const char *p = buf;
+    while (n) {
+        ssize_t w = write(fd, p, n);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (w == 0) return -1;
+        p += w;
+        n -= (size_t)w;
+    }
+    return 0;
+}
+
+static int read_full(int fd, void *buf, size_t n) {
+    char *p = buf;
+    while (n) {
+        ssize_t r = read(fd, p, n);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (r == 0) return -1;
+        p += r;
+        n -= (size_t)r;
+    }
+    return 0;
+}
+
+static int read_line(int fd, char *buf, size_t cap) {
+    size_t i = 0;
+    if (cap == 0) return -1;
+    while (i + 1 < cap) {
+        char c;
+        if (read_full(fd, &c, 1) < 0) return -1;
+        if (c == '\n') {
+            buf[i] = 0;
+            return 0;
+        }
+        if (c == '\r' || c == 0) return -1;
+        buf[i++] = c;
+    }
+    return -1;
+}
+
+static int parse_u(const char *s, int max, int *out) {
+    int n = 0;
+    if (!s || !s[0]) return -1;
+    for (const char *p = s; *p; p++) {
+        int d;
+        if (*p < '0' || *p > '9') return -1;
+        d = *p - '0';
+        if (n > (max - d) / 10) return -1;
+        n = n * 10 + d;
+    }
+    *out = n;
+    return 0;
+}
+
+static int push_mode(const char *sock, int argc, char **argv) {
+    int fd, i, code, n;
+    char line[64];
+    if (argc < 0 || argc > PUSH_ARGS_MAX) {
+        fprintf(stderr, "git push denied: not sent\n");
+        return 1;
+    }
+    for (i = 0; i < argc; i++) {
+        if (!argv[i] || strlen(argv[i]) > PUSH_ARG_MAX) {
+            fprintf(stderr, "git push denied: not sent\n");
+            return 1;
+        }
+    }
+    fd = dial_unix(sock);
+    if (fd < 0) {
+        fprintf(stderr, "git push denied: not sent\n");
+        return 1;
+    }
+    if (dprintf(fd, "PUSH\n%d\n", argc) < 0) {
+        close(fd);
+        fprintf(stderr, "git push denied: not sent\n");
+        return 1;
+    }
+    for (i = 0; i < argc; i++) {
+        size_t len = strlen(argv[i]);
+        if (dprintf(fd, "%zu\n", len) < 0 || write_all(fd, argv[i], len) < 0) {
+            close(fd);
+            fprintf(stderr, "git push denied: not sent\n");
+            return 1;
+        }
+    }
+    if (read_line(fd, line, sizeof line) < 0 || parse_u(line, 255, &code) < 0) {
+        close(fd);
+        fprintf(stderr, "git push denied: not sent\n");
+        return 1;
+    }
+    for (i = 0; i < 2; i++) {
+        char *buf;
+        int dest = i == 0 ? 1 : 2;
+        if (read_line(fd, line, sizeof line) < 0 || parse_u(line, PUSH_OUT_MAX, &n) < 0) {
+            close(fd);
+            fprintf(stderr, "git push denied: not sent\n");
+            return 1;
+        }
+        if (n == 0) continue;
+        buf = malloc((size_t)n);
+        if (!buf || read_full(fd, buf, (size_t)n) < 0 || write_all(dest, buf, (size_t)n) < 0) {
+            free(buf);
+            close(fd);
+            fprintf(stderr, "git push denied: not sent\n");
+            return 1;
+        }
+        free(buf);
+    }
+    close(fd);
+    return code;
+}
+
+int main(int argc, char **argv) {
+    signal(SIGCHLD, SIG_IGN);
+    if (argc == 3 && strcmp(argv[1], "http") == 0) {
+        return serve_http(argv[2]);
+    }
+    if (argc >= 3 && strcmp(argv[1], "push") == 0) {
+        return push_mode(argv[2], argc - 3, argv + 3);
+    }
+    return 2;
+}

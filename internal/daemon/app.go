@@ -87,8 +87,11 @@ type App struct {
 	audit  *audit.Logger
 	// shellDial, when set, is the sandbox proxy's outbound dial. Tests use it.
 	shellDial func(context.Context, string, string) (net.Conn, error)
-	ctx       context.Context
-	cancel    context.CancelFunc
+	// githubGitBase and githubAPIBase replace the GitHub upstreams. Tests set them.
+	githubGitBase string
+	githubAPIBase string
+	ctx           context.Context
+	cancel        context.CancelFunc
 
 	rtMu sync.Mutex
 	// turns counts bot- and timer-started turns per bot (turncap.go).

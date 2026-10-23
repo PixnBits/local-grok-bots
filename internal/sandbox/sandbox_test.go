@@ -351,7 +351,7 @@ func TestGitDeniedWithoutGrant(t *testing.T) {
 func TestGitCommitAndPushHeld(t *testing.T) {
 	requireBin(t, "git")
 	ws := t.TempDir()
-	res := mustRun(t, Request{Workspace: ws, Grants: []string{"git"}, Command: `set -e
+	res, err := runCmd(t, Request{Workspace: ws, Grants: []string{"git"}, Command: `set -e
 git init
 echo hello > readme.txt
 git add readme.txt
@@ -359,20 +359,22 @@ git commit -m note
 git push
 echo PUSH_DONE
 `})
-	if !strings.Contains(res.Stdout, "git push held for review") || !strings.Contains(res.Stdout, "not sent") {
-		t.Fatalf("push was not held:\n%s", res.Stdout)
+	if err == nil {
+		t.Fatal("push without a daemon exited 0")
 	}
-	if !strings.Contains(res.Stdout, "PUSH_DONE") || !strings.Contains(res.Stdout, "note") {
-		t.Fatalf("commit review missing:\n%s", res.Stdout)
+	if strings.Contains(res.Stdout, "PUSH_DONE") {
+		t.Fatalf("push continued:\n%s", res.Stdout)
 	}
-	var held bool
+	if !strings.Contains(res.Stderr, "denied") && !strings.Contains(res.Stderr, "not sent") && !strings.Contains(res.Stdout, "denied") {
+		t.Fatalf("push was not denied:\nstdout:\n%s\nstderr:\n%s", res.Stdout, res.Stderr)
+	}
 	for _, e := range res.Events {
-		if e.Kind == "grant_use" && e.Grant == "git" && e.Notice == "Git push held for review" {
-			held = true
+		if e.Notice != "" {
+			t.Fatalf("push notice: %+v", e)
 		}
 	}
-	if !held {
-		t.Fatalf("missing push notice: %+v", res.Events)
+	if _, ok := findEvent(res.Events, "grant_denied", "git", ""); !ok {
+		t.Fatalf("missing push denial: %+v", res.Events)
 	}
 	for _, sub := range []string{"init", "add", "commit"} {
 		found := false

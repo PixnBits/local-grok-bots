@@ -2,6 +2,7 @@ package store
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -14,6 +15,21 @@ func TestNormalizeGrantsAndAllow(t *testing.T) {
 	got, err = NormalizeGrants([]string{" build ", "git", "git", "net"})
 	if err != nil || len(got) != 3 || got[0] != "net" || got[1] != "git" || got[2] != "build" {
 		t.Fatalf("grants %#v %v", got, err)
+	}
+	got, err = NormalizeGrants([]string{"github", "git"})
+	if err != nil || strings.Join(got, ",") != "git,github" {
+		t.Fatalf("github grant %#v %v", got, err)
+	}
+	repos, err := NormalizeGitHubAllow([]string{"Acme/Widgets", "acme/widgets"})
+	if err != nil || len(repos) != 1 || repos[0] != "acme/widgets" {
+		t.Fatalf("github allow %#v %v", repos, err)
+	}
+	if _, err := NormalizeGitHubAllow([]string{"not a repo"}); err == nil {
+		t.Fatal("bad github_allow accepted")
+	}
+	empty, err := NormalizeGitHubAllow(nil)
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("nil github_allow %#v %v", empty, err)
 	}
 	hosts, err := NormalizeAllow([]string{"Allowed.Test.", "allowed.test", "bad host"})
 	if err == nil {
