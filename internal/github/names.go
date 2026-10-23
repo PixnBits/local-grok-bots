@@ -10,6 +10,9 @@ import (
 // ErrRepo means a repository name is not owner/repo.
 var ErrRepo = errors.New("invalid github repo")
 
+// ErrNotAllowed means the path names an owner/repo outside the allowlist.
+var ErrNotAllowed = errors.New("github repo is not allowlisted")
+
 // ErrAuthor means a commit author cannot be embedded safely.
 var ErrAuthor = errors.New("invalid git author")
 
