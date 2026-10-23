@@ -151,6 +151,11 @@ func (p *proxy) handle(conn net.Conn) {
 
 func (p *proxy) decide(host string, port int) (bool, Event) {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	// GitHub is never reached tokenless. A net grant cannot carry it, even
+	// when the name is on net_allow. Clone and fetch use the credential proxy.
+	if host == "github.com" || host == "api.github.com" {
+		return false, Event{Kind: "grant_denied", Grant: "github", Host: host, Detail: "github is not on the network grant"}
+	}
 	if port == 22 {
 		if !p.grants["ssh"] {
 			return false, Event{Kind: "grant_denied", Grant: "ssh", Host: host, Detail: "missing ssh grant"}

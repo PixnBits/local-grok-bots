@@ -23,6 +23,10 @@ type Request struct {
 	SSHAllow   []string
 	BuildBinds []string
 	SSHKey     string
+	// GitHubSock is the host credential-proxy socket. Empty leaves GitHub
+	// fetch unavailable. GitHubRepos is the allowlist copied into the wrapper.
+	GitHubSock  string
+	GitHubRepos []string
 	// Dial, when set, is the proxy's outbound TCP dial. Tests use it.
 	Dial func(context.Context, string, string) (net.Conn, error)
 }
@@ -172,8 +176,29 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 	if err := os.MkdirAll(filepath.Join(rw, "bin"), 0o755); err != nil {
 		return nil, err
 	}
+	ghSock := ""
+	if githubSockOK(req.GitHubSock) {
+		if bridge, err := ensureBridge(); err != nil {
+			p.extra = append(p.extra, Event{Kind: "grant_denied", Grant: "github", Detail: "github proxy unavailable"})
+		} else {
+			if err := overlayFile(ro, "ghbridge", mustRead(bridge), 0o755); err != nil {
+				return nil, err
+			}
+			touch(filepath.Join(rw, "bin", "ghbridge"))
+			touch(filepath.Join(rw, "sock", "github.sock"))
+			p.mounts = append(p.mounts,
+				mount{Src: filepath.Join(ro, "ghbridge"), Dst: "/lgb/bin/ghbridge", RO: true},
+				mount{Src: req.GitHubSock, Dst: "/lgb/sock/github.sock", RO: true},
+			)
+			ghSock = req.GitHubSock
+		}
+	}
 	if path, err := exec.LookPath("git"); err == nil {
-		if err := writeExec(filepath.Join(ro, "gitwrap"), gitWrap(grants["git"])); err != nil {
+		if err := writeExec(filepath.Join(ro, "gitwrap"), gitWrap(gitWrapOpts{
+			Grant:  grants["git"],
+			Repos:  req.GitHubRepos,
+			Bridge: ghSock != "",
+		})); err != nil {
 			return nil, err
 		}
 		touch(filepath.Join(rw, "bin", "git"))

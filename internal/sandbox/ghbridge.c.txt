@@ -1,0 +1,106 @@
+#define _GNU_SOURCE
+#include <arpa/inet.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+
+/* Bridge plain HTTP from 127.0.0.1 to the host GitHub credential socket.
+   The token is not in this program. */
+
+static int dial_unix(const char *path) {
+    int fd;
+    struct sockaddr_un un;
+    if (!path || !path[0]) return -1;
+    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    memset(&un, 0, sizeof un);
+    un.sun_family = AF_UNIX;
+    if (strlen(path) >= sizeof un.sun_path) {
+        close(fd);
+        return -1;
+    }
+    memcpy(un.sun_path, path, strlen(path) + 1);
+    if (connect(fd, (struct sockaddr *)&un, sizeof un) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static void copy_one(int from, int to) {
+    char buf[8192];
+    for (;;) {
+        ssize_t n = read(from, buf, sizeof buf);
+        if (n == 0) {
+            shutdown(to, SHUT_WR);
+            return;
+        }
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return;
+        }
+        ssize_t off = 0;
+        while (off < n) {
+            ssize_t w = write(to, buf + off, (size_t)(n - off));
+            if (w < 0) {
+                if (errno == EINTR) continue;
+                return;
+            }
+            if (w == 0) return;
+            off += w;
+        }
+    }
+}
+
+static int serve_http(const char *sock) {
+    int ln, one = 1;
+    struct sockaddr_in in;
+    socklen_t sl;
+    ln = socket(AF_INET, SOCK_STREAM, 0);
+    if (ln < 0) return 1;
+    setsockopt(ln, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    memset(&in, 0, sizeof in);
+    in.sin_family = AF_INET;
+    in.sin_addr.s_addr = htonl(0x7f000001);
+    in.sin_port = 0;
+    if (bind(ln, (struct sockaddr *)&in, sizeof in) < 0) return 1;
+    sl = sizeof in;
+    if (getsockname(ln, (struct sockaddr *)&in, &sl) < 0) return 1;
+    if (listen(ln, 16) < 0) return 1;
+    printf("%u\n", (unsigned)ntohs(in.sin_port));
+    fflush(stdout);
+    for (;;) {
+        int c = accept(ln, 0, 0);
+        if (c < 0) {
+            if (errno == EINTR) continue;
+            return 1;
+        }
+        if (fork() == 0) {
+            int u;
+            close(ln);
+            u = dial_unix(sock);
+            if (u < 0) _exit(0);
+            if (fork() == 0) {
+                copy_one(c, u);
+                _exit(0);
+            }
+            copy_one(u, c);
+            _exit(0);
+        }
+        close(c);
+    }
+}
+
+int main(int argc, char **argv) {
+    signal(SIGCHLD, SIG_IGN);
+    if (argc == 3 && strcmp(argv[1], "http") == 0) {
+        return serve_http(argv[2]);
+    }
+    return 2;
+}

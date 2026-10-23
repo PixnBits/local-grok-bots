@@ -448,15 +448,28 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		}
 		sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
+		ghSock, ghRepos := "", []string(nil)
+		if granted(current.Grants, "github") {
+			px, perr := a.openGitHubProxy(current)
+			if perr != nil || px == nil {
+				a.log(current.ID, "grant_denied", map[string]any{"grant": "github", "detail": "proxy unavailable"})
+			} else {
+				defer px.Close()
+				ghSock = px.Sock()
+				ghRepos = a.policy.EffectiveGitHubRepos(current.GitHubAllow)
+			}
+		}
 		res, err := sandbox.Run(sctx, sandbox.Request{
-			Workspace:  a.ws,
-			Command:    command,
-			Grants:     current.Grants,
-			NetAllow:   current.NetAllow,
-			SSHAllow:   current.SSHAllow,
-			BuildBinds: a.cfg.BuildBinds,
-			SSHKey:     a.sshKeyPath(),
-			Dial:       a.shellDial,
+			Workspace:   a.ws,
+			Command:     command,
+			Grants:      current.Grants,
+			NetAllow:    current.NetAllow,
+			SSHAllow:    current.SSHAllow,
+			BuildBinds:  a.cfg.BuildBinds,
+			SSHKey:      a.sshKeyPath(),
+			GitHubSock:  ghSock,
+			GitHubRepos: ghRepos,
+			Dial:        a.shellDial,
 		})
 		for _, ev := range res.Events {
 			a.recordSandbox(current.ID, ev)
