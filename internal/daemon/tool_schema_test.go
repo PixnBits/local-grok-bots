@@ -70,6 +70,14 @@ func TestToolSchemasComplete(t *testing.T) {
 			t.Errorf("tool %s missing", want)
 		}
 	}
+	for _, tool := range toolDefs() {
+		if tool.Name != "run_shell" {
+			continue
+		}
+		if !strings.Contains(tool.Description, "approval card") || strings.Contains(tool.Description, "git push, and SSH") {
+			t.Errorf("run_shell description %q", tool.Description)
+		}
+	}
 	timer := toolDefs()[2]
 	props := timer.Parameters["properties"].(map[string]any)
 	for _, k := range []string{"prompt", "in", "at", "every"} {

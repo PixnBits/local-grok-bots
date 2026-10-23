@@ -92,7 +92,7 @@ func toolDefs() []model.Tool {
 			}, "path", "old_string")},
 		{Name: "delete_file", Description: "Delete one regular file inside the workspace. Directories and symlinks are refused.",
 			Parameters: schemaObj(map[string]any{"path": prop("string", "Path relative to the workspace. Example: \"notes/old.md\".")}, "path")},
-		{Name: "run_shell", Description: "Run a shell command inside the workspace jail and return its output. Paths outside the workspace are rejected. Network, git push, and SSH fail unless the user granted them.",
+		{Name: "run_shell", Description: "Run a shell command inside the workspace jail and return its output. Paths outside the workspace are rejected. Network and SSH fail unless the user granted them. git push is an approval: the jail does not send it, and the daemon sends it only after the approval card.",
 			Parameters: schemaObj(map[string]any{"command": prop("string", "A bash command line. Example: \"ls -la && go version\".")}, "command")},
 		{Name: "create_pr", Description: "Open a pull request on an allowlisted GitHub repository. The daemon asks for approval on a card and sends it from the host. draft defaults to true. head cannot be the repository default branch.",
 			Parameters: schemaObj(map[string]any{
