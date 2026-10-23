@@ -30,6 +30,10 @@ type Request struct {
 	GitAuthor       string
 	GitAuthorEmail  string
 	GitAuthorRefuse bool
+	// OnPush answers a git push while the shell is still running. Nil denies.
+	// OnPushStart runs after the request is read and before OnPush.
+	OnPush      func(context.Context, []string) PushResult
+	OnPushStart func()
 	// Dial, when set, is the proxy's outbound TCP dial. Tests use it.
 	Dial func(context.Context, string, string) (net.Conn, error)
 }
@@ -62,6 +66,7 @@ type prepared struct {
 	mounts    []mount
 	events    string
 	proxy     *proxy
+	push      *pushSrv
 	before    *treeSnap
 	extra     []Event
 	grants    map[string]bool
@@ -73,6 +78,9 @@ func (p *prepared) close() {
 	}
 	if p.proxy != nil {
 		p.proxy.close()
+	}
+	if p.push != nil {
+		p.push.close()
 	}
 	if p.dir != "" {
 		_ = os.RemoveAll(p.dir)
@@ -108,6 +116,9 @@ func Run(ctx context.Context, req Request) (Result, error) {
 	events := append([]Event{}, p.extra...)
 	if p.proxy != nil {
 		events = append(events, p.proxy.drain()...)
+	}
+	if p.push != nil {
+		events = append(events, p.push.drain()...)
 	}
 	events = append(events, parseEventFile(p.events)...)
 	if blockErr != nil {
@@ -180,11 +191,15 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 		return nil, err
 	}
 	ghSock := ""
+	bridgeBin := ""
+	if b, err := ensureBridge(); err == nil {
+		bridgeBin = b
+	}
 	if githubSockOK(req.GitHubSock) {
-		if bridge, err := ensureBridge(); err != nil {
+		if bridgeBin == "" {
 			p.extra = append(p.extra, Event{Kind: "grant_denied", Grant: "github", Detail: "github proxy unavailable"})
 		} else {
-			if err := overlayFile(ro, "ghbridge", mustRead(bridge), 0o755); err != nil {
+			if err := overlayFile(ro, "ghbridge", mustRead(bridgeBin), 0o755); err != nil {
 				return nil, err
 			}
 			touch(filepath.Join(rw, "bin", "ghbridge"))
@@ -212,6 +227,21 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 			mount{Src: path, Dst: "/lgb/bin/git", RO: true},
 			mount{Src: filepath.Join(ro, "gitwrap"), Dst: "/usr/bin/git", RO: true},
 		)
+		if bridgeBin != "" && ghSock == "" {
+			if err := overlayFile(ro, "ghbridge", mustRead(bridgeBin), 0o755); err != nil {
+				return nil, err
+			}
+			touch(filepath.Join(rw, "bin", "ghbridge"))
+			p.mounts = append(p.mounts, mount{Src: filepath.Join(ro, "ghbridge"), Dst: "/lgb/bin/ghbridge", RO: true})
+		}
+		ps, perr := startPush(ctx, filepath.Join(dir, "push.sock"), req.OnPush, req.OnPushStart)
+		if perr != nil {
+			p.extra = append(p.extra, Event{Kind: "grant_denied", Grant: "git", Detail: "push socket unavailable"})
+		} else {
+			p.push = ps
+			touch(filepath.Join(rw, "sock", "push.sock"))
+			p.mounts = append(p.mounts, mount{Src: filepath.Join(dir, "push.sock"), Dst: "/lgb/sock/push.sock", RO: true})
+		}
 	}
 	if path, err := exec.LookPath("ssh"); err == nil {
 		if err := writeExec(filepath.Join(ro, "sshwrap"), sshWrap(grants["ssh"], normalizeHosts(req.SSHAllow))); err != nil {
@@ -445,7 +475,7 @@ func parseEventFile(path string) []Event {
 		case line == "":
 			continue
 		case line == "push":
-			out = append(out, Event{Kind: "grant_use", Grant: "git", Detail: "push held", Notice: "Git push held for review"})
+			out = append(out, Event{Kind: "grant_denied", Grant: "git", Detail: "push not sent"})
 		case line == "pkg":
 			out = append(out, Event{Kind: "grant_use", Detail: "package install", Notice: "Package install"})
 		case strings.HasPrefix(line, "deny git "):

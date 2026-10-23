@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/github"
@@ -428,24 +429,45 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		if fresh, err := a.st.GetBot(bot.ID); err == nil {
 			current = fresh
 		}
-		sctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		defer cancel()
+		shellCtx, shellCancel := context.WithCancel(ctx)
+		defer shellCancel()
+		var timerMu sync.Mutex
+		var shellTimer *time.Timer
+		armShell := func(d time.Duration) {
+			timerMu.Lock()
+			defer timerMu.Unlock()
+			if shellTimer != nil {
+				shellTimer.Stop()
+			}
+			shellTimer = time.AfterFunc(d, shellCancel)
+		}
+		armShell(30 * time.Second)
+		defer func() {
+			timerMu.Lock()
+			if shellTimer != nil {
+				shellTimer.Stop()
+			}
+			timerMu.Unlock()
+		}()
 		ghSock, ghRepos := "", []string(nil)
 		author, email, aerr := github.CommitAuthor(current.Name, a.policy.GitHub.AuthorName, a.policy.GitHub.AuthorEmail)
 		if aerr != nil {
 			author, email = "", ""
 		}
+		var px *github.Proxy
 		if granted(current.Grants, "github") {
-			px, perr := a.openGitHubProxy(current)
-			if perr != nil || px == nil {
+			opened, perr := a.openGitHubProxy(current)
+			if perr != nil || opened == nil {
 				a.log(current.ID, "grant_denied", map[string]any{"grant": "github", "detail": "proxy unavailable"})
 			} else {
+				px = opened
 				defer px.Close()
 				ghSock = px.Sock()
 				ghRepos = a.policy.EffectiveGitHubRepos(current.GitHubAllow)
 			}
 		}
-		res, err := sandbox.Run(sctx, sandbox.Request{
+		gate := &gitHubGate{px: px}
+		res, err := sandbox.Run(shellCtx, sandbox.Request{
 			Workspace:       a.ws,
 			Command:         command,
 			Grants:          current.Grants,
@@ -458,7 +480,13 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			GitAuthor:       author,
 			GitAuthorEmail:  email,
 			GitAuthorRefuse: aerr != nil,
-			Dial:            a.shellDial,
+			OnPushStart: func() {
+				armShell(a.policy.EffectivePromptTimeout() + 15*time.Second)
+			},
+			OnPush: func(pctx context.Context, pushArgs []string) sandbox.PushResult {
+				return a.handleGitPush(pctx, ctx, current, gate, pushArgs)
+			},
+			Dial: a.shellDial,
 		})
 		for _, ev := range res.Events {
 			a.recordSandbox(current.ID, ev)

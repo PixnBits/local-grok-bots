@@ -212,13 +212,13 @@ if [ "$grant" != "1" ]; then
   exit 1
 fi
 if [ "$sub" = "push" ]; then
-  printf '%s\n' push >> "$log"
-  echo "git push held for review; not sent"
-  "$real" --no-pager -c core.pager=cat -c diff.external= -c core.sshCommand=/bin/false status --short
-  "$real" --no-pager -c core.pager=cat -c diff.external= -c core.sshCommand=/bin/false diff
-  "$real" --no-pager -c core.pager=cat -c diff.external= -c core.sshCommand=/bin/false diff --cached
-  "$real" --no-pager -c core.pager=cat -c diff.external= -c core.sshCommand=/bin/false log --oneline -20
-  exit 0
+  if [ ! -x /lgb/bin/ghbridge ] || [ ! -S /lgb/sock/push.sock ]; then
+    echo "git push denied: not sent" >&2
+    printf '%s\n' "deny git push" >> "$log"
+    exit 1
+  fi
+  /lgb/bin/ghbridge push /lgb/sock/push.sock "$@"
+  exit $?
 fi
 case "$sub" in
   clone|fetch|pull|ls-remote|remote)
