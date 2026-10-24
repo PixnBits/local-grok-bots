@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/audit"
@@ -90,8 +91,12 @@ type App struct {
 	// githubGitBase and githubAPIBase replace the GitHub upstreams. Tests set them.
 	githubGitBase string
 	githubAPIBase string
-	ctx           context.Context
-	cancel        context.CancelFunc
+	// githubReadSock is the jail read-proxy socket for a bot's live shell.
+	// githubWriteUp is true only while a post-approval write proxy is listening.
+	githubReadSock map[string]string
+	githubWriteUp  atomic.Bool
+	ctx            context.Context
+	cancel         context.CancelFunc
 
 	rtMu sync.Mutex
 	// turns counts bot- and timer-started turns per bot (turncap.go).

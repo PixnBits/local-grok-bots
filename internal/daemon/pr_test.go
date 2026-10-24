@@ -237,6 +237,26 @@ func TestCreatePRAndStatus(t *testing.T) {
 			"repo": "acme/widgets", "head": "main", "base": "develop", "title": "Onto main",
 		}, "default branch", true)
 	})
+	t.Run("default branch case", func(t *testing.T) {
+		deny(t, []string{"acme/widgets"}, map[string]any{
+			"repo": "acme/widgets", "head": "Main", "base": "develop", "title": "Onto Main",
+		}, "default branch", true)
+	})
+	t.Run("base may match default case", func(t *testing.T) {
+		env := newPRApp(t)
+		bot := allow(t, env.app, []string{"acme/widgets"})
+		before := posts.Load()
+		done := approveCard(env.app, bot.ID, "create_pr")
+		out, err := env.app.dispatchTool(t.Context(), bot, "create_pr", map[string]any{
+			"repo": "acme/widgets", "head": "feature", "base": "MAIN", "title": "Add a widget",
+		})
+		if aerr := <-done; aerr != nil {
+			t.Fatal(aerr)
+		}
+		if err != nil || !strings.Contains(out, "https://github.com/acme/widgets/pull/7") || env.evals.Load() == 0 || posts.Load() != before+1 {
+			t.Fatalf("base MAIN: %v evals=%d posts=%d %s", err, env.evals.Load(), posts.Load(), out)
+		}
+	})
 	t.Run("empty allowlist", func(t *testing.T) {
 		deny(t, nil, args, "allowlist", false)
 	})
@@ -333,6 +353,10 @@ func approveCard(app *App, botID, tool string) <-chan error {
 				}
 				id, _ := card["id"].(string)
 				runID, _ := card["run_id"].(string)
+				if app.writeProxyUp() {
+					errc <- errors.New("write proxy reachable before approval")
+					return
+				}
 				if err := app.perm.DecideFor(botID, runID, id, permission.AllowOnce); err != nil {
 					errc <- err
 				}

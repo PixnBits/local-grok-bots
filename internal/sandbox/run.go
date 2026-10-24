@@ -197,7 +197,7 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 	}
 	if githubSockOK(req.GitHubSock) {
 		if bridgeBin == "" {
-			p.extra = append(p.extra, Event{Kind: "grant_denied", Grant: "github", Detail: "github proxy unavailable"})
+			p.extra = append(p.extra, Event{Kind: "grant_denied", Grant: "github", Detail: GitHubProxyDenied})
 		} else {
 			if err := overlayFile(ro, "ghbridge", mustRead(bridgeBin), 0o755); err != nil {
 				return nil, err

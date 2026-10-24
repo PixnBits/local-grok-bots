@@ -79,7 +79,7 @@ func TestProxyStripsCallerAuthAndAudits(t *testing.T) {
 		t.Fatalf("path %q", path)
 	}
 	mu.Unlock()
-	if len(audits) != 1 || audits[0].Action != "github_allow" || audits[0].Decision != "allow" || audits[0].Status != 200 {
+	if len(audits) != 1 || audits[0].Action != "github_allow" || audits[0].Decision != "allow" || audits[0].Status != 200 || audits[0].Method != http.MethodGet {
 		t.Fatalf("audit %#v", audits)
 	}
 	if audits[0].Owner != "acme" || audits[0].Repo != "widgets" || audits[0].Bot != "bot_1" || audits[0].Run != "run_1" {
@@ -103,7 +103,7 @@ func TestProxyStripsCallerAuthAndAudits(t *testing.T) {
 	if strings.Contains(string(denied), tokenSecret) || strings.Contains(string(denied), caller) {
 		t.Fatalf("deny body %q", denied)
 	}
-	if len(audits) != 1 || audits[0].Action != "github_refuse" || audits[0].Reason != "repo" || audits[0].Decision != "refuse" {
+	if len(audits) != 1 || audits[0].Action != "github_refuse" || audits[0].Reason != "repo" || audits[0].Decision != "refuse" || audits[0].Method != http.MethodGet {
 		t.Fatalf("deny audit %#v", audits)
 	}
 
@@ -199,6 +199,161 @@ func TestProxyTCPGateAndUnixSocket(t *testing.T) {
 	res.Body.Close()
 	if res.StatusCode != http.StatusNoContent {
 		t.Fatalf("unix %d", res.StatusCode)
+	}
+}
+
+func TestReadProxyRefusesWrites(t *testing.T) {
+	var mu sync.Mutex
+	var hits int
+	var sawAuth string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		sawAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("upstream-ok"))
+	}))
+	defer up.Close()
+	var audits []Audit
+	p, err := New(Config{
+		Repos:   []string{"acme/widgets"},
+		Token:   func() (string, error) { return tokenSecret, nil },
+		GitBase: up.URL,
+		APIBase: up.URL,
+		Audit:   func(a Audit) { audits = append(audits, a) },
+		Access:  AccessRead,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if err := p.ListenUnix(t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: &http.Transport{
+		Dial: func(network, addr string) (net.Conn, error) {
+			return net.Dial("unix", p.Sock())
+		},
+	}}
+	do := func(method, path string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequest(method, "http://proxy"+path, strings.NewReader("0000"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer "+tokenSecret)
+		res, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(res.Body)
+		res.Body.Close()
+		return res.StatusCode, string(body)
+	}
+	denied := []string{
+		http.MethodPost + " /github/acme/widgets.git/git-receive-pack",
+		http.MethodPost + " /api/repos/acme/widgets/pulls",
+		http.MethodPost + " /api/repos/acme/widgets/merges",
+		http.MethodPost + " /api/repos/acme/widgets/git/refs",
+		http.MethodPost + " /api/repos/acme/widgets/pulls/1/merge",
+		http.MethodHead + " /github/acme/widgets.git/info/refs?service=git-upload-pack",
+		http.MethodGet + " /api/repos/acme/widgets/merges",
+	}
+	for _, item := range denied {
+		method, path, _ := strings.Cut(item, " ")
+		audits = nil
+		code, body := do(method, path)
+		if code != http.StatusForbidden || strings.Contains(body, tokenSecret) {
+			t.Fatalf("%s %s -> %d %q", method, path, code, body)
+		}
+		mu.Lock()
+		gotHits := hits
+		gotAuth := sawAuth
+		mu.Unlock()
+		if gotHits != 0 || gotAuth != "" {
+			t.Fatalf("%s %s forwarded hits=%d auth=%q", method, path, gotHits, gotAuth)
+		}
+		if len(audits) != 1 || audits[0].Method != method {
+			t.Fatalf("%s audit %#v", item, audits)
+		}
+		if method != http.MethodGet && audits[0].Action != "github_write" {
+			t.Fatalf("%s action %#v", item, audits[0])
+		}
+	}
+	audits = nil
+	code, body := do(http.MethodGet, "/github/acme/widgets.git/info/refs?service=git-upload-pack")
+	if code != http.StatusOK || body != "upstream-ok" {
+		t.Fatalf("upload-pack GET %d %q", code, body)
+	}
+	if len(audits) != 1 || audits[0].Action != "github_allow" || audits[0].Method != http.MethodGet {
+		t.Fatalf("get audit %#v", audits)
+	}
+	audits = nil
+	code, body = do(http.MethodPost, "/github/acme/widgets.git/git-upload-pack")
+	if code != http.StatusOK || body != "upstream-ok" {
+		t.Fatalf("upload-pack POST %d %q", code, body)
+	}
+	mu.Lock()
+	if hits != 2 || sawAuth != "Bearer "+tokenSecret {
+		mu.Unlock()
+		t.Fatalf("allowed hits=%d auth=%q", hits, sawAuth)
+	}
+	mu.Unlock()
+	if len(audits) != 1 || audits[0].Action != "github_write" || audits[0].Method != http.MethodPost || audits[0].Decision != "allow" {
+		t.Fatalf("post audit %#v", audits)
+	}
+	code, body = do(http.MethodGet, "/api/repos/acme/widgets")
+	if code != http.StatusOK {
+		t.Fatalf("repo GET %d %q", code, body)
+	}
+	code, body = do(http.MethodGet, "/api/repos/acme/widgets/pulls/1")
+	if code != http.StatusOK {
+		t.Fatalf("pull GET %d %q", code, body)
+	}
+
+	writeProxy, err := New(Config{
+		Repos:   []string{"acme/widgets"},
+		Token:   func() (string, error) { return tokenSecret, nil },
+		GitBase: up.URL,
+		APIBase: up.URL,
+		Access:  AccessWrite,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writeProxy.Close()
+	if err := writeProxy.ListenUnix(t.TempDir()); err == nil {
+		t.Fatal("write proxy listened on a unix socket")
+	}
+	base, err := writeProxy.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		"/github/acme/widgets.git/git-receive-pack",
+		"/api/repos/acme/widgets/pulls",
+	} {
+		req, err := http.NewRequest(http.MethodPost, base+path, strings.NewReader("0000"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("write %s -> %d", path, res.StatusCode)
+		}
+	}
+	res, err := http.Get(base + "/github/acme/widgets.git/info/refs?service=git-upload-pack")
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("write proxy allowed upload-pack GET %d", res.StatusCode)
 	}
 }
 

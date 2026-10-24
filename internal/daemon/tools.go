@@ -476,12 +476,14 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		if granted(current.Grants, "github") {
 			opened, perr := a.openGitHubProxy(current)
 			if perr != nil || opened == nil {
-				a.log(current.ID, "grant_denied", map[string]any{"grant": "github", "detail": "proxy unavailable"})
+				a.auditGitHubDecision(current, "github_proxy_denied", "", "", "deny", "proxy unavailable")
 			} else {
 				px = opened
 				defer px.Close()
 				ghSock = px.Sock()
 				ghRepos = a.policy.EffectiveGitHubRepos(current.GitHubAllow)
+				a.noteGitHubSock(current.ID, ghSock)
+				defer a.noteGitHubSock(current.ID, "")
 			}
 		}
 		gate := &gitHubGate{px: px}
@@ -536,6 +538,7 @@ func (a *App) recordSandbox(botID string, ev sandbox.Event) {
 			detail["detail"] = ev.Detail
 		}
 		a.log(botID, ev.Kind, detail)
+		a.auditSandboxGitHub(botID, ev)
 	}
 	if ev.Notice != "" {
 		_, _ = a.st.AddMessage(store.Message{

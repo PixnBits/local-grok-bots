@@ -27,16 +27,16 @@ func (a *App) toolCreatePR(ctx context.Context, bot store.Bot, args map[string]a
 	if _, err := readGitHubToken(a.policy.GitHub.TokenFile); err != nil {
 		return a.prDeny(bot, "github_pr_denied", owner, repo, "token")
 	}
-	base, closeGate, err := a.openGitHubGate(bot)
-	if err != nil {
+	px, err := a.openGitHubReadProxy(bot)
+	if err != nil || px == nil {
 		return a.prDeny(bot, "github_pr_denied", owner, repo, "proxy")
 	}
-	defer closeGate()
-	def, err := a.githubDefaultBranch(ctx, base, owner, repo)
-	if err != nil {
+	def, lerr := a.githubDefaultBranch(ctx, px, owner, repo)
+	_ = px.Close()
+	if lerr != nil {
 		return a.prDeny(bot, "github_pr_denied", owner, repo, "default branch lookup")
 	}
-	if in.Head == def {
+	if strings.EqualFold(in.Head, def) {
 		return a.prDeny(bot, "github_pr_denied", owner, repo, "default branch")
 	}
 	out := a.perm.Evaluate(ctx, a.policy.Permission(), a.withUserRules(bot.ID, permission.Request{
@@ -61,6 +61,11 @@ func (a *App) toolCreatePR(ctx context.Context, bot store.Bot, args map[string]a
 		}
 		return a.prDeny(bot, "github_pr_denied", owner, repo, reason)
 	}
+	base, closeWrite, err := a.openGitHubWriteGate(bot)
+	if err != nil {
+		return a.prDeny(bot, "github_pr_denied", owner, repo, "proxy")
+	}
+	defer closeWrite()
 	pctx, pcancel := context.WithTimeout(ctx, 20*time.Second)
 	defer pcancel()
 	pr, err := github.CreatePull(pctx, nil, base+"/api/repos/"+owner+"/"+repo+"/pulls", owner, repo, in)
@@ -90,14 +95,14 @@ func (a *App) toolPRStatus(ctx context.Context, bot store.Bot, args map[string]a
 	if _, err := readGitHubToken(a.policy.GitHub.TokenFile); err != nil {
 		return a.prDeny(bot, "github_pr_status_denied", owner, repo, "token")
 	}
-	base, closeGate, err := a.openGitHubGate(bot)
-	if err != nil {
+	px, err := a.openGitHubReadProxy(bot)
+	if err != nil || px == nil {
 		return a.prDeny(bot, "github_pr_status_denied", owner, repo, "proxy")
 	}
-	defer closeGate()
+	defer px.Close()
 	lctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	pr, err := github.GetPull(lctx, nil, base+"/api/repos/"+owner+"/"+repo+"/pulls/"+strconv.Itoa(number), owner, repo)
+	pr, err := github.GetPull(lctx, githubUnixClient(px.Sock()), "http://proxy/api/repos/"+owner+"/"+repo+"/pulls/"+strconv.Itoa(number), owner, repo)
 	if err != nil {
 		return a.prDeny(bot, "github_pr_status_denied", owner, repo, githubErrReason(err))
 	}
@@ -261,22 +266,15 @@ func (a *App) freshBot(bot store.Bot) store.Bot {
 	return bot
 }
 
-func (a *App) githubDefaultBranch(ctx context.Context, base, owner, repo string) (string, error) {
+func (a *App) githubDefaultBranch(ctx context.Context, px *github.Proxy, owner, repo string) (string, error) {
+	if px == nil || px.Sock() == "" {
+		return "", errors.New("proxy")
+	}
+	name, err := github.NormalizeRepo(owner + "/" + repo)
+	if err != nil || name != owner+"/"+repo {
+		return "", errors.New("repo")
+	}
 	lctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	return github.DefaultBranch(lctx, nil, base+"/api/repos/"+owner+"/"+repo)
-}
-
-func (a *App) openGitHubGate(bot store.Bot) (string, func(), error) {
-	noop := func() {}
-	px, err := a.openGitHubProxy(bot)
-	if err != nil || px == nil {
-		return "", noop, errors.New("proxy unavailable")
-	}
-	base, err := px.ListenTCP()
-	if err != nil || base == "" {
-		_ = px.Close()
-		return "", noop, errors.New("proxy unavailable")
-	}
-	return base, func() { _ = px.Close() }, nil
+	return github.DefaultBranch(lctx, githubUnixClient(px.Sock()), "http://proxy/api/repos/"+owner+"/"+repo)
 }

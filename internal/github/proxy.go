@@ -19,6 +19,7 @@ import (
 )
 
 // Audit is one proxy decision. It has no header, no body, and no token.
+// Method is the request method. A non-GET is action github_write.
 type Audit struct {
 	Bot      string `json:"bot,omitempty"`
 	Run      string `json:"run,omitempty"`
@@ -27,9 +28,23 @@ type Audit struct {
 	Repo     string `json:"repo,omitempty"`
 	Decision string `json:"decision"`
 	Reason   string `json:"reason,omitempty"`
+	Method   string `json:"method"`
 	Path     string `json:"path"`
 	Status   int    `json:"status"`
 }
+
+// Access selects which routes a proxy instance forwards.
+// The zero value is AccessRead.
+type Access int
+
+const (
+	// AccessRead is the jail socket and host reads: upload-pack and the
+	// listed GET API routes. It does not push or call a write API.
+	AccessRead Access = iota
+	// AccessWrite is opened on the host after an approval card. It is not
+	// mounted in the jail and it does not listen on a unix socket.
+	AccessWrite
+)
 
 // Config builds a credential proxy. Token is read on each forwarded request
 // and is not logged. GitBase and APIBase default to https://github.com and
@@ -40,13 +55,18 @@ type Config struct {
 	GitBase string
 	APIBase string
 	Audit   func(Audit)
+	// Access defaults to AccessRead. AccessWrite is a second instance used
+	// only for a push or create_pr after the card is approved.
+	Access Access
 }
 
 // Proxy is a host-side reverse proxy. It adds Authorization only for an
 // allowlisted owner/repo on github.com or api.github.com, and it drops any
-// caller Authorization first. The jail reaches it through a unix socket.
-// A TCP listener on 127.0.0.1 requires an unguessable path gate.
+// caller Authorization first. The jail reaches a read proxy through a unix
+// socket. A TCP listener on 127.0.0.1 requires an unguessable path gate.
+// A write proxy is a separate instance: TCP only, never the jail socket.
 type Proxy struct {
+	access  Access
 	repos   map[string]bool
 	token   func() (string, error)
 	gitBase *url.URL
@@ -92,7 +112,11 @@ func New(cfg Config) (*Proxy, error) {
 	if err != nil {
 		return nil, errors.New("github proxy is not available")
 	}
+	if cfg.Access != AccessRead && cfg.Access != AccessWrite {
+		return nil, errors.New("github proxy is not available")
+	}
 	p := &Proxy{
+		access:  cfg.Access,
 		repos:   allow,
 		token:   cfg.Token,
 		gitBase: gitBase,
@@ -230,7 +254,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // ListenUnix serves on a mode-0600 socket named sock in a 0700 directory
 // under parent. The socket path does not require the TCP gate.
 func (p *Proxy) ListenUnix(parent string) error {
-	if p == nil {
+	if p == nil || p.access == AccessWrite {
 		return errors.New("github proxy is not available")
 	}
 	parent = filepath.Clean(parent)
@@ -340,47 +364,55 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, requireGate bool) 
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
+	method := ""
+	if r.Method != "" {
+		method = r.Method
+	}
 	if r.Method == http.MethodConnect || r.Method == "PRI" || r.URL == nil || r.URL.User != nil {
-		p.finish(w, http.StatusForbidden, "", "", "", "method")
+		p.finish(w, http.StatusForbidden, "", "", "", "method", method)
 		return
 	}
 	path, ok := requestPath(r)
 	if !ok {
-		p.finish(w, http.StatusForbidden, clipPath(r.URL.Path), "", "", "path")
+		p.finish(w, http.StatusForbidden, clipPath(r.URL.Path), "", "", "path", method)
 		return
 	}
 	if requireGate {
 		path, ok = stripGate(path, p.gate)
 		if !ok {
-			p.finish(w, http.StatusForbidden, "/", "", "", "gate")
+			p.finish(w, http.StatusForbidden, "/", "", "", "gate", method)
 			return
 		}
 	}
 	service, rest, ok := splitService(path)
 	if !ok {
-		p.finish(w, http.StatusForbidden, clipPath(path), "", "", "path")
+		p.finish(w, http.StatusForbidden, clipPath(path), "", "", "path", method)
 		return
 	}
 	route, err := Classify(service, rest, r.URL.RawQuery, p.repos)
 	if errors.Is(err, ErrNotAllowed) {
-		p.finish(w, http.StatusForbidden, route.Path, route.Owner, route.Repo, "repo")
+		p.finish(w, http.StatusForbidden, route.Path, route.Owner, route.Repo, "repo", method)
 		return
 	}
 	if err != nil {
-		p.finish(w, http.StatusForbidden, clipPath(path), "", "", "path")
+		p.finish(w, http.StatusForbidden, clipPath(path), "", "", "path", method)
 		return
 	}
-	if !methodOK(route, r.Method) {
-		p.finish(w, http.StatusForbidden, route.Path, route.Owner, route.Repo, "method")
+	if !accessOK(p.access, route, r.Method) {
+		reason := "method"
+		if r.Method == http.MethodGet {
+			reason = "route"
+		}
+		p.finish(w, http.StatusForbidden, route.Path, route.Owner, route.Repo, reason, method)
 		return
 	}
 	tok, err := p.token()
 	if err != nil || !TokenShape(tok) {
-		p.finish(w, http.StatusServiceUnavailable, route.Path, route.Owner, route.Repo, "token")
+		p.finish(w, http.StatusServiceUnavailable, route.Path, route.Owner, route.Repo, "token", method)
 		return
 	}
 	if strings.Contains(path, tok) || strings.Contains(r.URL.RawQuery, tok) {
-		p.finish(w, http.StatusForbidden, "/", "", "", "path")
+		p.finish(w, http.StatusForbidden, "/", "", "", "path", method)
 		return
 	}
 	base := p.gitBase
@@ -393,37 +425,43 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, requireGate bool) 
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 			status = http.StatusBadGateway
 		}
-		p.note(status, route.Path, route.Owner, route.Repo, "refuse", "upstream")
+		p.note(status, route.Path, route.Owner, route.Repo, "refuse", "upstream", method)
 		return
 	}
-	p.note(status, route.Path, route.Owner, route.Repo, "allow", "")
+	p.note(status, route.Path, route.Owner, route.Repo, "allow", "", method)
 }
 
-func (p *Proxy) finish(w http.ResponseWriter, status int, path, owner, repo, reason string) {
+func (p *Proxy) finish(w http.ResponseWriter, status int, path, owner, repo, reason, method string) {
 	http.Error(w, http.StatusText(status), status)
 	decision := "refuse"
 	if status >= 200 && status < 300 {
 		decision = "allow"
 	}
-	p.note(status, path, owner, repo, decision, reason)
+	p.note(status, path, owner, repo, decision, reason, method)
 }
 
-func (p *Proxy) note(status int, path, owner, repo, decision, reason string) {
+func (p *Proxy) note(status int, path, owner, repo, decision, reason, method string) {
 	if p == nil || p.audit == nil {
 		return
 	}
 	p.mu.Lock()
 	bot, run := p.bot, p.run
 	p.mu.Unlock()
-	action := "github_refuse"
-	if decision == "allow" {
-		action = "github_allow"
-	}
 	p.audit(Audit{
-		Bot: bot, Run: run, Action: action,
+		Bot: bot, Run: run, Action: auditAction(decision, method),
 		Owner: owner, Repo: repo, Decision: decision, Reason: reason,
-		Path: clipPath(path), Status: status,
+		Method: method, Path: clipPath(path), Status: status,
 	})
+}
+
+func auditAction(decision, method string) string {
+	if method != http.MethodGet {
+		return "github_write"
+	}
+	if decision == "allow" {
+		return "github_allow"
+	}
+	return "github_refuse"
 }
 
 func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, base *url.URL, route Route, tok string) (int, error) {
@@ -491,26 +529,81 @@ func copyHeaders(dst, src http.Header, allow map[string]bool) {
 	}
 }
 
-func methodOK(route Route, method string) bool {
-	switch method {
-	case http.MethodGet, http.MethodHead, http.MethodPost:
-	default:
+func accessOK(access Access, route Route, method string) bool {
+	if access == AccessWrite {
+		return writeAccess(route, method)
+	}
+	return readAccess(route, method)
+}
+
+func readAccess(route Route, method string) bool {
+	if route.Service == "github" {
+		switch gitTail(route.Path) {
+		case "info/refs":
+			return method == http.MethodGet && route.Query == "service=git-upload-pack"
+		case "git-upload-pack":
+			return method == http.MethodPost && route.Query == ""
+		default:
+			return false
+		}
+	}
+	if route.Service != "api" || method != http.MethodGet {
 		return false
 	}
-	if route.Service == "api" {
+	return apiReadPath(route.Path)
+}
+
+func writeAccess(route Route, method string) bool {
+	if route.Service == "github" {
+		switch gitTail(route.Path) {
+		case "info/refs":
+			return method == http.MethodGet && route.Query == "service=git-receive-pack"
+		case "git-receive-pack":
+			return method == http.MethodPost && route.Query == ""
+		default:
+			return false
+		}
+	}
+	if route.Service != "api" || method != http.MethodPost {
+		return false
+	}
+	return apiPullCreate(route.Path)
+}
+
+func gitTail(path string) string {
+	parts := splitParts(path)
+	if len(parts) < 3 {
+		return ""
+	}
+	return strings.Join(parts[2:], "/")
+}
+
+func apiReadPath(path string) bool {
+	parts := splitParts(path)
+	if len(parts) < 3 || parts[0] != "repos" {
+		return false
+	}
+	if len(parts) == 3 {
 		return true
 	}
-	tail := route.Path
-	if i := strings.LastIndex(tail, "/"); i >= 0 {
-		rest := tail[i+1:]
-		if strings.HasSuffix(route.Path, "/info/refs") {
-			return method == http.MethodGet || method == http.MethodHead
-		}
-		if rest == "git-upload-pack" || rest == "git-receive-pack" {
-			return method == http.MethodPost
+	return len(parts) == 5 && parts[3] == "pulls" && pullNumber(parts[4])
+}
+
+func apiPullCreate(path string) bool {
+	parts := splitParts(path)
+	return len(parts) == 4 && parts[0] == "repos" && parts[3] == "pulls"
+}
+
+func pullNumber(s string) bool {
+	if s == "" || len(s) > 10 || s[0] == '0' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func splitService(path string) (service, rest string, ok bool) {

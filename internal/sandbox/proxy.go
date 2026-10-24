@@ -149,12 +149,20 @@ func (p *proxy) handle(conn net.Conn) {
 	<-errc
 }
 
+// GitHubNetworkDenied is the splice-proxy detail for github.com and
+// api.github.com. GitHubProxyDenied is the detail when the credential
+// bridge cannot be built. The daemon audits these two strings.
+const (
+	GitHubNetworkDenied = "github is not on the network grant"
+	GitHubProxyDenied   = "github proxy unavailable"
+)
+
 func (p *proxy) decide(host string, port int) (bool, Event) {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	// GitHub is never reached tokenless. A net grant cannot carry it, even
 	// when the name is on net_allow. Clone and fetch use the credential proxy.
 	if host == "github.com" || host == "api.github.com" {
-		return false, Event{Kind: "grant_denied", Grant: "github", Host: host, Detail: "github is not on the network grant"}
+		return false, Event{Kind: "grant_denied", Grant: "github", Host: host, Detail: GitHubNetworkDenied}
 	}
 	if port == 22 {
 		if !p.grants["ssh"] {

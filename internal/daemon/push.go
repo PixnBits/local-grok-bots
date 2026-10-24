@@ -3,11 +3,10 @@ package daemon
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/github"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
@@ -15,23 +14,10 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
-// gitHubGate is the host TCP address of the credential proxy. The token is
-// not part of the URL.
+// gitHubGate is the read proxy mounted in the jail. Push does not call
+// ListenTCP on it. Writes use a separate proxy opened after the card.
 type gitHubGate struct {
-	px   *github.Proxy
-	once sync.Once
-	url  string
-	err  error
-}
-
-func (g *gitHubGate) URL() (string, error) {
-	if g == nil || g.px == nil {
-		return "", errors.New("proxy unavailable")
-	}
-	g.once.Do(func() {
-		g.url, g.err = g.px.ListenTCP()
-	})
-	return g.url, g.err
+	px *github.Proxy
 }
 
 type pushSpec struct {
@@ -40,8 +26,8 @@ type pushSpec struct {
 	branch string
 }
 
-// handleGitPush rebuilds the push on the host. Hard denies return before
-// Evaluate. A push that is still allowed always asks, then the daemon pushes.
+// handleGitPush rebuilds the push on the host from a mirror. Hard denies
+// return before Evaluate. A push that is still allowed always asks.
 func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *gitHubGate, args []string) sandbox.PushResult {
 	if parent == nil {
 		parent = context.Background()
@@ -56,35 +42,60 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	if !granted(bot.Grants, "git") || !granted(bot.Grants, "github") {
 		return a.pushDenied(bot, "", "", "missing grant")
 	}
-	ws := a.ws
-	owner, repo, specs, reason := a.resolvePush(pctx, ws, parsed)
+	repos := []string(nil)
+	ws := ""
+	if a != nil {
+		repos = a.policy.EffectiveGitHubRepos(bot.GitHubAllow)
+		ws = a.ws
+	}
+	owner, repo, reason := pushTarget(parsed, repos)
 	if reason != "" {
 		return a.pushDenied(bot, owner, repo, reason)
 	}
-	if !repoAllowed(a.policy.EffectiveGitHubRepos(bot.GitHubAllow), owner, repo) {
+	if !repoAllowed(repos, owner, repo) {
 		return a.pushDenied(bot, owner, repo, "allowlist")
 	}
-	if _, err := readGitHubToken(a.policy.GitHub.TokenFile); err != nil {
+	tokenFile := ""
+	if a != nil {
+		tokenFile = a.policy.GitHub.TokenFile
+	}
+	if _, err := readGitHubToken(tokenFile); err != nil {
 		return a.pushDenied(bot, owner, repo, "token")
 	}
-	base, err := gate.URL()
-	if err != nil || base == "" {
+	if gate == nil || gate.px == nil || gate.px.Sock() == "" {
 		return a.pushDenied(bot, owner, repo, "proxy unavailable")
 	}
-	lctx, lcancel := context.WithTimeout(pctx, 20*time.Second)
-	defer lcancel()
-	def, err := github.DefaultBranch(lctx, nil, base+"/api/repos/"+owner+"/"+repo)
+	if workspaceConfigReason(ws) == "config" {
+		return a.pushDenied(bot, owner, repo, "config")
+	}
+	parentDir := filepath.Join(a.cfg.DataDir, "mirrors")
+	mirror, err := copyGitMirror(parentDir, ws)
+	if err != nil {
+		return a.pushDenied(bot, owner, repo, "mirror")
+	}
+	defer os.RemoveAll(mirror)
+	if workspaceConfigReason(ws) == "config" {
+		return a.pushDenied(bot, owner, repo, "config")
+	}
+	specs, reason := resolvePushRefs(mirror, parsed)
+	if reason != "" {
+		return a.pushDenied(bot, owner, repo, reason)
+	}
+	def, err := a.githubDefaultBranch(pctx, gate.px, owner, repo)
 	if err != nil {
 		return a.pushDenied(bot, owner, repo, "default branch lookup")
 	}
 	var branches []string
 	for _, sp := range specs {
-		if sp.branch == def {
+		if strings.EqualFold(sp.branch, def) {
 			return a.pushDenied(bot, owner, repo, "default branch")
 		}
 		branches = append(branches, sp.branch)
 	}
-	commits := clip(gitText(pctx, ws, "log", "-n", "20", "--stat", "--format=%h %s"), 4000)
+	commits, err := mirrorLog(pctx, mirror, specs)
+	if err != nil {
+		return a.pushDenied(bot, owner, repo, "mirror")
+	}
 	ectx, cancel := context.WithTimeout(parent, a.policy.EffectivePromptTimeout())
 	defer cancel()
 	stop := context.AfterFunc(pctx, cancel)
@@ -99,7 +110,7 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 			"repo":    owner + "/" + repo,
 			"branch":  strings.Join(branches, ","),
 			"remote":  github.RemoteURL(owner, repo),
-			"commits": commits,
+			"commits": clip(commits, 4000),
 		},
 	}))
 	if out.Behavior != "allow" {
@@ -109,9 +120,21 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 		}
 		return a.pushDenied(bot, owner, repo, reason)
 	}
-	if msg, err := hostGitPush(pctx, ws, base, owner, repo, specs); err != nil {
+	if workspaceConfigReason(ws) == "config" {
+		return a.pushDenied(bot, owner, repo, "config")
+	}
+	base, closeWrite, err := a.openGitHubWriteGate(bot)
+	if err != nil {
+		return a.pushDenied(bot, owner, repo, "proxy unavailable")
+	}
+	defer closeWrite()
+	remote, err := proxyGitURL(base, owner, repo)
+	if err != nil {
+		return a.pushDenied(bot, owner, repo, "proxy unavailable")
+	}
+	if msg, err := mirrorPush(pctx, mirror, remote, specs); err != nil {
 		res := a.pushDenied(bot, owner, repo, "push failed")
-		res.Stderr += sanitizePush(msg, a.policy.GitHub.TokenFile)
+		res.Stderr += sanitizePush(msg, tokenFile, base)
 		return res
 	}
 	ev := a.auditPush(bot, owner, repo, "allow", "sent")
@@ -165,74 +188,114 @@ func repoAllowed(repos []string, owner, repo string) bool {
 	return false
 }
 
-func (a *App) resolvePush(ctx context.Context, ws string, parsed github.PushArgs) (owner, repo string, specs []pushSpec, reason string) {
-	remotes := gitRemotes(ctx, ws)
-	url := parsed.URL
-	refs := append([]string(nil), parsed.Names...)
-	if url == "" {
-		var named []string
-		refs = nil
-		for _, n := range parsed.Names {
-			if u, ok := remotes[n]; ok {
-				named = append(named, u)
-				continue
+func pushTarget(parsed github.PushArgs, repos []string) (owner, repo, reason string) {
+	if parsed.URL != "" {
+		owner, repo, err := github.ParseGitHubRemote(parsed.URL)
+		if err != nil {
+			return "", "", "remote"
+		}
+		return owner, repo, ""
+	}
+	if len(repos) != 1 {
+		return "", "", "remote"
+	}
+	owner, repo, ok := strings.Cut(repos[0], "/")
+	if !ok {
+		return "", "", "remote"
+	}
+	name, err := github.NormalizeRepo(owner + "/" + repo)
+	if err != nil || name != owner+"/"+repo {
+		return "", "", "remote"
+	}
+	return owner, repo, ""
+}
+
+func proxyGitURL(base, owner, repo string) (string, error) {
+	name, err := github.NormalizeRepo(owner + "/" + repo)
+	if err != nil || name != owner+"/"+repo {
+		return "", errors.New("remote")
+	}
+	u, err := url.Parse(base)
+	if err != nil || u.User != nil || u.Scheme != "http" || u.Hostname() != "127.0.0.1" {
+		return "", errors.New("proxy")
+	}
+	if u.RawQuery != "" || u.Fragment != "" || u.Port() == "" {
+		return "", errors.New("proxy")
+	}
+	rest, ok := strings.CutPrefix(u.Path, "/g/")
+	if !ok {
+		return "", errors.New("proxy")
+	}
+	gate := strings.Trim(rest, "/")
+	if gate == "" || strings.Contains(gate, "/") || strings.ContainsAny(gate, "\r\n\t\x00") {
+		return "", errors.New("proxy")
+	}
+	u.Path = "/g/" + gate + "/github/" + owner + "/" + repo + ".git"
+	u.RawPath = ""
+	return u.String(), nil
+}
+
+func resolvePushRefs(mirror string, parsed github.PushArgs) ([]pushSpec, string) {
+	names := append([]string(nil), parsed.Names...)
+	if parsed.URL == "" && len(names) >= 2 {
+		first := names[0]
+		if first != "HEAD" && !strings.Contains(first, ":") && github.BranchOK(first) {
+			ok, err := refPresent(mirror, "refs/heads/"+first)
+			if err != nil {
+				return nil, "refspec"
 			}
-			refs = append(refs, n)
-		}
-		switch len(named) {
-		case 1:
-			url = named[0]
-		case 0:
-			if len(remotes) != 1 {
-				return "", "", nil, "remote"
+			if !ok {
+				names = names[1:]
 			}
-			for _, u := range remotes {
-				url = u
-			}
-		default:
-			return "", "", nil, "remote"
 		}
 	}
-	var err error
-	owner, repo, err = github.ParseGitHubRemote(url)
-	if err != nil {
-		return "", "", nil, "remote"
+	if len(names) == 0 {
+		names = []string{"HEAD"}
 	}
-	if len(refs) == 0 {
-		head, herr := gitCurrentBranch(ctx, ws)
-		if herr != nil {
-			return owner, repo, nil, "refspec"
+	if len(names) > 8 {
+		return nil, "refspec"
+	}
+	var specs []pushSpec
+	for _, raw := range names {
+		src, dst, err := github.SplitRefspec(raw)
+		if err != nil {
+			return nil, err.Error()
 		}
-		refs = []string{head}
-	}
-	if len(refs) > 8 {
-		return owner, repo, nil, "refspec"
-	}
-	for _, raw := range refs {
-		src, dst, serr := github.SplitRefspec(raw)
-		if serr != nil {
-			return owner, repo, nil, serr.Error()
-		}
-		sp, sreason := resolveSpec(ctx, ws, src, dst)
-		if sreason != "" {
-			return owner, repo, nil, sreason
+		sp, reason := resolveSpec(mirror, src, dst)
+		if reason != "" {
+			return nil, reason
 		}
 		specs = append(specs, sp)
 	}
-	return owner, repo, specs, ""
+	return specs, ""
 }
 
-func resolveSpec(ctx context.Context, ws, src, dst string) (pushSpec, string) {
-	if src != "HEAD" && gitTagExists(ctx, ws, src) {
-		return pushSpec{}, "tag"
+func resolveSpec(mirror, src, dst string) (pushSpec, string) {
+	if src != "HEAD" {
+		ok, reason := tagPresent(mirror, src)
+		if reason != "" {
+			return pushSpec{}, reason
+		}
+		if ok {
+			return pushSpec{}, "tag"
+		}
 	}
-	if dst != "HEAD" && gitTagExists(ctx, ws, dst) {
-		return pushSpec{}, "tag"
+	if dst != "HEAD" {
+		ok, reason := tagPresent(mirror, dst)
+		if reason != "" {
+			return pushSpec{}, reason
+		}
+		if ok {
+			return pushSpec{}, "tag"
+		}
 	}
-	if dst == "HEAD" || src == "HEAD" {
-		head, err := gitCurrentBranch(ctx, ws)
+	if src == "HEAD" || dst == "HEAD" {
+		head, err := mirrorHEAD(mirror)
 		if err != nil {
 			return pushSpec{}, "refspec"
+		}
+		if src == "HEAD" {
+			src = head
 		}
 		if dst == "HEAD" {
 			dst = head
@@ -242,60 +305,118 @@ func resolveSpec(ctx context.Context, ws, src, dst string) (pushSpec, string) {
 	if err != nil {
 		return pushSpec{}, "refspec"
 	}
-	sp := pushSpec{dst: "refs/heads/" + branch, branch: branch}
-	if src == "HEAD" {
-		sp.src = "HEAD"
-		return sp, ""
-	}
 	srcBranch, err := github.BranchOf(src)
 	if err != nil {
 		return pushSpec{}, "refspec"
 	}
-	if !gitRefExists(ctx, ws, "refs/heads/"+srcBranch) {
+	ok, err := refPresent(mirror, "refs/heads/"+srcBranch)
+	if err != nil || !ok {
 		return pushSpec{}, "refspec"
 	}
-	sp.src = "refs/heads/" + srcBranch
-	return sp, ""
+	return pushSpec{src: "refs/heads/" + srcBranch, dst: "refs/heads/" + branch, branch: branch}, ""
 }
 
-func gitTagExists(ctx context.Context, ws, name string) bool {
+func tagPresent(mirror, name string) (bool, string) {
+	if name == "" || name == "HEAD" || strings.Contains(name, ":") {
+		return false, ""
+	}
 	ref := name
-	if !strings.HasPrefix(ref, "refs/tags/") {
-		if !github.BranchOK(name) && name != "HEAD" {
-			return false
+	if strings.HasPrefix(name, "refs/tags/") {
+		ref = name
+		if !github.BranchOK(strings.TrimPrefix(name, "refs/tags/")) {
+			return false, "refspec"
 		}
+	} else if !github.BranchOK(name) {
+		return false, ""
+	} else {
 		ref = "refs/tags/" + name
-	} else if rest := strings.TrimPrefix(ref, "refs/tags/"); !github.BranchOK(rest) {
+	}
+	ok, err := refPresent(mirror, ref)
+	if err != nil {
+		return false, "refspec"
+	}
+	return ok, ""
+}
+
+func mirrorHEAD(root string) (string, error) {
+	path := filepath.Join(root, "HEAD")
+	st, err := os.Lstat(path)
+	if err != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || st.Size() <= 0 || st.Size() > 300 {
+		return "", errors.New("refspec")
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) > 300 {
+		return "", errors.New("refspec")
+	}
+	s := strings.TrimSpace(string(b))
+	rest, ok := strings.CutPrefix(s, "ref: ")
+	if !ok || strings.ContainsAny(rest, " \t\r\n\x00") {
+		return "", errors.New("refspec")
+	}
+	name, ok := strings.CutPrefix(rest, "refs/heads/")
+	if !ok || !github.BranchOK(name) {
+		return "", errors.New("refspec")
+	}
+	present, err := refPresent(root, "refs/heads/"+name)
+	if err != nil || !present {
+		return "", errors.New("refspec")
+	}
+	return name, nil
+}
+
+func refPresent(root, rel string) (bool, error) {
+	if rel == "" || strings.Contains(rel, "..") || strings.HasPrefix(rel, "/") || strings.ContainsAny(rel, " \t\r\n\x00") {
+		return false, errors.New("ref")
+	}
+	full := filepath.Join(root, filepath.Clean(rel))
+	back, err := filepath.Rel(root, full)
+	if err != nil || back == ".." || strings.HasPrefix(back, ".."+string(filepath.Separator)) {
+		return false, errors.New("ref")
+	}
+	st, err := os.Lstat(full)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return packedHas(root, rel), nil
+		}
+		return false, err
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() {
+		return false, errors.New("ref")
+	}
+	return true, nil
+}
+
+func packedHas(root, ref string) bool {
+	path := filepath.Join(root, "packed-refs")
+	st, err := os.Lstat(path)
+	if err != nil || st.Mode()&os.ModeSymlink != 0 || !st.Mode().IsRegular() || st.Size() > 1<<20 {
 		return false
 	}
-	return gitRefExists(ctx, ws, ref)
-}
-
-func gitRemotes(ctx context.Context, ws string) map[string]string {
-	out := gitText(ctx, ws, "remote")
-	got := map[string]string{}
-	for _, name := range strings.Split(out, "\n") {
-		name = strings.TrimSpace(name)
-		if !remoteNameOK(name) {
-			continue
-		}
-		u := strings.TrimSpace(gitText(ctx, ws, "remote", "get-url", name))
-		if u == "" || strings.ContainsAny(u, "\r\n\t\x00") {
-			continue
-		}
-		got[name] = u
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
 	}
-	return got
+	for _, line := range strings.Split(string(b), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "^") {
+			continue
+		}
+		sha, name, ok := strings.Cut(line, " ")
+		if !ok || name != ref || !hexSHA(sha) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
-func remoteNameOK(s string) bool {
-	if s == "" || len(s) > 100 || s[0] == '-' {
+func hexSHA(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
-		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '.', c == '_', c == '-':
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
 		default:
 			return false
 		}
@@ -303,87 +424,14 @@ func remoteNameOK(s string) bool {
 	return true
 }
 
-func gitCurrentBranch(ctx context.Context, ws string) (string, error) {
-	name := strings.TrimSpace(gitText(ctx, ws, "symbolic-ref", "--short", "HEAD"))
-	if !github.BranchOK(name) {
-		return "", errors.New("branch")
-	}
-	return name, nil
-}
-
-func gitRefExists(ctx context.Context, ws, ref string) bool {
-	if ref == "" || strings.ContainsAny(ref, " \t\r\n\x00") {
-		return false
-	}
-	_, err := gitRun(ctx, ws, "rev-parse", "--verify", "--quiet", ref)
-	return err == nil
-}
-
-func gitText(ctx context.Context, ws string, args ...string) string {
-	b, err := gitRun(ctx, ws, args...)
-	if err != nil {
-		return ""
-	}
-	return string(b)
-}
-
-func gitRun(ctx context.Context, ws string, args ...string) ([]byte, error) {
-	cmdArgs := append([]string{"-C", ws, "--no-pager", "-c", "core.pager=cat", "-c", "safe.directory=" + ws}, args...)
-	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
-	cmd.Env = gitPushEnv()
-	return cmd.Output()
-}
-
-func sanitizePush(msg, tokenFile string) string {
+func sanitizePush(msg, tokenFile, gate string) string {
 	msg = clip(msg, 2000)
 	tok, err := readGitHubToken(tokenFile)
 	if err == nil && tok != "" {
 		msg = strings.ReplaceAll(msg, tok, "")
 	}
+	if gate != "" {
+		msg = strings.ReplaceAll(msg, gate, "")
+	}
 	return msg
-}
-
-func hostGitPush(ctx context.Context, ws, gate, owner, repo string, specs []pushSpec) (string, error) {
-	args := []string{
-		"-C", ws,
-		"--no-pager",
-		"-c", "safe.directory=" + ws,
-		"-c", "http.proxy=",
-		"-c", "http.followRedirects=false",
-		"-c", "core.sshCommand=/bin/false",
-		"-c", "core.hooksPath=/dev/null",
-		"-c", "protocol.version=1",
-		"-c", "url." + gate + "/github/.insteadOf=https://github.com/",
-		"push",
-		github.RemoteURL(owner, repo),
-	}
-	for _, sp := range specs {
-		if !strings.HasPrefix(sp.dst, "refs/heads/") || (sp.src != "HEAD" && !strings.HasPrefix(sp.src, "refs/heads/")) {
-			return "", errors.New("refspec")
-		}
-		args = append(args, sp.src+":"+sp.dst)
-	}
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Env = gitPushEnv()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return string(out), err
-	}
-	return "", nil
-}
-
-func gitPushEnv() []string {
-	path := os.Getenv("PATH")
-	if path == "" {
-		path = "/usr/bin:/bin"
-	}
-	return []string{
-		"PATH=" + path,
-		"HOME=/nonexistent",
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_CONFIG_SYSTEM=/dev/null",
-		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_TERMINAL_PROMPT=0",
-		"LANG=C",
-	}
 }
