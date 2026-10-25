@@ -37,10 +37,8 @@ func readTokenFile(path string) (string, error) {
 		if err := tokenCheck(st.Uid, perm); err != nil {
 			return "", errToken("check")
 		}
-	} else if perm != 0o600 {
-		return "", errToken("mode")
-	} else if st.Uid != 0 {
-		return "", errToken("owner")
+	} else if err := checkTokenFile(tokenOwner(st.Uid), perm); err != nil {
+		return "", err
 	}
 	if st.Size <= 0 || st.Size > 4096 {
 		return "", errToken("size")

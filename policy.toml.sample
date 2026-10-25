@@ -205,7 +205,7 @@ conflict_policy = "refuse"
 [github]
 # Host path of a fine-grained PAT. The daemon reads it. It is not mounted
 # into a jail, not put in the environment, and not written to logs.
-# The file must be a regular file, mode 0600, owner uid 0, one line,
+# The file must be a regular file, mode 0600, owned by the daemon user, one line,
 # at most 4096 bytes. Anything else fails closed.
 # token_file = "/etc/local-grok-bots/github.token"
 # repos is the ceiling of owner/repo names an Ollama bot may use.

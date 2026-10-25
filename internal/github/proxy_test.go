@@ -467,7 +467,7 @@ func TestProxyAuditsTokenReasonWithoutBytes(t *testing.T) {
 		err  error
 		want string
 	}{
-		{"owner", "", errToken("owner"), "token file: not root-owned"},
+		{"owner", "", errToken("owner"), "token file: not owned by daemon"},
 		{"mode", "", errToken("mode"), "mode"},
 		{"missing", "", errToken("read"), "missing"},
 		{"shape", "bad token", nil, "shape"},

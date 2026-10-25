@@ -10,10 +10,16 @@ import (
 
 const tokenSecret = "lgb-github-test-secret-value"
 
-func TestReadTokenFileRefusesNonRoot(t *testing.T) {
+func TestReadTokenOwnerMatchesEUID(t *testing.T) {
 	prevCheck, prevHook := tokenCheck, tokenHook
+	prevEUID, prevOwner := tokenEUID, tokenOwner
 	tokenCheck, tokenHook = nil, nil
-	t.Cleanup(func() { tokenCheck, tokenHook = prevCheck, prevHook })
+	tokenEUID = os.Geteuid
+	tokenOwner = func(uid uint32) uint32 { return uid }
+	t.Cleanup(func() {
+		tokenCheck, tokenHook = prevCheck, prevHook
+		tokenEUID, tokenOwner = prevEUID, prevOwner
+	})
 
 	dir := t.TempDir()
 	good := filepath.Join(dir, "token")
@@ -23,16 +29,45 @@ func TestReadTokenFileRefusesNonRoot(t *testing.T) {
 	if err := os.Chmod(good, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, err := ReadToken(good)
-	if !errors.Is(err, ErrToken) || strings.Contains(err.Error(), tokenSecret) {
-		t.Fatalf("owner: %v", err)
+	got, err := ReadToken(good)
+	if err != nil || got != tokenSecret || strings.Contains(errString(err), tokenSecret) {
+		t.Fatalf("owner==euid: %q %v", got, err)
 	}
-	if !strings.Contains(err.Error(), "owner") {
-		t.Fatalf("reason: %v", err)
+
+	// Another owner fails, including a root-owned file when euid is not root.
+	tokenEUID = func() int { return 1000 }
+	tokenOwner = func(uint32) uint32 { return 1001 }
+	_, err = ReadToken(good)
+	if !errors.Is(err, ErrToken) || !strings.Contains(err.Error(), "owner") || strings.Contains(err.Error(), tokenSecret) {
+		t.Fatalf("other owner: %v", err)
 	}
+	tokenOwner = func(uint32) uint32 { return 0 }
+	_, err = ReadToken(good)
+	if !errors.Is(err, ErrToken) || !strings.Contains(err.Error(), "owner") || strings.Contains(err.Error(), tokenSecret) {
+		t.Fatalf("root owner, non-root euid: %v", err)
+	}
+
+	// A root daemon still accepts only a root-owned file.
+	tokenEUID = func() int { return 0 }
+	tokenOwner = func(uint32) uint32 { return 0 }
+	got, err = ReadToken(good)
+	if err != nil || got != tokenSecret {
+		t.Fatalf("root: %q %v", got, err)
+	}
+	tokenOwner = func(uint32) uint32 { return 1000 }
+	_, err = ReadToken(good)
+	if !errors.Is(err, ErrToken) || !strings.Contains(err.Error(), "owner") || strings.Contains(err.Error(), tokenSecret) {
+		t.Fatalf("root euid, other owner: %v", err)
+	}
+
+	tokenEUID = os.Geteuid
+	tokenOwner = func(uid uint32) uint32 { return uid }
 
 	loose := filepath.Join(dir, "loose")
 	if err := os.WriteFile(loose, []byte(tokenSecret+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(loose, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	_, err = ReadToken(loose)
@@ -146,7 +181,7 @@ func errString(err error) string {
 }
 
 func TestTokenFailureReasonOmitsBytes(t *testing.T) {
-	if TokenFailureReason(errToken("owner")) != "token file: not root-owned" {
+	if TokenFailureReason(errToken("owner")) != "token file: not owned by daemon" {
 		t.Fatal(TokenFailureReason(errToken("owner")))
 	}
 	if TokenFailureReason(errToken("mode")) != "mode" || TokenFailureReason(errToken("shape")) != "shape" {

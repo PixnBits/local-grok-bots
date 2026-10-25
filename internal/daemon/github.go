@@ -14,7 +14,7 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
-// readGitHubToken reads the root-owned token file. Tests replace it.
+// readGitHubToken reads the token file owned by the daemon user. Tests replace it.
 var readGitHubToken = github.ReadToken
 
 // openGitHubProxy listens on a private socket for this shell. The token

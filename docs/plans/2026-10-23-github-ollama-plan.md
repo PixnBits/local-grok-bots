@@ -4,7 +4,7 @@ Spec: docs/github.md. Review overrides win where they differ.
 
 ## Decisions
 
-- Token file is root-owned, mode 0600, not a symlink, at most 4096 bytes, one line. The daemon reads it on the host. A bad owner, mode, or read fails closed. Tests replace the file inspect with an unexported hook. A non-root daemon is out of scope.
+- Token file is mode 0600, owned by the daemon's effective uid, not a symlink, at most 4096 bytes, one line. The daemon reads it on the host. A bad owner, mode, or read fails closed. A root daemon still requires uid 0. Tests replace the euid and the owner with unexported hooks.
 - `github_allow` empty or omitted allows no repositories. It does not inherit the policy list.
 - Managed `[github].repos` is the ceiling. Local policy only narrows it (intersection). A bad `[github]` value disables GitHub and warns.
 - Every `git push` and `create_pr` shows the approval card. `Request.ForceAsk` is honored ahead of hook allow, bypass, managed allow, durable user allow, and session grant. Deny rules still deny. `ui_prompts` off denies.
@@ -26,4 +26,4 @@ Spec: docs/github.md. Review overrides win where they differ.
 
 ## Out of scope
 
-Non-root daemon, other forges, Grok and Claude backends, voice, deploys, ports 8080/8090/8095, pushing this branch.
+Other forges, Grok and Claude backends, voice, deploys, ports 8080/8090/8095, pushing this branch.

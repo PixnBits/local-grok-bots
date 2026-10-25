@@ -2,6 +2,7 @@ package github
 
 import (
 	"errors"
+	"os"
 	"strings"
 )
 
@@ -32,14 +33,20 @@ func errToken(reason string) error {
 var tokenHook func(path string) (string, error)
 
 // tokenCheck, when set, replaces the owner and mode decision. Symlink, type,
-// size, and shape checks still run. Production leaves it nil, which requires
-// uid 0 and mode 0600.
+// size, and shape checks still run. Production leaves it nil.
 var tokenCheck func(uid uint32, perm uint32) error
 
-// ReadToken reads a root-owned mode-0600 token file. A symlink, the wrong
-// owner, the wrong mode, or an unreadable file fails closed. The token is at
-// most 4096 bytes. Trailing spaces, tabs, and newlines are removed. A leading
-// or inner space, tab, or newline is refused.
+// tokenEUID is the daemon's effective uid. Tests replace it.
+var tokenEUID = os.Geteuid
+
+// tokenOwner is the file uid the owner check sees. Tests replace it.
+var tokenOwner = func(uid uint32) uint32 { return uid }
+
+// ReadToken reads a mode-0600 token file owned by the daemon's effective uid.
+// A root daemon still requires a root-owned file. A symlink, any other owner,
+// the wrong mode, or an unreadable file fails closed. The token is at most
+// 4096 bytes. Trailing spaces, tabs, and newlines are removed. A leading or
+// inner space, tab, or newline is refused.
 func ReadToken(path string) (string, error) {
 	if tokenHook != nil {
 		tok, err := tokenHook(path)
@@ -52,6 +59,21 @@ func ReadToken(path string) (string, error) {
 		return tok, nil
 	}
 	return readTokenFile(path)
+}
+
+// checkTokenFile accepts a file only when its mode is exactly 0600 and its
+// owner is the daemon's effective uid. A negative euid fails closed. A root
+// daemon therefore still requires uid 0, and a non-root daemon refuses a
+// root-owned file.
+func checkTokenFile(owner, perm uint32) error {
+	if perm != 0o600 {
+		return errToken("mode")
+	}
+	id := tokenEUID()
+	if id < 0 || uint32(id) != owner {
+		return errToken("owner")
+	}
+	return nil
 }
 
 // TokenShape reports whether tok can be sent as a bearer token.
@@ -90,7 +112,7 @@ func TokenFailureReason(err error) string {
 	}
 	switch te.reason {
 	case "owner":
-		return "token file: not root-owned"
+		return "token file: not owned by daemon"
 	case "mode":
 		return "mode"
 	case "shape":
