@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -48,7 +49,7 @@ func TestGzipDefaultClientBothProxies(t *testing.T) {
 	defer up.Close()
 
 	client := &http.Client{}
-	readProxy := gzipProxy(t, up.URL, AccessRead)
+	readProxy := gzipProxy(t, up.URL, AccessRead, Window{})
 	readSrv := httptest.NewServer(readProxy)
 	defer readSrv.Close()
 
@@ -56,27 +57,26 @@ func TestGzipDefaultClientBothProxies(t *testing.T) {
 	if err != nil || got != branch {
 		t.Fatalf("DefaultBranch %q %v", got, err)
 	}
-	assertPlainJSON(t, client, readSrv.URL+"/api/repos/acme/widgets")
+	readReq, err := http.NewRequest(http.MethodGet, readSrv.URL+"/api/repos/acme/widgets", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertPlainJSON(t, client, readReq)
 
-	writeProxy := gzipProxy(t, up.URL, AccessWrite)
-	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		route := Route{Service: "api", Owner: "acme", Repo: "widgets", Path: "/repos/acme/widgets"}
-		rec := httptest.NewRecorder()
-		status, ferr := writeProxy.forward(rec, r, writeProxy.apiBase, route, tokenSecret)
-		if ferr != nil {
-			http.Error(w, "upstream", http.StatusBadGateway)
-			return
-		}
-		for k, vs := range rec.Header() {
-			for _, v := range vs {
-				w.Header().Add(k, v)
-			}
-		}
-		w.WriteHeader(status)
-		_, _ = io.Copy(w, rec.Body)
-	}))
-	defer front.Close()
-	assertPlainJSON(t, client, front.URL+"/repos/acme/widgets")
+	writeProxy := gzipProxy(t, up.URL, AccessWrite, Window{
+		Kind: WindowPush, Owner: "acme", Repo: "widgets", Branch: "feature", Default: "main",
+		Old: strings.Repeat("0", 40),
+	})
+	base, err := writeProxy.ListenTCP()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReq, err := http.NewRequest(http.MethodGet, base+"/github/acme/widgets.git/info/refs?service=git-receive-pack", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeReq.Header.Set("X-LGB-Gate", writeProxy.Gate())
+	assertPlainJSON(t, client, writeReq)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -90,7 +90,7 @@ func TestGzipDefaultClientBothProxies(t *testing.T) {
 	}
 }
 
-func gzipProxy(t *testing.T, upstream string, access Access) *Proxy {
+func gzipProxy(t *testing.T, upstream string, access Access, win Window) *Proxy {
 	t.Helper()
 	p, err := New(Config{
 		Repos:   []string{"acme/widgets"},
@@ -98,6 +98,7 @@ func gzipProxy(t *testing.T, upstream string, access Access) *Proxy {
 		GitBase: upstream,
 		APIBase: upstream,
 		Access:  access,
+		Window:  win,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -106,9 +107,9 @@ func gzipProxy(t *testing.T, upstream string, access Access) *Proxy {
 	return p
 }
 
-func assertPlainJSON(t *testing.T, client *http.Client, rawURL string) {
+func assertPlainJSON(t *testing.T, client *http.Client, req *http.Request) {
 	t.Helper()
-	res, err := client.Get(rawURL)
+	res, err := client.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
