@@ -8,6 +8,40 @@ import (
 	"testing"
 )
 
+func TestCapabilitySectionBytes(t *testing.T) {
+	zero := strings.Repeat("0", 40)
+	feature := strings.Repeat("a", 40)
+	base := zero + " " + feature + " refs/heads/feature\x00"
+	cases := []struct {
+		caps string
+		ok   bool
+	}{
+		{"report-status side-band-64k\n", true},
+		{"report-status", true},
+		{"", true},
+		{"\n", true},
+		{"report-status\r\n", false},
+		{"report-status\r", false},
+		{"side\x00band\n", false},
+		{"side\x00band", false},
+		{"side\x01band\n", false},
+		{"side\tband\n", false},
+		{"side\nband\n", false},
+		{"side\nband", false},
+		{"report-status\n\n", false},
+	}
+	for _, tc := range cases {
+		buf := []byte(pktLine(base+tc.caps) + "0000")
+		_, err := parseRefUpdates(buf)
+		if tc.ok && err != nil {
+			t.Fatalf("caps %q: %v", tc.caps, err)
+		}
+		if !tc.ok && err == nil {
+			t.Fatalf("caps %q accepted", tc.caps)
+		}
+	}
+}
+
 func TestCapabilityNewline(t *testing.T) {
 	feature := strings.Repeat("a", 40)
 	other := strings.Repeat("b", 40)

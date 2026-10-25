@@ -85,6 +85,9 @@ func AdvertisedOID(buf []byte, ref string) (string, error) {
 			caps = data[j+1:]
 			data = data[:j]
 		}
+		if !capabilityOK(caps) {
+			return "", errPkt
+		}
 		if bytes.Contains(caps, []byte("object-format=sha256")) {
 			sha256 = true
 		}
@@ -312,8 +315,7 @@ func parseRefUpdates(buf []byte) ([]refUpdate, error) {
 		data := buf[i+4 : i+n]
 		i += n
 		if j := bytes.IndexByte(data, 0); j >= 0 {
-			caps := data[j+1:]
-			if n := bytes.IndexByte(caps, '\n'); n >= 0 && n != len(caps)-1 {
+			if !capabilityOK(data[j+1:]) {
 				return nil, errPkt
 			}
 			data = data[:j]
@@ -333,6 +335,23 @@ func parseRefUpdates(buf []byte) ([]refUpdate, error) {
 		return nil, errPkt
 	}
 	return out, nil
+}
+
+// capabilityOK accepts a pkt-line capability section. A NUL, CR, or any
+// other byte below 0x20 is rejected. A LF is accepted only as the last byte.
+func capabilityOK(caps []byte) bool {
+	for i, c := range caps {
+		if c == '\n' {
+			if i != len(caps)-1 {
+				return false
+			}
+			continue
+		}
+		if c < 0x20 {
+			return false
+		}
+	}
+	return true
 }
 
 func oidOK(s string) bool {
