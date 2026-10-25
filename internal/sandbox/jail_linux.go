@@ -11,6 +11,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// mountCall is the mount syscall. Tests replace it.
+var mountCall = unix.Mount
+
 // HandleArgs runs the jailed shell stage when the process was re-exec'd
 // inside a user and mount namespace. It returns true when it handled the args.
 func HandleArgs(args []string) bool {
@@ -50,14 +53,11 @@ func enterJail(jail string, cfg stage2File) error {
 		if err := os.MkdirAll(dst, 0o755); err != nil {
 			return err
 		}
-		if err := unix.Mount(src, dst, "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
-			return fmt.Errorf("bind %s: %w", src, err)
+		if err := bindReadOnly(src, dst); err != nil {
+			return err
 		}
-		// Best-effort. Dropped capabilities still stop writes to host-owned files
-		// if a recursive remount is rejected.
-		_ = unix.Mount("", dst, "", unix.MS_BIND|unix.MS_REMOUNT|unix.MS_RDONLY|unix.MS_REC, "")
 	}
-	if err := unix.Mount(workspace, filepath.Join(jail, "work"), "", unix.MS_BIND, ""); err != nil {
+	if err := mountCall(workspace, filepath.Join(jail, "work"), "", unix.MS_BIND, ""); err != nil {
 		return fmt.Errorf("bind workspace: %w", err)
 	}
 	if b, err := os.ReadFile("/etc/ld.so.cache"); err == nil {
@@ -67,10 +67,10 @@ func enterJail(jail string, cfg stage2File) error {
 	if err := os.WriteFile(nullPath, nil, 0o644); err != nil {
 		return err
 	}
-	if err := unix.Mount("/dev/null", nullPath, "", unix.MS_BIND, ""); err != nil {
+	if err := mountCall("/dev/null", nullPath, "", unix.MS_BIND, ""); err != nil {
 		return fmt.Errorf("dev/null: %w", err)
 	}
-	if err := unix.Mount("tmpfs", filepath.Join(jail, "tmp"), "tmpfs", 0, "size=32m,mode=1777"); err != nil {
+	if err := mountCall("tmpfs", filepath.Join(jail, "tmp"), "tmpfs", 0, "size=32m,mode=1777"); err != nil {
 		return fmt.Errorf("tmpfs: %w", err)
 	}
 	for _, m := range cfg.Mounts {
@@ -129,11 +129,31 @@ func bindIntoJail(jail string, m mount) error {
 			return err
 		}
 	}
-	if err := unix.Mount(m.Src, target, "", unix.MS_BIND, ""); err != nil {
+	if err := mountCall(m.Src, target, "", unix.MS_BIND, ""); err != nil {
 		return fmt.Errorf("bind %s: %w", m.Dst, err)
 	}
 	if m.RO {
-		_ = unix.Mount("", target, "", unix.MS_BIND|unix.MS_REMOUNT|unix.MS_RDONLY, "")
+		if err := remountReadOnly(target, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func bindReadOnly(src, dst string) error {
+	if err := mountCall(src, dst, "", unix.MS_BIND|unix.MS_REC, ""); err != nil {
+		return fmt.Errorf("bind %s: %w", src, err)
+	}
+	return remountReadOnly(dst, true)
+}
+
+func remountReadOnly(dst string, recursive bool) error {
+	flags := uintptr(unix.MS_BIND | unix.MS_REMOUNT | unix.MS_RDONLY)
+	if recursive {
+		flags |= unix.MS_REC
+	}
+	if err := mountCall("", dst, "", flags, ""); err != nil {
+		return fmt.Errorf("remount %s: %w", dst, err)
 	}
 	return nil
 }

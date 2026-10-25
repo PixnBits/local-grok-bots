@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
+	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 	"github.com/PixnBits/local-grok-bots/web"
 )
@@ -192,7 +193,11 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": a.cfg.Version})
+	body := map[string]any{"status": "ok", "version": a.cfg.Version}
+	if w := sandbox.RootJailWarning(); w != "" {
+		body["warning"] = w
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {

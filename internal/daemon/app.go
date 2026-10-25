@@ -18,6 +18,7 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
+	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
@@ -128,6 +129,9 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		return nil, err
 	}
 	for _, w := range pol.Warnings {
+		fmt.Fprintf(os.Stderr, "local-grok-bots: %s\n", w)
+	}
+	if w := sandbox.RootJailWarning(); w != "" {
 		fmt.Fprintf(os.Stderr, "local-grok-bots: %s\n", w)
 	}
 	if pol.HasBind {

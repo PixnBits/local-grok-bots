@@ -15,8 +15,18 @@ import (
 	"strings"
 )
 
+func refuseUnsandboxedRoot() error {
+	if msg := RootJailWarning(); msg != "" {
+		return fmt.Errorf("shell sandbox unavailable: %s", msg)
+	}
+	return nil
+}
+
 func launch(ctx context.Context, p *prepared) (string, string, error) {
-	if path, err := exec.LookPath("bwrap"); err == nil {
+	if err := refuseUnsandboxedRoot(); err != nil {
+		return "", "", err
+	}
+	if path, err := LookPath("bwrap"); err == nil {
 		return runBwrap(ctx, p, path)
 	}
 	return runUnshare(ctx, p)

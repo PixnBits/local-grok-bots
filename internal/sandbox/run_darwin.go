@@ -22,6 +22,8 @@ func HandleArgs(args []string) bool { return false }
 // starts in the workspace instead of /work. The LD_PRELOAD proxy does not
 // work on macOS, so net and ssh grants are denied and the network stays
 // closed. A missing sandbox-exec fails closed.
+func refuseUnsandboxedRoot() error { return nil }
+
 func launch(ctx context.Context, p *prepared) (string, string, error) {
 	if _, err := os.Stat(sandboxExec); err != nil {
 		return "", "", fmt.Errorf("shell sandbox unavailable: %w", err)

@@ -90,8 +90,12 @@ func (p *prepared) close() {
 // Run executes command in the workspace jail.
 // Bubblewrap is used when it is installed. Otherwise the unshare jail is used.
 // Both paths keep the host filesystem outside the workspace hidden and start
-// with no network. A missing bwrap and a missing unshare fails closed.
+// with no network. A root daemon without bubblewrap fails closed. A missing
+// bwrap and a missing unshare fails closed.
 func Run(ctx context.Context, req Request) (Result, error) {
+	if err := refuseUnsandboxedRoot(); err != nil {
+		return Result{}, err
+	}
 	if strings.TrimSpace(req.Command) == "" {
 		return Result{}, fmt.Errorf("command required")
 	}

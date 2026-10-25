@@ -3,8 +3,15 @@
 package sandbox
 
 import (
+	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestCommandArgvStaysShellWhenNotDropped(t *testing.T) {
@@ -50,6 +57,78 @@ func TestDroppedArgvKeepsCommandApart(t *testing.T) {
 	}
 	if !strings.Contains(got[2], "max_user_namespaces") {
 		t.Fatalf("script %q", got[2])
+	}
+}
+
+func TestRootWithoutBwrapRefusesShell(t *testing.T) {
+	prevE, prevL := EUID, LookPath
+	t.Cleanup(func() { EUID, LookPath = prevE, prevL })
+
+	EUID = func() int { return 0 }
+	LookPath = func(name string) (string, error) {
+		if name == "bwrap" {
+			return "", errors.New("not found")
+		}
+		return exec.LookPath(name)
+	}
+	ws := t.TempDir()
+	_, _, err := launch(context.Background(), &prepared{workspace: ws, command: "git status", dir: t.TempDir()})
+	if err == nil || !strings.Contains(err.Error(), "shell sandbox unavailable: root requires bwrap") {
+		t.Fatalf("launch %v", err)
+	}
+	res, err := Run(context.Background(), Request{
+		Workspace: ws,
+		Command:   "git status",
+		Grants:    []string{"git", "github"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "shell sandbox unavailable: root requires bwrap") {
+		t.Fatalf("run_shell %v", err)
+	}
+	if res.Stdout != "" || res.Stderr != "" || len(res.Events) != 0 {
+		t.Fatalf("git and github grants ran: %#v", res)
+	}
+
+	LookPath = func(name string) (string, error) {
+		if name == "bwrap" {
+			return "/usr/bin/bwrap", nil
+		}
+		return "", errors.New("not found")
+	}
+	if msg := RootJailWarning(); msg != "" {
+		t.Fatalf("root with bwrap refused: %s", msg)
+	}
+
+	EUID = func() int { return 1000 }
+	LookPath = func(string) (string, error) { return "", errors.New("not found") }
+	if msg := RootJailWarning(); msg != "" {
+		t.Fatalf("non-root refused: %s", msg)
+	}
+}
+
+func TestRemountFailureIsFatal(t *testing.T) {
+	prev := mountCall
+	t.Cleanup(func() { mountCall = prev })
+	mountCall = func(src, dst, fstype string, flags uintptr, data string) error {
+		if flags&unix.MS_REMOUNT != 0 {
+			return errors.New("rejected")
+		}
+		return nil
+	}
+	if err := bindReadOnly("/bin", "/jail/bin"); err == nil || !strings.Contains(err.Error(), "remount") {
+		t.Fatalf("host remount %v", err)
+	}
+	jail := t.TempDir()
+	src := filepath.Join(t.TempDir(), "git")
+	if err := os.WriteFile(src, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := bindIntoJail(jail, mount{Src: src, Dst: "/lgb/bin/git", RO: true})
+	if err == nil || !strings.Contains(err.Error(), "remount") {
+		t.Fatalf("file remount %v", err)
+	}
+	mountCall = func(string, string, string, uintptr, string) error { return nil }
+	if err := remountReadOnly("/jail/usr", true); err != nil {
+		t.Fatal(err)
 	}
 }
 

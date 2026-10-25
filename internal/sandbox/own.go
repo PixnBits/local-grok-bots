@@ -16,6 +16,9 @@ var Chown = defaultChown
 // EUID is the daemon's effective uid. Tests replace it.
 var EUID = os.Geteuid
 
+// LookPath resolves a host binary. Tests replace it.
+var LookPath = exec.LookPath
+
 func defaultChown(path string, uid, gid int) error {
 	if EUID() != 0 {
 		return nil
@@ -26,15 +29,28 @@ func defaultChown(path string, uid, gid int) error {
 // JailIDs is the uid and gid that must own the bot workspace.
 // A non-root daemon is that user. A root daemon that has bubblewrap uses the
 // kernel overflow ids, and the jail command drops to those ids. Without
-// bubblewrap the jail stays uid 0, so the workspace stays owned by root.
+// bubblewrap the shell is refused, and these ids stay 0 so the workspace
+// stays owned by root.
 func JailIDs() (uid, gid int) {
 	if id := EUID(); id != 0 {
 		return id, os.Getegid()
 	}
-	if _, err := exec.LookPath("bwrap"); err != nil {
+	if _, err := LookPath("bwrap"); err != nil {
 		return 0, 0
 	}
 	return readOverflow("/proc/sys/kernel/overflowuid", 65534), readOverflow("/proc/sys/kernel/overflowgid", 65534)
+}
+
+// RootJailWarning is set when a root daemon has no bubblewrap. The shell
+// sandbox refuses to run in that case. An empty string means the jail may start.
+func RootJailWarning() string {
+	if EUID() != 0 {
+		return ""
+	}
+	if _, err := LookPath("bwrap"); err == nil {
+		return ""
+	}
+	return "root requires bwrap; the shell sandbox and git and github grants are refused"
 }
 
 func readOverflow(path string, fallback int) int {
