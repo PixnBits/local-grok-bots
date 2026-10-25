@@ -14,6 +14,7 @@ const (
 )
 
 var errPkt = errors.New("ref")
+var errPullBase = errors.New("base")
 
 type refUpdate struct {
 	old string
@@ -155,23 +156,89 @@ func pktPayloads(buf []byte) ([][]byte, error) {
 	return out, nil
 }
 
-// checkPullHead reads a pull-request body up to a fixed limit and requires
-// the JSON head to be the approved head. The original bytes are returned.
-func checkPullHead(r io.Reader, head string) (io.Reader, error) {
-	if r == nil || !PullBranch(head) {
+// checkPullHead reads a pull-request body up to a fixed limit. Keys must be
+// the exact lowercase names head, base, title, body, and draft. head and base
+// are required. A base that differs from the approved base is errPullBase.
+// Any other failure is errPkt. The original bytes are returned.
+func checkPullHead(r io.Reader, head, base string) (io.Reader, error) {
+	if r == nil || !PullBranch(head) || !PullBranch(base) {
 		return nil, errPkt
 	}
 	buf, err := io.ReadAll(io.LimitReader(r, maxPullBody+1))
 	if err != nil || len(buf) == 0 || len(buf) > maxPullBody {
 		return nil, errPkt
 	}
-	var body struct {
-		Head string `json:"head"`
-	}
-	if json.Unmarshal(buf, &body) != nil || body.Head != head {
+	gotHead, gotBase, err := pullObject(buf)
+	if err != nil {
 		return nil, errPkt
 	}
+	if gotHead != head {
+		return nil, errPkt
+	}
+	if gotBase != base {
+		return nil, errPullBase
+	}
 	return bytes.NewReader(buf), nil
+}
+
+func pullObject(buf []byte) (head, base string, err error) {
+	dec := json.NewDecoder(bytes.NewReader(buf))
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return "", "", errPkt
+	}
+	seen := map[string]bool{}
+	var sawHead, sawBase bool
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return "", "", errPkt
+		}
+		key, ok := keyTok.(string)
+		if !ok || seen[key] {
+			return "", "", errPkt
+		}
+		seen[key] = true
+		switch key {
+		case "head", "base", "title", "body":
+			val, err := dec.Token()
+			if err != nil {
+				return "", "", errPkt
+			}
+			s, ok := val.(string)
+			if !ok {
+				return "", "", errPkt
+			}
+			switch key {
+			case "head":
+				head, sawHead = s, true
+			case "base":
+				base, sawBase = s, true
+			}
+		case "draft":
+			val, err := dec.Token()
+			if err != nil {
+				return "", "", errPkt
+			}
+			if _, ok := val.(bool); !ok {
+				return "", "", errPkt
+			}
+		default:
+			return "", "", errPkt
+		}
+	}
+	end, err := dec.Token()
+	if err != nil || end != json.Delim('}') {
+		return "", "", errPkt
+	}
+	var extra any
+	if dec.Decode(&extra) != io.EOF {
+		return "", "", errPkt
+	}
+	if !sawHead || !sawBase {
+		return "", "", errPkt
+	}
+	return head, base, nil
 }
 
 func readCommandSection(r io.Reader) ([]byte, error) {

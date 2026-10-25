@@ -77,6 +77,8 @@ type Window struct {
 	// An absent ref uses the zero id. A push window with an empty Old
 	// refuses receive-pack.
 	Old string
+	// Base is the approved pull-request base branch.
+	Base string
 }
 
 const (
@@ -460,9 +462,13 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, requireGate bool) 
 		r.Body = io.NopCloser(body)
 	}
 	if p.access == AccessWrite && p.window.Kind == WindowPR && method == http.MethodPost && apiPullCreate(route.Path) {
-		body, berr := checkPullHead(r.Body, p.window.Branch)
+		body, berr := checkPullHead(r.Body, p.window.Branch, p.window.Base)
 		if berr != nil {
-			p.finish(w, http.StatusForbidden, route.Path, route.Owner, route.Repo, "head", method, write)
+			reason := "head"
+			if errors.Is(berr, errPullBase) {
+				reason = "base"
+			}
+			p.finish(w, http.StatusForbidden, route.Path, route.Owner, route.Repo, reason, method, write)
 			return
 		}
 		r.Body = io.NopCloser(body)

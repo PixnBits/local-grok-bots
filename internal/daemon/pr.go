@@ -63,7 +63,7 @@ func (a *App) toolCreatePR(ctx context.Context, bot store.Bot, args map[string]a
 		return a.prDeny(bot, "github_pr_denied", owner, repo, reason)
 	}
 	base, gateSecret, closeWrite, err := a.openGitHubWriteGate(bot, github.Window{
-		Kind: github.WindowPR, Owner: owner, Repo: repo, Branch: in.Head,
+		Kind: github.WindowPR, Owner: owner, Repo: repo, Branch: in.Head, Base: in.Base,
 	})
 	if err != nil {
 		return a.prDeny(bot, "github_pr_denied", owner, repo, "proxy")

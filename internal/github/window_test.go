@@ -37,7 +37,7 @@ func TestWriteWindowAndRefUpdates(t *testing.T) {
 	defer up.Close()
 
 	pushWin := Window{Kind: WindowPush, Owner: "Acme", Repo: "Widgets", Branch: "feature", Default: "main", Old: oid('0')}
-	prWin := Window{Kind: WindowPR, Owner: "Acme", Repo: "Widgets", Branch: "feature"}
+	prWin := Window{Kind: WindowPR, Owner: "Acme", Repo: "Widgets", Branch: "feature", Base: "main"}
 	approved := oneRef(oid('0'), oid('a'), "refs/heads/feature")
 	approvedCaps := pktLine(oid('0')+" "+oid('b')+" refs/heads/feature\x00report-status side-band-64k\n") + "0000PACK-bytes"
 
@@ -71,7 +71,12 @@ func TestWriteWindowAndRefUpdates(t *testing.T) {
 		{AccessWrite, pushWin, http.MethodPost, "/api/repos/acme/widgets/pulls", `{"head":"feature"}`, http.StatusForbidden, "", false},
 		{AccessWrite, Window{}, http.MethodPost, "/github/acme/widgets.git/git-receive-pack", approved, http.StatusForbidden, "", false},
 		{AccessWrite, prWin, http.MethodPost, "/api/repos/acme/widgets/pulls", `{"title":"T","head":"feature","base":"main"}`, http.StatusNoContent, "", true},
-		{AccessWrite, prWin, http.MethodPost, "/api/repos/Acme/Widgets/pulls", `{"head":"other"}`, http.StatusForbidden, "head", false},
+		{AccessWrite, prWin, http.MethodPost, "/api/repos/Acme/Widgets/pulls", `{"head":"other","base":"main"}`, http.StatusForbidden, "head", false},
+		{AccessWrite, prWin, http.MethodPost, "/api/repos/acme/widgets/pulls", `{"head":"evil","HEAD":"feat","base":"main"}`, http.StatusForbidden, "head", false},
+		{AccessWrite, prWin, http.MethodPost, "/api/repos/acme/widgets/pulls", `{"hEaD":"feature","base":"main"}`, http.StatusForbidden, "head", false},
+		{AccessWrite, prWin, http.MethodPost, "/api/repos/acme/widgets/pulls", `{"head":"feature","head":"evil","base":"main"}`, http.StatusForbidden, "head", false},
+		{AccessWrite, prWin, http.MethodPost, "/api/repos/acme/widgets/pulls", `{"head":"feature","base":"other"}`, http.StatusForbidden, "base", false},
+		{AccessWrite, prWin, http.MethodPost, "/api/repos/acme/widgets/pulls", `{"title":"T","head":"feature","base":"main","body":"b","draft":false}`, http.StatusNoContent, "", true},
 		{AccessWrite, prWin, http.MethodPost, "/api/repos/acme/other/pulls", `{"head":"feature"}`, http.StatusForbidden, "", false},
 		{AccessWrite, prWin, http.MethodPost, "/github/acme/widgets.git/git-receive-pack", approved, http.StatusForbidden, "", false},
 		{AccessWrite, prWin, http.MethodGet, "/api/repos/acme/widgets", "", http.StatusForbidden, "", false},
