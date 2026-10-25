@@ -679,6 +679,87 @@ func TestMirrorInsteadOfDoesNotRedirect(t *testing.T) {
 	}
 }
 
+func TestResolveWorkspaceRepo(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal(err)
+	}
+	ws := t.TempDir()
+	scratch := filepath.Join(ws, "scratch")
+	if err := os.Mkdir(scratch, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRepo(t, scratch, "init")
+	sub := filepath.Join(scratch, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got, reason := resolveWorkspaceRepo(ws, "scratch")
+	if reason != "" || got != scratch {
+		t.Fatalf("scratch %q %q", got, reason)
+	}
+	got, reason = resolveWorkspaceRepo(ws, "scratch/sub")
+	if reason != "" || got != scratch {
+		t.Fatalf("nested %q %q", got, reason)
+	}
+	got, reason = resolveWorkspaceRepo(ws, ".")
+	if reason != "repository not found in workspace" || got != "" {
+		t.Fatalf("workspace root %q %q", got, reason)
+	}
+	if err := os.Symlink("scratch", filepath.Join(ws, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if _, reason := resolveWorkspaceRepo(ws, "link"); reason != "symlink" {
+		t.Fatalf("symlink %q", reason)
+	}
+	if _, reason := resolveWorkspaceRepo(ws, "link/sub"); reason != "symlink" {
+		t.Fatalf("symlink nested %q", reason)
+	}
+	for _, rel := range []string{"", "..", "scratch/../../etc", "/etc", "foo/../bar", `scratch\sub`} {
+		if _, reason := resolveWorkspaceRepo(ws, rel); reason != "path" {
+			t.Fatalf("%q -> %q", rel, reason)
+		}
+	}
+	gf := filepath.Join(ws, "gf")
+	if err := os.Mkdir(gf, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(gf, ".git"), []byte("gitdir: /tmp/elsewhere\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, reason := resolveWorkspaceRepo(ws, "gf"); reason != "gitfile" {
+		t.Fatalf("gitfile %q", reason)
+	}
+	if err := os.Symlink("scratch/.git", filepath.Join(ws, "dotgit")); err != nil {
+		t.Fatal(err)
+	}
+	linked := filepath.Join(ws, "linked")
+	if err := os.Mkdir(linked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("nope", filepath.Join(linked, ".git")); err != nil {
+		t.Fatal(err)
+	}
+	if _, reason := resolveWorkspaceRepo(ws, "linked"); reason != "symlink" {
+		t.Fatalf("git symlink %q", reason)
+	}
+	empty := filepath.Join(ws, "empty")
+	if err := os.Mkdir(empty, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, reason := resolveWorkspaceRepo(ws, "empty"); reason != "repository not found in workspace" {
+		t.Fatalf("empty %q", reason)
+	}
+	odd := filepath.Join(ws, "foo..bar")
+	if err := os.Mkdir(odd, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitRepo(t, odd, "init")
+	got, reason = resolveWorkspaceRepo(ws, "foo..bar")
+	if reason != "" || got != odd {
+		t.Fatalf("dots %q %q", got, reason)
+	}
+}
+
 func TestMirrorPushGateStaysOutOfCmdline(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Fatal(err)

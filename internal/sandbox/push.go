@@ -30,14 +30,14 @@ type PushResult struct {
 type pushSrv struct {
 	ln    net.Listener
 	ctx   context.Context
-	fn    func(context.Context, []string) PushResult
+	fn    func(context.Context, string, []string) PushResult
 	start func()
 	mu    sync.Mutex
 	wg    sync.WaitGroup
 	ev    []Event
 }
 
-func startPush(ctx context.Context, path string, fn func(context.Context, []string) PushResult, start func()) (*pushSrv, error) {
+func startPush(ctx context.Context, path string, fn func(context.Context, string, []string) PushResult, start func()) (*pushSrv, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -111,7 +111,7 @@ func (s *pushSrv) handle(conn net.Conn) {
 	defer conn.Close()
 	res := PushResult{Code: 1, Stderr: "git push denied: not sent\n"}
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	args, err := readPush(conn)
+	cwd, args, err := readPush(conn)
 	_ = conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		s.add([]Event{{Kind: "grant_denied", Grant: "git", Detail: "push not sent"}})
@@ -124,7 +124,7 @@ func (s *pushSrv) handle(conn net.Conn) {
 	if s.fn == nil {
 		res.Events = []Event{{Kind: "grant_denied", Grant: "git", Detail: "push not sent"}}
 	} else {
-		res = s.fn(s.ctx, args)
+		res = s.fn(s.ctx, cwd, args)
 		if res.Code != 0 && res.Stderr == "" {
 			res.Stderr = "git push denied: not sent\n"
 		}
@@ -137,37 +137,52 @@ func (s *pushSrv) handle(conn net.Conn) {
 	_ = writePush(conn, res)
 }
 
-func readPush(conn net.Conn) ([]string, error) {
+func readPush(conn net.Conn) (string, []string, error) {
 	br := bufio.NewReader(conn)
 	line, err := readLimitedLine(br, 16)
 	if err != nil || line != "PUSH" {
-		return nil, fmt.Errorf("push request")
+		return "", nil, fmt.Errorf("push request")
+	}
+	cwd, err := readCounted(br)
+	if err != nil {
+		return "", nil, err
 	}
 	argcLine, err := readLimitedLine(br, 8)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	argc, err := strconv.Atoi(argcLine)
 	if err != nil || argc < 0 || argc > pushArgsMax || fmt.Sprint(argc) != argcLine {
-		return nil, fmt.Errorf("push argc")
+		return "", nil, fmt.Errorf("push argc")
 	}
 	args := make([]string, argc)
 	for i := 0; i < argc; i++ {
-		nLine, err := readLimitedLine(br, 8)
+		arg, err := readCounted(br)
 		if err != nil {
-			return nil, err
+			return "", nil, err
 		}
-		n, err := strconv.Atoi(nLine)
-		if err != nil || n < 0 || n > pushArgMax || fmt.Sprint(n) != nLine {
-			return nil, fmt.Errorf("push arg")
-		}
-		buf := make([]byte, n)
-		if _, err := io.ReadFull(br, buf); err != nil {
-			return nil, err
-		}
-		args[i] = string(buf)
+		args[i] = arg
 	}
-	return args, nil
+	return cwd, args, nil
+}
+
+func readCounted(br *bufio.Reader) (string, error) {
+	nLine, err := readLimitedLine(br, 8)
+	if err != nil {
+		return "", err
+	}
+	n, err := strconv.Atoi(nLine)
+	if err != nil || n < 0 || n > pushArgMax || fmt.Sprint(n) != nLine {
+		return "", fmt.Errorf("push arg")
+	}
+	if n == 0 {
+		return "", nil
+	}
+	buf := make([]byte, n)
+	if _, err := io.ReadFull(br, buf); err != nil {
+		return "", err
+	}
+	return string(buf), nil
 }
 
 func readLimitedLine(br *bufio.Reader, max int) (string, error) {

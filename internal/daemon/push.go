@@ -28,7 +28,7 @@ type pushSpec struct {
 
 // handleGitPush rebuilds the push on the host from a mirror. Hard denies
 // return before Evaluate. A push that is still allowed always asks.
-func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *gitHubGate, args []string) sandbox.PushResult {
+func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *gitHubGate, cwd string, args []string) sandbox.PushResult {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -65,16 +65,20 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	if gate == nil || gate.px == nil || gate.px.Sock() == "" {
 		return a.pushDenied(bot, owner, repo, "proxy unavailable")
 	}
-	if workspaceConfigReason(ws) == "config" {
+	repoRoot, locReason := resolveWorkspaceRepo(ws, cwd)
+	if locReason != "" {
+		return a.pushDenied(bot, owner, repo, locReason)
+	}
+	if workspaceConfigReason(repoRoot) == "config" {
 		return a.pushDenied(bot, owner, repo, "config")
 	}
 	parentDir := filepath.Join(a.cfg.DataDir, "mirrors")
-	mirror, err := copyGitMirror(parentDir, ws)
+	mirror, err := copyGitMirror(parentDir, repoRoot)
 	if err != nil {
 		return a.pushDenied(bot, owner, repo, "mirror")
 	}
 	defer os.RemoveAll(mirror)
-	if workspaceConfigReason(ws) == "config" {
+	if workspaceConfigReason(repoRoot) == "config" {
 		return a.pushDenied(bot, owner, repo, "config")
 	}
 	specs, reason := resolvePushRefs(mirror, parsed)
@@ -127,7 +131,7 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 		}
 		return a.pushDenied(bot, owner, repo, reason)
 	}
-	if workspaceConfigReason(ws) == "config" {
+	if workspaceConfigReason(repoRoot) == "config" {
 		return a.pushDenied(bot, owner, repo, "config")
 	}
 	branch := ""

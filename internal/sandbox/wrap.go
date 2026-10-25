@@ -222,7 +222,20 @@ if [ "$sub" = "push" ]; then
     printf '%s\n' "deny git push" >> "$log"
     exit 1
   fi
-  /lgb/bin/ghbridge push /lgb/sock/push.sock "$@"
+  case "$PWD" in
+    /work)
+      rel=.
+      ;;
+    /work/*)
+      rel=${PWD#/work/}
+      ;;
+    *)
+      echo "git push denied: repository not found in workspace" >&2
+      printf '%s\n' "deny git push" >> "$log"
+      exit 1
+      ;;
+  esac
+  /lgb/bin/ghbridge push /lgb/sock/push.sock "$rel" "$@"
   exit $?
 fi
 case "$sub" in

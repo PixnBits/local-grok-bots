@@ -503,8 +503,8 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			OnPushStart: func() {
 				armShell(a.policy.EffectivePromptTimeout() + 15*time.Second)
 			},
-			OnPush: func(pctx context.Context, pushArgs []string) sandbox.PushResult {
-				return a.handleGitPush(pctx, ctx, current, gate, pushArgs)
+			OnPush: func(pctx context.Context, cwd string, pushArgs []string) sandbox.PushResult {
+				return a.handleGitPush(pctx, ctx, current, gate, cwd, pushArgs)
 			},
 			Dial: a.shellDial,
 		})

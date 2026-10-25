@@ -31,8 +31,9 @@ type Request struct {
 	GitAuthorEmail  string
 	GitAuthorRefuse bool
 	// OnPush answers a git push while the shell is still running. Nil denies.
+	// The string is the shell's logical directory relative to /work.
 	// OnPushStart runs after the request is read and before OnPush.
-	OnPush      func(context.Context, []string) PushResult
+	OnPush      func(context.Context, string, []string) PushResult
 	OnPushStart func()
 	// Dial, when set, is the proxy's outbound TCP dial. Tests use it.
 	Dial func(context.Context, string, string) (net.Conn, error)

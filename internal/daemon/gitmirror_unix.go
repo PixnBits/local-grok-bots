@@ -88,6 +88,129 @@ func configDeniedAt(gitFd int) (bool, error) {
 	return github.RepoConfigDenied(string(buf)), nil
 }
 
+// resolveWorkspaceRepo finds the nearest directory at rel, relative to the
+// workspace, that contains a .git directory. rel is the logical path. ".." ,
+// an absolute path, a symlink component, a gitfile, and a path outside the
+// workspace are refused. The returned directory is inside the workspace.
+func resolveWorkspaceRepo(ws, rel string) (string, string) {
+	if ws == "" || !filepath.IsAbs(ws) {
+		return "", "repository not found in workspace"
+	}
+	parts, reason := workspaceRelParts(rel)
+	if reason != "" {
+		return "", reason
+	}
+	wsFd, err := unix.Open(ws, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return "", "repository not found in workspace"
+	}
+	defer unix.Close(wsFd)
+	fds := []int{wsFd}
+	var extra []int
+	defer func() {
+		for _, fd := range extra {
+			unix.Close(fd)
+		}
+	}()
+	dirFd := wsFd
+	for _, part := range parts {
+		next, err := unix.Openat(dirFd, part, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			switch err {
+			case unix.ELOOP:
+				return "", "symlink"
+			case unix.ENOENT:
+				return "", "repository not found in workspace"
+			default:
+				return "", "path"
+			}
+		}
+		var st unix.Stat_t
+		if err := unix.Fstat(next, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR {
+			unix.Close(next)
+			return "", "path"
+		}
+		extra = append(extra, next)
+		fds = append(fds, next)
+		dirFd = next
+	}
+	for i := len(fds) - 1; i >= 0; i-- {
+		kind, err := gitDirKind(fds[i])
+		if err != nil {
+			return "", "path"
+		}
+		switch kind {
+		case "dir":
+			if i == 0 {
+				return ws, ""
+			}
+			return filepath.Join(append([]string{ws}, parts[:i]...)...), ""
+		case "symlink":
+			return "", "symlink"
+		case "file":
+			return "", "gitfile"
+		case "none":
+			continue
+		default:
+			return "", "path"
+		}
+	}
+	return "", "repository not found in workspace"
+}
+
+func workspaceRelParts(rel string) ([]string, string) {
+	if rel == "" || strings.ContainsAny(rel, "\\\x00\r\n") || filepath.IsAbs(rel) {
+		return nil, "path"
+	}
+	for _, part := range strings.Split(rel, "/") {
+		if part == ".." {
+			return nil, "path"
+		}
+	}
+	clean := filepath.Clean(rel)
+	if clean == "." {
+		return nil, ""
+	}
+	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || filepath.IsAbs(clean) {
+		return nil, "path"
+	}
+	var parts []string
+	for _, part := range strings.Split(clean, string(filepath.Separator)) {
+		if part == "" || part == "." || part == ".." {
+			return nil, "path"
+		}
+		parts = append(parts, part)
+	}
+	return parts, ""
+}
+
+func gitDirKind(dirfd int) (string, error) {
+	fd, err := unix.Openat(dirfd, ".git", unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		switch err {
+		case unix.ENOENT:
+			return "none", nil
+		case unix.ELOOP:
+			return "symlink", nil
+		default:
+			return "", err
+		}
+	}
+	defer unix.Close(fd)
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return "", err
+	}
+	switch st.Mode & unix.S_IFMT {
+	case unix.S_IFDIR:
+		return "dir", nil
+	case unix.S_IFREG:
+		return "file", nil
+	default:
+		return "path", nil
+	}
+}
+
 // copyGitMirror builds a bare repository under parent from the workspace
 // refs and objects. It does not copy config, hooks, attributes, or alternates.
 func copyGitMirror(parent, ws string) (string, error) {

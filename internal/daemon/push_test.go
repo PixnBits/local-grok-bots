@@ -351,6 +351,54 @@ echo PUSH_DONE
 			t.Fatalf("empty allowlist: %v evals=%d\n%s", err, evals.Load(), out)
 		}
 	})
+	t.Run("subdirectory", func(t *testing.T) {
+		app, evals, auditPath := newPushApp(t)
+		packsBefore := packs.Load()
+		cmd := `set -e
+mkdir -p scratch
+cd scratch
+git init
+git checkout -b feature-sub
+echo hello > readme.txt
+git add readme.txt
+git commit -m note-sub
+git push https://github.com/acme/widgets.git feature-sub
+echo PUSH_DONE
+`
+		out, err := runPush(t, app, auditPath, []string{"acme/widgets"}, cmd, true)
+		if err != nil || !strings.Contains(out, "git push sent") || !strings.Contains(out, "PUSH_DONE") || evals.Load() == 0 {
+			t.Fatalf("subdir: %v evals=%d\n%s", err, evals.Load(), out)
+		}
+		if packs.Load() <= packsBefore {
+			t.Fatal("subdir receive-pack was not called")
+		}
+		log := gitOK(t, "--git-dir", bare, "log", "--all", "--format=%s")
+		if !strings.Contains(log, "note-sub") {
+			t.Fatalf("bare repo log:\n%s", log)
+		}
+	})
+
+	t.Run("symlinked subdirectory", func(t *testing.T) {
+		app, _, auditPath := newPushApp(t)
+		before := packs.Load()
+		cmd := `set -e
+mkdir -p real
+ln -s real link
+cd link
+git init
+git checkout -b feature-link
+echo hello > readme.txt
+git add readme.txt
+git commit -m note-link
+git push https://github.com/acme/widgets.git feature-link
+echo PUSH_DONE
+`
+		out, err := runPush(t, app, auditPath, []string{"acme/widgets"}, cmd, false)
+		if err == nil || !strings.Contains(out, "symlink") || strings.Contains(out, "PUSH_DONE") || packs.Load() != before {
+			t.Fatalf("symlink: %v\n%s", err, out)
+		}
+	})
+
 	t.Run("prompts off", func(t *testing.T) {
 		app, evals, auditPath := newPushApp(t)
 		app.policy.UIPrompts = false

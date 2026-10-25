@@ -161,10 +161,16 @@ static int parse_u(const char *s, int max, int *out) {
     return 0;
 }
 
-static int push_mode(const char *sock, int argc, char **argv) {
+static int push_mode(const char *sock, const char *cwd, int argc, char **argv) {
     int fd, i, code, n;
     char line[64];
-    if (argc < 0 || argc > PUSH_ARGS_MAX) {
+    size_t cwdlen;
+    if (!cwd || argc < 0 || argc > PUSH_ARGS_MAX) {
+        fprintf(stderr, "git push denied: not sent\n");
+        return 1;
+    }
+    cwdlen = strlen(cwd);
+    if (cwdlen > PUSH_ARG_MAX) {
         fprintf(stderr, "git push denied: not sent\n");
         return 1;
     }
@@ -179,7 +185,7 @@ static int push_mode(const char *sock, int argc, char **argv) {
         fprintf(stderr, "git push denied: not sent\n");
         return 1;
     }
-    if (dprintf(fd, "PUSH\n%d\n", argc) < 0) {
+    if (dprintf(fd, "PUSH\n%zu\n", cwdlen) < 0 || (cwdlen > 0 && write_all(fd, cwd, cwdlen) < 0) || dprintf(fd, "%d\n", argc) < 0) {
         close(fd);
         fprintf(stderr, "git push denied: not sent\n");
         return 1;
@@ -224,8 +230,8 @@ int main(int argc, char **argv) {
     if (argc == 3 && strcmp(argv[1], "http") == 0) {
         return serve_http(argv[2]);
     }
-    if (argc >= 3 && strcmp(argv[1], "push") == 0) {
-        return push_mode(argv[2], argc - 3, argv + 3);
+    if (argc >= 4 && strcmp(argv[1], "push") == 0) {
+        return push_mode(argv[2], argv[3], argc - 4, argv + 4);
     }
     return 2;
 }
