@@ -102,6 +102,9 @@ func TestOffAllowlistPushAuditsOnce(t *testing.T) {
 	if res.Code == 0 || !strings.Contains(res.Stderr, "allowlist") {
 		t.Fatalf("push result %+v", res)
 	}
+	if len(res.Events) != 1 || res.Events[0].Detail != "push allowlist (claimed other/nope from argv)" {
+		t.Fatalf("detail %+v", res.Events)
+	}
 	for _, ev := range res.Events {
 		if ev.Detail == sandbox.GitHubAllowlistDenied {
 			t.Fatalf("daemon denial reused the allowlist detail: %+v", ev)
@@ -275,9 +278,32 @@ func TestPushDenyDetail(t *testing.T) {
 			t.Fatalf("detail %q", ev.Detail)
 		}
 	}
+	claimed := []struct {
+		reason string
+		from   string
+		detail string
+	}{
+		{"allowlist", "argv", "push allowlist (claimed acme/widgets from argv)"},
+		{"force push denied", "config", "force push denied (claimed acme/widgets from .git/config)"},
+		{"missing grant", "argv", "push missing grant"},
+	}
+	for _, tc := range claimed {
+		owner, repo := "acme", "widgets"
+		if tc.reason == "missing grant" {
+			owner, repo = "", ""
+		}
+		ev := app.auditPush(store.Bot{ID: "bot_1"}, owner, repo, "deny", tc.reason, tc.from)
+		if ev.Detail != tc.detail {
+			t.Fatalf("%q %q detail %q", tc.reason, tc.from, ev.Detail)
+		}
+	}
 	ev := app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "allow", "sent", "")
 	if ev.Detail != "sent" || ev.Kind != "grant_use" {
 		t.Fatalf("allow %+v", ev)
+	}
+	ev = app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "allow", "sent", "argv")
+	if ev.Detail != "sent" || ev.Kind != "grant_use" {
+		t.Fatalf("allow with claim %+v", ev)
 	}
 }
 

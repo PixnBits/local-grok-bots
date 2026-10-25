@@ -213,18 +213,27 @@ func (a *App) auditPush(bot store.Bot, owner, repo, decision, reason, claimedFro
 	}
 	detail := reason
 	if decision != "allow" {
-		detail = pushDenyDetail(reason)
+		detail = pushDenyDetail(reason, owner, repo, claimedFrom)
 	}
 	return sandbox.Event{Kind: kind, Grant: "github", Detail: detail}
 }
 
 // pushDenyDetail is the event detail for a denied push.
 // A reason that already says push is kept as it is.
-func pushDenyDetail(reason string) string {
-	if strings.Contains(reason, "push") {
-		return reason
+// When the denial recorded a claimed repo, the detail names that claim.
+func pushDenyDetail(reason, owner, repo, claimedFrom string) string {
+	detail := reason
+	if !strings.Contains(reason, "push") {
+		detail = "push " + reason
 	}
-	return "push " + reason
+	if claimedFrom == "" || owner == "" || repo == "" {
+		return detail
+	}
+	from := claimedFrom
+	if claimedFrom == "config" {
+		from = ".git/config"
+	}
+	return detail + " (claimed " + owner + "/" + repo + " from " + from + ")"
 }
 
 func repoAllowed(repos []string, owner, repo string) bool {
