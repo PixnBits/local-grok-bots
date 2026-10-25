@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -224,7 +225,7 @@ func askGit(t *testing.T, mirror string, extra []string, args ...string) {
 	cmdArgs := append(gitFixedArgs(), args...)
 	cmd := exec.CommandContext(ctx, "git", cmdArgs...)
 	cmd.Dir = mirror
-	cmd.Env = mirrorEnv(mirror)
+	cmd.Env = mirrorEnv(mirror, nil)
 	for _, e := range extra {
 		key, _, _ := strings.Cut(e, "=")
 		prefix := key + "="
@@ -314,6 +315,91 @@ func authServer(t *testing.T) string {
 	}))
 	t.Cleanup(srv.Close)
 	return srv.URL
+}
+
+func TestPushPlanOmitsGateFromArgv(t *testing.T) {
+	const gate = "abc123secretgate"
+	remote := "http://127.0.0.1:9/g/" + gate + "/github/acme/widgets.git"
+	args, cfg, err := pushPlan(remote, []pushSpec{{
+		src: "refs/heads/feature", dst: "refs/heads/feature", branch: "feature",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, arg := range args {
+		if strings.Contains(arg, gate) || strings.Contains(arg, remote) {
+			t.Fatalf("gate in argv %q", arg)
+		}
+	}
+	if len(args) < 2 || args[0] != "push" || args[1] != "lgbpush" {
+		t.Fatalf("args %v", args)
+	}
+	var saw bool
+	for _, pair := range cfg {
+		if strings.Contains(pair[1], remote) && (pair[0] == "remote.lgbpush.url" || pair[0] == "remote.lgbpush.pushurl") {
+			saw = true
+		}
+		if strings.Contains(pair[0], gate) {
+			t.Fatalf("gate in config key %q", pair[0])
+		}
+	}
+	if !saw {
+		t.Fatal("push url was not passed as git config")
+	}
+}
+
+func TestMirrorInsteadOfDoesNotRedirect(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal(err)
+	}
+	const gate = "abc123secretgate"
+	var goodHits, badHits atomic.Int32
+	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		goodHits.Add(1)
+		if !strings.Contains(r.URL.Path, gate) {
+			t.Errorf("path %s", r.URL.Path)
+		}
+		http.NotFound(w, r)
+	}))
+	defer good.Close()
+	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		badHits.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer bad.Close()
+
+	ws, _, _ := hostileRepo(t)
+	mirror := mustMirror(t, ws)
+	appendConfig(t, mirror, "[url \""+bad.URL+"/p/\"]\n\tinsteadOf = http://127.0.0.1:\n\tpushInsteadOf = http://127.0.0.1:\n")
+	remote := good.URL + "/g/" + gate + "/github/acme/widgets.git"
+	var got []string
+	prev := commandContext
+	commandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		got = append([]string{name}, args...)
+		return exec.CommandContext(ctx, name, args...)
+	}
+	t.Cleanup(func() { commandContext = prev })
+	_, _ = mirrorPush(context.Background(), mirror, remote, []pushSpec{{
+		src: "refs/heads/feature", dst: "refs/heads/feature", branch: "feature",
+	}})
+	if goodHits.Load() == 0 {
+		t.Fatal("push did not reach the write-gate host")
+	}
+	if badHits.Load() != 0 {
+		t.Fatal("mirror insteadOf redirected the push")
+	}
+	for _, arg := range got {
+		if strings.Contains(arg, gate) || strings.Contains(arg, remote) {
+			t.Fatalf("gate in constructed argv %q", arg)
+		}
+	}
+	cfg, err := os.ReadFile(filepath.Join(mirror, "config"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(cfg), "insteadOf") || strings.Contains(string(cfg), "pushInsteadOf") {
+		t.Fatalf("mirror config kept a url rewrite:\n%s", cfg)
+	}
 }
 
 func markerPresent(path string) bool {

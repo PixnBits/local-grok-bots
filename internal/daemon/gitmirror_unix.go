@@ -152,7 +152,7 @@ func writeBareConfig(dir string) error {
 	if err != nil {
 		return err
 	}
-	body := []byte("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n")
+	body := []byte(bareMirrorConfig)
 	_, err = f.Write(body)
 	cerr := f.Close()
 	if err != nil {
