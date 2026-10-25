@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"path/filepath"
@@ -180,10 +181,12 @@ func (a *App) openGitHubReadProxy(bot store.Bot) (*github.Proxy, error) {
 
 // openGitHubWriteGate listens only after an approval card. The caller closes it.
 // The listener is not the jail socket. win is the only route it forwards.
-func (a *App) openGitHubWriteGate(bot store.Bot, win github.Window) (string, func(), error) {
+// The second result is the gate secret. It belongs in the X-LGB-Gate header,
+// not in a URL.
+func (a *App) openGitHubWriteGate(bot store.Bot, win github.Window) (string, string, func(), error) {
 	noop := func() {}
 	if a == nil {
-		return "", noop, errors.New("proxy unavailable")
+		return "", "", noop, errors.New("proxy unavailable")
 	}
 	p, err := github.New(github.Config{
 		Repos:   a.policy.EffectiveGitHubRepos(bot.GitHubAllow),
@@ -195,18 +198,18 @@ func (a *App) openGitHubWriteGate(bot store.Bot, win github.Window) (string, fun
 		Window:  win,
 	})
 	if err != nil {
-		return "", noop, errors.New("proxy unavailable")
+		return "", "", noop, errors.New("proxy unavailable")
 	}
 	p.Bind(safeAuditID(bot.ID), safeAuditID(a.loopRunID(bot.ID)))
 	a.githubWriteUp.Store(true)
 	base, err := p.ListenTCP()
-	if err != nil || base == "" {
+	if err != nil || base == "" || p.Gate() == "" {
 		a.githubWriteUp.Store(false)
 		_ = p.Close()
-		return "", noop, errors.New("proxy unavailable")
+		return "", "", noop, errors.New("proxy unavailable")
 	}
 	var once bool
-	return base, func() {
+	return base, p.Gate(), func() {
 		if once {
 			return
 		}
@@ -214,4 +217,60 @@ func (a *App) openGitHubWriteGate(bot store.Bot, win github.Window) (string, fun
 		_ = p.Close()
 		a.githubWriteUp.Store(false)
 	}, nil
+}
+
+// gateRoundTripper adds X-LGB-Gate on a clone of the request. It does not
+// log the value.
+type gateRoundTripper struct {
+	base http.RoundTripper
+	gate string
+}
+
+func (g gateRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r == nil || g.gate == "" || strings.ContainsAny(g.gate, "\r\n\x00") {
+		return nil, errors.New("gate")
+	}
+	r2 := r.Clone(r.Context())
+	r2.Header.Set("X-LGB-Gate", g.gate)
+	rt := g.base
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	return rt.RoundTrip(r2)
+}
+
+// githubBranchOID reads refs/heads/<branch> through the read proxy. An absent
+// ref is the zero id. A transport or parse failure is "remote ref" with no body.
+func (a *App) githubBranchOID(ctx context.Context, px *github.Proxy, owner, repo, branch string) (string, error) {
+	if px == nil || px.Sock() == "" || !github.BranchOK(branch) {
+		return "", errors.New("remote ref")
+	}
+	name, err := github.NormalizeRepo(owner + "/" + repo)
+	if err != nil || name != owner+"/"+repo {
+		return "", errors.New("remote ref")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	rawURL := "http://proxy/github/" + owner + "/" + repo + ".git/info/refs?service=git-upload-pack"
+	req, err := http.NewRequestWithContext(lctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return "", errors.New("remote ref")
+	}
+	resp, err := githubUnixClient(px.Sock()).Do(req)
+	if err != nil {
+		return "", errors.New("remote ref")
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return "", errors.New("remote ref")
+	}
+	oid, err := github.AdvertisedOID(body, "refs/heads/"+branch)
+	if err != nil {
+		return "", errors.New("remote ref")
+	}
+	return oid, nil
 }

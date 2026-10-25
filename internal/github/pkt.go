@@ -24,8 +24,8 @@ type refUpdate struct {
 // checkReceivePack reads the command section of a receive-pack body, checks
 // that it is one non-delete update of refs/heads/<branch>, and returns a
 // reader of the original bytes. The pack that follows the flush is not buffered.
-func checkReceivePack(r io.Reader, branch, def string) (io.Reader, error) {
-	if r == nil || !BranchOK(branch) {
+func checkReceivePack(r io.Reader, branch, def, old string) (io.Reader, error) {
+	if r == nil || !BranchOK(branch) || !oidOK(old) {
 		return nil, errPkt
 	}
 	prefix, err := readCommandSection(r)
@@ -50,7 +50,109 @@ func checkReceivePack(r io.Reader, branch, def string) (io.Reader, error) {
 	if def != "" && strings.EqualFold(cmd.ref, "refs/heads/"+def) {
 		return nil, errPkt
 	}
+	if cmd.old != old {
+		return nil, errPkt
+	}
 	return io.MultiReader(bytes.NewReader(prefix), r), nil
+}
+
+// AdvertisedOID reads a smart-HTTP info/refs body and returns the object id
+// of ref. A missing ref is the zero id: 40 hex zeros, or 64 when the
+// advertisement is sha256. The error is errPkt and contains no body bytes.
+func AdvertisedOID(buf []byte, ref string) (string, error) {
+	if ref == "" || strings.ContainsAny(ref, " \t\r\n\x00") || len(buf) == 0 || len(buf) > 1<<20 {
+		return "", errPkt
+	}
+	payloads, err := pktPayloads(buf)
+	if err != nil {
+		return "", errPkt
+	}
+	sha256 := false
+	sawFlush := false
+	found := ""
+	saw := false
+	for _, data := range payloads {
+		if data == nil {
+			sawFlush = true
+			continue
+		}
+		if bytes.HasPrefix(data, []byte("#")) {
+			continue
+		}
+		var caps []byte
+		if j := bytes.IndexByte(data, 0); j >= 0 {
+			caps = data[j+1:]
+			data = data[:j]
+		}
+		if bytes.Contains(caps, []byte("object-format=sha256")) {
+			sha256 = true
+		}
+		data = bytes.TrimRight(data, "\n")
+		parts := bytes.Split(data, []byte{' '})
+		if len(parts) != 2 {
+			return "", errPkt
+		}
+		oid := string(parts[0])
+		name := string(parts[1])
+		if !oidOK(oid) {
+			return "", errPkt
+		}
+		if len(oid) == 64 {
+			sha256 = true
+		}
+		if name == "capabilities^{}" {
+			if !isZeroOID(oid) {
+				return "", errPkt
+			}
+			continue
+		}
+		if strings.ContainsAny(name, "\r\n\x00") || name == "" {
+			return "", errPkt
+		}
+		if name == ref {
+			if saw && found != oid {
+				return "", errPkt
+			}
+			found = oid
+			saw = true
+		}
+	}
+	if !sawFlush {
+		return "", errPkt
+	}
+	if saw {
+		return found, nil
+	}
+	n := 40
+	if sha256 {
+		n = 64
+	}
+	return strings.Repeat("0", n), nil
+}
+
+func pktPayloads(buf []byte) ([][]byte, error) {
+	var out [][]byte
+	i := 0
+	for i < len(buf) {
+		if len(buf)-i < 4 {
+			return nil, errPkt
+		}
+		n, ok := pktSize(buf[i : i+4])
+		if !ok {
+			return nil, errPkt
+		}
+		if n == 0 {
+			out = append(out, nil)
+			i += 4
+			continue
+		}
+		if n < 4 || i+n > len(buf) {
+			return nil, errPkt
+		}
+		out = append(out, append([]byte(nil), buf[i+4:i+n]...))
+		i += n
+	}
+	return out, nil
 }
 
 // checkPullHead reads a pull-request body up to a fixed limit and requires

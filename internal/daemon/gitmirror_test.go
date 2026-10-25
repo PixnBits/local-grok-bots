@@ -5,6 +5,8 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -532,7 +534,7 @@ func assertCleanPushTo(t *testing.T, ws, mark string, specs []pushSpec, good, ba
 		t.Fatal("commit list created a marker")
 	}
 	remote := good.URL + "/acme/widgets.git"
-	_, _ = mirrorPush(context.Background(), mirror, remote, specs)
+	_, _ = mirrorPush(context.Background(), mirror, remote, "0123456789abcdef0123456789abcdef", specs)
 	if good.hits.Load() == 0 {
 		t.Fatal("push did not reach the intended host")
 	}
@@ -576,9 +578,9 @@ func controlTimeout(t *testing.T, ws, mark string, args ...string) {
 }
 
 func TestPushPlanOmitsGateFromArgv(t *testing.T) {
-	const gate = "abc123secretgate"
-	remote := "http://127.0.0.1:9/g/" + gate + "/github/acme/widgets.git"
-	args, cfg, err := pushPlan(remote, []pushSpec{{
+	const gate = "abc123secretgateabc123secretgate"
+	remote := "http://127.0.0.1:9/github/acme/widgets.git"
+	args, cfg, err := pushPlan(remote, gate, []pushSpec{{
 		src: "refs/heads/feature", dst: "refs/heads/feature", branch: "feature",
 	}})
 	if err != nil {
@@ -592,17 +594,31 @@ func TestPushPlanOmitsGateFromArgv(t *testing.T) {
 	if len(args) < 2 || args[0] != "push" || args[1] != "lgbpush" {
 		t.Fatalf("args %v", args)
 	}
-	var saw bool
+	var sawURL, sawHeader bool
 	for _, pair := range cfg {
+		if strings.Contains(pair[1], gate) && pair[0] != "http.extraHeader" {
+			t.Fatalf("gate in config %q", pair[0])
+		}
+		if pair[0] == "http.extraHeader" && pair[1] == "X-LGB-Gate: "+gate {
+			sawHeader = true
+		}
 		if strings.Contains(pair[1], remote) && (pair[0] == "remote.lgbpush.url" || pair[0] == "remote.lgbpush.pushurl") {
-			saw = true
+			sawURL = true
+			if strings.Contains(pair[1], gate) {
+				t.Fatalf("gate in push url %q", pair[1])
+			}
 		}
 		if strings.Contains(pair[0], gate) {
 			t.Fatalf("gate in config key %q", pair[0])
 		}
 	}
-	if !saw {
-		t.Fatal("push url was not passed as git config")
+	if !sawURL || !sawHeader {
+		t.Fatal("push url or gate header was not passed as git config")
+	}
+	if _, _, err := pushPlan(remote+"/"+gate, gate, []pushSpec{{
+		src: "refs/heads/feature", dst: "refs/heads/feature", branch: "feature",
+	}}); err == nil {
+		t.Fatal("push plan accepted a url that contains the gate")
 	}
 }
 
@@ -610,12 +626,15 @@ func TestMirrorInsteadOfDoesNotRedirect(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Fatal(err)
 	}
-	const gate = "abc123secretgate"
+	const gate = "abc123secretgateabc123secretgate"
 	var goodHits, badHits atomic.Int32
 	good := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		goodHits.Add(1)
-		if !strings.Contains(r.URL.Path, gate) {
-			t.Errorf("path %s", r.URL.Path)
+		if strings.Contains(r.URL.Path, gate) || strings.Contains(r.URL.RawQuery, gate) {
+			t.Errorf("gate in request target")
+		}
+		if r.Header.Get("X-LGB-Gate") != gate {
+			t.Errorf("missing gate header")
 		}
 		http.NotFound(w, r)
 	}))
@@ -629,7 +648,7 @@ func TestMirrorInsteadOfDoesNotRedirect(t *testing.T) {
 	ws, _, _ := hostileRepo(t)
 	mirror := mustMirror(t, ws)
 	appendConfig(t, mirror, "[url \""+bad.URL+"/p/\"]\n\tinsteadOf = http://127.0.0.1:\n\tpushInsteadOf = http://127.0.0.1:\n")
-	remote := good.URL + "/g/" + gate + "/github/acme/widgets.git"
+	remote := good.URL + "/github/acme/widgets.git"
 	var got []string
 	prev := commandContext
 	commandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
@@ -637,7 +656,7 @@ func TestMirrorInsteadOfDoesNotRedirect(t *testing.T) {
 		return exec.CommandContext(ctx, name, args...)
 	}
 	t.Cleanup(func() { commandContext = prev })
-	_, _ = mirrorPush(context.Background(), mirror, remote, []pushSpec{{
+	_, _ = mirrorPush(context.Background(), mirror, remote, gate, []pushSpec{{
 		src: "refs/heads/feature", dst: "refs/heads/feature", branch: "feature",
 	}})
 	if goodHits.Load() == 0 {
@@ -658,6 +677,112 @@ func TestMirrorInsteadOfDoesNotRedirect(t *testing.T) {
 	if strings.Contains(string(cfg), "insteadOf") || strings.Contains(string(cfg), "pushInsteadOf") {
 		t.Fatalf("mirror config kept a url rewrite:\n%s", cfg)
 	}
+}
+
+func TestMirrorPushGateStaysOutOfCmdline(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 24)
+	if _, err := rand.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	gate := hex.EncodeToString(buf)
+	ws, _, _ := hostileRepo(t)
+	mirror := mustMirror(t, ws)
+	var leaked atomic.Bool
+	var sawRemote atomic.Bool
+	note := func() {
+		leak, remote := scanCmdline(gate)
+		if leak {
+			leaked.Store(true)
+		}
+		if remote {
+			sawRemote.Store(true)
+		}
+	}
+	var mu sync.Mutex
+	var sawHeader bool
+	var gateInTarget bool
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		note()
+		if strings.Contains(r.URL.Path, gate) || strings.Contains(r.URL.RawQuery, gate) {
+			mu.Lock()
+			gateInTarget = true
+			mu.Unlock()
+		}
+		if r.Header.Get("X-LGB-Gate") == gate {
+			mu.Lock()
+			sawHeader = true
+			mu.Unlock()
+		}
+		time.Sleep(1500 * time.Millisecond)
+		note()
+		http.NotFound(w, r)
+	}))
+	defer up.Close()
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		tick := time.NewTicker(20 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+				note()
+			}
+		}
+	}()
+	remote := up.URL + "/github/acme/widgets.git"
+	_, _ = mirrorPush(context.Background(), mirror, remote, gate, []pushSpec{{
+		src: "refs/heads/feature", dst: "refs/heads/feature", branch: "feature",
+	}})
+	close(stop)
+	wg.Wait()
+	note()
+	if leaked.Load() {
+		t.Fatal("gate appeared in a process cmdline")
+	}
+	if !sawRemote.Load() {
+		t.Fatal("remote-http was not observed")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gateInTarget {
+		t.Fatal("gate appeared in the request target")
+	}
+	if !sawHeader {
+		t.Fatal("upstream did not receive the gate header")
+	}
+}
+
+func scanCmdline(gate string) (leaked, remote bool) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false, false
+	}
+	needle := []byte(gate)
+	for _, e := range entries {
+		name := e.Name()
+		if name == "" || name[0] < '0' || name[0] > '9' {
+			continue
+		}
+		b, err := os.ReadFile("/proc/" + name + "/cmdline")
+		if err != nil || len(b) == 0 {
+			continue
+		}
+		if bytes.Contains(b, needle) {
+			leaked = true
+		}
+		if bytes.Contains(b, []byte("remote-http")) {
+			remote = true
+		}
+	}
+	return leaked, remote
 }
 
 func markerPresent(path string) bool {

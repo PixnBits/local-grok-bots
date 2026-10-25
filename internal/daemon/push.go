@@ -92,6 +92,13 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 		}
 		branches = append(branches, sp.branch)
 	}
+	if len(specs) == 0 {
+		return a.pushDenied(bot, owner, repo, "refspec")
+	}
+	old, oerr := a.githubBranchOID(pctx, gate.px, owner, repo, specs[0].branch)
+	if oerr != nil {
+		return a.pushDenied(bot, owner, repo, "remote ref")
+	}
 	commits, err := mirrorLog(pctx, mirror, specs)
 	if err != nil {
 		return a.pushDenied(bot, owner, repo, "mirror")
@@ -127,8 +134,8 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	if len(specs) > 0 {
 		branch = specs[0].branch
 	}
-	base, closeWrite, err := a.openGitHubWriteGate(bot, github.Window{
-		Kind: github.WindowPush, Owner: owner, Repo: repo, Branch: branch, Default: def,
+	base, gateSecret, closeWrite, err := a.openGitHubWriteGate(bot, github.Window{
+		Kind: github.WindowPush, Owner: owner, Repo: repo, Branch: branch, Default: def, Old: old,
 	})
 	if err != nil {
 		return a.pushDenied(bot, owner, repo, "proxy unavailable")
@@ -138,9 +145,9 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	if err != nil {
 		return a.pushDenied(bot, owner, repo, "proxy unavailable")
 	}
-	if msg, err := mirrorPush(pctx, mirror, remote, specs); err != nil {
+	if msg, err := mirrorPush(pctx, mirror, remote, gateSecret, specs); err != nil {
 		res := a.pushDenied(bot, owner, repo, "push failed")
-		res.Stderr += sanitizePush(msg, tokenFile, base)
+		res.Stderr += sanitizePush(msg, tokenFile, gateSecret)
 		return res
 	}
 	ev := a.auditPush(bot, owner, repo, "allow", "sent")
@@ -228,15 +235,10 @@ func proxyGitURL(base, owner, repo string) (string, error) {
 	if u.RawQuery != "" || u.Fragment != "" || u.Port() == "" {
 		return "", errors.New("proxy")
 	}
-	rest, ok := strings.CutPrefix(u.Path, "/g/")
-	if !ok {
+	if u.Path != "" && u.Path != "/" {
 		return "", errors.New("proxy")
 	}
-	gate := strings.Trim(rest, "/")
-	if gate == "" || strings.Contains(gate, "/") || strings.ContainsAny(gate, "\r\n\t\x00") {
-		return "", errors.New("proxy")
-	}
-	u.Path = "/g/" + gate + "/github/" + owner + "/" + repo + ".git"
+	u.Path = "/github/" + owner + "/" + repo + ".git"
 	u.RawPath = ""
 	return u.String(), nil
 }

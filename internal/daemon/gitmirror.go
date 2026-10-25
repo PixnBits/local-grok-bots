@@ -171,14 +171,19 @@ func mirrorLog(ctx context.Context, gitDir string, specs []pushSpec) (string, er
 	return b.String(), nil
 }
 
-func pushPlan(remote string, specs []pushSpec) (args []string, cfg [][2]string, err error) {
+func pushPlan(remote, gate string, specs []pushSpec) (args []string, cfg [][2]string, err error) {
 	if remote == "" || strings.ContainsAny(remote, "\r\n\x00") {
 		return nil, nil, fmt.Errorf("remote")
 	}
+	if gate == "" || strings.ContainsAny(gate, "\r\n\x00") || strings.Contains(remote, gate) {
+		return nil, nil, fmt.Errorf("remote")
+	}
+	header := "X-LGB-Gate: " + gate
 	cfg = [][2]string{
 		{"protocol.version", "1"},
 		{"remote.lgbpush.url", remote},
 		{"remote.lgbpush.pushurl", remote},
+		{"http.extraHeader", header},
 	}
 	args = []string{"push", "lgbpush"}
 	for _, sp := range specs {
@@ -196,8 +201,8 @@ func pushPlan(remote string, specs []pushSpec) (args []string, cfg [][2]string, 
 	return args, cfg, nil
 }
 
-func mirrorPush(ctx context.Context, gitDir, remote string, specs []pushSpec) (string, error) {
-	args, cfg, err := pushPlan(remote, specs)
+func mirrorPush(ctx context.Context, gitDir, remote, gate string, specs []pushSpec) (string, error) {
+	args, cfg, err := pushPlan(remote, gate, specs)
 	if err != nil {
 		return "", err
 	}

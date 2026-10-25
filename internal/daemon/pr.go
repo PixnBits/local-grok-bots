@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -61,7 +62,7 @@ func (a *App) toolCreatePR(ctx context.Context, bot store.Bot, args map[string]a
 		}
 		return a.prDeny(bot, "github_pr_denied", owner, repo, reason)
 	}
-	base, closeWrite, err := a.openGitHubWriteGate(bot, github.Window{
+	base, gateSecret, closeWrite, err := a.openGitHubWriteGate(bot, github.Window{
 		Kind: github.WindowPR, Owner: owner, Repo: repo, Branch: in.Head,
 	})
 	if err != nil {
@@ -70,7 +71,14 @@ func (a *App) toolCreatePR(ctx context.Context, bot store.Bot, args map[string]a
 	defer closeWrite()
 	pctx, pcancel := context.WithTimeout(ctx, 20*time.Second)
 	defer pcancel()
-	pr, err := github.CreatePull(pctx, nil, base+"/api/repos/"+owner+"/"+repo+"/pulls", owner, repo, in)
+	client := &http.Client{
+		Timeout:   20 * time.Second,
+		Transport: gateRoundTripper{gate: gateSecret},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+	pr, err := github.CreatePull(pctx, client, base+"/api/repos/"+owner+"/"+repo+"/pulls", owner, repo, in)
 	if err != nil {
 		return a.prDeny(bot, "github_pr_denied", owner, repo, githubErrReason(err))
 	}

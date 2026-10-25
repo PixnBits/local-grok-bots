@@ -73,6 +73,10 @@ type Window struct {
 	Repo    string
 	Branch  string
 	Default string
+	// Old is the object id of refs/heads/<Branch> when the card was built.
+	// An absent ref uses the zero id. A push window with an empty Old
+	// refuses receive-pack.
+	Old string
 }
 
 const (
@@ -85,8 +89,9 @@ const (
 // Proxy is a host-side reverse proxy. It adds Authorization only for an
 // allowlisted owner/repo on github.com or api.github.com, and it drops any
 // caller Authorization first. The jail reaches a read proxy through a unix
-// socket. A TCP listener on 127.0.0.1 requires an unguessable path gate.
-// A write proxy is a separate instance: TCP only, never the jail socket.
+// socket. A TCP listener on 127.0.0.1 requires the X-LGB-Gate header.
+// The gate is not part of the URL. A write proxy is a separate instance:
+// TCP only, never the jail socket.
 type Proxy struct {
 	access  Access
 	repos   map[string]bool
@@ -325,9 +330,10 @@ func (p *Proxy) ListenUnix(parent string) error {
 	return nil
 }
 
-// ListenTCP serves on 127.0.0.1 and returns the origin including the gate
-// prefix, for example http://127.0.0.1:1234/g/<gate>. Requests without that
-// prefix are refused. The token is not part of the URL.
+// ListenTCP serves on 127.0.0.1 and returns the origin, for example
+// http://127.0.0.1:1234. The gate is not in that URL. Callers send it as
+// the X-LGB-Gate header. Requests without that header are refused. The
+// token is not part of the URL.
 func (p *Proxy) ListenTCP() (string, error) {
 	if p == nil {
 		return "", errors.New("github proxy is not available")
@@ -353,7 +359,7 @@ func (p *Proxy) ListenTCP() (string, error) {
 	p.tcpSrv = srv
 	p.mu.Unlock()
 	go func() { _ = srv.Serve(ln) }()
-	return "http://" + ln.Addr().String() + "/g/" + p.gate, nil
+	return "http://" + ln.Addr().String(), nil
 }
 
 // Close stops listeners and removes the socket directory.
@@ -402,11 +408,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, requireGate bool) 
 		return
 	}
 	if requireGate {
-		path, ok = stripGate(path, p.gate)
-		if !ok {
+		if !gateHeaderOK(r.Header, p.gate) {
+			r.Header.Del("X-LGB-Gate")
 			p.finish(w, http.StatusForbidden, "/", "", "", "gate", method, false)
 			return
 		}
+		r.Header.Del("X-LGB-Gate")
 	}
 	service, rest, ok := splitService(path)
 	if !ok {
@@ -445,7 +452,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, requireGate bool) 
 		return
 	}
 	if p.access == AccessWrite && p.window.Kind == WindowPush && method == http.MethodPost && gitTail(route.Path) == "git-receive-pack" {
-		body, berr := checkReceivePack(r.Body, p.window.Branch, p.window.Default)
+		body, berr := checkReceivePack(r.Body, p.window.Branch, p.window.Default, p.window.Old)
 		if berr != nil {
 			p.finish(w, http.StatusForbidden, route.Path, route.Owner, route.Repo, "ref", method, write)
 			return
@@ -533,6 +540,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, base *url.URL, r
 	// Leave Accept-Encoding unset so the transport negotiates gzip and
 	// decompresses the body. A forwarded client value skips that.
 	req.Header.Del("Accept-Encoding")
+	req.Header.Del("X-LGB-Gate")
 	req.Header.Set("Authorization", upstreamAuth(route.Service, tok))
 	req.Host = u.Host
 	if r.ContentLength > 0 {
@@ -704,17 +712,15 @@ func splitService(path string) (service, rest string, ok bool) {
 	}
 }
 
-func stripGate(path, gate string) (string, bool) {
-	const prefix = "/g/"
-	if !strings.HasPrefix(path, prefix) || gate == "" {
-		return "", false
+func gateHeaderOK(h http.Header, gate string) bool {
+	if h == nil || gate == "" {
+		return false
 	}
-	rest := path[len(prefix):]
-	seg, tail, found := strings.Cut(rest, "/")
-	if !found || !gateEqual(seg, gate) {
-		return "", false
+	vs := h.Values("X-LGB-Gate")
+	if len(vs) != 1 || strings.ContainsAny(vs[0], "\r\n\x00") {
+		return false
 	}
-	return "/" + tail, true
+	return gateEqual(vs[0], gate)
 }
 
 func gateEqual(got, want string) bool {

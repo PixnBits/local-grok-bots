@@ -144,6 +144,9 @@ func TestProxyTCPGateAndUnixSocket(t *testing.T) {
 		if r.Header.Get("Authorization") != gitBasic(tokenSecret) {
 			t.Errorf("auth %q", r.Header.Get("Authorization"))
 		}
+		if r.Header.Get("X-LGB-Gate") != "" {
+			t.Errorf("gate header reached upstream")
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer up.Close()
@@ -161,8 +164,11 @@ func TestProxyTCPGateAndUnixSocket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bare := strings.TrimSuffix(strings.TrimPrefix(base, "http://"), "/g/"+p.Gate())
-	res, err := http.Get("http://" + bare + "/github/acme/widgets.git/info/refs?service=git-upload-pack")
+	if strings.Contains(base, p.Gate()) || strings.Contains(base, "/g/") {
+		t.Fatalf("gate in listen url %s", base)
+	}
+	gitURL := base + "/github/acme/widgets.git/info/refs?service=git-upload-pack"
+	res, err := http.Get(gitURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +176,39 @@ func TestProxyTCPGateAndUnixSocket(t *testing.T) {
 	if res.StatusCode != http.StatusForbidden {
 		t.Fatalf("missing gate %d", res.StatusCode)
 	}
-	res, err = http.Get(base + "/github/acme/widgets.git/info/refs?service=git-upload-pack")
+	wrong, err := http.NewRequest(http.MethodGet, gitURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong.Header.Set("X-LGB-Gate", "not-the-gate")
+	res, err = http.DefaultClient.Do(wrong)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("wrong gate %d", res.StatusCode)
+	}
+	dup, err := http.NewRequest(http.MethodGet, gitURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dup.Header.Add("X-LGB-Gate", p.Gate())
+	dup.Header.Add("X-LGB-Gate", p.Gate())
+	res, err = http.DefaultClient.Do(dup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("duplicate gate %d", res.StatusCode)
+	}
+	okReq, err := http.NewRequest(http.MethodGet, gitURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	okReq.Header.Set("X-LGB-Gate", p.Gate())
+	res, err = http.DefaultClient.Do(okReq)
 	if err != nil {
 		t.Fatal(err)
 	}

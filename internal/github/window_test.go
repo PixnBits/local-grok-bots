@@ -36,7 +36,7 @@ func TestWriteWindowAndRefUpdates(t *testing.T) {
 	}))
 	defer up.Close()
 
-	pushWin := Window{Kind: WindowPush, Owner: "Acme", Repo: "Widgets", Branch: "feature", Default: "main"}
+	pushWin := Window{Kind: WindowPush, Owner: "Acme", Repo: "Widgets", Branch: "feature", Default: "main", Old: oid('0')}
 	prWin := Window{Kind: WindowPR, Owner: "Acme", Repo: "Widgets", Branch: "feature"}
 	approved := oneRef(oid('0'), oid('a'), "refs/heads/feature")
 	approvedCaps := pktLine(oid('0')+" "+oid('b')+" refs/heads/feature\x00report-status side-band-64k\n") + "0000PACK-bytes"
@@ -56,6 +56,9 @@ func TestWriteWindowAndRefUpdates(t *testing.T) {
 		{AccessWrite, pushWin, http.MethodPost, "/github/Acme/Widgets.git/git-receive-pack", approvedCaps, http.StatusNoContent, "", true},
 		{AccessWrite, pushWin, http.MethodGet, "/github/acme/widgets.git/info/refs?service=git-receive-pack", "", http.StatusNoContent, "", true},
 		{AccessWrite, pushWin, http.MethodPost, "/github/acme/widgets.git/git-receive-pack", oneRef(oid('a'), oid('0'), "refs/heads/feature"), http.StatusForbidden, "ref", false},
+		{AccessWrite, pushWin, http.MethodPost, "/github/acme/widgets.git/git-receive-pack", oneRef(oid('b'), oid('a'), "refs/heads/feature"), http.StatusForbidden, "ref", false},
+		{AccessWrite, Window{Kind: WindowPush, Owner: "acme", Repo: "widgets", Branch: "feature", Default: "main", Old: oid('c')}, http.MethodPost, "/github/acme/widgets.git/git-receive-pack", oneRef(oid('c'), oid('a'), "refs/heads/feature"), http.StatusNoContent, "", true},
+		{AccessWrite, Window{Kind: WindowPush, Owner: "acme", Repo: "widgets", Branch: "feature", Default: "main"}, http.MethodPost, "/github/acme/widgets.git/git-receive-pack", approved, http.StatusForbidden, "ref", false},
 		{AccessWrite, pushWin, http.MethodPost, "/github/acme/widgets.git/git-receive-pack", oneRef(oid('0'), strings.Repeat("0", 64), "refs/heads/feature"), http.StatusForbidden, "ref", false},
 		{AccessWrite, Window{Kind: WindowPush, Owner: "acme", Repo: "widgets", Branch: "Feature", Default: "feature"}, http.MethodPost, "/github/acme/widgets.git/git-receive-pack", oneRef(oid('0'), oid('a'), "refs/heads/Feature"), http.StatusForbidden, "ref", false},
 		{AccessWrite, pushWin, http.MethodPost, "/github/acme/widgets.git/git-receive-pack", oneRef(oid('0'), oid('a'), "refs/tags/v1"), http.StatusForbidden, "ref", false},
