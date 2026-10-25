@@ -1038,3 +1038,42 @@ func gitRepoOut(t *testing.T, dir string, args ...string) string {
 	}
 	return string(b)
 }
+
+func TestMirrorEnvStripsTrace(t *testing.T) {
+	keys := []string{
+		"GIT_TRACE", "GIT_TRACE_CURL", "GIT_TRACE_PACKET", "GIT_TRACE2",
+		"GIT_TRACE2_EVENT", "GIT_TRACE_SETUP", "GIT_CURL_VERBOSE",
+	}
+	for _, key := range keys {
+		t.Setenv(key, "1")
+	}
+	t.Setenv("PATH", "/usr/bin:/bin")
+	for _, e := range mirrorEnv(t.TempDir(), [][2]string{{"http.extraHeader", "X-LGB-Gate: secret"}}) {
+		key, _, _ := strings.Cut(e, "=")
+		if traceEnv(key) {
+			t.Fatalf("mirror env carried %s", key)
+		}
+	}
+	dir := t.TempDir()
+	prev := commandContext
+	commandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "env")
+	}
+	t.Cleanup(func() { commandContext = prev })
+	stdout, stderr, err := execGit(context.Background(), dir, []string{
+		"GIT_TRACE=1", "GIT_TRACE2_EVENT=1", "GIT_CURL_VERBOSE=1", "FOO=bar",
+	}, nil, "status")
+	if err != nil {
+		t.Fatalf("exec %v %s", err, stderr)
+	}
+	text := string(stdout)
+	for _, line := range strings.Split(text, "\n") {
+		key, _, _ := strings.Cut(line, "=")
+		if traceEnv(key) {
+			t.Fatalf("exec env carried %s", line)
+		}
+	}
+	if !strings.Contains(text, "FOO=bar") {
+		t.Fatalf("dropped a normal extra:\n%s", text)
+	}
+}

@@ -74,7 +74,25 @@ func mirrorEnv(gitDir string, extra [][2]string) []string {
 			fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", i, p[1]),
 		)
 	}
-	return env
+	return dropTraceEnv(env)
+}
+
+// traceEnv is a git trace variable. Those can write request headers, packet
+// bytes, or the credential helper command line into the daemon's stderr.
+func traceEnv(key string) bool {
+	return key == "GIT_CURL_VERBOSE" || strings.HasPrefix(key, "GIT_TRACE")
+}
+
+func dropTraceEnv(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		key, _, ok := strings.Cut(e, "=")
+		if ok && traceEnv(key) {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // rewriteMirrorConfig replaces the mirror config with the daemon body.
@@ -122,7 +140,7 @@ func execGit(ctx context.Context, gitDir string, extra []string, cfg [][2]string
 	cmd.Env = mirrorEnv(gitDir, cfg)
 	for _, e := range extra {
 		key, _, ok := strings.Cut(e, "=")
-		if !ok || key == "" {
+		if !ok || key == "" || traceEnv(key) {
 			continue
 		}
 		prefix := key + "="
