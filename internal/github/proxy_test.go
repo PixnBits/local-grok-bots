@@ -283,7 +283,11 @@ func TestReadProxyRefusesWrites(t *testing.T) {
 		if len(audits) != 1 || audits[0].Method != method {
 			t.Fatalf("%s audit %#v", item, audits)
 		}
-		if method != http.MethodGet && audits[0].Action != "github_write" {
+		wantAction := "github_refuse"
+		if method == http.MethodPost && !strings.Contains(path, "git-upload-pack") {
+			wantAction = "github_write"
+		}
+		if audits[0].Action != wantAction {
 			t.Fatalf("%s action %#v", item, audits[0])
 		}
 	}
@@ -306,7 +310,7 @@ func TestReadProxyRefusesWrites(t *testing.T) {
 		t.Fatalf("allowed hits=%d auth=%q", hits, sawAuth)
 	}
 	mu.Unlock()
-	if len(audits) != 1 || audits[0].Action != "github_write" || audits[0].Method != http.MethodPost || audits[0].Decision != "allow" {
+	if len(audits) != 1 || audits[0].Action != "github_allow" || audits[0].Method != http.MethodPost || audits[0].Decision != "allow" {
 		t.Fatalf("post audit %#v", audits)
 	}
 	code, body = do(http.MethodGet, "/api/repos/acme/widgets")
@@ -318,11 +322,13 @@ func TestReadProxyRefusesWrites(t *testing.T) {
 		t.Fatalf("pull GET %d %q", code, body)
 	}
 
+	var writeAudits []Audit
 	writeProxy, err := New(Config{
 		Repos:   []string{"acme/widgets"},
 		Token:   func() (string, error) { return tokenSecret, nil },
 		GitBase: up.URL,
 		APIBase: up.URL,
+		Audit:   func(a Audit) { writeAudits = append(writeAudits, a) },
 		Access:  AccessWrite,
 	})
 	if err != nil {
@@ -360,6 +366,22 @@ func TestReadProxyRefusesWrites(t *testing.T) {
 	res.Body.Close()
 	if res.StatusCode != http.StatusForbidden {
 		t.Fatalf("write proxy allowed upload-pack GET %d", res.StatusCode)
+	}
+	writeAudits = nil
+	req, err := http.NewRequest(http.MethodPost, base+"/github/acme/widgets.git/git-upload-pack", strings.NewReader("0000"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("write proxy allowed upload-pack POST %d", res.StatusCode)
+	}
+	if len(writeAudits) != 1 || writeAudits[0].Action != "github_refuse" || writeAudits[0].Decision != "refuse" {
+		t.Fatalf("upload-pack write audit %#v", writeAudits)
 	}
 }
 

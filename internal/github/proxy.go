@@ -20,7 +20,9 @@ import (
 )
 
 // Audit is one proxy decision. It has no header, no body, and no token.
-// Method is the request method. A non-GET is action github_write.
+// Method is the request method. github_write is a receive-pack POST or a
+// non-GET API call. A fetch, including POST git-upload-pack, is github_allow
+// or github_refuse.
 type Audit struct {
 	Bot      string `json:"bot,omitempty"`
 	Run      string `json:"run,omitempty"`
@@ -370,41 +372,42 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, requireGate bool) 
 		method = r.Method
 	}
 	if r.Method == http.MethodConnect || r.Method == "PRI" || r.URL == nil || r.URL.User != nil {
-		p.finish(w, http.StatusForbidden, "", "", "", "method", method)
+		p.finish(w, http.StatusForbidden, "", "", "", "method", method, false)
 		return
 	}
 	path, ok := requestPath(r)
 	if !ok {
-		p.finish(w, http.StatusForbidden, clipPath(r.URL.Path), "", "", "path", method)
+		p.finish(w, http.StatusForbidden, clipPath(r.URL.Path), "", "", "path", method, false)
 		return
 	}
 	if requireGate {
 		path, ok = stripGate(path, p.gate)
 		if !ok {
-			p.finish(w, http.StatusForbidden, "/", "", "", "gate", method)
+			p.finish(w, http.StatusForbidden, "/", "", "", "gate", method, false)
 			return
 		}
 	}
 	service, rest, ok := splitService(path)
 	if !ok {
-		p.finish(w, http.StatusForbidden, clipPath(path), "", "", "path", method)
+		p.finish(w, http.StatusForbidden, clipPath(path), "", "", "path", method, false)
 		return
 	}
 	route, err := Classify(service, rest, r.URL.RawQuery, p.repos)
 	if errors.Is(err, ErrNotAllowed) {
-		p.finish(w, http.StatusForbidden, route.Path, route.Owner, route.Repo, "repo", method)
+		p.finish(w, http.StatusForbidden, route.Path, route.Owner, route.Repo, "repo", method, isGenuineWrite(route, method))
 		return
 	}
 	if err != nil {
-		p.finish(w, http.StatusForbidden, clipPath(path), "", "", "path", method)
+		p.finish(w, http.StatusForbidden, clipPath(path), "", "", "path", method, false)
 		return
 	}
+	write := isGenuineWrite(route, method)
 	if !accessOK(p.access, route, r.Method) {
 		reason := "method"
-		if r.Method == http.MethodGet {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead {
 			reason = "route"
 		}
-		p.finish(w, http.StatusForbidden, route.Path, route.Owner, route.Repo, reason, method)
+		p.finish(w, http.StatusForbidden, route.Path, route.Owner, route.Repo, reason, method, write)
 		return
 	}
 	tok, err := p.token()
@@ -413,11 +416,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, requireGate bool) 
 		if err != nil {
 			reason = TokenFailureReason(err)
 		}
-		p.finish(w, http.StatusServiceUnavailable, route.Path, route.Owner, route.Repo, reason, method)
+		p.finish(w, http.StatusServiceUnavailable, route.Path, route.Owner, route.Repo, reason, method, write)
 		return
 	}
 	if strings.Contains(path, tok) || strings.Contains(r.URL.RawQuery, tok) {
-		p.finish(w, http.StatusForbidden, "/", "", "", "path", method)
+		p.finish(w, http.StatusForbidden, "/", "", "", "path", method, write)
 		return
 	}
 	base := p.gitBase
@@ -430,22 +433,22 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, requireGate bool) 
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 			status = http.StatusBadGateway
 		}
-		p.note(status, route.Path, route.Owner, route.Repo, "refuse", "upstream", method)
+		p.note(status, route.Path, route.Owner, route.Repo, "refuse", "upstream", method, write)
 		return
 	}
-	p.note(status, route.Path, route.Owner, route.Repo, "allow", "", method)
+	p.note(status, route.Path, route.Owner, route.Repo, "allow", "", method, write)
 }
 
-func (p *Proxy) finish(w http.ResponseWriter, status int, path, owner, repo, reason, method string) {
+func (p *Proxy) finish(w http.ResponseWriter, status int, path, owner, repo, reason, method string, write bool) {
 	http.Error(w, http.StatusText(status), status)
 	decision := "refuse"
 	if status >= 200 && status < 300 {
 		decision = "allow"
 	}
-	p.note(status, path, owner, repo, decision, reason, method)
+	p.note(status, path, owner, repo, decision, reason, method, write)
 }
 
-func (p *Proxy) note(status int, path, owner, repo, decision, reason, method string) {
+func (p *Proxy) note(status int, path, owner, repo, decision, reason, method string, write bool) {
 	if p == nil || p.audit == nil {
 		return
 	}
@@ -453,20 +456,32 @@ func (p *Proxy) note(status int, path, owner, repo, decision, reason, method str
 	bot, run := p.bot, p.run
 	p.mu.Unlock()
 	p.audit(Audit{
-		Bot: bot, Run: run, Action: auditAction(decision, method),
+		Bot: bot, Run: run, Action: auditAction(decision, write),
 		Owner: owner, Repo: repo, Decision: decision, Reason: reason,
 		Method: method, Path: clipPath(path), Status: status,
 	})
 }
 
-func auditAction(decision, method string) string {
-	if method != http.MethodGet {
+func auditAction(decision string, write bool) string {
+	if write {
 		return "github_write"
 	}
 	if decision == "allow" {
 		return "github_allow"
 	}
 	return "github_refuse"
+}
+
+// isGenuineWrite is true for POST git-receive-pack and for API methods other
+// than GET and HEAD. POST git-upload-pack is a fetch.
+func isGenuineWrite(route Route, method string) bool {
+	if route.Service == "github" {
+		return method == http.MethodPost && gitTail(route.Path) == "git-receive-pack"
+	}
+	if route.Service == "api" {
+		return method != http.MethodGet && method != http.MethodHead && method != ""
+	}
+	return false
 }
 
 func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, base *url.URL, route Route, tok string) (int, error) {
