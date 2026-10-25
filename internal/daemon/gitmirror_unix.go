@@ -20,30 +20,106 @@ const (
 	maxConfig         = 1 << 20
 )
 
-// workspaceConfigReason returns "config" when the workspace git config must
-// be refused. A missing .git is not a config denial. Git is not invoked.
-func workspaceConfigReason(ws string) string {
-	if ws == "" || !filepath.IsAbs(ws) {
-		return "config"
+// beforeMirrorCopy, when set, runs after resolve and before the mirror
+// read. Production leaves it nil.
+var beforeMirrorCopy func()
+
+// heldDir is one path component opened relative to the previous descriptor.
+type heldDir struct {
+	fd   int
+	name string
+	dev  uint64
+	ino  uint64
+}
+
+// repoHandle is the workspace repository kept open for the config check and
+// the mirror copy. Close releases every directory descriptor.
+type repoHandle struct {
+	root       int
+	chain      []heldDir
+	repo       int
+	repoParent int
+	repoName   string
+	git        int
+	repoDev    uint64
+	repoIno    uint64
+	gitDev     uint64
+	gitIno     uint64
+	closed     bool
+}
+
+func (h *repoHandle) Close() error {
+	if h == nil || h.closed {
+		return nil
 	}
-	wsFd, err := unix.Open(ws, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return "config"
+	h.closed = true
+	if h.git >= 0 {
+		unix.Close(h.git)
+		h.git = -1
 	}
-	defer unix.Close(wsFd)
-	gitFd, err := unix.Openat(wsFd, ".git", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		if err == unix.ENOENT {
-			return ""
+	for i := len(h.chain) - 1; i >= 0; i-- {
+		if h.chain[i].fd >= 0 {
+			unix.Close(h.chain[i].fd)
+			h.chain[i].fd = -1
 		}
+	}
+	if h.root >= 0 {
+		unix.Close(h.root)
+		h.root = -1
+	}
+	h.repo = -1
+	h.repoParent = -1
+	return nil
+}
+
+// configReason reports "config" when .git/config must be refused.
+// The read uses the held .git descriptor.
+func (h *repoHandle) configReason() string {
+	if h == nil || h.git < 0 || h.closed {
 		return "config"
 	}
-	defer unix.Close(gitFd)
-	denied, err := configDeniedAt(gitFd)
+	denied, err := configDeniedAt(h.git)
 	if err != nil || denied {
 		return "config"
 	}
 	return ""
+}
+
+// stable reports whether the repository directory and .git are still the
+// files recorded when the handle was opened.
+func (h *repoHandle) stable() bool {
+	if h == nil || h.closed || h.git < 0 || h.repo < 0 {
+		return false
+	}
+	if !statMatch(h.repo, h.repoDev, h.repoIno) || !statMatch(h.git, h.gitDev, h.gitIno) {
+		return false
+	}
+	if h.repoName != "" && !statAtMatch(h.repoParent, h.repoName, h.repoDev, h.repoIno) {
+		return false
+	}
+	return statAtMatch(h.repo, ".git", h.gitDev, h.gitIno)
+}
+
+func statMatch(fd int, dev, ino uint64) bool {
+	if fd < 0 {
+		return false
+	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return false
+	}
+	return uint64(st.Dev) == dev && uint64(st.Ino) == ino && st.Mode&unix.S_IFMT == unix.S_IFDIR
+}
+
+func statAtMatch(dirfd int, name string, dev, ino uint64) bool {
+	if dirfd < 0 || name == "" || strings.ContainsAny(name, "/\\\x00") {
+		return false
+	}
+	var st unix.Stat_t
+	if err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return false
+	}
+	return uint64(st.Dev) == dev && uint64(st.Ino) == ino && st.Mode&unix.S_IFMT == unix.S_IFDIR
 }
 
 func configDeniedAt(gitFd int) (bool, error) {
@@ -88,74 +164,162 @@ func configDeniedAt(gitFd int) (bool, error) {
 	return github.RepoConfigDenied(string(buf)), nil
 }
 
-// resolveWorkspaceRepo finds the nearest directory at rel, relative to the
-// workspace, that contains a .git directory. rel is the logical path. ".." ,
-// an absolute path, a symlink component, a gitfile, and a path outside the
-// workspace are refused. The returned directory is inside the workspace.
-func resolveWorkspaceRepo(ws, rel string) (string, string) {
+// resolveWorkspaceRepo opens the workspace once and returns the repository
+// directory that contains the nearest .git at rel. The caller closes it.
+// ".." , an absolute path, a symlink component, a gitfile, and a path outside
+// the workspace are refused.
+func resolveWorkspaceRepo(ws, rel string) (*repoHandle, string) {
 	if ws == "" || !filepath.IsAbs(ws) {
-		return "", "repository not found in workspace"
+		return nil, "repository not found in workspace"
 	}
 	parts, reason := workspaceRelParts(rel)
 	if reason != "" {
-		return "", reason
+		return nil, reason
 	}
-	wsFd, err := unix.Open(ws, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	rootFd, err := unix.Open(ws, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return "", "repository not found in workspace"
+		return nil, "repository not found in workspace"
 	}
-	defer unix.Close(wsFd)
-	fds := []int{wsFd}
+	chain, err := openChain(rootFd, parts)
+	if err != nil {
+		unix.Close(rootFd)
+		return nil, openErrReason(err)
+	}
+	h, reason := findRepo(rootFd, chain)
+	if reason != "" {
+		closeHeld(rootFd, chain, -1)
+		return nil, reason
+	}
+	return h, ""
+}
+
+func openErrReason(err error) string {
+	switch {
+	case errors.Is(err, unix.ELOOP):
+		return "symlink"
+	case errors.Is(err, unix.ENOENT):
+		return "repository not found in workspace"
+	default:
+		return "path"
+	}
+}
+
+// directoryErr turns O_DIRECTORY's ENOTDIR into ELOOP when the component is a
+// symlink. O_DIRECTORY reports both a symlink and a non-directory as ENOTDIR.
+func directoryErr(parent int, name string, err error) error {
+	if err == nil || !errors.Is(err, unix.ENOTDIR) {
+		return err
+	}
+	var st unix.Stat_t
+	if ferr := unix.Fstatat(parent, name, &st, unix.AT_SYMLINK_NOFOLLOW); ferr != nil {
+		return err
+	}
+	if st.Mode&unix.S_IFMT == unix.S_IFLNK {
+		return unix.ELOOP
+	}
+	return err
+}
+
+// componentErr classifies a failed resolve. An intermediate symlink is ELOOP
+// from openat2. A final symlink is ENOTDIR because the open asks for a directory.
+func componentErr(rootFd int, parts []string, err error) error {
+	if err == nil || errors.Is(err, unix.ELOOP) || !errors.Is(err, unix.ENOTDIR) {
+		return err
+	}
+	parent := rootFd
 	var extra []int
 	defer func() {
 		for _, fd := range extra {
 			unix.Close(fd)
 		}
 	}()
-	dirFd := wsFd
-	for _, part := range parts {
-		next, err := unix.Openat(dirFd, part, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-		if err != nil {
-			switch err {
-			case unix.ELOOP:
-				return "", "symlink"
-			case unix.ENOENT:
-				return "", "repository not found in workspace"
-			default:
-				return "", "path"
-			}
+	for i, part := range parts {
+		if errors.Is(directoryErr(parent, part, unix.ENOTDIR), unix.ELOOP) {
+			return unix.ELOOP
 		}
 		var st unix.Stat_t
-		if err := unix.Fstat(next, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR {
-			unix.Close(next)
-			return "", "path"
+		if ferr := unix.Fstatat(parent, part, &st, unix.AT_SYMLINK_NOFOLLOW); ferr != nil {
+			return err
 		}
-		extra = append(extra, next)
-		fds = append(fds, next)
-		dirFd = next
+		if st.Mode&unix.S_IFMT != unix.S_IFDIR || i == len(parts)-1 {
+			return err
+		}
+		fd, oerr := unix.Openat(parent, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if oerr != nil {
+			return directoryErr(parent, part, oerr)
+		}
+		extra = append(extra, fd)
+		parent = fd
 	}
-	for i := len(fds) - 1; i >= 0; i-- {
-		kind, err := gitDirKind(fds[i])
+	return err
+}
+
+func findRepo(rootFd int, chain []heldDir) (*repoHandle, string) {
+	type step struct {
+		fd     int
+		name   string
+		parent int
+	}
+	steps := make([]step, 0, 1+len(chain))
+	steps = append(steps, step{fd: rootFd, parent: -1})
+	parent := rootFd
+	for _, n := range chain {
+		steps = append(steps, step{fd: n.fd, name: n.name, parent: parent})
+		parent = n.fd
+	}
+	for i := len(steps) - 1; i >= 0; i-- {
+		gitFd, kind, err := openGitAt(steps[i].fd)
 		if err != nil {
-			return "", "path"
+			return nil, "path"
 		}
 		switch kind {
 		case "dir":
-			if i == 0 {
-				return ws, ""
+			var rst, gst unix.Stat_t
+			if unix.Fstat(steps[i].fd, &rst) != nil || unix.Fstat(gitFd, &gst) != nil {
+				unix.Close(gitFd)
+				return nil, "path"
 			}
-			return filepath.Join(append([]string{ws}, parts[:i]...)...), ""
+			if rst.Mode&unix.S_IFMT != unix.S_IFDIR || gst.Mode&unix.S_IFMT != unix.S_IFDIR {
+				unix.Close(gitFd)
+				return nil, "path"
+			}
+			return &repoHandle{
+				root:       rootFd,
+				chain:      chain,
+				repo:       steps[i].fd,
+				repoParent: steps[i].parent,
+				repoName:   steps[i].name,
+				git:        gitFd,
+				repoDev:    uint64(rst.Dev),
+				repoIno:    uint64(rst.Ino),
+				gitDev:     uint64(gst.Dev),
+				gitIno:     uint64(gst.Ino),
+			}, ""
 		case "symlink":
-			return "", "symlink"
+			return nil, "symlink"
 		case "file":
-			return "", "gitfile"
+			return nil, "gitfile"
 		case "none":
 			continue
 		default:
-			return "", "path"
+			return nil, "path"
 		}
 	}
-	return "", "repository not found in workspace"
+	return nil, "repository not found in workspace"
+}
+
+func closeHeld(root int, chain []heldDir, git int) {
+	if git >= 0 {
+		unix.Close(git)
+	}
+	for i := len(chain) - 1; i >= 0; i-- {
+		if chain[i].fd >= 0 {
+			unix.Close(chain[i].fd)
+		}
+	}
+	if root >= 0 {
+		unix.Close(root)
+	}
 }
 
 func workspaceRelParts(rel string) ([]string, string) {
@@ -184,37 +348,94 @@ func workspaceRelParts(rel string) ([]string, string) {
 	return parts, ""
 }
 
-func gitDirKind(dirfd int) (string, error) {
+func openGitAt(dirfd int) (int, string, error) {
 	fd, err := unix.Openat(dirfd, ".git", unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		switch err {
-		case unix.ENOENT:
-			return "none", nil
-		case unix.ELOOP:
-			return "symlink", nil
+		switch {
+		case errors.Is(err, unix.ENOENT):
+			return -1, "none", nil
+		case errors.Is(err, unix.ELOOP):
+			return -1, "symlink", nil
 		default:
-			return "", err
+			return -1, "", err
 		}
 	}
-	defer unix.Close(fd)
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
-		return "", err
+		unix.Close(fd)
+		return -1, "", err
 	}
 	switch st.Mode & unix.S_IFMT {
 	case unix.S_IFDIR:
-		return "dir", nil
+		return fd, "dir", nil
 	case unix.S_IFREG:
-		return "file", nil
+		unix.Close(fd)
+		return -1, "file", nil
 	default:
-		return "path", nil
+		unix.Close(fd)
+		return -1, "path", nil
 	}
 }
 
-// copyGitMirror builds a bare repository under parent from the workspace
-// refs and objects. It does not copy config, hooks, attributes, or alternates.
-func copyGitMirror(parent, ws string) (string, error) {
-	if !filepath.IsAbs(parent) || !filepath.IsAbs(ws) {
+// openChainWalk opens each component from the previous descriptor.
+// A symlink is not followed. Every directory must stay on the root device.
+func openChainWalk(rootFd int, parts []string) ([]heldDir, error) {
+	var rootStat unix.Stat_t
+	if err := unix.Fstat(rootFd, &rootStat); err != nil {
+		return nil, err
+	}
+	rootDev := uint64(rootStat.Dev)
+	var nodes []heldDir
+	parent := rootFd
+	for _, part := range parts {
+		fd, err := unix.Openat(parent, part, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			classified := directoryErr(parent, part, err)
+			closeHeldDirs(nodes)
+			return nil, classified
+		}
+		node, err := heldFrom(parent, fd, part, rootDev)
+		if err != nil {
+			unix.Close(fd)
+			closeHeldDirs(nodes)
+			return nil, err
+		}
+		nodes = append(nodes, node)
+		parent = fd
+	}
+	return nodes, nil
+}
+
+func heldFrom(parent, fd int, name string, rootDev uint64) (heldDir, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return heldDir{}, err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFDIR || uint64(st.Dev) != rootDev {
+		if uint64(st.Dev) != rootDev {
+			return heldDir{}, unix.EXDEV
+		}
+		return heldDir{}, unix.ENOTDIR
+	}
+	node := heldDir{fd: fd, name: name, dev: uint64(st.Dev), ino: uint64(st.Ino)}
+	if !statAtMatch(parent, name, node.dev, node.ino) {
+		return heldDir{}, unix.ELOOP
+	}
+	return node, nil
+}
+
+func closeHeldDirs(nodes []heldDir) {
+	for i := len(nodes) - 1; i >= 0; i-- {
+		if nodes[i].fd >= 0 {
+			unix.Close(nodes[i].fd)
+		}
+	}
+}
+
+// copyGitMirror builds a bare repository under parent from the held
+// repository. It reads that repository only through its open descriptors.
+func copyGitMirror(parent string, h *repoHandle) (string, error) {
+	if h == nil || h.git < 0 || h.closed || !filepath.IsAbs(parent) {
 		return "", errors.New("mirror")
 	}
 	if err := os.MkdirAll(parent, 0o700); err != nil {
@@ -222,6 +443,9 @@ func copyGitMirror(parent, ws string) (string, error) {
 	}
 	if err := os.Chmod(parent, 0o700); err != nil {
 		return "", err
+	}
+	if beforeMirrorCopy != nil {
+		beforeMirrorCopy()
 	}
 	dir, err := os.MkdirTemp(parent, "m-")
 	if err != nil {
@@ -231,39 +455,33 @@ func copyGitMirror(parent, ws string) (string, error) {
 		_ = os.RemoveAll(dir)
 		return "", err
 	}
-	if err := fillMirror(dir, ws); err != nil {
+	if err := fillMirror(dir, h); err != nil {
 		_ = os.RemoveAll(dir)
 		return "", err
+	}
+	if !h.stable() {
+		_ = os.RemoveAll(dir)
+		return "", errors.New("mirror")
 	}
 	return dir, nil
 }
 
-func fillMirror(dir, ws string) error {
-	wsFd, err := unix.Open(ws, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return err
-	}
-	defer unix.Close(wsFd)
-	gitFd, err := unix.Openat(wsFd, ".git", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return err
-	}
-	defer unix.Close(gitFd)
+func fillMirror(dir string, h *repoHandle) error {
 	var root unix.Stat_t
-	if err := unix.Fstat(gitFd, &root); err != nil {
+	if err := unix.Fstat(h.git, &root); err != nil {
 		return err
 	}
 	c := &copier{rootDev: uint64(root.Dev)}
 	for _, name := range []string{"HEAD", "packed-refs", "shallow"} {
 		optional := name != "HEAD"
-		if err := copyFileNamed(c, gitFd, name, filepath.Join(dir, name), optional); err != nil {
+		if err := copyFileNamed(c, h.git, name, filepath.Join(dir, name), optional); err != nil {
 			return err
 		}
 	}
-	if err := copyDirNamed(c, gitFd, "refs", filepath.Join(dir, "refs"), "refs"); err != nil {
+	if err := copyDirNamed(c, h.git, "refs", filepath.Join(dir, "refs"), "refs"); err != nil {
 		return err
 	}
-	if err := copyDirNamed(c, gitFd, "objects", filepath.Join(dir, "objects"), "objects"); err != nil {
+	if err := copyDirNamed(c, h.git, "objects", filepath.Join(dir, "objects"), "objects"); err != nil {
 		return err
 	}
 	return writeBareConfig(dir)

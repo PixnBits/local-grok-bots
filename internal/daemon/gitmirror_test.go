@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestMirrorIgnoresWorkspaceConfig(t *testing.T) {
@@ -84,7 +86,7 @@ func TestMirrorIgnoresWorkspaceConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 		controlGit(t, ws, mark, nil, "log", "-p")
-		if reason := workspaceConfigReason(ws); reason != "" {
+		if reason := configReasonAt(t, ws); reason != "" {
 			t.Fatalf("textconv config was refused: %s", reason)
 		}
 		mirror := mustMirror(t, ws)
@@ -148,14 +150,14 @@ func TestWorkspaceConfigRefusesHostileKeys(t *testing.T) {
 	ws := t.TempDir()
 	gitRepo(t, ws, "init")
 	gitRepo(t, ws, "checkout", "-b", "feature")
-	if workspaceConfigReason(ws) != "" {
+	if configReasonAt(t, ws) != "" {
 		t.Fatal("ordinary init config was refused")
 	}
 	for _, key := range []string{"url.http://attacker/.insteadOf", "credential.helper", "http.proxy", "core.fsmonitor", "core.askPass", "gpg.program", "core.sshCommand", "core.hooksPath", "alias.push", "filter.evil.clean", "diff.external", "remote.origin.pushurl"} {
 		dir := t.TempDir()
 		gitRepo(t, dir, "init")
 		gitRepo(t, dir, "config", key, "/tmp/lgb-should-not-run")
-		if workspaceConfigReason(dir) != "config" {
+		if configReasonAt(t, dir) != "config" {
 			t.Fatalf("%s was not refused", key)
 		}
 	}
@@ -164,7 +166,7 @@ func TestWorkspaceConfigRefusesHostileKeys(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, ".git", "config"), []byte("[include]\n\tpath = /tmp/x\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if workspaceConfigReason(dir) != "config" {
+	if configReasonAt(t, dir) != "config" {
 		t.Fatal("include was not refused")
 	}
 }
@@ -188,9 +190,38 @@ func hostileRepo(t *testing.T) (ws, mark, script string) {
 	return ws, mark, script
 }
 
+func configReasonAt(t *testing.T, ws string) string {
+	t.Helper()
+	h, reason := resolveWorkspaceRepo(ws, ".")
+	if reason != "" || h == nil {
+		t.Fatalf("resolve config: %s", reason)
+	}
+	defer h.Close()
+	return h.configReason()
+}
+
+func holdRepo(t *testing.T, ws, rel string) *repoHandle {
+	t.Helper()
+	h, reason := resolveWorkspaceRepo(ws, rel)
+	if reason != "" || h == nil {
+		t.Fatalf("resolve %s: %s", rel, reason)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	return h
+}
+
+func sameRepo(h *repoHandle, path string) bool {
+	var st unix.Stat_t
+	if h == nil || unix.Lstat(path, &st) != nil {
+		return false
+	}
+	return uint64(st.Dev) == h.repoDev && uint64(st.Ino) == h.repoIno
+}
+
 func mustMirror(t *testing.T, ws string) string {
 	t.Helper()
-	dir, err := copyGitMirror(t.TempDir(), ws)
+	h := holdRepo(t, ws, ".")
+	dir, err := copyGitMirror(t.TempDir(), h)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +362,7 @@ func TestMirrorPushSurvivesHostileWorkspace(t *testing.T) {
 		gitRepo(t, ws, "config", "gpg.program", script)
 		gitRepo(t, ws, "config", "log.showSignature", "true")
 		forgeSignedCommit(t, ws)
-		if workspaceConfigReason(ws) != "config" {
+		if configReasonAt(t, ws) != "config" {
 			t.Fatal("gpg config was not refused")
 		}
 		controlGit(t, ws, mark, nil, "log", "--stat")
@@ -340,7 +371,7 @@ func TestMirrorPushSurvivesHostileWorkspace(t *testing.T) {
 	t.Run("fsmonitor", func(t *testing.T) {
 		ws, mark, script := hostileRepo(t)
 		gitRepo(t, ws, "config", "core.fsmonitor", script)
-		if workspaceConfigReason(ws) != "config" {
+		if configReasonAt(t, ws) != "config" {
 			t.Fatal("fsmonitor was not refused")
 		}
 		controlGit(t, ws, mark, nil, "status")
@@ -361,7 +392,7 @@ func TestMirrorPushSurvivesHostileWorkspace(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(info, "attributes"), []byte("* diff=evil\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if workspaceConfigReason(ws) != "" {
+		if configReasonAt(t, ws) != "" {
 			t.Fatal("textconv config was refused")
 		}
 		controlGit(t, ws, mark, nil, "log", "-p")
@@ -370,7 +401,7 @@ func TestMirrorPushSurvivesHostileWorkspace(t *testing.T) {
 	t.Run("credential helper", func(t *testing.T) {
 		ws, mark, script := hostileRepo(t)
 		gitRepo(t, ws, "config", "credential.helper", script)
-		if workspaceConfigReason(ws) != "config" {
+		if configReasonAt(t, ws) != "config" {
 			t.Fatal("credential helper was not refused")
 		}
 		controlGit(t, ws, mark, nil, "push", authServer(t)+"/acme/widgets.git", "HEAD")
@@ -379,7 +410,7 @@ func TestMirrorPushSurvivesHostileWorkspace(t *testing.T) {
 	t.Run("askpass", func(t *testing.T) {
 		ws, mark, script := hostileRepo(t)
 		gitRepo(t, ws, "config", "core.askPass", script)
-		if workspaceConfigReason(ws) != "config" {
+		if configReasonAt(t, ws) != "config" {
 			t.Fatal("askpass was not refused")
 		}
 		controlGit(t, ws, mark, []byte("protocol=http\nhost=example.com\n\n"), "credential", "fill")
@@ -388,7 +419,7 @@ func TestMirrorPushSurvivesHostileWorkspace(t *testing.T) {
 	t.Run("sshCommand", func(t *testing.T) {
 		ws, mark, script := hostileRepo(t)
 		gitRepo(t, ws, "config", "core.sshCommand", script)
-		if workspaceConfigReason(ws) != "config" {
+		if configReasonAt(t, ws) != "config" {
 			t.Fatal("sshCommand was not refused")
 		}
 		controlTimeout(t, ws, mark, "ls-remote", "git@example.com:acme/widgets.git")
@@ -401,7 +432,7 @@ func TestMirrorPushSurvivesHostileWorkspace(t *testing.T) {
 			t.Fatal(err)
 		}
 		gitRepo(t, ws, "config", "core.hooksPath", hookDir)
-		if workspaceConfigReason(ws) != "config" {
+		if configReasonAt(t, ws) != "config" {
 			t.Fatal("hooksPath was not refused")
 		}
 		controlTimeout(t, ws, mark, "commit", "--allow-empty", "-m", "hook")
@@ -411,7 +442,7 @@ func TestMirrorPushSurvivesHostileWorkspace(t *testing.T) {
 		ws, mark, script := hostileRepo(t)
 		gitRepo(t, ws, "config", "alias.st", "!"+script)
 		gitRepo(t, ws, "config", "alias.push", "!"+script)
-		if workspaceConfigReason(ws) != "config" {
+		if configReasonAt(t, ws) != "config" {
 			t.Fatal("alias was not refused")
 		}
 		controlTimeout(t, ws, mark, "st")
@@ -424,7 +455,7 @@ func TestMirrorPushSurvivesHostileWorkspace(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(ws, ".gitattributes"), []byte("* filter=evil\n"), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if workspaceConfigReason(ws) != "config" {
+		if configReasonAt(t, ws) != "config" {
 			t.Fatal("filter was not refused")
 		}
 		if err := os.WriteFile(filepath.Join(ws, "extra.txt"), []byte("more\n"), 0o644); err != nil {
@@ -441,7 +472,7 @@ func TestMirrorPushSurvivesHostileWorkspace(t *testing.T) {
 		gitRepo(t, ws, "add", "readme.txt")
 		gitRepo(t, ws, "commit", "-m", "more")
 		gitRepo(t, ws, "config", "diff.external", script)
-		if workspaceConfigReason(ws) != "config" {
+		if configReasonAt(t, ws) != "config" {
 			t.Fatal("diff.external was not refused")
 		}
 		controlTimeout(t, ws, mark, "diff", "HEAD~1", "HEAD")
@@ -452,7 +483,7 @@ func TestMirrorPushSurvivesHostileWorkspace(t *testing.T) {
 		good, bad := splitServers(t)
 		gitRepo(t, ws, "remote", "add", "origin", good.URL+"/acme/widgets.git")
 		gitRepo(t, ws, "config", "remote.origin.pushurl", bad.URL+"/stolen.git")
-		if workspaceConfigReason(ws) != "config" {
+		if configReasonAt(t, ws) != "config" {
 			t.Fatal("pushurl was not refused")
 		}
 		runWorkspaceGit(t, ws, "push", "origin", "HEAD:refs/heads/feature")
@@ -471,7 +502,7 @@ func TestMirrorPushSurvivesHostileWorkspace(t *testing.T) {
 		good, bad := splitServers(t)
 		gitRepo(t, ws, "config", "url."+bad.URL+"/p/.insteadOf", "http://127.0.0.1:")
 		gitRepo(t, ws, "config", "url."+bad.URL+"/p/.pushInsteadOf", "http://127.0.0.1:")
-		if workspaceConfigReason(ws) != "config" {
+		if configReasonAt(t, ws) != "config" {
 			t.Fatal("insteadOf was not refused")
 		}
 		runWorkspaceGit(t, ws, "ls-remote", good.URL+"/acme/widgets.git")
@@ -693,29 +724,28 @@ func TestResolveWorkspaceRepo(t *testing.T) {
 	if err := os.Mkdir(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got, reason := resolveWorkspaceRepo(ws, "scratch")
-	if reason != "" || got != scratch {
-		t.Fatalf("scratch %q %q", got, reason)
+	got := holdRepo(t, ws, "scratch")
+	if !sameRepo(got, scratch) {
+		t.Fatal("scratch")
 	}
-	got, reason = resolveWorkspaceRepo(ws, "scratch/sub")
-	if reason != "" || got != scratch {
-		t.Fatalf("nested %q %q", got, reason)
+	got = holdRepo(t, ws, "scratch/sub")
+	if !sameRepo(got, scratch) {
+		t.Fatal("nested")
 	}
-	got, reason = resolveWorkspaceRepo(ws, ".")
-	if reason != "repository not found in workspace" || got != "" {
-		t.Fatalf("workspace root %q %q", got, reason)
+	if reason := resolveReason(ws, "."); reason != "repository not found in workspace" {
+		t.Fatalf("workspace root %q", reason)
 	}
 	if err := os.Symlink("scratch", filepath.Join(ws, "link")); err != nil {
 		t.Fatal(err)
 	}
-	if _, reason := resolveWorkspaceRepo(ws, "link"); reason != "symlink" {
+	if reason := resolveReason(ws, "link"); reason != "symlink" {
 		t.Fatalf("symlink %q", reason)
 	}
-	if _, reason := resolveWorkspaceRepo(ws, "link/sub"); reason != "symlink" {
+	if reason := resolveReason(ws, "link/sub"); reason != "symlink" {
 		t.Fatalf("symlink nested %q", reason)
 	}
 	for _, rel := range []string{"", "..", "scratch/../../etc", "/etc", "foo/../bar", `scratch\sub`} {
-		if _, reason := resolveWorkspaceRepo(ws, rel); reason != "path" {
+		if reason := resolveReason(ws, rel); reason != "path" {
 			t.Fatalf("%q -> %q", rel, reason)
 		}
 	}
@@ -726,7 +756,7 @@ func TestResolveWorkspaceRepo(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(gf, ".git"), []byte("gitdir: /tmp/elsewhere\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, reason := resolveWorkspaceRepo(ws, "gf"); reason != "gitfile" {
+	if reason := resolveReason(ws, "gf"); reason != "gitfile" {
 		t.Fatalf("gitfile %q", reason)
 	}
 	if err := os.Symlink("scratch/.git", filepath.Join(ws, "dotgit")); err != nil {
@@ -739,14 +769,14 @@ func TestResolveWorkspaceRepo(t *testing.T) {
 	if err := os.Symlink("nope", filepath.Join(linked, ".git")); err != nil {
 		t.Fatal(err)
 	}
-	if _, reason := resolveWorkspaceRepo(ws, "linked"); reason != "symlink" {
+	if reason := resolveReason(ws, "linked"); reason != "symlink" {
 		t.Fatalf("git symlink %q", reason)
 	}
 	empty := filepath.Join(ws, "empty")
 	if err := os.Mkdir(empty, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, reason := resolveWorkspaceRepo(ws, "empty"); reason != "repository not found in workspace" {
+	if reason := resolveReason(ws, "empty"); reason != "repository not found in workspace" {
 		t.Fatalf("empty %q", reason)
 	}
 	odd := filepath.Join(ws, "foo..bar")
@@ -754,10 +784,18 @@ func TestResolveWorkspaceRepo(t *testing.T) {
 		t.Fatal(err)
 	}
 	gitRepo(t, odd, "init")
-	got, reason = resolveWorkspaceRepo(ws, "foo..bar")
-	if reason != "" || got != odd {
-		t.Fatalf("dots %q %q", got, reason)
+	got = holdRepo(t, ws, "foo..bar")
+	if !sameRepo(got, odd) {
+		t.Fatal("dots")
 	}
+}
+
+func resolveReason(ws, rel string) string {
+	h, reason := resolveWorkspaceRepo(ws, rel)
+	if h != nil {
+		_ = h.Close()
+	}
+	return reason
 }
 
 func TestMirrorPushGateStaysOutOfCmdline(t *testing.T) {
@@ -874,4 +912,129 @@ func markerPresent(path string) bool {
 func markerAbsent(path string) bool {
 	_, err := os.Stat(path)
 	return os.IsNotExist(err)
+}
+
+func writeRepo(t *testing.T, dir, file, body, msg string) {
+	t.Helper()
+	gitRepo(t, dir, "init")
+	gitRepo(t, dir, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(dir, file), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRepo(t, dir, "add", file)
+	gitRepo(t, dir, "commit", "-m", msg)
+}
+
+func TestMirrorSwapIntermediateDirectory(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal(err)
+	}
+	ws := t.TempDir()
+	proj := filepath.Join(ws, "sub", "proj")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRepo(t, proj, "readme.txt", "original-bytes\n", "original-subject")
+	outside := t.TempDir()
+	outProj := filepath.Join(outside, "proj")
+	if err := os.MkdirAll(outProj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRepo(t, outProj, "secret.txt", "HOST-MARKER-OBJECT\n", "HOST-SECRET-COMMIT")
+	assertSwapCopy(t, ws, "sub/proj", proj, outProj, func() {
+		sub := filepath.Join(ws, "sub")
+		if err := os.Rename(sub, sub+".old"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, sub); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestMirrorSwapGitDirectory(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal(err)
+	}
+	ws := t.TempDir()
+	proj := filepath.Join(ws, "sub", "proj")
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRepo(t, proj, "readme.txt", "original-bytes\n", "original-subject")
+	outside := t.TempDir()
+	outProj := filepath.Join(outside, "proj")
+	if err := os.MkdirAll(outProj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeRepo(t, outProj, "secret.txt", "HOST-MARKER-OBJECT\n", "HOST-SECRET-COMMIT")
+	assertSwapCopy(t, ws, "sub/proj", proj, outProj, func() {
+		gitDir := filepath.Join(proj, ".git")
+		if err := os.Rename(gitDir, gitDir+".orig"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(filepath.Join(outProj, ".git"), gitDir); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func assertSwapCopy(t *testing.T, ws, rel, proj, outProj string, swap func()) {
+	t.Helper()
+	origHead := strings.TrimSpace(gitRepoOut(t, proj, "rev-parse", "HEAD"))
+	outsideHead := strings.TrimSpace(gitRepoOut(t, outProj, "rev-parse", "HEAD"))
+	if origHead == "" || origHead == outsideHead {
+		t.Fatalf("heads %s %s", origHead, outsideHead)
+	}
+	h := holdRepo(t, ws, rel)
+	parent := t.TempDir()
+	beforeMirrorCopy = swap
+	t.Cleanup(func() { beforeMirrorCopy = nil })
+	mirror, err := copyGitMirror(parent, h)
+	if mirror != "" {
+		t.Cleanup(func() { _ = os.RemoveAll(mirror) })
+	}
+	if err != nil {
+		if mirror != "" {
+			t.Fatalf("refused copy returned %s", mirror)
+		}
+		left, rerr := os.ReadDir(parent)
+		if rerr != nil {
+			t.Fatal(rerr)
+		}
+		if len(left) != 0 {
+			t.Fatalf("partial mirror remains: %v", left)
+		}
+		return
+	}
+	patch := gitRepoOut(t, mirror, "--git-dir", mirror, "log", "-p", "--all")
+	if strings.Contains(patch, "HOST-MARKER-OBJECT") || strings.Contains(patch, "HOST-SECRET-COMMIT") {
+		t.Fatalf("mirror contains the outside repository:\n%s", patch)
+	}
+	if !strings.Contains(patch, "original-subject") || !strings.Contains(patch, "original-bytes") {
+		t.Fatalf("mirror lost the original repository:\n%s", patch)
+	}
+	got := strings.TrimSpace(gitRepoOut(t, mirror, "--git-dir", mirror, "rev-parse", "HEAD"))
+	if got != origHead {
+		t.Fatalf("mirror HEAD %s original %s", got, origHead)
+	}
+	cmd := exec.Command("git", "--git-dir", mirror, "cat-file", "-e", outsideHead+"^{commit}")
+	cmd.Env = hostEnv(t, mirror)
+	if out, cerr := cmd.CombinedOutput(); cerr == nil {
+		t.Fatalf("outside commit is reachable: %s", out)
+	}
+}
+
+func gitRepoOut(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if len(args) > 0 && args[0] == "--git-dir" {
+		cmd = exec.Command("git", args...)
+	}
+	cmd.Env = hostEnv(t, dir)
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v %s", args, err, b)
+	}
+	return string(b)
 }

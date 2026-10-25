@@ -4,12 +4,19 @@ package daemon
 
 import "errors"
 
-func workspaceConfigReason(string) string { return "config" }
+// repoHandle is unused off unix. Resolve fails closed.
+type repoHandle struct{}
 
-func copyGitMirror(string, string) (string, error) {
+func (h *repoHandle) Close() error { return nil }
+
+func (h *repoHandle) configReason() string { return "config" }
+
+func (h *repoHandle) stable() bool { return false }
+
+func copyGitMirror(string, *repoHandle) (string, error) {
 	return "", errors.New("mirror")
 }
 
-func resolveWorkspaceRepo(string, string) (string, string) {
-	return "", "repository not found in workspace"
+func resolveWorkspaceRepo(string, string) (*repoHandle, string) {
+	return nil, "repository not found in workspace"
 }

@@ -65,20 +65,27 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	if gate == nil || gate.px == nil || gate.px.Sock() == "" {
 		return a.pushDenied(bot, owner, repo, "proxy unavailable")
 	}
-	repoRoot, locReason := resolveWorkspaceRepo(ws, cwd)
-	if locReason != "" {
+	held, locReason := resolveWorkspaceRepo(ws, cwd)
+	defer held.Close()
+	if locReason != "" || held == nil {
+		if locReason == "" {
+			locReason = "repository not found in workspace"
+		}
 		return a.pushDenied(bot, owner, repo, locReason)
 	}
-	if workspaceConfigReason(repoRoot) == "config" {
+	if held.configReason() == "config" {
 		return a.pushDenied(bot, owner, repo, "config")
 	}
 	parentDir := filepath.Join(a.cfg.DataDir, "mirrors")
-	mirror, err := copyGitMirror(parentDir, repoRoot)
+	mirror, err := copyGitMirror(parentDir, held)
 	if err != nil {
 		return a.pushDenied(bot, owner, repo, "mirror")
 	}
 	defer os.RemoveAll(mirror)
-	if workspaceConfigReason(repoRoot) == "config" {
+	if !held.stable() {
+		return a.pushDenied(bot, owner, repo, "mirror")
+	}
+	if held.configReason() == "config" {
 		return a.pushDenied(bot, owner, repo, "config")
 	}
 	specs, reason := resolvePushRefs(mirror, parsed)
@@ -131,7 +138,10 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 		}
 		return a.pushDenied(bot, owner, repo, reason)
 	}
-	if workspaceConfigReason(repoRoot) == "config" {
+	if !held.stable() {
+		return a.pushDenied(bot, owner, repo, "mirror")
+	}
+	if held.configReason() == "config" {
 		return a.pushDenied(bot, owner, repo, "config")
 	}
 	branch := ""
