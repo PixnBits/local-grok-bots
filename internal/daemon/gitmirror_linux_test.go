@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,7 +33,7 @@ func TestOpenat2ENOSYSUsesComponentWalk(t *testing.T) {
 	if !sameRepo(h, proj) {
 		t.Fatal("walk resolved a different directory")
 	}
-	mirror, err := copyGitMirror(t.TempDir(), h)
+	mirror, err := copyGitMirror(context.Background(), t.TempDir(), h)
 	if err != nil {
 		t.Fatal(err)
 	}

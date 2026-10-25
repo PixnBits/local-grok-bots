@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -221,7 +222,7 @@ func sameRepo(h *repoHandle, path string) bool {
 func mustMirror(t *testing.T, ws string) string {
 	t.Helper()
 	h := holdRepo(t, ws, ".")
-	dir, err := copyGitMirror(t.TempDir(), h)
+	dir, err := copyGitMirror(context.Background(), t.TempDir(), h)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -990,7 +991,7 @@ func assertSwapCopy(t *testing.T, ws, rel, proj, outProj string, swap func()) {
 	parent := t.TempDir()
 	beforeMirrorCopy = swap
 	t.Cleanup(func() { beforeMirrorCopy = nil })
-	mirror, err := copyGitMirror(parent, h)
+	mirror, err := copyGitMirror(context.Background(), parent, h)
 	if mirror != "" {
 		t.Cleanup(func() { _ = os.RemoveAll(mirror) })
 	}
@@ -1037,6 +1038,73 @@ func gitRepoOut(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %v: %v %s", args, err, b)
 	}
 	return string(b)
+}
+
+func writePlainGit(t *testing.T, proj string) {
+	t.Helper()
+	git := filepath.Join(proj, ".git")
+	for _, sub := range []string{"refs/heads", "objects"} {
+		if err := os.MkdirAll(filepath.Join(git, sub), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files := map[string]string{
+		"HEAD":               "ref: refs/heads/feature\n",
+		"config":             "[core]\n\trepositoryformatversion = 0\n",
+		"refs/heads/feature": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(git, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestCancelledCopyRemovesMirror(t *testing.T) {
+	ws := t.TempDir()
+	proj := filepath.Join(ws, "proj")
+	writePlainGit(t, proj)
+	h := holdRepo(t, ws, "proj")
+	parent := t.TempDir()
+	okDir, err := copyGitMirror(context.Background(), parent, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(okDir); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	prev := beforeMirrorCopy
+	beforeMirrorCopy = cancel
+	t.Cleanup(func() { beforeMirrorCopy = prev })
+	dir, err := copyGitMirror(ctx, parent, h)
+	if err == nil || dir != "" {
+		t.Fatalf("cancelled copy returned %q %v", dir, err)
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err %v", err)
+	}
+	left, rerr := os.ReadDir(parent)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if len(left) != 0 {
+		t.Fatalf("partial mirror %v", left)
+	}
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	dir, err = copyGitMirror(ctx2, parent, h)
+	if err == nil || dir != "" || !errors.Is(err, context.Canceled) {
+		t.Fatalf("already cancelled: %q %v", dir, err)
+	}
+	left, rerr = os.ReadDir(parent)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if len(left) != 0 {
+		t.Fatalf("partial mirror %v", left)
+	}
 }
 
 func TestMirrorEnvStripsTrace(t *testing.T) {

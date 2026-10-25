@@ -2,7 +2,10 @@
 
 package daemon
 
-import "errors"
+import (
+	"context"
+	"errors"
+)
 
 // repoHandle is unused off unix. Resolve fails closed.
 type repoHandle struct{}
@@ -13,7 +16,7 @@ func (h *repoHandle) configReason() string { return "config" }
 
 func (h *repoHandle) stable() bool { return false }
 
-func copyGitMirror(string, *repoHandle) (string, error) {
+func copyGitMirror(context.Context, string, *repoHandle) (string, error) {
 	return "", errors.New("mirror")
 }
 

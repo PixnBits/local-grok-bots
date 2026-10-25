@@ -82,7 +82,7 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 		return a.pushDenied(bot, owner, repo, "config")
 	}
 	parentDir := filepath.Join(a.cfg.DataDir, "mirrors")
-	mirror, err := copyGitMirror(parentDir, held)
+	mirror, err := copyGitMirror(pctx, parentDir, held)
 	if err != nil {
 		return a.pushDenied(bot, owner, repo, "mirror")
 	}
