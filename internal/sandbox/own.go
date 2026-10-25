@@ -42,7 +42,8 @@ func JailIDs() (uid, gid int) {
 }
 
 // RootJailWarning is set when a root daemon has no bubblewrap. The shell
-// sandbox refuses to run in that case. An empty string means the jail may start.
+// sandbox, git push, create_pr, and pr_status are refused. An empty string
+// means the jail may start.
 func RootJailWarning() string {
 	if EUID() != 0 {
 		return ""
@@ -50,7 +51,7 @@ func RootJailWarning() string {
 	if _, err := LookPath("bwrap"); err == nil {
 		return ""
 	}
-	return "root requires bwrap; the shell sandbox and git and github grants are refused"
+	return "root requires bwrap; the shell sandbox, git push, create_pr, and pr_status are refused"
 }
 
 func readOverflow(path string, fallback int) int {

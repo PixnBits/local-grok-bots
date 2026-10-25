@@ -10,6 +10,7 @@ import (
 
 	"github.com/PixnBits/local-grok-bots/internal/github"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
+	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
@@ -18,6 +19,9 @@ func (a *App) toolCreatePR(ctx context.Context, bot store.Bot, args map[string]a
 	in, owner, repo, reason := parseCreatePR(args)
 	if reason != "" {
 		return a.prDeny(bot, "github_pr_denied", owner, repo, reason)
+	}
+	if sandbox.RootJailWarning() != "" {
+		return a.prDeny(bot, "github_pr_denied", owner, repo, "root requires bwrap")
 	}
 	if !granted(bot.Grants, "github") {
 		return a.prDeny(bot, "github_pr_denied", owner, repo, "missing grant")
@@ -95,6 +99,9 @@ func (a *App) toolPRStatus(ctx context.Context, bot store.Bot, args map[string]a
 	owner, repo, number, reason := parsePRStatus(args)
 	if reason != "" {
 		return a.prDeny(bot, "github_pr_status_denied", owner, repo, reason)
+	}
+	if sandbox.RootJailWarning() != "" {
+		return a.prDeny(bot, "github_pr_status_denied", owner, repo, "root requires bwrap")
 	}
 	if !granted(bot.Grants, "github") {
 		return a.prDeny(bot, "github_pr_status_denied", owner, repo, "missing grant")
@@ -227,6 +234,8 @@ func prDenyText(reason string) string {
 		return "head is the default branch"
 	case "prompts disabled":
 		return "prompts disabled"
+	case "root requires bwrap":
+		return "root requires bwrap"
 	case "not approved":
 		return "not approved"
 	default:
