@@ -14,6 +14,10 @@ func (h *repoHandle) Close() error { return nil }
 
 func (h *repoHandle) configReason() string { return "config" }
 
+func (h *repoHandle) gitConfig() ([]byte, error) {
+	return nil, errors.New("config")
+}
+
 func (h *repoHandle) stable() bool { return false }
 
 func copyGitMirror(context.Context, string, *repoHandle) (string, error) {

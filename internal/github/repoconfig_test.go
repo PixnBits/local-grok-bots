@@ -67,3 +67,51 @@ func TestRepoConfigDeniesHostileKeys(t *testing.T) {
 		t.Fatal("remote url denied")
 	}
 }
+
+func TestRemoteConfigURL(t *testing.T) {
+	text := "" +
+		"[core]\n" +
+		"\trepositoryformatversion = 0\n" +
+		"[remote \"origin\"]\n" +
+		"\turl = https://github.com/old/one.git\n" +
+		"\turl = \"https://github.com/other/lib.git\"\n" +
+		"\tpushurl = https://github.com/nope/push.git\n" +
+		"[remote \"upstream\"]\n" +
+		"\turl = https://github.com/acme/widgets.git\n" +
+		"[include]\n" +
+		"\tpath = /tmp/other\n"
+	if got := RemoteConfigURL(text, "origin"); got != "https://github.com/other/lib.git" {
+		t.Fatalf("origin %q", got)
+	}
+	if got := RemoteConfigURL(text, "upstream"); got != "https://github.com/acme/widgets.git" {
+		t.Fatalf("upstream %q", got)
+	}
+	if got := RemoteConfigURL(text, "missing"); got != "" {
+		t.Fatalf("missing %q", got)
+	}
+	cased := "[REMOTE \"origin\"]\n\tURL = https://github.com/other/lib.git\n"
+	if got := RemoteConfigURL(cased, "origin"); got != "https://github.com/other/lib.git" {
+		t.Fatalf("case %q", got)
+	}
+	otherCase := "[remote \"Origin\"]\n\turl = https://github.com/other/lib.git\n"
+	if got := RemoteConfigURL(otherCase, "origin"); got != "" {
+		t.Fatalf("subsection case %q", got)
+	}
+	for _, name := range []string{"", "ori\"gin", "ori]gin", "ori[gin", "ori\ngin", "ori\tgin"} {
+		if got := RemoteConfigURL(text, name); got != "" {
+			t.Fatalf("name %q -> %q", name, got)
+		}
+	}
+	if got := RemoteConfigURL("[remote \"origin\"]\n\turl = https://github.com/other/lib.git\nthis is bad\n", "origin"); got != "" {
+		t.Fatalf("bad line %q", got)
+	}
+	if got := RemoteConfigURL("[include]\n\tpath = /tmp/other\n", "origin"); got != "" {
+		t.Fatalf("include %q", got)
+	}
+	if got := RemoteConfigURL("[remote \"origin\"]\n\tpushurl = https://github.com/other/lib.git\n", "origin"); got != "" {
+		t.Fatalf("pushurl %q", got)
+	}
+	if got := RemoteConfigURL("\x00[remote \"origin\"]\n\turl = https://github.com/other/lib.git\n", "origin"); got != "" {
+		t.Fatalf("nul %q", got)
+	}
+}

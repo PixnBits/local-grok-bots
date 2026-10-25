@@ -141,6 +141,14 @@ func configDeniedAt(gitFd int) (bool, error) {
 	return github.RepoConfigDenied(string(buf)), nil
 }
 
+// gitConfig reads .git/config through the held descriptor.
+func (h *repoHandle) gitConfig() ([]byte, error) {
+	if h == nil || h.closed || h.git < 0 {
+		return nil, errGitType
+	}
+	return readGitConfig(h.git)
+}
+
 // readGitConfig reads .git/config through gitFd. The file must be a regular
 // file no larger than maxConfig. A FIFO is refused before a blocking open.
 func readGitConfig(gitFd int) ([]byte, error) {

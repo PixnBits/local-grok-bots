@@ -102,6 +102,14 @@ func PushAuditRemote(args []string) string {
 	return tok
 }
 
+// PushAuditRemotePresent reports whether argv has a positional remote token.
+// PushAuditRemote is "" both when none is present and when the token contains
+// a control character. This is false only when no positional was present.
+func PushAuditRemotePresent(args []string) bool {
+	_, ok := firstPushPositional(args)
+	return ok
+}
+
 func firstPushPositional(args []string) (string, bool) {
 	i := 0
 	if i < len(args) && args[i] == "git" {

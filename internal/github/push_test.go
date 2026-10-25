@@ -72,11 +72,11 @@ func TestParsePushArgs(t *testing.T) {
 	if got := PushAuditRemote([]string{"push", "--", "origin"}); got != "origin" {
 		t.Fatalf("audit remote %q", got)
 	}
-	if got := PushAuditRemote([]string{"push", "--force"}); got != "" {
-		t.Fatalf("audit remote %q", got)
+	if got := PushAuditRemote([]string{"push", "--force"}); got != "" || PushAuditRemotePresent([]string{"push", "--force"}) {
+		t.Fatalf("audit remote %q present %v", got, PushAuditRemotePresent([]string{"push", "--force"}))
 	}
-	if got := PushAuditRemote([]string{"push", "ori\ngin"}); got != "" {
-		t.Fatalf("audit remote %q", got)
+	if got := PushAuditRemote([]string{"push", "ori\ngin"}); got != "" || !PushAuditRemotePresent([]string{"push", "ori\ngin"}) {
+		t.Fatalf("audit remote %q present %v", got, PushAuditRemotePresent([]string{"push", "ori\ngin"}))
 	}
 	owner, repo, err := ParseGitHubRemote("https://github.com/Acme/Widgets.git")
 	if err != nil || owner != "acme" || repo != "widgets" {

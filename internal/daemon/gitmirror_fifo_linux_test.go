@@ -97,6 +97,41 @@ func TestFIFORefusesMirrorPath(t *testing.T) {
 	}
 }
 
+func TestFIFOConfigDenialReturnsBlank(t *testing.T) {
+	ws := t.TempDir()
+	proj := filepath.Join(ws, "proj")
+	writePlainGit(t, proj)
+	fifo := filepath.Join(proj, ".git", "config")
+	if err := os.Remove(fifo); err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Mkfifo(fifo, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{ws: ws}
+	base := runtime.NumGoroutine()
+	type named struct{ owner, repo string }
+	ch := make(chan named, 1)
+	go func() {
+		owner, repo := app.deniedPushNames("proj", []string{"git", "push", "--force", "origin"})
+		ch <- named{owner, repo}
+	}()
+	select {
+	case got := <-ch:
+		if got.owner != "" || got.repo != "" {
+			t.Fatalf("named %s/%s", got.owner, got.repo)
+		}
+	case <-time.After(2 * time.Second):
+		unblockFIFO(fifo)
+		select {
+		case <-ch:
+		case <-time.After(time.Second):
+		}
+		t.Fatal("still running after 2s")
+	}
+	waitGoroutines(t, base)
+}
+
 func mirrorPath(ctx context.Context, ws, rel, parent string) error {
 	h, reason := resolveWorkspaceRepo(ws, rel)
 	if h != nil {
