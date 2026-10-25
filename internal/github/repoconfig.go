@@ -7,9 +7,12 @@ import "strings"
 // invoked. An unreadable or unparseable file is denied so a hidden key cannot
 // slip through. An empty file is not denied.
 //
-// Denied keys are any key in url.*, credential*, http.*, gpg.*, include*, and
-// includeIf*, plus core.fsmonitor and core.askpass. A remote URL under
-// [remote] is not one of those sections.
+// This denylist is a convenience check. The bare mirror, which is written by
+// the daemon and does not copy this file, is the control that decides what
+// host git can run. Denied keys are url.*, credential*, http.*, gpg.*,
+// include*, includeIf*, alias.*, filter.*, diff.external, remote.*.pushurl,
+// and core.fsmonitor, core.askpass, core.sshCommand, and core.hooksPath.
+// A remote URL under [remote] is not one of those keys.
 func RepoConfigDenied(text string) bool {
 	if text == "" {
 		return false
@@ -53,6 +56,7 @@ func RepoConfigDenied(text string) bool {
 
 func configKeyDenied(section, key string) bool {
 	sec := strings.ToLower(section)
+	k := strings.ToLower(key)
 	switch {
 	case sec == "url" || strings.HasPrefix(sec, "url."):
 		return true
@@ -64,10 +68,16 @@ func configKeyDenied(section, key string) bool {
 		return true
 	case sec == "include" || strings.HasPrefix(sec, "include"):
 		return true
+	case sec == "alias" || sec == "filter":
+		return true
+	case sec == "diff" && k == "external":
+		return true
+	case sec == "remote" && k == "pushurl":
+		return true
 	}
-	if strings.EqualFold(sec, "core") {
-		k := strings.ToLower(key)
-		if k == "fsmonitor" || k == "askpass" {
+	if sec == "core" {
+		switch k {
+		case "fsmonitor", "askpass", "sshcommand", "hookspath":
 			return true
 		}
 	}

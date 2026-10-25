@@ -158,7 +158,7 @@ func mirrorLog(ctx context.Context, gitDir string, specs []pushSpec) (string, er
 		stdout, _, err := runGit(ctx, gitDir,
 			"log", "-n", "20", "--stat", "--format=%h %s",
 			"--no-textconv", "--no-ext-diff", "--no-show-signature",
-			"--", sp.src,
+			sp.src, "--",
 		)
 		if err != nil {
 			return "", err

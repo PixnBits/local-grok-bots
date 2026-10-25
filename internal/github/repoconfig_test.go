@@ -42,6 +42,12 @@ func TestRepoConfigDeniesHostileKeys(t *testing.T) {
 		"[gpg \"ssh\"]\n\tprogram = /tmp/mark\n",
 		"[include]\n\tpath = /tmp/other\n",
 		"[includeIf \"gitdir:/work/**\"]\n\tpath = /tmp/other\n",
+		"[core]\n\tsshCommand = /tmp/mark\n",
+		"[core]\n\thooksPath = /tmp/hooks\n",
+		"[alias]\n\tpush = !/tmp/mark\n",
+		"[filter \"evil\"]\n\tclean = /tmp/mark\n\tsmudge = /tmp/mark\n",
+		"[diff]\n\texternal = /tmp/mark\n",
+		"[remote \"origin\"]\n\tpushurl = http://attacker/stolen.git\n",
 		"not a section\n",
 		"[core]\n\tthis is bad\n",
 		"[core]\n\tbare = false\\\n",
@@ -53,5 +59,11 @@ func TestRepoConfigDeniesHostileKeys(t *testing.T) {
 	}
 	if RepoConfigDenied(base + "[core]\n\tfilemode = true\n") {
 		t.Fatal("filemode denied")
+	}
+	if RepoConfigDenied(base + "[diff \"evil\"]\n\ttextconv = /tmp/mark\n") {
+		t.Fatal("textconv denied")
+	}
+	if RepoConfigDenied(base + "[remote \"origin\"]\n\turl = https://github.com/acme/widgets.git\n") {
+		t.Fatal("remote url denied")
 	}
 }

@@ -11,8 +11,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestMirrorIgnoresWorkspaceConfig(t *testing.T) {
@@ -147,7 +149,7 @@ func TestWorkspaceConfigRefusesHostileKeys(t *testing.T) {
 	if workspaceConfigReason(ws) != "" {
 		t.Fatal("ordinary init config was refused")
 	}
-	for _, key := range []string{"url.http://attacker/.insteadOf", "credential.helper", "http.proxy", "core.fsmonitor", "core.askPass", "gpg.program"} {
+	for _, key := range []string{"url.http://attacker/.insteadOf", "credential.helper", "http.proxy", "core.fsmonitor", "core.askPass", "gpg.program", "core.sshCommand", "core.hooksPath", "alias.push", "filter.evil.clean", "diff.external", "remote.origin.pushurl"} {
 		dir := t.TempDir()
 		gitRepo(t, dir, "init")
 		gitRepo(t, dir, "config", key, "/tmp/lgb-should-not-run")
@@ -315,6 +317,262 @@ func authServer(t *testing.T) string {
 	}))
 	t.Cleanup(srv.Close)
 	return srv.URL
+}
+
+func TestMirrorPushSurvivesHostileWorkspace(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal(err)
+	}
+	spec := []pushSpec{{src: "refs/heads/feature", dst: "refs/heads/feature", branch: "feature"}}
+	t.Run("gpg", func(t *testing.T) {
+		ws, mark, script := hostileRepo(t)
+		gitRepo(t, ws, "config", "gpg.program", script)
+		gitRepo(t, ws, "config", "log.showSignature", "true")
+		forgeSignedCommit(t, ws)
+		if workspaceConfigReason(ws) != "config" {
+			t.Fatal("gpg config was not refused")
+		}
+		controlGit(t, ws, mark, nil, "log", "--stat")
+		assertCleanPush(t, ws, mark, spec)
+	})
+	t.Run("fsmonitor", func(t *testing.T) {
+		ws, mark, script := hostileRepo(t)
+		gitRepo(t, ws, "config", "core.fsmonitor", script)
+		if workspaceConfigReason(ws) != "config" {
+			t.Fatal("fsmonitor was not refused")
+		}
+		controlGit(t, ws, mark, nil, "status")
+		assertCleanPush(t, ws, mark, spec)
+	})
+	t.Run("textconv", func(t *testing.T) {
+		ws, mark, script := hostileRepo(t)
+		gitRepo(t, ws, "config", "diff.evil.textconv", script)
+		if err := os.WriteFile(filepath.Join(ws, ".gitattributes"), []byte("* diff=evil\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitRepo(t, ws, "add", ".gitattributes")
+		gitRepo(t, ws, "commit", "-m", "attrs")
+		info := filepath.Join(ws, ".git", "info")
+		if err := os.MkdirAll(info, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(info, "attributes"), []byte("* diff=evil\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if workspaceConfigReason(ws) != "" {
+			t.Fatal("textconv config was refused")
+		}
+		controlGit(t, ws, mark, nil, "log", "-p")
+		assertCleanPush(t, ws, mark, spec)
+	})
+	t.Run("credential helper", func(t *testing.T) {
+		ws, mark, script := hostileRepo(t)
+		gitRepo(t, ws, "config", "credential.helper", script)
+		if workspaceConfigReason(ws) != "config" {
+			t.Fatal("credential helper was not refused")
+		}
+		controlGit(t, ws, mark, nil, "push", authServer(t)+"/acme/widgets.git", "HEAD")
+		assertCleanPush(t, ws, mark, spec)
+	})
+	t.Run("askpass", func(t *testing.T) {
+		ws, mark, script := hostileRepo(t)
+		gitRepo(t, ws, "config", "core.askPass", script)
+		if workspaceConfigReason(ws) != "config" {
+			t.Fatal("askpass was not refused")
+		}
+		controlGit(t, ws, mark, []byte("protocol=http\nhost=example.com\n\n"), "credential", "fill")
+		assertCleanPush(t, ws, mark, spec)
+	})
+	t.Run("sshCommand", func(t *testing.T) {
+		ws, mark, script := hostileRepo(t)
+		gitRepo(t, ws, "config", "core.sshCommand", script)
+		if workspaceConfigReason(ws) != "config" {
+			t.Fatal("sshCommand was not refused")
+		}
+		controlTimeout(t, ws, mark, "ls-remote", "git@example.com:acme/widgets.git")
+		assertCleanPush(t, ws, mark, spec)
+	})
+	t.Run("hooksPath", func(t *testing.T) {
+		ws, mark, script := hostileRepo(t)
+		hookDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(hookDir, "pre-commit"), []byte("#!/bin/sh\n'"+script+"'\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		gitRepo(t, ws, "config", "core.hooksPath", hookDir)
+		if workspaceConfigReason(ws) != "config" {
+			t.Fatal("hooksPath was not refused")
+		}
+		controlTimeout(t, ws, mark, "commit", "--allow-empty", "-m", "hook")
+		assertCleanPush(t, ws, mark, spec)
+	})
+	t.Run("alias", func(t *testing.T) {
+		ws, mark, script := hostileRepo(t)
+		gitRepo(t, ws, "config", "alias.st", "!"+script)
+		gitRepo(t, ws, "config", "alias.push", "!"+script)
+		if workspaceConfigReason(ws) != "config" {
+			t.Fatal("alias was not refused")
+		}
+		controlTimeout(t, ws, mark, "st")
+		assertCleanPush(t, ws, mark, spec)
+	})
+	t.Run("filter", func(t *testing.T) {
+		ws, mark, script := hostileRepo(t)
+		gitRepo(t, ws, "config", "filter.evil.clean", script)
+		gitRepo(t, ws, "config", "filter.evil.smudge", script)
+		if err := os.WriteFile(filepath.Join(ws, ".gitattributes"), []byte("* filter=evil\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if workspaceConfigReason(ws) != "config" {
+			t.Fatal("filter was not refused")
+		}
+		if err := os.WriteFile(filepath.Join(ws, "extra.txt"), []byte("more\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		controlTimeout(t, ws, mark, "add", "extra.txt")
+		assertCleanPush(t, ws, mark, spec)
+	})
+	t.Run("diff external", func(t *testing.T) {
+		ws, mark, script := hostileRepo(t)
+		if err := os.WriteFile(filepath.Join(ws, "readme.txt"), []byte("hello\nmore\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitRepo(t, ws, "add", "readme.txt")
+		gitRepo(t, ws, "commit", "-m", "more")
+		gitRepo(t, ws, "config", "diff.external", script)
+		if workspaceConfigReason(ws) != "config" {
+			t.Fatal("diff.external was not refused")
+		}
+		controlTimeout(t, ws, mark, "diff", "HEAD~1", "HEAD")
+		assertCleanPush(t, ws, mark, spec)
+	})
+	t.Run("pushurl", func(t *testing.T) {
+		ws, mark, _ := hostileRepo(t)
+		good, bad := splitServers(t)
+		gitRepo(t, ws, "remote", "add", "origin", good.URL+"/acme/widgets.git")
+		gitRepo(t, ws, "config", "remote.origin.pushurl", bad.URL+"/stolen.git")
+		if workspaceConfigReason(ws) != "config" {
+			t.Fatal("pushurl was not refused")
+		}
+		runWorkspaceGit(t, ws, "push", "origin", "HEAD:refs/heads/feature")
+		bad.mu.Lock()
+		badPath := bad.path
+		bad.mu.Unlock()
+		if bad.hits.Load() == 0 || !strings.Contains(badPath, "/stolen.git") {
+			t.Fatalf("control pushurl hits=%d path=%s", bad.hits.Load(), badPath)
+		}
+		bad.hits.Store(0)
+		good.hits.Store(0)
+		assertCleanPushTo(t, ws, mark, spec, good, bad)
+	})
+	t.Run("insteadOf", func(t *testing.T) {
+		ws, mark, _ := hostileRepo(t)
+		good, bad := splitServers(t)
+		gitRepo(t, ws, "config", "url."+bad.URL+"/p/.insteadOf", "http://127.0.0.1:")
+		gitRepo(t, ws, "config", "url."+bad.URL+"/p/.pushInsteadOf", "http://127.0.0.1:")
+		if workspaceConfigReason(ws) != "config" {
+			t.Fatal("insteadOf was not refused")
+		}
+		runWorkspaceGit(t, ws, "ls-remote", good.URL+"/acme/widgets.git")
+		if bad.hits.Load() == 0 {
+			t.Fatal("control insteadOf did not redirect")
+		}
+		bad.hits.Store(0)
+		good.hits.Store(0)
+		_ = os.Remove(mark)
+		assertCleanPushTo(t, ws, mark, spec, good, bad)
+	})
+}
+
+type hitServer struct {
+	URL  string
+	hits *atomic.Int32
+	path string
+	mu   sync.Mutex
+}
+
+func splitServers(t *testing.T) (good, bad *hitServer) {
+	t.Helper()
+	mk := func() *hitServer {
+		t.Helper()
+		hs := &hitServer{hits: &atomic.Int32{}}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			hs.hits.Add(1)
+			hs.mu.Lock()
+			hs.path = r.URL.Path
+			hs.mu.Unlock()
+			http.NotFound(w, r)
+		}))
+		t.Cleanup(srv.Close)
+		hs.URL = srv.URL
+		return hs
+	}
+	return mk(), mk()
+}
+
+func assertCleanPush(t *testing.T, ws, mark string, specs []pushSpec) {
+	t.Helper()
+	good, bad := splitServers(t)
+	assertCleanPushTo(t, ws, mark, specs, good, bad)
+}
+
+func assertCleanPushTo(t *testing.T, ws, mark string, specs []pushSpec, good, bad *hitServer) {
+	t.Helper()
+	if markerPresent(mark) {
+		t.Fatal("marker was still present before the mirror")
+	}
+	mirror := mustMirror(t, ws)
+	log, err := mirrorLog(context.Background(), mirror, specs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(log, "note") {
+		t.Fatalf("commit list %q", log)
+	}
+	if markerPresent(mark) {
+		t.Fatal("commit list created a marker")
+	}
+	remote := good.URL + "/acme/widgets.git"
+	_, _ = mirrorPush(context.Background(), mirror, remote, specs)
+	if good.hits.Load() == 0 {
+		t.Fatal("push did not reach the intended host")
+	}
+	if bad != nil && bad.hits.Load() != 0 {
+		t.Fatal("push reached another host")
+	}
+	good.mu.Lock()
+	path := good.path
+	good.mu.Unlock()
+	if !strings.Contains(path, "/acme/widgets.git") || strings.Contains(path, "stolen") {
+		t.Fatalf("push target %s", path)
+	}
+	if markerPresent(mark) {
+		t.Fatal("push created a marker")
+	}
+}
+
+func runWorkspaceGit(t *testing.T, ws string, args ...string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", ws}, args...)...)
+	cmd.Env = hostEnv(t, ws)
+	_, _ = cmd.CombinedOutput()
+}
+
+func controlTimeout(t *testing.T, ws, mark string, args ...string) {
+	t.Helper()
+	_ = os.Remove(mark)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", ws}, args...)...)
+	cmd.Env = hostEnv(t, ws)
+	out, _ := cmd.CombinedOutput()
+	if !markerPresent(mark) {
+		t.Fatalf("control %v did not create a marker: %s", args, out)
+	}
+	if err := os.Remove(mark); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestPushPlanOmitsGateFromArgv(t *testing.T) {
