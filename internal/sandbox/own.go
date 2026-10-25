@@ -10,10 +10,14 @@ import (
 
 // Chown sets the numeric owner of path. Production skips the host call when
 // the daemon is not root, because that call is rejected. Tests replace this.
+// OwnPath does not call it at all unless EUID is 0.
 var Chown = defaultChown
 
+// EUID is the daemon's effective uid. Tests replace it.
+var EUID = os.Geteuid
+
 func defaultChown(path string, uid, gid int) error {
-	if os.Geteuid() != 0 {
+	if EUID() != 0 {
 		return nil
 	}
 	return os.Chown(path, uid, gid)
@@ -24,8 +28,8 @@ func defaultChown(path string, uid, gid int) error {
 // kernel overflow ids, and the jail command drops to those ids. Without
 // bubblewrap the jail stays uid 0, so the workspace stays owned by root.
 func JailIDs() (uid, gid int) {
-	if os.Geteuid() != 0 {
-		return os.Geteuid(), os.Getegid()
+	if id := EUID(); id != 0 {
+		return id, os.Getegid()
 	}
 	if _, err := exec.LookPath("bwrap"); err != nil {
 		return 0, 0
@@ -55,6 +59,11 @@ func OwnPath(path string, mode os.FileMode) error {
 		if err := os.Chmod(path, mode); err != nil {
 			return err
 		}
+	}
+	// A non-root daemon already owns the directories it creates. Chown would
+	// be rejected, so it is not called. Modes stay 0750 or 0700.
+	if EUID() != 0 {
+		return nil
 	}
 	uid, gid := JailIDs()
 	return Chown(path, uid, gid)

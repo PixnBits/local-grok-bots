@@ -25,12 +25,13 @@ func TestOwnPathUsesJailIDs(t *testing.T) {
 	dir := t.TempDir()
 	var got string
 	var uid, gid int
-	old := Chown
+	oldC, oldE := Chown, EUID
 	Chown = func(path string, u, g int) error {
 		got, uid, gid = path, u, g
 		return nil
 	}
-	t.Cleanup(func() { Chown = old })
+	EUID = func() int { return 0 }
+	t.Cleanup(func() { Chown, EUID = oldC, oldE })
 	if err := OwnPath(dir, 0o750); err != nil {
 		t.Fatal(err)
 	}
@@ -47,19 +48,29 @@ func TestOwnPathUsesJailIDs(t *testing.T) {
 	}
 }
 
-func TestOwnPathSkipsHostChownWhenNotRoot(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root calls the host chown")
-	}
+func TestOwnPathSkipsChownWhenNotRoot(t *testing.T) {
 	dir := t.TempDir()
-	if err := OwnPath(dir, 0o700); err != nil {
-		t.Fatal(err)
+	called := false
+	oldC, oldE := Chown, EUID
+	Chown = func(string, int, int) error {
+		called = true
+		return nil
 	}
-	st, err := os.Stat(dir)
-	if err != nil {
-		t.Fatal(err)
+	EUID = func() int { return 1000 }
+	t.Cleanup(func() { Chown, EUID = oldC, oldE })
+	for _, mode := range []os.FileMode{0o700, 0o750} {
+		if err := OwnPath(dir, mode); err != nil {
+			t.Fatal(err)
+		}
+		st, err := os.Stat(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Mode().Perm() != mode || st.Mode().Perm()&0o002 != 0 {
+			t.Fatalf("mode %o", st.Mode().Perm())
+		}
 	}
-	if st.Mode().Perm() != 0o700 {
-		t.Fatalf("mode %o", st.Mode().Perm())
+	if called {
+		t.Fatal("chown called")
 	}
 }

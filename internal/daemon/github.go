@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -40,7 +39,7 @@ func (a *App) openGitHubProxy(bot store.Bot) (*github.Proxy, error) {
 		_ = p.Close()
 		return nil, err
 	}
-	if os.Geteuid() == 0 {
+	if sandbox.EUID() == 0 {
 		uid, gid := sandbox.JailIDs()
 		if err := sandbox.Chown(p.Sock(), uid, gid); err != nil {
 			_ = p.Close()

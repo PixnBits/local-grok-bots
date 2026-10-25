@@ -18,12 +18,13 @@ type ownCall struct {
 
 func TestWorkspaceOwnedForJail(t *testing.T) {
 	var calls []ownCall
-	old := sandbox.Chown
+	oldC, oldE := sandbox.Chown, sandbox.EUID
 	sandbox.Chown = func(path string, uid, gid int) error {
 		calls = append(calls, ownCall{path, uid, gid})
 		return nil
 	}
-	t.Cleanup(func() { sandbox.Chown = old })
+	sandbox.EUID = func() int { return 0 }
+	t.Cleanup(func() { sandbox.Chown, sandbox.EUID = oldC, oldE })
 
 	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
 		return model.ChatResponse{Content: "no"}, nil
@@ -78,4 +79,60 @@ func assertOwned(t *testing.T, calls []ownCall, path string, uid, gid int, mode 
 		}
 	}
 	t.Fatalf("no chown of %s to %d:%d in %v", path, uid, gid, calls)
+}
+
+func TestWorkspaceNonRootSkipsChown(t *testing.T) {
+	var calls []ownCall
+	oldC, oldE := sandbox.Chown, sandbox.EUID
+	sandbox.Chown = func(path string, uid, gid int) error {
+		calls = append(calls, ownCall{path, uid, gid})
+		return nil
+	}
+	sandbox.EUID = func() int { return 1000 }
+	t.Cleanup(func() { sandbox.Chown, sandbox.EUID = oldC, oldE })
+
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "no"}, nil
+	}})
+	if _, err := app.toolWriteFile("bot", map[string]any{"path": "sub/dir/note.txt", "content": "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("chown calls %v", calls)
+	}
+	assertDirMode(t, app.ws, 0o750)
+	assertDirMode(t, filepath.Join(app.ws, "sub"), 0o700)
+	assertDirMode(t, filepath.Join(app.ws, "sub", "dir"), 0o700)
+	if err := filepath.WalkDir(app.ws, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		st, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if st.Mode()&os.ModeSymlink != 0 {
+			t.Fatalf("symlink dir %s", path)
+		}
+		if st.Mode().Perm()&0o002 != 0 {
+			t.Fatalf("world-writable %s mode %o", path, st.Mode().Perm())
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertDirMode(t *testing.T, path string, mode os.FileMode) {
+	t.Helper()
+	st, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !st.IsDir() || st.Mode().Perm() != mode || st.Mode().Perm()&0o002 != 0 {
+		t.Fatalf("%s mode %o", path, st.Mode().Perm())
+	}
 }

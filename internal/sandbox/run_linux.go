@@ -108,7 +108,7 @@ func runBwrap(ctx context.Context, p *prepared, bwrap string) (string, string, e
 // jailDrops is true when a root daemon has bubblewrap and must run the shell
 // as the overflow uid. The workspace is owned by that uid.
 func jailDrops(uid int) bool {
-	return os.Geteuid() == 0 && uid != 0
+	return EUID() == 0 && uid != 0
 }
 
 // commandArgv is the program bubblewrap executes. A non-root daemon keeps
