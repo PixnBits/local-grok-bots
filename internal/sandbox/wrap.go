@@ -119,7 +119,12 @@ need_bridge=0
 found_url=0
 pos=
 vet() {
-  case "$1" in
+  folded=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || {
+    echo "git ${sub} denied: repository is not allowlisted" >&2
+    printf '%s\n' "deny git ${sub}" >> "$log"
+    exit 1
+  }
+  case "$folded" in
     ""|file://*)
       return 0
       ;;

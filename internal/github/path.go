@@ -66,7 +66,7 @@ func classifyGit(norm, rawQuery string, allow map[string]bool) (Route, error) {
 		return Route{}, ErrRepo
 	}
 	route := Route{Service: "github", Owner: owner, Repo: repo, Path: norm, Query: query}
-	if !allow[owner+"/"+repo] {
+	if !allowListed(allow, owner, repo) {
 		return route, ErrNotAllowed
 	}
 	return route, nil
@@ -94,10 +94,28 @@ func classifyAPI(norm, rawQuery string, allow map[string]bool) (Route, error) {
 		}
 	}
 	route := Route{Service: "api", Owner: owner, Repo: repo, Path: norm, Query: ""}
-	if !allow[owner+"/"+repo] {
+	if !allowListed(allow, owner, repo) {
 		return route, ErrNotAllowed
 	}
 	return route, nil
+}
+
+// allowListed matches owner/repo with EqualFold. Keys may already be lower
+// case. A mixed-case allowlist entry still matches a mixed-case path.
+func allowListed(allow map[string]bool, owner, repo string) bool {
+	if len(allow) == 0 {
+		return false
+	}
+	want := owner + "/" + repo
+	if allow[want] {
+		return true
+	}
+	for key, ok := range allow {
+		if ok && strings.EqualFold(key, want) {
+			return true
+		}
+	}
+	return false
 }
 
 func splitParts(norm string) []string {

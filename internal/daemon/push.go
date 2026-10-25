@@ -179,9 +179,9 @@ func (a *App) auditPush(bot store.Bot, owner, repo, decision, reason string) san
 }
 
 func repoAllowed(repos []string, owner, repo string) bool {
-	want := owner + "/" + repo
 	for _, r := range repos {
-		if r == want {
+		o, n, ok := strings.Cut(r, "/")
+		if ok && strings.EqualFold(o, owner) && strings.EqualFold(n, repo) {
 			return true
 		}
 	}

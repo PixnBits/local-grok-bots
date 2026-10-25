@@ -58,4 +58,16 @@ func TestClassifyGitAndAPI(t *testing.T) {
 	if _, err := Classify("api", "/repos/Acme/Widgets.git", "", allow); err == nil {
 		t.Fatal("accepted .git on api")
 	}
+	mixed := allowMap("aCmE/wIdGeTs")
+	got, err = Classify("github", "/AcMe/WiDgEtS.git/info/refs", "service=git-upload-pack", mixed)
+	if err != nil || got.Owner != "acme" || got.Repo != "widgets" {
+		t.Fatalf("mixed allow %#v %v", got, err)
+	}
+	api, err = Classify("api", "/repos/AcMe/WiDgEtS", "", mixed)
+	if err != nil || api.Owner != "acme" || api.Repo != "widgets" {
+		t.Fatalf("mixed api %#v %v", api, err)
+	}
+	if _, err := Classify("github", "/Other/Widgets.git/info/refs", "service=git-upload-pack", mixed); !errors.Is(err, ErrNotAllowed) {
+		t.Fatalf("mixed miss: %v", err)
+	}
 }

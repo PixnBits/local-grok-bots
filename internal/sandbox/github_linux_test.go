@@ -61,10 +61,10 @@ func TestGitHubCloneUsesCredentialProxy(t *testing.T) {
 		Grants:      []string{"git", "github", "net"},
 		NetAllow:    []string{"github.com", "api.github.com"},
 		GitHubSock:  px.Sock(),
-		GitHubRepos: []string{"acme/widgets"},
+		GitHubRepos: []string{"aCmE/wIdGeTs"},
 		Command: `env
 git clone https://github.com/other/nope.git nope; echo OTHER:$?
-git clone https://github.com/acme/widgets.git dest; echo ACME:$?
+git clone https://github.com/AcMe/WiDgEtS.git dest; echo ACME:$?
 git clone git@github.com:acme/widgets.git sshdest; echo SSH:$?
 `,
 	})
@@ -87,7 +87,8 @@ git clone git@github.com:acme/widgets.git sshdest; echo SSH:$?
 	if hits == 0 || auth != wantAuth {
 		t.Fatalf("proxy hits=%d auth=%q path=%q err=%v\n%s", hits, auth, path, err, out)
 	}
-	if !strings.Contains(path, "/acme/widgets") || strings.Contains(path, "other/nope") {
+	lowPath := strings.ToLower(path)
+	if !strings.Contains(lowPath, "/acme/widgets") || strings.Contains(lowPath, "other/nope") {
 		t.Fatalf("path %q", path)
 	}
 	if _, ok := findEvent(res.Events, "grant_use", "git", ""); !ok {
