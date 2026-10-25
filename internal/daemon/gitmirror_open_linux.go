@@ -32,6 +32,7 @@ func openChainAt2(rootFd int, parts []string) ([]heldDir, error) {
 		return nil, err
 	}
 	rootDev := uint64(rootStat.Dev)
+	rootMnt, rootOK := mountID(rootFd)
 	final, err := openat2Dir(rootFd, strings.Join(parts, "/"))
 	if err != nil {
 		return nil, componentErr(rootFd, parts, err)
@@ -54,7 +55,7 @@ func openChainAt2(rootFd int, parts []string) ([]heldDir, error) {
 			closeHeldDirs(nodes)
 			return nil, classified
 		}
-		node, err := heldFrom(parent, fd, part, rootDev)
+		node, err := heldFrom(parent, fd, part, rootDev, rootMnt, rootOK)
 		if err != nil {
 			unix.Close(fd)
 			closeHeldDirs(nodes)
@@ -108,6 +109,17 @@ func openChecked(dirfd int, name string, allowDir, allowReg bool) (int, unix.Sta
 		return -1, st, errGitType
 	}
 	return fd, st, nil
+}
+
+func platformMountID(fd int) (uint64, bool) {
+	var stx unix.Statx_t
+	if err := unix.Statx(fd, "", unix.AT_EMPTY_PATH|unix.AT_SYMLINK_NOFOLLOW, unix.STATX_MNT_ID, &stx); err != nil {
+		return 0, false
+	}
+	if stx.Mask&unix.STATX_MNT_ID == 0 {
+		return 0, false
+	}
+	return stx.Mnt_id, true
 }
 
 func openat2Dir(dirfd int, path string) (int, error) {

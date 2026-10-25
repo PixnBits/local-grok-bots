@@ -17,6 +17,10 @@ import (
 // errGitType is a FIFO, socket, or other file the copy will not open.
 var errGitType = errors.New("type")
 
+// mountID reports the mount id of an open file. ok is false when the
+// kernel did not return one. Tests replace it.
+var mountID = platformMountID
+
 const (
 	maxGitFile  int64 = 1 << 30
 	maxGitTotal int64 = 1 << 31
@@ -400,6 +404,7 @@ func openChainWalk(rootFd int, parts []string) ([]heldDir, error) {
 		return nil, err
 	}
 	rootDev := uint64(rootStat.Dev)
+	rootMnt, rootOK := mountID(rootFd)
 	var nodes []heldDir
 	parent := rootFd
 	for _, part := range parts {
@@ -409,7 +414,7 @@ func openChainWalk(rootFd int, parts []string) ([]heldDir, error) {
 			closeHeldDirs(nodes)
 			return nil, classified
 		}
-		node, err := heldFrom(parent, fd, part, rootDev)
+		node, err := heldFrom(parent, fd, part, rootDev, rootMnt, rootOK)
 		if err != nil {
 			unix.Close(fd)
 			closeHeldDirs(nodes)
@@ -421,15 +426,15 @@ func openChainWalk(rootFd int, parts []string) ([]heldDir, error) {
 	return nodes, nil
 }
 
-func heldFrom(parent, fd int, name string, rootDev uint64) (heldDir, error) {
+func heldFrom(parent, fd int, name string, rootDev, rootMnt uint64, rootOK bool) (heldDir, error) {
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
 		return heldDir{}, err
 	}
-	if st.Mode&unix.S_IFMT != unix.S_IFDIR || uint64(st.Dev) != rootDev {
-		if uint64(st.Dev) != rootDev {
-			return heldDir{}, unix.EXDEV
-		}
+	if mountDiffers(fd, uint64(st.Dev), rootDev, rootMnt, rootOK) {
+		return heldDir{}, unix.EXDEV
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return heldDir{}, unix.ENOTDIR
 	}
 	node := heldDir{fd: fd, name: name, dev: uint64(st.Dev), ino: uint64(st.Ino)}
@@ -437,6 +442,19 @@ func heldFrom(parent, fd int, name string, rootDev uint64) (heldDir, error) {
 		return heldDir{}, unix.ELOOP
 	}
 	return node, nil
+}
+
+// mountDiffers reports a device or mount-id mismatch. A missing mount id
+// on either side leaves the device check as the only comparison.
+func mountDiffers(fd int, dev, rootDev, rootMnt uint64, rootOK bool) bool {
+	if dev != rootDev {
+		return true
+	}
+	id, ok := mountID(fd)
+	if !ok || !rootOK {
+		return false
+	}
+	return id != rootMnt
 }
 
 func closeHeldDirs(nodes []heldDir) {
@@ -494,7 +512,8 @@ func fillMirror(ctx context.Context, dir string, h *repoHandle) error {
 	if err := unix.Fstat(h.git, &root); err != nil {
 		return err
 	}
-	c := &copier{ctx: ctx, rootDev: uint64(root.Dev)}
+	rootMnt, rootOK := mountID(h.git)
+	c := &copier{ctx: ctx, rootDev: uint64(root.Dev), rootMnt: rootMnt, rootMntOK: rootOK}
 	for _, name := range []string{"HEAD", "packed-refs", "shallow"} {
 		if err := c.alive(); err != nil {
 			return err
@@ -531,10 +550,12 @@ func writeBareConfig(dir string) error {
 }
 
 type copier struct {
-	ctx     context.Context
-	rootDev uint64
-	total   int64
-	files   int
+	ctx       context.Context
+	rootDev   uint64
+	rootMnt   uint64
+	rootMntOK bool
+	total     int64
+	files     int
 }
 
 func (c *copier) alive() error {
@@ -585,7 +606,7 @@ func copyDirFd(c *copier, fd int, dst, rel string) error {
 	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return errors.New("type")
 	}
-	if uint64(st.Dev) != c.rootDev {
+	if mountDiffers(fd, uint64(st.Dev), c.rootDev, c.rootMnt, c.rootMntOK) {
 		return errors.New("device")
 	}
 	if err := os.MkdirAll(dst, 0o700); err != nil {
@@ -625,7 +646,7 @@ func copyEntry(c *copier, parent int, name, dst, rel string) error {
 		return err
 	}
 	defer unix.Close(fd)
-	if uint64(st.Dev) != c.rootDev {
+	if mountDiffers(fd, uint64(st.Dev), c.rootDev, c.rootMnt, c.rootMntOK) {
 		return errors.New("device")
 	}
 	switch st.Mode & unix.S_IFMT {

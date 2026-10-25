@@ -1107,6 +1107,62 @@ func TestCancelledCopyRemovesMirror(t *testing.T) {
 	}
 }
 
+func TestMountIDMismatchRefusesWalkAndCopy(t *testing.T) {
+	prev := mountID
+	t.Cleanup(func() { mountID = prev })
+
+	ws := t.TempDir()
+	if err := os.Mkdir(filepath.Join(ws, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	proj := filepath.Join(ws, "proj")
+	writePlainGit(t, proj)
+	h := holdRepo(t, ws, "proj")
+
+	mountID = func(fd int) (uint64, bool) {
+		var st unix.Stat_t
+		if unix.Fstat(fd, &st) != nil {
+			return 0, false
+		}
+		return uint64(st.Ino), true
+	}
+	root, err := unix.Open(ws, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unix.Close(root)
+	if nodes, err := openChainWalk(root, []string{"sub"}); err == nil || !errors.Is(err, unix.EXDEV) {
+		closeHeldDirs(nodes)
+		t.Fatalf("walk %v", err)
+	}
+	parent := t.TempDir()
+	if dir, err := copyGitMirror(context.Background(), parent, h); err == nil || dir != "" || !strings.Contains(err.Error(), "device") {
+		if dir != "" {
+			_ = os.RemoveAll(dir)
+		}
+		t.Fatalf("copy %q %v", dir, err)
+	}
+	left, rerr := os.ReadDir(parent)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if len(left) != 0 {
+		t.Fatalf("partial mirror %v", left)
+	}
+
+	mountID = func(int) (uint64, bool) { return 0, false }
+	nodes, err := openChainWalk(root, []string{"sub"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeHeldDirs(nodes)
+	dir, err := copyGitMirror(context.Background(), parent, h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+}
+
 func TestMirrorEnvStripsTrace(t *testing.T) {
 	keys := []string{
 		"GIT_TRACE", "GIT_TRACE_CURL", "GIT_TRACE_PACKET", "GIT_TRACE2",

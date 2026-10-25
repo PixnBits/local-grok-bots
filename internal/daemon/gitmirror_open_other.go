@@ -33,3 +33,5 @@ func openChecked(dirfd int, name string, allowDir, allowReg bool) (int, unix.Sta
 	}
 	return fd, st, nil
 }
+
+func platformMountID(int) (uint64, bool) { return 0, false }
