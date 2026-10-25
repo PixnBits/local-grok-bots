@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -161,6 +162,9 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	if logw == nil {
 		logw = os.Stderr
 	}
+	if cfg.AuthToken == "" && !loopbackBind(cfg.BindAddr) {
+		fmt.Fprint(logw, bindWarn)
+	}
 	aud, err := audit.Open(pol.AuditLog)
 	if err != nil {
 		return nil, err
@@ -309,6 +313,23 @@ func (a *App) writeStartup(format string, args ...any) {
 		w = a.logw
 	}
 	fmt.Fprintf(w, format, args...)
+}
+
+// bindWarn is the one startup line for a non-loopback bind with no token.
+const bindWarn = "local-grok-bots: WARN: the API is reachable beyond this machine without AUTH_TOKEN; set AUTH_TOKEN or a loopback BIND_ADDR\n"
+
+// loopbackBind reports whether addr's host is 127.0.0.0/8, ::1, or localhost.
+// An empty host is not loopback.
+func loopbackBind(addr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		host = strings.TrimSpace(addr)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (a *App) timerLoop() {

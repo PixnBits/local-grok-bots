@@ -43,6 +43,26 @@ func captureStartup(t *testing.T) *safeBuf {
 	return buf
 }
 
+func TestLoopbackBind(t *testing.T) {
+	cases := []struct {
+		addr string
+		ok   bool
+	}{
+		{"127.0.0.1:8080", true},
+		{"[::1]:8080", true},
+		{"localhost:8080", true},
+		{"0.0.0.0:8080", false},
+		{":8080", false},
+		{"[::]:8080", false},
+		{"192.168.1.5:8080", false},
+	}
+	for _, tc := range cases {
+		if got := loopbackBind(tc.addr); got != tc.ok {
+			t.Errorf("%s loopback %v", tc.addr, got)
+		}
+	}
+}
+
 func TestRunLogsPolicyBind(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "policy.toml")
@@ -165,4 +185,76 @@ func loggedAddr(out string) (string, bool) {
 		return "", false
 	}
 	return line, true
+}
+
+func TestStartupWarn(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("BIND_ADDR", "")
+	t.Setenv("AUTH_TOKEN", "")
+
+	open := func(t *testing.T, bind, token, policy string) (*App, string) {
+		t.Helper()
+		dir := t.TempDir()
+		cfg := config.Config{
+			DataDir:   filepath.Join(dir, "data"),
+			BindAddr:  bind,
+			OllamaURL: "http://127.0.0.1:9",
+			Model:     "test-model",
+			Version:   "0.1.0",
+			AuthToken: token,
+		}
+		if policy != "" {
+			path := filepath.Join(dir, "policy.toml")
+			if err := os.WriteFile(path, []byte(policy), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cfg.PolicyPath = path
+		}
+		buf := captureStartup(t)
+		app, err := New(cfg, fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+			return model.ChatResponse{}, nil
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(app.Shutdown)
+		return app, buf.String()
+	}
+
+	t.Run("non-loopback", func(t *testing.T) {
+		_, out := open(t, "192.168.1.5:9", "", "")
+		if out != bindWarn || strings.Count(out, "local-grok-bots: WARN:") != 1 {
+			t.Fatalf("log:\n%s", out)
+		}
+	})
+	t.Run("loopback", func(t *testing.T) {
+		_, out := open(t, "127.0.0.1:0", "", "")
+		if strings.Contains(out, "local-grok-bots: WARN:") {
+			t.Fatalf("log:\n%s", out)
+		}
+	})
+	t.Run("token", func(t *testing.T) {
+		_, out := open(t, "192.168.1.5:9", "unit-token", "")
+		if strings.Contains(out, "local-grok-bots: WARN:") {
+			t.Fatalf("log:\n%s", out)
+		}
+	})
+	t.Run("policy bind", func(t *testing.T) {
+		app, out := open(t, "127.0.0.1:0", "", "[daemon]\nbind = \"192.168.1.5:9\"\n")
+		if app.cfg.BindAddr != "192.168.1.5:9" || out != bindWarn {
+			t.Fatalf("bind %s log:\n%s", app.cfg.BindAddr, out)
+		}
+	})
+	t.Run("policy loopback", func(t *testing.T) {
+		app, out := open(t, "192.168.1.5:9", "", "[daemon]\nbind = \"127.0.0.1:0\"\n")
+		if app.cfg.BindAddr != "127.0.0.1:0" || strings.Contains(out, "local-grok-bots: WARN:") {
+			t.Fatalf("bind %s log:\n%s", app.cfg.BindAddr, out)
+		}
+	})
+	t.Run("generated token", func(t *testing.T) {
+		app, out := open(t, "192.168.1.5:9", "", "[daemon]\nbind = \"192.168.1.5:9\"\n\n[backend]\nbackend = \"claude\"\n")
+		if app.cfg.AuthToken == "" || strings.Contains(out, "local-grok-bots: WARN:") {
+			t.Fatalf("token %q log:\n%s", app.cfg.AuthToken, out)
+		}
+	})
 }
