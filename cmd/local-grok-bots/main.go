@@ -52,7 +52,7 @@ func main() {
 }
 
 func wantsHelp(args []string) bool {
-	for _, a := range args {
+	for _, a := range args[:min(len(args), 1)] {
 		switch a {
 		case "-h", "--help", "-help":
 			return true
