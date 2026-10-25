@@ -41,6 +41,25 @@ func TestUnparseableFailClosed(t *testing.T) {
 	}
 }
 
+func TestPolicyBindOverridesUnsetEnv(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.toml")
+	if err := os.WriteFile(path, []byte("[daemon]\nbind = \"0.0.0.0:8080\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Load(Options{Path: path, EnvBind: ""})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.HasBind || p.Bind != "0.0.0.0:8080" {
+		t.Fatalf("bind %#v set %v", p.Bind, p.HasBind)
+	}
+	for _, w := range p.Warnings {
+		if strings.Contains(w, "BIND_ADDR") {
+			t.Fatalf("unset BIND_ADDR warned: %s", w)
+		}
+	}
+}
+
 func TestPolicySelectsCLIAndJailFollows(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "policy.toml")
 	body := `

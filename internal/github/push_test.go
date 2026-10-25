@@ -41,28 +41,42 @@ func TestParsePushArgs(t *testing.T) {
 		{[]string{"push", "--tags", "+feature"}, ErrPushTag},
 	}
 	for _, tc := range cases {
-		_, err := ParsePushArgs(tc.args)
-		if !errors.Is(err, tc.want) {
-			t.Fatalf("%v: %v", tc.args, err)
-		}
-	}
-	kept := []struct {
-		args []string
-		want error
-		url  string
-	}{
-		{[]string{"push", "--force", "https://github.com/acme/widgets.git", "feature"}, ErrPushForce, "https://github.com/acme/widgets.git"},
-		{[]string{"push", "--tags", "https://github.com/acme/widgets.git"}, ErrPushTag, "https://github.com/acme/widgets.git"},
-		{[]string{"push", "https://github.com/acme/widgets.git", "refs/tags/v1"}, ErrPushTag, "https://github.com/acme/widgets.git"},
-		{[]string{"push", "https://github.com/acme/widgets.git", "+feature"}, ErrPushForce, "https://github.com/acme/widgets.git"},
-		{[]string{"push", "--force", "https://evil.example/acme/widgets.git"}, ErrPushForce, "https://evil.example/acme/widgets.git"},
-		{[]string{"push", "--force", "origin"}, ErrPushForce, ""},
-	}
-	for _, tc := range kept {
 		got, err := ParsePushArgs(tc.args)
-		if !errors.Is(err, tc.want) || got.URL != tc.url {
+		if !errors.Is(err, tc.want) || !zeroPushArgs(got) {
 			t.Fatalf("%v: %+v %v", tc.args, got, err)
 		}
+	}
+	zero := []struct {
+		args []string
+		want error
+	}{
+		{[]string{"push", "--force", "https://github.com/acme/widgets.git", "feature"}, ErrPushForce},
+		{[]string{"push", "--tags", "https://github.com/acme/widgets.git"}, ErrPushTag},
+		{[]string{"push", "https://github.com/acme/widgets.git", "refs/tags/v1"}, ErrPushTag},
+		{[]string{"push", "https://github.com/acme/widgets.git", "+feature"}, ErrPushForce},
+		{[]string{"push", "--force", "https://evil.example/acme/widgets.git"}, ErrPushForce},
+		{[]string{"push", "--force", "origin"}, ErrPushForce},
+	}
+	for _, tc := range zero {
+		got, err := ParsePushArgs(tc.args)
+		if !errors.Is(err, tc.want) || !zeroPushArgs(got) {
+			t.Fatalf("%v: %+v %v", tc.args, got, err)
+		}
+	}
+	if got := PushAuditRemote([]string{"git", "push", "--force", "https://github.com/acme/widgets.git", "feature"}); got != "https://github.com/acme/widgets.git" {
+		t.Fatalf("audit remote %q", got)
+	}
+	if got := PushAuditRemote([]string{"push", "--force", "origin", "feature"}); got != "origin" {
+		t.Fatalf("audit remote %q", got)
+	}
+	if got := PushAuditRemote([]string{"push", "--", "origin"}); got != "origin" {
+		t.Fatalf("audit remote %q", got)
+	}
+	if got := PushAuditRemote([]string{"push", "--force"}); got != "" || PushAuditRemotePresent([]string{"push", "--force"}) {
+		t.Fatalf("audit remote %q present %v", got, PushAuditRemotePresent([]string{"push", "--force"}))
+	}
+	if got := PushAuditRemote([]string{"push", "ori\ngin"}); got != "" || !PushAuditRemotePresent([]string{"push", "ori\ngin"}) {
+		t.Fatalf("audit remote %q present %v", got, PushAuditRemotePresent([]string{"push", "ori\ngin"}))
 	}
 	owner, repo, err := ParseGitHubRemote("https://github.com/Acme/Widgets.git")
 	if err != nil || owner != "acme" || repo != "widgets" {
@@ -74,4 +88,8 @@ func TestParsePushArgs(t *testing.T) {
 	if _, err := BranchOf("refs/tags/v1"); !errors.Is(err, ErrPushSpec) {
 		t.Fatalf("tag branch %v", err)
 	}
+}
+
+func zeroPushArgs(p PushArgs) bool {
+	return p.URL == "" && p.Names == nil
 }

@@ -3,6 +3,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
@@ -12,6 +13,13 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/github"
 	"golang.org/x/sys/unix"
 )
+
+// errGitType is a FIFO, socket, or other file the copy will not open.
+var errGitType = errors.New("type")
+
+// mountID reports the mount id of an open file. ok is false when the
+// kernel did not return one. Tests replace it.
+var mountID = platformMountID
 
 const (
 	maxGitFile  int64 = 1 << 30
@@ -123,23 +131,34 @@ func statAtMatch(dirfd int, name string, dev, ino uint64) bool {
 }
 
 func configDeniedAt(gitFd int) (bool, error) {
-	fd, err := unix.Openat(gitFd, "config", unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	buf, err := readGitConfig(gitFd)
 	if err != nil {
-		if err == unix.ENOENT {
+		if errors.Is(err, unix.ENOENT) {
 			return false, nil
 		}
 		return true, nil
 	}
+	return github.RepoConfigDenied(string(buf)), nil
+}
+
+// gitConfig reads .git/config through the held descriptor.
+func (h *repoHandle) gitConfig() ([]byte, error) {
+	if h == nil || h.closed || h.git < 0 {
+		return nil, errGitType
+	}
+	return readGitConfig(h.git)
+}
+
+// readGitConfig reads .git/config through gitFd. The file must be a regular
+// file no larger than maxConfig. A FIFO is refused before a blocking open.
+func readGitConfig(gitFd int) ([]byte, error) {
+	fd, st, err := openChecked(gitFd, "config", false, true)
+	if err != nil {
+		return nil, err
+	}
 	defer unix.Close(fd)
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		return true, nil
-	}
-	if st.Mode&unix.S_IFMT != unix.S_IFREG {
-		return true, nil
-	}
 	if st.Size < 0 || st.Size > maxConfig {
-		return true, nil
+		return nil, errGitType
 	}
 	buf := make([]byte, 0, int(st.Size))
 	tmp := make([]byte, 32*1024)
@@ -148,20 +167,20 @@ func configDeniedAt(gitFd int) (bool, error) {
 		if n > 0 {
 			buf = append(buf, tmp[:n]...)
 			if len(buf) > maxConfig {
-				return true, nil
+				return nil, errGitType
 			}
 		}
 		if err == unix.EINTR {
 			continue
 		}
 		if err != nil {
-			return true, nil
+			return nil, err
 		}
 		if n == 0 {
 			break
 		}
 	}
-	return github.RepoConfigDenied(string(buf)), nil
+	return buf, nil
 }
 
 // resolveWorkspaceRepo opens the workspace once and returns the repository
@@ -349,21 +368,18 @@ func workspaceRelParts(rel string) ([]string, string) {
 }
 
 func openGitAt(dirfd int) (int, string, error) {
-	fd, err := unix.Openat(dirfd, ".git", unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, st, err := openChecked(dirfd, ".git", true, true)
 	if err != nil {
 		switch {
 		case errors.Is(err, unix.ENOENT):
 			return -1, "none", nil
 		case errors.Is(err, unix.ELOOP):
 			return -1, "symlink", nil
+		case errors.Is(err, errGitType):
+			return -1, "path", nil
 		default:
 			return -1, "", err
 		}
-	}
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		unix.Close(fd)
-		return -1, "", err
 	}
 	switch st.Mode & unix.S_IFMT {
 	case unix.S_IFDIR:
@@ -377,6 +393,17 @@ func openGitAt(dirfd int) (int, string, error) {
 	}
 }
 
+func modeAllowed(mode uint32, allowDir, allowReg bool) bool {
+	switch mode {
+	case unix.S_IFDIR:
+		return allowDir
+	case unix.S_IFREG:
+		return allowReg
+	default:
+		return false
+	}
+}
+
 // openChainWalk opens each component from the previous descriptor.
 // A symlink is not followed. Every directory must stay on the root device.
 func openChainWalk(rootFd int, parts []string) ([]heldDir, error) {
@@ -385,6 +412,7 @@ func openChainWalk(rootFd int, parts []string) ([]heldDir, error) {
 		return nil, err
 	}
 	rootDev := uint64(rootStat.Dev)
+	rootMnt, rootOK := mountID(rootFd)
 	var nodes []heldDir
 	parent := rootFd
 	for _, part := range parts {
@@ -394,7 +422,7 @@ func openChainWalk(rootFd int, parts []string) ([]heldDir, error) {
 			closeHeldDirs(nodes)
 			return nil, classified
 		}
-		node, err := heldFrom(parent, fd, part, rootDev)
+		node, err := heldFrom(parent, fd, part, rootDev, rootMnt, rootOK)
 		if err != nil {
 			unix.Close(fd)
 			closeHeldDirs(nodes)
@@ -406,15 +434,15 @@ func openChainWalk(rootFd int, parts []string) ([]heldDir, error) {
 	return nodes, nil
 }
 
-func heldFrom(parent, fd int, name string, rootDev uint64) (heldDir, error) {
+func heldFrom(parent, fd int, name string, rootDev, rootMnt uint64, rootOK bool) (heldDir, error) {
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
 		return heldDir{}, err
 	}
-	if st.Mode&unix.S_IFMT != unix.S_IFDIR || uint64(st.Dev) != rootDev {
-		if uint64(st.Dev) != rootDev {
-			return heldDir{}, unix.EXDEV
-		}
+	if mountDiffers(fd, uint64(st.Dev), rootDev, rootMnt, rootOK) {
+		return heldDir{}, unix.EXDEV
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return heldDir{}, unix.ENOTDIR
 	}
 	node := heldDir{fd: fd, name: name, dev: uint64(st.Dev), ino: uint64(st.Ino)}
@@ -422,6 +450,19 @@ func heldFrom(parent, fd int, name string, rootDev uint64) (heldDir, error) {
 		return heldDir{}, unix.ELOOP
 	}
 	return node, nil
+}
+
+// mountDiffers reports a device or mount-id mismatch. A missing mount id
+// on either side leaves the device check as the only comparison.
+func mountDiffers(fd int, dev, rootDev, rootMnt uint64, rootOK bool) bool {
+	if dev != rootDev {
+		return true
+	}
+	id, ok := mountID(fd)
+	if !ok || !rootOK {
+		return false
+	}
+	return id != rootMnt
 }
 
 func closeHeldDirs(nodes []heldDir) {
@@ -434,7 +475,11 @@ func closeHeldDirs(nodes []heldDir) {
 
 // copyGitMirror builds a bare repository under parent from the held
 // repository. It reads that repository only through its open descriptors.
-func copyGitMirror(parent string, h *repoHandle) (string, error) {
+// A cancelled ctx removes the partial mirror and returns an error.
+func copyGitMirror(ctx context.Context, parent string, h *repoHandle) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if h == nil || h.git < 0 || h.closed || !filepath.IsAbs(parent) {
 		return "", errors.New("mirror")
 	}
@@ -455,7 +500,11 @@ func copyGitMirror(parent string, h *repoHandle) (string, error) {
 		_ = os.RemoveAll(dir)
 		return "", err
 	}
-	if err := fillMirror(dir, h); err != nil {
+	if err := ctx.Err(); err != nil {
+		_ = os.RemoveAll(dir)
+		return "", err
+	}
+	if err := fillMirror(ctx, dir, h); err != nil {
 		_ = os.RemoveAll(dir)
 		return "", err
 	}
@@ -466,23 +515,29 @@ func copyGitMirror(parent string, h *repoHandle) (string, error) {
 	return dir, nil
 }
 
-func fillMirror(dir string, h *repoHandle) error {
+func fillMirror(ctx context.Context, dir string, h *repoHandle) error {
 	var root unix.Stat_t
 	if err := unix.Fstat(h.git, &root); err != nil {
 		return err
 	}
-	c := &copier{rootDev: uint64(root.Dev)}
+	rootMnt, rootOK := mountID(h.git)
+	c := &copier{ctx: ctx, rootDev: uint64(root.Dev), rootMnt: rootMnt, rootMntOK: rootOK}
 	for _, name := range []string{"HEAD", "packed-refs", "shallow"} {
+		if err := c.alive(); err != nil {
+			return err
+		}
 		optional := name != "HEAD"
 		if err := copyFileNamed(c, h.git, name, filepath.Join(dir, name), optional); err != nil {
 			return err
 		}
 	}
-	if err := copyDirNamed(c, h.git, "refs", filepath.Join(dir, "refs"), "refs"); err != nil {
-		return err
-	}
-	if err := copyDirNamed(c, h.git, "objects", filepath.Join(dir, "objects"), "objects"); err != nil {
-		return err
+	for _, name := range []string{"refs", "objects"} {
+		if err := c.alive(); err != nil {
+			return err
+		}
+		if err := copyDirNamed(c, h.git, name, filepath.Join(dir, name), name); err != nil {
+			return err
+		}
 	}
 	return writeBareConfig(dir)
 }
@@ -503,34 +558,43 @@ func writeBareConfig(dir string) error {
 }
 
 type copier struct {
-	rootDev uint64
-	total   int64
-	files   int
+	ctx       context.Context
+	rootDev   uint64
+	rootMnt   uint64
+	rootMntOK bool
+	total     int64
+	files     int
+}
+
+func (c *copier) alive() error {
+	if c == nil || c.ctx == nil {
+		return nil
+	}
+	return c.ctx.Err()
 }
 
 func copyFileNamed(c *copier, dirfd int, name, dst string, optional bool) error {
+	if err := c.alive(); err != nil {
+		return err
+	}
 	if !safeGitName(name) {
 		return errors.New("name")
 	}
-	fd, err := unix.Openat(dirfd, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, st, err := openChecked(dirfd, name, false, true)
 	if err != nil {
-		if optional && err == unix.ENOENT {
+		if optional && errors.Is(err, unix.ENOENT) {
 			return nil
 		}
 		return err
 	}
 	defer unix.Close(fd)
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		return err
-	}
-	if st.Mode&unix.S_IFMT != unix.S_IFREG {
-		return errors.New("type")
-	}
 	return copyRegular(c, fd, &st, dst)
 }
 
 func copyDirNamed(c *copier, parent int, name, dst, rel string) error {
+	if err := c.alive(); err != nil {
+		return err
+	}
 	if !safeGitName(name) {
 		return errors.New("name")
 	}
@@ -550,7 +614,7 @@ func copyDirFd(c *copier, fd int, dst, rel string) error {
 	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return errors.New("type")
 	}
-	if uint64(st.Dev) != c.rootDev {
+	if mountDiffers(fd, uint64(st.Dev), c.rootDev, c.rootMnt, c.rootMntOK) {
 		return errors.New("device")
 	}
 	if err := os.MkdirAll(dst, 0o700); err != nil {
@@ -564,6 +628,9 @@ func copyDirFd(c *copier, fd int, dst, rel string) error {
 		return err
 	}
 	for _, ent := range names {
+		if err := c.alive(); err != nil {
+			return err
+		}
 		if !safeGitName(ent) {
 			return errors.New("name")
 		}
@@ -579,16 +646,15 @@ func copyDirFd(c *copier, fd int, dst, rel string) error {
 }
 
 func copyEntry(c *copier, parent int, name, dst, rel string) error {
-	fd, err := unix.Openat(parent, name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err := c.alive(); err != nil {
+		return err
+	}
+	fd, st, err := openChecked(parent, name, true, true)
 	if err != nil {
 		return err
 	}
 	defer unix.Close(fd)
-	var st unix.Stat_t
-	if err := unix.Fstat(fd, &st); err != nil {
-		return err
-	}
-	if uint64(st.Dev) != c.rootDev {
+	if mountDiffers(fd, uint64(st.Dev), c.rootDev, c.rootMnt, c.rootMntOK) {
 		return errors.New("device")
 	}
 	switch st.Mode & unix.S_IFMT {

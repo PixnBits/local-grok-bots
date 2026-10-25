@@ -1,11 +1,15 @@
 package daemon
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"errors"
+
 	"github.com/PixnBits/local-grok-bots/internal/audit"
+	"github.com/PixnBits/local-grok-bots/internal/github"
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
 	"github.com/PixnBits/local-grok-bots/internal/sandbox"
@@ -113,6 +117,39 @@ func TestOffAllowlistPushAuditsOnce(t *testing.T) {
 	}
 }
 
+func TestDeniedForceURLIgnoresParsedArgs(t *testing.T) {
+	args := []string{"git", "push", "--force", "https://github.com/acme/widgets.git", "feature"}
+	got, err := github.ParsePushArgs(args)
+	if !errors.Is(err, github.ErrPushForce) || got.URL != "" || got.Names != nil {
+		t.Fatalf("parsed %+v %v", got, err)
+	}
+	if github.PushAuditRemote(args) != "https://github.com/acme/widgets.git" {
+		t.Fatalf("audit remote %q", github.PushAuditRemote(args))
+	}
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "no"}, nil
+	}})
+	app.policy.GitHub.Repos = []string{"acme/widgets"}
+	bot := store.Bot{
+		ID: "bot_1", Grants: []string{"git", "github"}, GitHubAllow: []string{"acme/widgets"},
+	}
+	path := filepath.Join(t.TempDir(), "audit.log")
+	lg, err := audit.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.audit = lg
+	res := app.handleGitPush(t.Context(), t.Context(), bot, nil, ".", args)
+	_ = lg.Close()
+	if res.Code == 0 {
+		t.Fatalf("push result %+v", res)
+	}
+	raw := readAudit(t, path)
+	if !strings.Contains(raw, `"owner":"acme"`) || !strings.Contains(raw, `"repo":"widgets"`) || !strings.Contains(raw, `"reason":"force push denied"`) {
+		t.Fatalf("audit:\n%s", raw)
+	}
+}
+
 func TestForceAndTagDenialNamesTheRepo(t *testing.T) {
 	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
 		return model.ChatResponse{Content: "no"}, nil
@@ -138,7 +175,7 @@ func TestForceAndTagDenialNamesTheRepo(t *testing.T) {
 		{[]string{"git", "push", "--tags", "https://github.com/acme/widgets.git"}, "tag push denied", "acme", "widgets"},
 		{[]string{"git", "push", "https://github.com/acme/widgets.git", "refs/tags/v1"}, "tag push denied", "acme", "widgets"},
 		{[]string{"git", "push", "https://github.com/acme/widgets.git", "+feature"}, "force push denied", "acme", "widgets"},
-		{[]string{"git", "push", "--force", "origin", "feature"}, "force push denied", "acme", "widgets"},
+		{[]string{"git", "push", "--force", "origin", "feature"}, "force push denied", "", ""},
 		{[]string{"git", "push", "--force", "https://evil.example/acme/widgets.git"}, "force push denied", "", ""},
 	}
 	for _, tc := range cases {
@@ -164,4 +201,99 @@ func TestForceAndTagDenialNamesTheRepo(t *testing.T) {
 	if evals != 0 {
 		t.Fatalf("Evaluate ran %d times", evals)
 	}
+}
+
+func TestDeniedPushNamesConfigRemote(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "no"}, nil
+	}})
+	app.policy.GitHub.Repos = []string{"acme/widgets"}
+	writeGitRemote(t, app.ws, "https://github.com/other/lib.git")
+	bot := store.Bot{
+		ID: "bot_1", Grants: []string{"git", "github"}, GitHubAllow: []string{"acme/widgets"},
+	}
+	cases := []struct {
+		args  []string
+		owner string
+		repo  string
+		ban   []string
+	}{
+		{[]string{"git", "push", "--force", "origin", "feature"}, "other", "lib", []string{"acme", "widgets"}},
+		{[]string{"git", "push", "--force"}, "other", "lib", []string{"acme", "widgets"}},
+		{[]string{"git", "push", "--force", "upstream"}, "", "", []string{"acme", "other", "widgets", "lib"}},
+		{[]string{"git", "push", "--force", "ori\ngin"}, "", "", []string{"acme", "other", "widgets", "lib"}},
+		{[]string{"git", "push", "--force", "https://github.com/zzz/yyy.git"}, "zzz", "yyy", []string{"acme", "other", "widgets", "lib"}},
+		{[]string{"git", "push", "--force", "https://evil.example/acme/widgets.git"}, "", "", []string{"acme", "other", "widgets", "lib"}},
+	}
+	for _, tc := range cases {
+		raw := deniedPushAudit(t, app, bot, tc.args)
+		if !strings.Contains(raw, `"owner":"`+tc.owner+`"`) || !strings.Contains(raw, `"repo":"`+tc.repo+`"`) {
+			t.Fatalf("%v audit:\n%s", tc.args, raw)
+		}
+		for _, word := range tc.ban {
+			if strings.Contains(raw, word) {
+				t.Fatalf("%v contains %s:\n%s", tc.args, word, raw)
+			}
+		}
+	}
+	writeGitRemote(t, app.ws, "https://gitlab.com/other/lib.git")
+	raw := deniedPushAudit(t, app, bot, []string{"git", "push", "--force", "origin"})
+	if !strings.Contains(raw, `"owner":""`) || !strings.Contains(raw, `"repo":""`) || strings.Contains(raw, "other") || strings.Contains(raw, "gitlab") || strings.Contains(raw, "acme") {
+		t.Fatalf("non-github url:\n%s", raw)
+	}
+}
+
+func TestPushDenyDetail(t *testing.T) {
+	app := &App{}
+	cases := []struct {
+		reason string
+		detail string
+	}{
+		{"force push denied", "force push denied"},
+		{"tag push denied", "tag push denied"},
+		{"push option denied", "push option denied"},
+		{"push failed", "push failed"},
+		{"allowlist", "push allowlist"},
+		{"not approved", "push not approved"},
+		{"branch delete denied", "push branch delete denied"},
+		{"missing grant", "push missing grant"},
+	}
+	for _, tc := range cases {
+		ev := app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "deny", tc.reason)
+		if ev.Detail != tc.detail {
+			t.Fatalf("%q detail %q", tc.reason, ev.Detail)
+		}
+		if ev.Detail == sandbox.GitHubAllowlistDenied {
+			t.Fatalf("detail %q", ev.Detail)
+		}
+	}
+	ev := app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "allow", "sent")
+	if ev.Detail != "sent" || ev.Kind != "grant_use" {
+		t.Fatalf("allow %+v", ev)
+	}
+}
+
+func writeGitRemote(t *testing.T, root, url string) {
+	t.Helper()
+	writePlainGit(t, root)
+	body := "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = " + url + "\n"
+	if err := os.WriteFile(filepath.Join(root, ".git", "config"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func deniedPushAudit(t *testing.T, app *App, bot store.Bot, args []string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "audit.log")
+	lg, err := audit.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.audit = lg
+	res := app.handleGitPush(t.Context(), t.Context(), bot, nil, ".", args)
+	_ = lg.Close()
+	if res.Code == 0 || !strings.Contains(res.Stderr, "force push denied") {
+		t.Fatalf("%v: %+v", args, res)
+	}
+	return readAudit(t, path)
 }

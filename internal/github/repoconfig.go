@@ -84,6 +84,107 @@ func configKeyDenied(section, key string) bool {
 	return false
 }
 
+// RemoteConfigURL returns the url of [remote "name"] in a git config text.
+// The section and the url key match without regard to case. The remote name
+// matches exactly. The last value wins. One pair of double quotes around the
+// value is removed. Includes are not opened. A name that contains a quote, a
+// bracket, or a control character returns "". A header or a pair that cannot
+// be parsed returns "".
+func RemoteConfigURL(text, name string) string {
+	if name == "" || strings.ContainsAny(name, "\"[]\r\n\t\x00") {
+		return ""
+	}
+	if strings.ContainsRune(text, 0) {
+		return ""
+	}
+	joined, ok := joinConfigLines(text)
+	if !ok {
+		return ""
+	}
+	section := ""
+	sub := ""
+	seen := false
+	url := ""
+	for _, line := range strings.Split(joined, "\n") {
+		trim := strings.TrimSpace(line)
+		if trim == "" || strings.HasPrefix(trim, "#") || strings.HasPrefix(trim, ";") {
+			continue
+		}
+		if strings.HasPrefix(trim, "[") {
+			sec, subsection, ok := configHeader(trim)
+			if !ok {
+				return ""
+			}
+			section = sec
+			sub = subsection
+			seen = true
+			continue
+		}
+		if !seen {
+			return ""
+		}
+		key, val, ok := configPair(trim)
+		if !ok {
+			return ""
+		}
+		if strings.EqualFold(section, "remote") && sub == name && strings.EqualFold(key, "url") {
+			url = val
+		}
+	}
+	return url
+}
+
+func configHeader(line string) (section, subsection string, ok bool) {
+	s := strings.TrimSpace(line)
+	if len(s) < 3 || s[0] != '[' || s[len(s)-1] != ']' {
+		return "", "", false
+	}
+	body := strings.TrimSpace(s[1 : len(s)-1])
+	if body == "" {
+		return "", "", false
+	}
+	i := 0
+	for i < len(body) && configNameByte(body[i]) {
+		i++
+	}
+	if i == 0 {
+		return "", "", false
+	}
+	section = body[:i]
+	rest := strings.TrimSpace(body[i:])
+	if rest == "" {
+		return section, "", true
+	}
+	if len(rest) < 2 || rest[0] != '"' || rest[len(rest)-1] != '"' {
+		return "", "", false
+	}
+	inner := rest[1 : len(rest)-1]
+	if strings.ContainsAny(inner, "\"[]\r\n\x00") || strings.Contains(inner, "\\") {
+		return "", "", false
+	}
+	return section, inner, true
+}
+
+func configPair(line string) (key, val string, ok bool) {
+	s := strings.TrimSpace(line)
+	key, ok = configKey(s)
+	if !ok {
+		return "", "", false
+	}
+	i := strings.IndexByte(s, '=')
+	if i < 0 {
+		return key, "", true
+	}
+	val = strings.TrimSpace(s[i+1:])
+	if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
+		val = val[1 : len(val)-1]
+	}
+	if strings.ContainsAny(val, "\r\n\x00") {
+		return "", "", false
+	}
+	return key, val, true
+}
+
 func configSection(line string) (string, bool) {
 	s := strings.TrimSpace(line)
 	if len(s) < 3 || s[0] != '[' || s[len(s)-1] != ']' {

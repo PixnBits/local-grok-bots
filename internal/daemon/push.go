@@ -37,11 +37,7 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	}
 	parsed, err := github.ParsePushArgs(args)
 	if err != nil {
-		var repos []string
-		if a != nil {
-			repos = a.policy.EffectiveGitHubRepos(bot.GitHubAllow)
-		}
-		owner, repo := pushAuditNames(parsed, repos)
+		owner, repo := a.deniedPushNames(cwd, args)
 		return a.pushDenied(bot, owner, repo, err.Error())
 	}
 	if !granted(bot.Grants, "git") || !granted(bot.Grants, "github") {
@@ -82,7 +78,7 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 		return a.pushDenied(bot, owner, repo, "config")
 	}
 	parentDir := filepath.Join(a.cfg.DataDir, "mirrors")
-	mirror, err := copyGitMirror(parentDir, held)
+	mirror, err := copyGitMirror(pctx, parentDir, held)
 	if err != nil {
 		return a.pushDenied(bot, owner, repo, "mirror")
 	}
@@ -209,9 +205,18 @@ func (a *App) auditPush(bot store.Bot, owner, repo, decision, reason string) san
 	}
 	detail := reason
 	if decision != "allow" {
-		detail = "push " + reason
+		detail = pushDenyDetail(reason)
 	}
 	return sandbox.Event{Kind: kind, Grant: "github", Detail: detail}
+}
+
+// pushDenyDetail is the event detail for a denied push.
+// A reason that already says push is kept as it is.
+func pushDenyDetail(reason string) string {
+	if strings.Contains(reason, "push") {
+		return reason
+	}
+	return "push " + reason
 }
 
 func repoAllowed(repos []string, owner, repo string) bool {
@@ -224,23 +229,53 @@ func repoAllowed(repos []string, owner, repo string) bool {
 	return false
 }
 
-// pushAuditNames is the repository a denied push can name. An invalid URL
-// is left blank so it is not replaced by the single allowlisted repository.
-func pushAuditNames(parsed github.PushArgs, repos []string) (string, string) {
-	if parsed.URL != "" {
-		owner, repo, err := github.ParseGitHubRemote(parsed.URL)
+// deniedPushNames is the owner and repo written on a denied push.
+// A URL is parsed as itself. A remote name is read from the repository
+// config. No remote means origin. The allowlist is not used.
+func (a *App) deniedPushNames(cwd string, args []string) (string, string) {
+	remote, ok := denialRemote(args)
+	if !ok {
+		return "", ""
+	}
+	if strings.Contains(remote, "://") || strings.HasPrefix(remote, "git@") {
+		owner, repo, err := github.ParseGitHubRemote(remote)
 		if err != nil {
 			return "", ""
 		}
 		return owner, repo
 	}
-	if len(repos) == 1 {
-		owner, repo, ok := strings.Cut(repos[0], "/")
-		if ok && owner != "" && repo != "" {
-			return owner, repo
-		}
+	if a == nil || a.ws == "" {
+		return "", ""
 	}
-	return "", ""
+	h, reason := resolveWorkspaceRepo(a.ws, cwd)
+	if h != nil {
+		defer h.Close()
+	}
+	if reason != "" || h == nil {
+		return "", ""
+	}
+	buf, err := h.gitConfig()
+	if err != nil {
+		return "", ""
+	}
+	owner, repo, err := github.ParseGitHubRemote(github.RemoteConfigURL(string(buf), remote))
+	if err != nil {
+		return "", ""
+	}
+	return owner, repo
+}
+
+// denialRemote is the remote token a denial may look up.
+// A missing positional means origin. A control character stays unnamed.
+func denialRemote(args []string) (string, bool) {
+	if github.PushAuditRemotePresent(args) {
+		tok := github.PushAuditRemote(args)
+		if tok == "" {
+			return "", false
+		}
+		return tok, true
+	}
+	return "origin", true
 }
 
 func pushTarget(parsed github.PushArgs, repos []string) (owner, repo, reason string) {

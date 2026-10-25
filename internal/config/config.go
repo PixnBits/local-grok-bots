@@ -30,7 +30,7 @@ func FromEnv() Config {
 	}
 	return Config{
 		DataDir:    getenv("DATA_DIR", "./data"),
-		BindAddr:   getenv("BIND_ADDR", "0.0.0.0:8080"),
+		BindAddr:   getenv("BIND_ADDR", "127.0.0.1:8080"),
 		OllamaURL:  getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
 		Model:      getenv("OLLAMA_MODEL", "llama3.2"),
 		AuthToken:  tok,
