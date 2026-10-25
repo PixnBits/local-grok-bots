@@ -12,7 +12,7 @@ import (
 
 func ioTokenReason(err error) error {
 	switch {
-	case errors.Is(err, unix.ENOENT):
+	case errors.Is(err, unix.ENOENT), errors.Is(err, unix.ENOTDIR):
 		return errToken("missing")
 	case errors.Is(err, unix.EACCES), errors.Is(err, unix.EPERM):
 		return errToken("denied")
