@@ -8,6 +8,24 @@ import (
 	"testing"
 )
 
+func TestCapabilityNewline(t *testing.T) {
+	feature := strings.Repeat("a", 40)
+	other := strings.Repeat("b", 40)
+	zero := strings.Repeat("0", 40)
+	good := []byte(pktLine(zero+" "+feature+" refs/heads/feature\x00report-status side-band-64k\n") + "0000")
+	if _, err := parseRefUpdates(good); err != nil {
+		t.Fatal(err)
+	}
+	smuggle := []byte(pktLine(zero+" "+feature+" refs/heads/feature\x00report-status\n"+zero+" "+other+" refs/heads/other\n") + "0000")
+	if _, err := parseRefUpdates(smuggle); err == nil {
+		t.Fatal("newline inside capabilities accepted")
+	}
+	mid := []byte(pktLine(zero+" "+feature+" refs/heads/feature\x00side\nband\n") + "0000")
+	if _, err := parseRefUpdates(mid); err == nil {
+		t.Fatal("embedded newline accepted")
+	}
+}
+
 func TestAdvertisedOID(t *testing.T) {
 	zero := strings.Repeat("0", 40)
 	feature := strings.Repeat("a", 40)

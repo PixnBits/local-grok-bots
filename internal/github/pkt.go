@@ -312,6 +312,10 @@ func parseRefUpdates(buf []byte) ([]refUpdate, error) {
 		data := buf[i+4 : i+n]
 		i += n
 		if j := bytes.IndexByte(data, 0); j >= 0 {
+			caps := data[j+1:]
+			if n := bytes.IndexByte(caps, '\n'); n >= 0 && n != len(caps)-1 {
+				return nil, errPkt
+			}
 			data = data[:j]
 		}
 		data = bytes.TrimRight(data, "\n")
