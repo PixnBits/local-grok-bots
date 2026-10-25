@@ -37,11 +37,11 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	}
 	parsed, err := github.ParsePushArgs(args)
 	if err != nil {
-		owner, repo := a.deniedPushNames(cwd, args)
-		return a.pushDenied(bot, owner, repo, err.Error())
+		owner, repo, from := a.deniedPushNames(cwd, args)
+		return a.pushDenied(bot, owner, repo, from, err.Error())
 	}
 	if !granted(bot.Grants, "git") || !granted(bot.Grants, "github") {
-		return a.pushDenied(bot, "", "", "missing grant")
+		return a.pushDenied(bot, "", "", "", "missing grant")
 	}
 	repos := []string(nil)
 	ws := ""
@@ -50,21 +50,25 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 		ws = a.ws
 	}
 	owner, repo, reason := pushTarget(parsed, repos)
+	claimedFrom := ""
+	if parsed.URL != "" && owner != "" && repo != "" {
+		claimedFrom = "argv"
+	}
 	if reason != "" {
-		return a.pushDenied(bot, owner, repo, reason)
+		return a.pushDenied(bot, owner, repo, claimedFrom, reason)
 	}
 	if !repoAllowed(repos, owner, repo) {
-		return a.pushDenied(bot, owner, repo, "allowlist")
+		return a.pushDenied(bot, owner, repo, claimedFrom, "allowlist")
 	}
 	tokenFile := ""
 	if a != nil {
 		tokenFile = a.policy.GitHub.TokenFile
 	}
 	if _, err := readGitHubToken(tokenFile); err != nil {
-		return a.pushDenied(bot, owner, repo, "token")
+		return a.pushDenied(bot, owner, repo, claimedFrom, "token")
 	}
 	if gate == nil || gate.px == nil || gate.px.Sock() == "" {
-		return a.pushDenied(bot, owner, repo, "proxy unavailable")
+		return a.pushDenied(bot, owner, repo, claimedFrom, "proxy unavailable")
 	}
 	held, locReason := resolveWorkspaceRepo(ws, cwd)
 	defer held.Close()
@@ -72,48 +76,48 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 		if locReason == "" {
 			locReason = "repository not found in workspace"
 		}
-		return a.pushDenied(bot, owner, repo, locReason)
+		return a.pushDenied(bot, owner, repo, claimedFrom, locReason)
 	}
 	if held.configReason() == "config" {
-		return a.pushDenied(bot, owner, repo, "config")
+		return a.pushDenied(bot, owner, repo, claimedFrom, "config")
 	}
 	parentDir := filepath.Join(a.cfg.DataDir, "mirrors")
 	mirror, err := copyGitMirror(pctx, parentDir, held)
 	if err != nil {
-		return a.pushDenied(bot, owner, repo, "mirror")
+		return a.pushDenied(bot, owner, repo, claimedFrom, "mirror")
 	}
 	defer os.RemoveAll(mirror)
 	if !held.stable() {
-		return a.pushDenied(bot, owner, repo, "mirror")
+		return a.pushDenied(bot, owner, repo, claimedFrom, "mirror")
 	}
 	if held.configReason() == "config" {
-		return a.pushDenied(bot, owner, repo, "config")
+		return a.pushDenied(bot, owner, repo, claimedFrom, "config")
 	}
 	specs, reason := resolvePushRefs(mirror, parsed)
 	if reason != "" {
-		return a.pushDenied(bot, owner, repo, reason)
+		return a.pushDenied(bot, owner, repo, claimedFrom, reason)
 	}
 	def, err := a.githubDefaultBranch(pctx, gate.px, owner, repo)
 	if err != nil {
-		return a.pushDenied(bot, owner, repo, "default branch lookup")
+		return a.pushDenied(bot, owner, repo, claimedFrom, "default branch lookup")
 	}
 	var branches []string
 	for _, sp := range specs {
 		if strings.EqualFold(sp.branch, def) {
-			return a.pushDenied(bot, owner, repo, "default branch")
+			return a.pushDenied(bot, owner, repo, claimedFrom, "default branch")
 		}
 		branches = append(branches, sp.branch)
 	}
 	if len(specs) == 0 {
-		return a.pushDenied(bot, owner, repo, "refspec")
+		return a.pushDenied(bot, owner, repo, claimedFrom, "refspec")
 	}
 	old, oerr := a.githubBranchOID(pctx, gate.px, owner, repo, specs[0].branch)
 	if oerr != nil {
-		return a.pushDenied(bot, owner, repo, "remote ref")
+		return a.pushDenied(bot, owner, repo, claimedFrom, "remote ref")
 	}
 	commits, err := mirrorLog(pctx, mirror, specs)
 	if err != nil {
-		return a.pushDenied(bot, owner, repo, "mirror")
+		return a.pushDenied(bot, owner, repo, claimedFrom, "mirror")
 	}
 	ectx, cancel := context.WithTimeout(parent, a.policy.EffectivePromptTimeout())
 	defer cancel()
@@ -137,13 +141,13 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 		if out.Source == "no_ui" {
 			reason = "prompts disabled"
 		}
-		return a.pushDenied(bot, owner, repo, reason)
+		return a.pushDenied(bot, owner, repo, claimedFrom, reason)
 	}
 	if !held.stable() {
-		return a.pushDenied(bot, owner, repo, "mirror")
+		return a.pushDenied(bot, owner, repo, claimedFrom, "mirror")
 	}
 	if held.configReason() == "config" {
-		return a.pushDenied(bot, owner, repo, "config")
+		return a.pushDenied(bot, owner, repo, claimedFrom, "config")
 	}
 	branch := ""
 	if len(specs) > 0 {
@@ -153,19 +157,19 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 		Kind: github.WindowPush, Owner: owner, Repo: repo, Branch: branch, Default: def, Old: old,
 	})
 	if err != nil {
-		return a.pushDenied(bot, owner, repo, "proxy unavailable")
+		return a.pushDenied(bot, owner, repo, claimedFrom, "proxy unavailable")
 	}
 	defer closeWrite()
 	remote, err := proxyGitURL(base, owner, repo)
 	if err != nil {
-		return a.pushDenied(bot, owner, repo, "proxy unavailable")
+		return a.pushDenied(bot, owner, repo, claimedFrom, "proxy unavailable")
 	}
 	if msg, err := mirrorPush(pctx, mirror, remote, gateSecret, specs); err != nil {
-		res := a.pushDenied(bot, owner, repo, "push failed")
+		res := a.pushDenied(bot, owner, repo, claimedFrom, "push failed")
 		res.Stderr += sanitizePush(msg, tokenFile, gateSecret)
 		return res
 	}
-	ev := a.auditPush(bot, owner, repo, "allow", "sent")
+	ev := a.auditPush(bot, owner, repo, "allow", "sent", "")
 	return sandbox.PushResult{
 		Code:   0,
 		Stdout: "git push sent\n",
@@ -173,11 +177,11 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	}
 }
 
-func (a *App) pushDenied(bot store.Bot, owner, repo, reason string) sandbox.PushResult {
+func (a *App) pushDenied(bot store.Bot, owner, repo, claimedFrom, reason string) sandbox.PushResult {
 	if reason == "" {
 		reason = "not sent"
 	}
-	ev := a.auditPush(bot, owner, repo, "deny", reason)
+	ev := a.auditPush(bot, owner, repo, "deny", reason, claimedFrom)
 	return sandbox.PushResult{
 		Code:   1,
 		Stderr: "git push denied: " + reason + "\n",
@@ -185,7 +189,7 @@ func (a *App) pushDenied(bot store.Bot, owner, repo, reason string) sandbox.Push
 	}
 }
 
-func (a *App) auditPush(bot store.Bot, owner, repo, decision, reason string) sandbox.Event {
+func (a *App) auditPush(bot store.Bot, owner, repo, decision, reason, claimedFrom string) sandbox.Event {
 	action := "github_push_denied"
 	kind := "grant_denied"
 	if decision == "allow" {
@@ -193,7 +197,7 @@ func (a *App) auditPush(bot store.Bot, owner, repo, decision, reason string) san
 		kind = "grant_use"
 	}
 	if a != nil && a.audit != nil {
-		a.audit.Write(map[string]any{
+		fields := map[string]any{
 			"bot":      safeAuditID(bot.ID),
 			"run":      safeAuditID(a.loopRunID(bot.ID)),
 			"action":   action,
@@ -201,7 +205,11 @@ func (a *App) auditPush(bot store.Bot, owner, repo, decision, reason string) san
 			"repo":     repo,
 			"decision": decision,
 			"reason":   reason,
-		})
+		}
+		if decision != "allow" && claimedFrom != "" && owner != "" && repo != "" {
+			fields["claimed_from"] = claimedFrom
+		}
+		a.audit.Write(fields)
 	}
 	detail := reason
 	if decision != "allow" {
@@ -229,40 +237,41 @@ func repoAllowed(repos []string, owner, repo string) bool {
 	return false
 }
 
-// deniedPushNames is the owner and repo written on a denied push.
+// deniedPushNames is the owner and repo a denied push claims.
+// from is "argv" or "config" when those names are set, and "" when they are blank.
 // A URL is parsed as itself. A remote name is read from the repository
 // config. No remote means origin. The allowlist is not used.
-func (a *App) deniedPushNames(cwd string, args []string) (string, string) {
+func (a *App) deniedPushNames(cwd string, args []string) (owner, repo, from string) {
 	remote, ok := denialRemote(args)
 	if !ok {
-		return "", ""
+		return "", "", ""
 	}
 	if strings.Contains(remote, "://") || strings.HasPrefix(remote, "git@") {
-		owner, repo, err := github.ParseGitHubRemote(remote)
+		o, r, err := github.ParseGitHubRemote(remote)
 		if err != nil {
-			return "", ""
+			return "", "", ""
 		}
-		return owner, repo
+		return o, r, "argv"
 	}
 	if a == nil || a.ws == "" {
-		return "", ""
+		return "", "", ""
 	}
 	h, reason := resolveWorkspaceRepo(a.ws, cwd)
 	if h != nil {
 		defer h.Close()
 	}
 	if reason != "" || h == nil {
-		return "", ""
+		return "", "", ""
 	}
 	buf, err := h.gitConfig()
 	if err != nil {
-		return "", ""
+		return "", "", ""
 	}
-	owner, repo, err := github.ParseGitHubRemote(github.RemoteConfigURL(string(buf), remote))
+	o, r, err := github.ParseGitHubRemote(github.RemoteConfigURL(string(buf), remote))
 	if err != nil {
-		return "", ""
+		return "", "", ""
 	}
-	return owner, repo
+	return o, r, "config"
 }
 
 // denialRemote is the remote token a denial may look up.

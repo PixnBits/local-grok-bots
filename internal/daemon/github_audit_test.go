@@ -112,7 +112,7 @@ func TestOffAllowlistPushAuditsOnce(t *testing.T) {
 	if strings.Count(raw, `"action":"github_push_denied"`) != 1 || strings.Contains(raw, `"action":"github_refuse"`) {
 		t.Fatalf("audit:\n%s", raw)
 	}
-	if !strings.Contains(raw, `"owner":"other"`) || !strings.Contains(raw, `"repo":"nope"`) || !strings.Contains(raw, `"reason":"allowlist"`) {
+	if !strings.Contains(raw, `"owner":"other"`) || !strings.Contains(raw, `"repo":"nope"`) || !strings.Contains(raw, `"reason":"allowlist"`) || !strings.Contains(raw, `"claimed_from":"argv"`) {
 		t.Fatalf("audit fields:\n%s", raw)
 	}
 }
@@ -145,7 +145,7 @@ func TestDeniedForceURLIgnoresParsedArgs(t *testing.T) {
 		t.Fatalf("push result %+v", res)
 	}
 	raw := readAudit(t, path)
-	if !strings.Contains(raw, `"owner":"acme"`) || !strings.Contains(raw, `"repo":"widgets"`) || !strings.Contains(raw, `"reason":"force push denied"`) {
+	if !strings.Contains(raw, `"owner":"acme"`) || !strings.Contains(raw, `"repo":"widgets"`) || !strings.Contains(raw, `"reason":"force push denied"`) || !strings.Contains(raw, `"claimed_from":"argv"`) {
 		t.Fatalf("audit:\n%s", raw)
 	}
 }
@@ -216,19 +216,27 @@ func TestDeniedPushNamesConfigRemote(t *testing.T) {
 		args  []string
 		owner string
 		repo  string
+		from  string
 		ban   []string
 	}{
-		{[]string{"git", "push", "--force", "origin", "feature"}, "other", "lib", []string{"acme", "widgets"}},
-		{[]string{"git", "push", "--force"}, "other", "lib", []string{"acme", "widgets"}},
-		{[]string{"git", "push", "--force", "upstream"}, "", "", []string{"acme", "other", "widgets", "lib"}},
-		{[]string{"git", "push", "--force", "ori\ngin"}, "", "", []string{"acme", "other", "widgets", "lib"}},
-		{[]string{"git", "push", "--force", "https://github.com/zzz/yyy.git"}, "zzz", "yyy", []string{"acme", "other", "widgets", "lib"}},
-		{[]string{"git", "push", "--force", "https://evil.example/acme/widgets.git"}, "", "", []string{"acme", "other", "widgets", "lib"}},
+		{[]string{"git", "push", "--force", "origin", "feature"}, "other", "lib", "config", []string{"acme", "widgets"}},
+		{[]string{"git", "push", "--force"}, "other", "lib", "config", []string{"acme", "widgets"}},
+		{[]string{"git", "push", "--force", "upstream"}, "", "", "", []string{"acme", "other", "widgets", "lib"}},
+		{[]string{"git", "push", "--force", "ori\ngin"}, "", "", "", []string{"acme", "other", "widgets", "lib"}},
+		{[]string{"git", "push", "--force", "https://github.com/zzz/yyy.git"}, "zzz", "yyy", "argv", []string{"acme", "other", "widgets", "lib"}},
+		{[]string{"git", "push", "--force", "https://evil.example/acme/widgets.git"}, "", "", "", []string{"acme", "other", "widgets", "lib"}},
 	}
 	for _, tc := range cases {
 		raw := deniedPushAudit(t, app, bot, tc.args)
 		if !strings.Contains(raw, `"owner":"`+tc.owner+`"`) || !strings.Contains(raw, `"repo":"`+tc.repo+`"`) {
 			t.Fatalf("%v audit:\n%s", tc.args, raw)
+		}
+		if tc.from == "" {
+			if strings.Contains(raw, "claimed_from") {
+				t.Fatalf("%v claim:\n%s", tc.args, raw)
+			}
+		} else if !strings.Contains(raw, `"claimed_from":"`+tc.from+`"`) {
+			t.Fatalf("%v claim:\n%s", tc.args, raw)
 		}
 		for _, word := range tc.ban {
 			if strings.Contains(raw, word) {
@@ -238,7 +246,7 @@ func TestDeniedPushNamesConfigRemote(t *testing.T) {
 	}
 	writeGitRemote(t, app.ws, "https://gitlab.com/other/lib.git")
 	raw := deniedPushAudit(t, app, bot, []string{"git", "push", "--force", "origin"})
-	if !strings.Contains(raw, `"owner":""`) || !strings.Contains(raw, `"repo":""`) || strings.Contains(raw, "other") || strings.Contains(raw, "gitlab") || strings.Contains(raw, "acme") {
+	if !strings.Contains(raw, `"owner":""`) || !strings.Contains(raw, `"repo":""`) || strings.Contains(raw, "claimed_from") || strings.Contains(raw, "other") || strings.Contains(raw, "gitlab") || strings.Contains(raw, "acme") {
 		t.Fatalf("non-github url:\n%s", raw)
 	}
 }
@@ -259,7 +267,7 @@ func TestPushDenyDetail(t *testing.T) {
 		{"missing grant", "push missing grant"},
 	}
 	for _, tc := range cases {
-		ev := app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "deny", tc.reason)
+		ev := app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "deny", tc.reason, "")
 		if ev.Detail != tc.detail {
 			t.Fatalf("%q detail %q", tc.reason, ev.Detail)
 		}
@@ -267,9 +275,32 @@ func TestPushDenyDetail(t *testing.T) {
 			t.Fatalf("detail %q", ev.Detail)
 		}
 	}
-	ev := app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "allow", "sent")
+	ev := app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "allow", "sent", "")
 	if ev.Detail != "sent" || ev.Kind != "grant_use" {
 		t.Fatalf("allow %+v", ev)
+	}
+}
+
+func TestAllowedPushOmitsClaimedFrom(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "no"}, nil
+	}})
+	path := filepath.Join(t.TempDir(), "audit.log")
+	lg, err := audit.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.audit = lg
+	app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "allow", "sent", "argv")
+	app.auditPush(store.Bot{ID: "bot_1"}, "", "", "deny", "missing grant", "")
+	_ = lg.Close()
+	raw := readAudit(t, path)
+	lines := strings.Split(strings.TrimRight(raw, "\n"), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], `"action":"github_push_allowed"`) || !strings.Contains(lines[1], `"action":"github_push_denied"`) {
+		t.Fatalf("audit:\n%s", raw)
+	}
+	if strings.Contains(raw, "claimed_from") {
+		t.Fatalf("claim on an unchanged row:\n%s", raw)
 	}
 }
 
