@@ -22,6 +22,8 @@ const usage = `local-grok-bots is a local daemon for a personal bot roster.
   OLLAMA_MODEL          llama3.2
   AUTH_TOKEN            unset
   SANDBOX_BUILD_BINDS   unset
+
+A policy.toml bind overrides BIND_ADDR.
 `
 
 func main() {
