@@ -3,11 +3,23 @@
 package github
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 
 	"golang.org/x/sys/unix"
 )
+
+func ioTokenReason(err error) error {
+	switch {
+	case errors.Is(err, unix.ENOENT):
+		return errToken("missing")
+	case errors.Is(err, unix.EACCES), errors.Is(err, unix.EPERM):
+		return errToken("denied")
+	default:
+		return errToken("read")
+	}
+}
 
 func readTokenFile(path string) (string, error) {
 	if !filepath.IsAbs(path) || strings.ContainsAny(path, "\r\n\x00") {
@@ -15,19 +27,19 @@ func readTokenFile(path string) (string, error) {
 	}
 	var lst unix.Stat_t
 	if err := unix.Lstat(path, &lst); err != nil {
-		return "", errToken("read")
+		return "", ioTokenReason(err)
 	}
 	if lst.Mode&unix.S_IFMT != unix.S_IFREG {
 		return "", errToken("type")
 	}
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return "", errToken("read")
+		return "", ioTokenReason(err)
 	}
 	defer unix.Close(fd)
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
-		return "", errToken("read")
+		return "", ioTokenReason(err)
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		return "", errToken("type")
@@ -51,7 +63,7 @@ func readTokenFile(path string) (string, error) {
 			continue
 		}
 		if err != nil {
-			return "", errToken("read")
+			return "", ioTokenReason(err)
 		}
 		if got == 0 {
 			break

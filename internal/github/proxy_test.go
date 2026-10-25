@@ -504,12 +504,14 @@ func TestProxyAuditsTokenReasonWithoutBytes(t *testing.T) {
 		tok  string
 		err  error
 		want string
+		body string
 	}{
-		{"owner", "", errToken("owner"), "token file: not owned by daemon"},
-		{"mode", "", errToken("mode"), "mode"},
-		{"missing", "", errToken("read"), "missing"},
-		{"shape", "bad token", nil, "shape"},
-		{"wrapped", "", errors.New("leak " + tokenSecret), "token"},
+		{"owner", "", errToken("owner"), "token file: not owned by daemon", "github token unavailable: not owned by daemon"},
+		{"mode", "", errToken("mode"), "mode", "github token unavailable: mode"},
+		{"missing", "", errToken("read"), "missing", "github token unavailable: missing"},
+		{"denied", "", errToken("denied"), "permission denied", "github token unavailable: permission denied"},
+		{"shape", "bad token", nil, "shape", "github token unavailable: shape"},
+		{"wrapped", "", errors.New("leak " + tokenSecret), "token", "github token unavailable: token"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -540,6 +542,9 @@ func TestProxyAuditsTokenReasonWithoutBytes(t *testing.T) {
 			}
 			if len(audits) != 1 || audits[0].Reason != tc.want || audits[0].Status != http.StatusServiceUnavailable {
 				t.Fatalf("audit %#v", audits)
+			}
+			if strings.TrimSpace(string(body)) != tc.body {
+				t.Fatalf("body %q", body)
 			}
 			blob := string(body) + audits[0].Reason + audits[0].Path + audits[0].Action
 			if strings.Contains(blob, tokenSecret) || strings.Contains(blob, "bad token") || strings.Contains(blob, "leak") {

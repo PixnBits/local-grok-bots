@@ -117,7 +117,9 @@ func TokenFailureReason(err error) string {
 		return "mode"
 	case "shape":
 		return "shape"
-	case "read", "path":
+	case "denied":
+		return "permission denied"
+	case "read", "path", "missing":
 		return "missing"
 	case "size":
 		return "size"
@@ -125,6 +127,31 @@ func TokenFailureReason(err error) string {
 		return "type"
 	case "check":
 		return "check"
+	default:
+		return "token"
+	}
+}
+
+// TokenFailureBody is the 503 text for a token read error. It is a fixed
+// phrase and never copies err.Error().
+func TokenFailureBody(err error) string {
+	return "github token unavailable: " + tokenBodyPhrase(err)
+}
+
+func tokenBodyPhrase(err error) string {
+	var te *tokenError
+	if err == nil || !errors.As(err, &te) {
+		return "token"
+	}
+	switch te.reason {
+	case "owner":
+		return "not owned by daemon"
+	case "denied":
+		return "permission denied"
+	case "read", "path", "missing":
+		return "missing"
+	case "mode", "shape", "size", "type", "check":
+		return te.reason
 	default:
 		return "token"
 	}

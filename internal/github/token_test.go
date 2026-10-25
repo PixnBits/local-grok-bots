@@ -173,6 +173,34 @@ func TestReadTokenShapeAndHook(t *testing.T) {
 	}
 }
 
+func TestTokenReadDistinguishesMissingAndDenied(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "no-such-token")
+	_, err := ReadToken(missing)
+	if TokenFailureReason(err) != "missing" || TokenFailureBody(err) != "github token unavailable: missing" {
+		t.Fatalf("missing %v body %q", err, TokenFailureBody(err))
+	}
+	if strings.Contains(err.Error(), "no-such") {
+		t.Fatalf("path leaked: %v", err)
+	}
+	dir := t.TempDir()
+	locked := filepath.Join(dir, "locked")
+	if err := os.WriteFile(locked, []byte(tokenSecret+"\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	_, err = ReadToken(locked)
+	reason := TokenFailureReason(err)
+	if os.Geteuid() == 0 {
+		if reason != "mode" && reason != "permission denied" {
+			t.Fatalf("root read %q %v", reason, err)
+		}
+	} else if reason != "permission denied" {
+		t.Fatalf("denied %q %v", reason, err)
+	}
+	if reason == "missing" || strings.Contains(TokenFailureBody(err), tokenSecret) || strings.Contains(err.Error(), tokenSecret) {
+		t.Fatalf("locked %q %v", TokenFailureBody(err), err)
+	}
+}
+
 func errString(err error) string {
 	if err == nil {
 		return ""
@@ -187,10 +215,22 @@ func TestTokenFailureReasonOmitsBytes(t *testing.T) {
 	if TokenFailureReason(errToken("mode")) != "mode" || TokenFailureReason(errToken("shape")) != "shape" {
 		t.Fatal("mode or shape")
 	}
-	if TokenFailureReason(errToken("read")) != "missing" || TokenFailureReason(errToken("path")) != "missing" {
+	if TokenFailureReason(errToken("read")) != "missing" || TokenFailureReason(errToken("path")) != "missing" || TokenFailureReason(errToken("missing")) != "missing" {
 		t.Fatal("missing")
 	}
+	if TokenFailureReason(errToken("denied")) != "permission denied" || TokenFailureBody(errToken("denied")) != "github token unavailable: permission denied" {
+		t.Fatal("permission denied")
+	}
+	if TokenFailureBody(errToken("owner")) != "github token unavailable: not owned by daemon" {
+		t.Fatal(TokenFailureBody(errToken("owner")))
+	}
+	if TokenFailureBody(errToken("missing")) != "github token unavailable: missing" || TokenFailureBody(errToken("mode")) != "github token unavailable: mode" || TokenFailureBody(errToken("shape")) != "github token unavailable: shape" {
+		t.Fatal("body phrase")
+	}
 	leak := errors.New("bad " + tokenSecret)
+	if strings.Contains(TokenFailureBody(leak), tokenSecret) || strings.Contains(TokenFailureBody(errToken("owner")), tokenSecret) {
+		t.Fatal("body leaked")
+	}
 	if TokenFailureReason(leak) != "token" || strings.Contains(TokenFailureReason(leak), tokenSecret) {
 		t.Fatal(TokenFailureReason(leak))
 	}

@@ -443,10 +443,12 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, requireGate bool) 
 	tok, err := p.token()
 	if err != nil || !TokenShape(tok) {
 		reason := "shape"
+		text := TokenFailureBody(errToken("shape"))
 		if err != nil {
 			reason = TokenFailureReason(err)
+			text = TokenFailureBody(err)
 		}
-		p.finish(w, http.StatusServiceUnavailable, route.Path, route.Owner, route.Repo, reason, method, write)
+		p.finishBody(w, http.StatusServiceUnavailable, text, route.Path, route.Owner, route.Repo, reason, method, write)
 		return
 	}
 	if strings.Contains(path, tok) || strings.Contains(r.URL.RawQuery, tok) {
@@ -490,7 +492,14 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, requireGate bool) 
 }
 
 func (p *Proxy) finish(w http.ResponseWriter, status int, path, owner, repo, reason, method string, write bool) {
-	http.Error(w, http.StatusText(status), status)
+	p.finishBody(w, status, http.StatusText(status), path, owner, repo, reason, method, write)
+}
+
+func (p *Proxy) finishBody(w http.ResponseWriter, status int, text, path, owner, repo, reason, method string, write bool) {
+	if strings.ContainsAny(text, "\r\n\x00") || text == "" {
+		text = http.StatusText(status)
+	}
+	http.Error(w, text, status)
 	decision := "refuse"
 	if status >= 200 && status < 300 {
 		decision = "allow"
