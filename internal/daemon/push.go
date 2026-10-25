@@ -41,7 +41,7 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 		if a != nil {
 			repos = a.policy.EffectiveGitHubRepos(bot.GitHubAllow)
 		}
-		owner, repo := pushAuditNames(parsed, repos)
+		owner, repo := pushAuditNames(denialArgs(args), repos)
 		return a.pushDenied(bot, owner, repo, err.Error())
 	}
 	if !granted(bot.Grants, "git") || !granted(bot.Grants, "github") {
@@ -222,6 +222,16 @@ func repoAllowed(repos []string, owner, repo string) bool {
 		}
 	}
 	return false
+}
+
+// denialArgs carries only a URL from the audit helper. A remote name is
+// left blank here. The parsed PushArgs value is not used.
+func denialArgs(args []string) github.PushArgs {
+	tok := github.PushAuditRemote(args)
+	if strings.Contains(tok, "://") || strings.HasPrefix(tok, "git@") {
+		return github.PushArgs{URL: tok}
+	}
+	return github.PushArgs{}
 }
 
 // pushAuditNames is the repository a denied push can name. An invalid URL

@@ -5,7 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	"errors"
+
 	"github.com/PixnBits/local-grok-bots/internal/audit"
+	"github.com/PixnBits/local-grok-bots/internal/github"
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
 	"github.com/PixnBits/local-grok-bots/internal/sandbox"
@@ -110,6 +113,39 @@ func TestOffAllowlistPushAuditsOnce(t *testing.T) {
 	}
 	if !strings.Contains(raw, `"owner":"other"`) || !strings.Contains(raw, `"repo":"nope"`) || !strings.Contains(raw, `"reason":"allowlist"`) {
 		t.Fatalf("audit fields:\n%s", raw)
+	}
+}
+
+func TestDeniedForceURLIgnoresParsedArgs(t *testing.T) {
+	args := []string{"git", "push", "--force", "https://github.com/acme/widgets.git", "feature"}
+	got, err := github.ParsePushArgs(args)
+	if !errors.Is(err, github.ErrPushForce) || got.URL != "" || got.Names != nil {
+		t.Fatalf("parsed %+v %v", got, err)
+	}
+	if github.PushAuditRemote(args) != "https://github.com/acme/widgets.git" {
+		t.Fatalf("audit remote %q", github.PushAuditRemote(args))
+	}
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "no"}, nil
+	}})
+	app.policy.GitHub.Repos = []string{"acme/widgets"}
+	bot := store.Bot{
+		ID: "bot_1", Grants: []string{"git", "github"}, GitHubAllow: []string{"acme/widgets"},
+	}
+	path := filepath.Join(t.TempDir(), "audit.log")
+	lg, err := audit.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.audit = lg
+	res := app.handleGitPush(t.Context(), t.Context(), bot, nil, ".", args)
+	_ = lg.Close()
+	if res.Code == 0 {
+		t.Fatalf("push result %+v", res)
+	}
+	raw := readAudit(t, path)
+	if !strings.Contains(raw, `"owner":"acme"`) || !strings.Contains(raw, `"repo":"widgets"`) || !strings.Contains(raw, `"reason":"force push denied"`) {
+		t.Fatalf("audit:\n%s", raw)
 	}
 }
 

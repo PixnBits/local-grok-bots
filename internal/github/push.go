@@ -27,6 +27,7 @@ type PushArgs struct {
 // ParsePushArgs fail-closes. Flags that are not on the explicit allow list,
 // including force, delete, tags, mirror, and dry-run, are errors. A refspec
 // whose source starts with + or is empty is an error.
+// On error the returned PushArgs is the zero value. Callers must not use it.
 func ParsePushArgs(args []string) (PushArgs, error) {
 	i := 0
 	if i < len(args) && args[i] == "git" {
@@ -83,7 +84,47 @@ func ParsePushArgs(args []string) (PushArgs, error) {
 		}
 		take(a)
 	}
-	return out, first
+	if first != nil {
+		return PushArgs{}, first
+	}
+	return out, nil
+}
+
+// PushAuditRemote returns the first positional token of a git push argv.
+// The token is a URL or a remote name. It returns "" when there is no
+// positional token, or when that token contains CR, LF, a tab, or NUL.
+// Callers use it only to label a denial.
+func PushAuditRemote(args []string) string {
+	tok, ok := firstPushPositional(args)
+	if !ok || strings.ContainsAny(tok, "\r\n\t\x00") {
+		return ""
+	}
+	return tok
+}
+
+func firstPushPositional(args []string) (string, bool) {
+	i := 0
+	if i < len(args) && args[i] == "git" {
+		i++
+	}
+	if i < len(args) && args[i] == "push" {
+		i++
+	}
+	for i < len(args) {
+		a := args[i]
+		i++
+		if a == "--" {
+			if i >= len(args) {
+				return "", false
+			}
+			return args[i], true
+		}
+		if a == "" || strings.HasPrefix(a, "-") {
+			continue
+		}
+		return a, true
+	}
+	return "", false
 }
 
 func pushFlag(a string) error {
