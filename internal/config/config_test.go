@@ -2,6 +2,17 @@ package config
 
 import "testing"
 
+func TestBindAddrDefault(t *testing.T) {
+	t.Setenv("BIND_ADDR", "")
+	if got := FromEnv().BindAddr; got != "127.0.0.1:8080" {
+		t.Fatalf("default %s", got)
+	}
+	t.Setenv("BIND_ADDR", "0.0.0.0:8080")
+	if got := FromEnv().BindAddr; got != "0.0.0.0:8080" {
+		t.Fatalf("override %s", got)
+	}
+}
+
 func TestBuildBindsFromEnv(t *testing.T) {
 	t.Setenv("SANDBOX_BUILD_BINDS", " /opt/a : /opt/b ")
 	c := FromEnv()

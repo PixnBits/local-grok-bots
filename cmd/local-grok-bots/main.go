@@ -13,7 +13,22 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 )
 
+const usage = `local-grok-bots is a local daemon for a personal bot roster.
+
+  DATA_DIR              ./data
+  BIND_ADDR             127.0.0.1:8080
+  POLICY_PATH           policy.toml
+  OLLAMA_URL            http://127.0.0.1:11434
+  OLLAMA_MODEL          llama3.2
+  AUTH_TOKEN            unset
+  SANDBOX_BUILD_BINDS   unset
+`
+
 func main() {
+	if wantsHelp(os.Args[1:]) {
+		fmt.Fprint(os.Stdout, usage)
+		os.Exit(0)
+	}
 	if coi.HandleForward(os.Args[1:]) {
 		return
 	}
@@ -34,4 +49,14 @@ func main() {
 		fmt.Fprintln(os.Stderr, "local-grok-bots:", err)
 		os.Exit(1)
 	}
+}
+
+func wantsHelp(args []string) bool {
+	for _, a := range args {
+		switch a {
+		case "-h", "--help", "-help":
+			return true
+		}
+	}
+	return false
 }
