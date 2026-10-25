@@ -215,7 +215,10 @@ func TestTokenFailureReasonOmitsBytes(t *testing.T) {
 	if TokenFailureReason(errToken("mode")) != "mode" || TokenFailureReason(errToken("shape")) != "shape" {
 		t.Fatal("mode or shape")
 	}
-	if TokenFailureReason(errToken("read")) != "missing" || TokenFailureReason(errToken("path")) != "missing" || TokenFailureReason(errToken("missing")) != "missing" {
+	if TokenFailureReason(errToken("read")) != "read error" || TokenFailureBody(errToken("read")) != "github token unavailable: read error" {
+		t.Fatal("read error")
+	}
+	if TokenFailureReason(errToken("path")) != "missing" || TokenFailureReason(errToken("missing")) != "missing" {
 		t.Fatal("missing")
 	}
 	if TokenFailureReason(errToken("denied")) != "permission denied" || TokenFailureBody(errToken("denied")) != "github token unavailable: permission denied" {

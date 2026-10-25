@@ -119,7 +119,9 @@ func TokenFailureReason(err error) string {
 		return "shape"
 	case "denied":
 		return "permission denied"
-	case "read", "path", "missing":
+	case "read":
+		return "read error"
+	case "path", "missing":
 		return "missing"
 	case "size":
 		return "size"
@@ -148,7 +150,9 @@ func tokenBodyPhrase(err error) string {
 		return "not owned by daemon"
 	case "denied":
 		return "permission denied"
-	case "read", "path", "missing":
+	case "read":
+		return "read error"
+	case "path", "missing":
 		return "missing"
 	case "mode", "shape", "size", "type", "check":
 		return te.reason

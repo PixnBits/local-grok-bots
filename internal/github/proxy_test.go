@@ -508,7 +508,7 @@ func TestProxyAuditsTokenReasonWithoutBytes(t *testing.T) {
 	}{
 		{"owner", "", errToken("owner"), "token file: not owned by daemon", "github token unavailable: not owned by daemon"},
 		{"mode", "", errToken("mode"), "mode", "github token unavailable: mode"},
-		{"missing", "", errToken("read"), "missing", "github token unavailable: missing"},
+		{"read", "", errToken("read"), "read error", "github token unavailable: read error"},
 		{"denied", "", errToken("denied"), "permission denied", "github token unavailable: permission denied"},
 		{"shape", "bad token", nil, "shape", "github token unavailable: shape"},
 		{"wrapped", "", errors.New("leak " + tokenSecret), "token", "github token unavailable: token"},

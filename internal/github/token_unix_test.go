@@ -23,7 +23,12 @@ func TestIOTokenReason(t *testing.T) {
 			t.Fatalf("body %s", TokenFailureBody(ioTokenReason(err)))
 		}
 	}
-	if TokenFailureReason(ioTokenReason(unix.EIO)) != "missing" {
-		t.Fatal("generic read")
+	for _, err := range []error{unix.EIO, unix.ENOTDIR} {
+		if TokenFailureReason(ioTokenReason(err)) != "read error" {
+			t.Fatalf("%v -> %s", err, TokenFailureReason(ioTokenReason(err)))
+		}
+		if TokenFailureBody(ioTokenReason(err)) != "github token unavailable: read error" {
+			t.Fatalf("body %s", TokenFailureBody(ioTokenReason(err)))
+		}
 	}
 }
