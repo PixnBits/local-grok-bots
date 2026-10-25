@@ -205,9 +205,18 @@ func (a *App) auditPush(bot store.Bot, owner, repo, decision, reason string) san
 	}
 	detail := reason
 	if decision != "allow" {
-		detail = "push " + reason
+		detail = pushDenyDetail(reason)
 	}
 	return sandbox.Event{Kind: kind, Grant: "github", Detail: detail}
+}
+
+// pushDenyDetail is the event detail for a denied push.
+// A reason that already says push is kept as it is.
+func pushDenyDetail(reason string) string {
+	if strings.Contains(reason, "push") {
+		return reason
+	}
+	return "push " + reason
 }
 
 func repoAllowed(repos []string, owner, repo string) bool {

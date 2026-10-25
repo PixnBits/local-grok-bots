@@ -243,6 +243,36 @@ func TestDeniedPushNamesConfigRemote(t *testing.T) {
 	}
 }
 
+func TestPushDenyDetail(t *testing.T) {
+	app := &App{}
+	cases := []struct {
+		reason string
+		detail string
+	}{
+		{"force push denied", "force push denied"},
+		{"tag push denied", "tag push denied"},
+		{"push option denied", "push option denied"},
+		{"push failed", "push failed"},
+		{"allowlist", "push allowlist"},
+		{"not approved", "push not approved"},
+		{"branch delete denied", "push branch delete denied"},
+		{"missing grant", "push missing grant"},
+	}
+	for _, tc := range cases {
+		ev := app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "deny", tc.reason)
+		if ev.Detail != tc.detail {
+			t.Fatalf("%q detail %q", tc.reason, ev.Detail)
+		}
+		if ev.Detail == sandbox.GitHubAllowlistDenied {
+			t.Fatalf("detail %q", ev.Detail)
+		}
+	}
+	ev := app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "allow", "sent")
+	if ev.Detail != "sent" || ev.Kind != "grant_use" {
+		t.Fatalf("allow %+v", ev)
+	}
+}
+
 func writeGitRemote(t *testing.T, root, url string) {
 	t.Helper()
 	writePlainGit(t, root)
