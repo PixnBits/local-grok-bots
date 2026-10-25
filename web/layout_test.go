@@ -56,6 +56,26 @@ func TestLayoutStatic(t *testing.T) {
 		"#log",
 		"function navBack",
 		"function parseLevel",
+		".roster-head { height: 64px;",
+		"<h1>Bots</h1>",
+		`<footer class="roster-foot"><p id="health">`,
+		`id="theme-select"`,
+		`id="log-toggle"`,
+		`" · state"`,
+		`class="mark mark-20" id="state-sheet-mark"`,
+		`.mark.mark-20 { width: 20px; height: 20px; }`,
+		`class="solo-bar"`,
+		`id="log-back"`,
+		`class="solo-kicker">Profile</span>`,
+		`<h2 class="solo-title">Log</h2>`,
+		`id="profile-log"`,
+		"gap: 0;",
+		"border-right: 1px solid var(--border);",
+		".roster-head, .thread-bar, .solo-bar { height: 56px; }",
+		`<title>Local Grok Bots</title>`,
+		`b.name + " — Local Grok Bots"`,
+		"openState(btn)",
+		"function restoreStateFocus",
 	} {
 		if !strings.Contains(src, s) {
 			t.Errorf("index.html missing %q", s)
@@ -63,14 +83,28 @@ func TestLayoutStatic(t *testing.T) {
 	}
 	for _, s := range []string{
 		`role="tablist"`,
+		`role="tab"`,
 		`nav class="tabs"`,
 		"nav.tabs",
 		`data-view=`,
 		`id="profile-back"`,
+		"header.top",
+		`class="top"`,
+		"<h1>Local Grok Bots</h1>",
+		">Back</button>",
 	} {
 		if strings.Contains(src, s) {
 			t.Errorf("index.html still has %q", s)
 		}
+	}
+	foot := strings.Index(src, `class="roster-foot"`)
+	health := strings.Index(src, `id="health"`)
+	if foot < 0 || health < foot {
+		t.Fatal("#health must sit in the roster footer")
+	}
+	end := strings.Index(src[foot:], "</footer>")
+	if end < 0 || health > foot+end {
+		t.Fatal("#health must sit in the roster footer")
 	}
 	if strings.Contains(src, `+ "/profile"`) || strings.Contains(src, `+"/profile"`) {
 		t.Error("profile must stay on the bot URL, not a /profile path")

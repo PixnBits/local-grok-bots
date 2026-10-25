@@ -212,22 +212,19 @@ window.addEventListener("storage", function (ev) {
   textarea { resize: vertical; min-height: 72px; }
   /* One viewport. The document does not scroll; paging stays on the message list. */
   .app { height: 100vh; height: 100dvh; overflow: hidden; display: flex; flex-direction: column; }
-  header.top {
-    display: flex; align-items: center; gap: 12px;
-    padding: 14px 16px 8px;
-    flex: none;
-  }
-  header.top h1 {
-    font-family: var(--font);
-    font-size: 22px;
-    font-weight: 600;
-    margin: 0;
-    letter-spacing: -.02em;
-  }
-  header.top .sub { color: var(--muted); font-size: 12px; }
   .theme-switch { display: inline-flex; align-items: center; gap: 8px; flex: none; color: var(--muted); font-size: 13px; }
   .theme-switch select { width: auto; padding: 4px 8px; }
-  main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; padding: 0 16px 16px; }
+  main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; padding: 0; }
+  .roster-head { height: 64px; flex: none; display: flex; align-items: center; padding: 0 12px 0 20px; border-bottom: 1px solid var(--border); }
+  .roster-head h1 { margin: 0; font-family: var(--font); font-size: 17px; font-weight: 700; }
+  .roster-foot { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+  .roster-foot #health { flex: 1 0 100%; margin: 0; }
+  .roster-foot .theme-switch { margin-right: auto; }
+  .solo-bar { height: 64px; flex: none; width: 100%; display: flex; align-items: center; gap: 8px; padding: 0 12px 0 4px; border-bottom: 1px solid var(--border); background: var(--surface); }
+  .solo-id { min-width: 0; flex: 1; display: flex; align-items: baseline; gap: 8px; }
+  .solo-id .name { min-width: 0; font-size: 17px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .solo-kicker { color: var(--muted); flex: none; font-size: 13px; }
+  .solo-title { margin: 0; flex: 1; min-width: 0; font-family: var(--font); font-size: 17px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .panel {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -237,14 +234,15 @@ window.addEventListener("storage", function (ev) {
   }
   .view { display: none; flex: 1; min-height: 0; overflow: hidden; }
   .view.on { display: flex; flex-direction: column; gap: 12px; }
-  #view-bots.on { overflow-y: auto; }
+  #view-bots.on { overflow: hidden; gap: 0; }
   #view-chat.on { overflow: hidden; align-items: center; }
-  #view-profile.on, #view-log.on { overflow: hidden; }
-  #view-bots.on, #bot-list, .msgs, .profile-layout, .profile-col, .sheet-body, .log { overscroll-behavior: contain; }
-  /* The roster list scrolls. The view scrolls only if the create form is taller than the pane. */
-  #bot-list { flex: 1; min-height: 0; overflow-y: auto; }
+  #view-profile.on, #view-log.on { overflow: hidden; gap: 0; }
+  #view-bots.on, .roster-scroll, .msgs, .profile-layout, .profile-col, .sheet-body, .log { overscroll-behavior: contain; }
+  /* Header and footer stay put. The list and the create form scroll together. */
+  .roster-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 8px 0; }
+  #bot-list { flex: none; min-height: 0; overflow: visible; }
   #view-bots > * { flex-shrink: 0; }
-  #view-bots > #bot-list { flex-shrink: 1; }
+  #view-bots > .roster-scroll { flex-shrink: 1; }
   .profile-layout {
     flex: 1; min-height: 0; overflow: hidden; width: 100%;
     display: grid;
@@ -257,19 +255,12 @@ window.addEventListener("storage", function (ev) {
   .profile-nav:empty { display: none; }
   .profile-layout:has(> .profile-nav:empty) { grid-template-columns: minmax(0, 720px); }
   .profile-col { min-width: 0; min-height: 0; overflow: auto; }
-  .solo-back, .thread-back {
+  .back {
     width: 44px; height: 44px; flex: none; padding: 0;
     border: 0; background: transparent; color: var(--text);
-    align-items: center; justify-content: center;
+    display: inline-flex; align-items: center; justify-content: center;
   }
-  .solo-back { display: none; }
-  body.solo .solo-back { display: inline-flex; }
   .thread-back { display: none; }
-  body.solo header.top {
-    height: 64px; padding: 0 16px;
-    border-bottom: 1px solid var(--border);
-    background: var(--surface);
-  }
   .create, .profile { padding: 14px; display: grid; gap: 8px; }
   .grants { border: 1px solid var(--border); border-radius: 10px; margin: 0; padding: 8px 12px; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
   .grants legend { padding: 0 6px; color: var(--muted); }
@@ -310,6 +301,8 @@ window.addEventListener("storage", function (ev) {
   .mark[data-shape="square"]::before { border-radius: 4px; }
   .mark[data-shape="square"]::after { border-radius: 2px; }
   .mark[data-shape="diamond"] { width: 20px; height: 20px; margin: 4px; transform: rotate(45deg); }
+  .mark.mark-20 { width: 20px; height: 20px; }
+  .mark.mark-20[data-shape="diamond"] { width: 14px; height: 14px; margin: 3px; }
   .mark[data-shape="diamond"]::before { border-radius: 3px; }
   .mark[data-shape="diamond"]::after { border-radius: 1px; }
   .mark[data-shape="triangle"]::before,
@@ -339,9 +332,7 @@ window.addEventListener("storage", function (ev) {
     #color-custom { width: 100%; height: auto; aspect-ratio: 1; min-width: 0; }
     .colours .swatch { width: 100%; height: auto; aspect-ratio: 1; min-width: 0; }
   }
-  .profile-head { display: flex; align-items: center; gap: 10px; min-width: 0; margin: 0; }
-  .profile-head .name { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .thread-bar > .mark { flex: none; }
+  .thread-bar > .mark, .solo-bar > .mark, .sheet-head > .mark { flex: none; }
   .bot-copy .bot-attn { color: var(--attention-text); font-weight: 600; }
   .swatch[aria-pressed="true"], .shape-btn[aria-pressed="true"] { outline: 2px solid var(--text); outline-offset: 2px; }
   .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); text-transform: lowercase; flex: none; }
@@ -362,6 +353,7 @@ window.addEventListener("storage", function (ev) {
   .thread {
     flex: 1; min-height: 0; width: 100%; max-width: 800px;
     display: flex; flex-direction: column; overflow: hidden;
+    border: 0; border-radius: 0; box-shadow: none; background: transparent;
   }
   .thread-bar, .edit-bar {
     display: flex; justify-content: space-between; align-items: center; gap: 8px;
@@ -403,12 +395,17 @@ window.addEventListener("storage", function (ev) {
   }
   .state-sheet .sheet-head {
     height: 64px; flex: none;
-    display: flex; justify-content: space-between; align-items: center;
-    padding: 0 12px 0 20px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 8px 0 20px; border-bottom: 1px solid var(--border);
   }
-  .state-sheet .sheet-head h2 { margin: 0; font-family: var(--font); font-size: 18px; }
+  .state-sheet .sheet-head h2 {
+    margin: 0; flex: 1; min-width: 0;
+    font-family: var(--font); font-size: 17px; font-weight: 650;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
   .sheet-close {
-    width: 36px; height: 36px; padding: 0; border: 0;
+    width: 44px; height: 44px; min-width: 44px; min-height: 44px; padding: 0; border: 0;
+    flex: none; background: transparent;
     display: inline-flex; align-items: center; justify-content: center;
   }
   .state-sheet .sheet-body { overflow-y: auto; padding: 4px 14px 16px; flex: 1; min-height: 0; }
@@ -579,25 +576,24 @@ window.addEventListener("storage", function (ev) {
   }
   .auth.on { display: flex; }
   .auth .card { width: min(420px, 100%); padding: 16px; display: grid; gap: 10px; }
-  .desktop-log { display: inline-flex; }
   @media (min-width: 980px) {
-    main { display: grid; grid-template-columns: 280px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 12px; align-items: stretch; }
-    #view-bots { overflow-y: auto; }
-    #view-chat { overflow: hidden; align-items: center; }
+    main { display: grid; grid-template-columns: 280px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 0; align-items: stretch; }
+    #view-bots { border-right: 1px solid var(--border); overflow: hidden; min-width: 0; }
+    #view-chat { overflow: hidden; align-items: center; min-width: 0; }
     #view-bots, #view-chat { display: flex !important; flex-direction: column; }
     #view-profile, #view-log { display: none !important; }
     body.solo #view-bots, body.solo #view-chat { display: none !important; }
     body.solo #view-profile.on, body.solo #view-log.on { display: flex !important; grid-column: 1 / -1; }
+    .thread-back { display: none; }
   }
   @media (max-width: 979px) {
     .thread-back { display: inline-flex; }
-    .thread-bar { height: 56px; }
+    .roster-head, .thread-bar, .solo-bar { height: 56px; }
     .profile-layout { display: flex; flex-direction: column; overflow: auto; }
     .profile-nav, .profile-col { overflow: visible; min-height: auto; flex: none; }
   }
   @media (max-width: 540px) {
-    header.top, body.solo header.top, .thread-bar, .state-sheet .sheet-head { height: 56px; }
-    header.top { padding: 0 12px; }
+    .state-sheet .sheet-head { height: 56px; }
     main { padding: 0; }
     .thread { --thread-pad: 12px; }
     .panel { border-left: 0; border-right: 0; border-radius: 0; }
@@ -607,31 +603,17 @@ window.addEventListener("storage", function (ev) {
     .sheet-close, .solo-back, .thread-back { min-width: 44px; }
   }
   @media (prefers-reduced-motion: reduce) {
-    .state-sheet, .state-backdrop { transition: none; }
+    .state-sheet, .state-backdrop { transition: none; animation: none; }
     .pulse { animation: none; }
   }
 </style>
 </head>
 <body>
 <div class="app">
-  <header class="top">
-    <button type="button" class="back solo-back" id="solo-back" aria-label="Back"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-    <div>
-      <h1>Local Grok Bots</h1>
-      <div class="sub" id="health">connecting…</div>
-    </div>
-    <span style="flex:1"></span>
-    <label class="theme-switch">Appearance
-      <select id="theme-select" aria-label="Appearance">
-        <option value="system">System</option>
-        <option value="light">Light</option>
-        <option value="dark">Dark</option>
-      </select>
-    </label>
-    <button class="ghost desktop-log" id="log-toggle" type="button">Log</button>
-  </header>
   <main>
     <section class="view on" id="view-bots">
+      <header class="roster-head"><h1>Bots</h1></header>
+      <div class="roster-scroll">
       <div class="bots" id="bot-list"></div>
       <form class="panel create" id="create-form">
         <h2>New bot</h2>
@@ -645,9 +627,18 @@ window.addEventListener("storage", function (ev) {
         </div>
         <div class="err" id="create-err"></div>
       </form>
+      </div>
+      <footer class="roster-foot"><p id="health">connecting…</p><label class="theme-switch">Appearance
+        <select id="theme-select" aria-label="Appearance">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </label>
+      <button class="ghost" id="log-toggle" type="button">Log</button></footer>
     </section>
     <section class="view" id="view-chat">
-      <div class="panel thread" id="thread">
+      <div class="thread" id="thread">
         <div class="thread-bar">
           <button type="button" class="back thread-back" id="thread-back" aria-label="Back"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           <span class="mark" id="thread-mark" hidden aria-hidden="true"></span>
@@ -657,7 +648,7 @@ window.addEventListener("storage", function (ev) {
           </div>
           <button type="button" class="state-chip" id="state-chip" hidden aria-label="Bot state" aria-haspopup="dialog" aria-expanded="false" aria-controls="state-sheet" title="Bot state: timers, memory, tools, runs"></button>
           <div class="menu">
-            <button type="button" id="menu-btn" aria-haspopup="menu" aria-expanded="false" aria-label="Bot menu">⋯</button>
+            <button type="button" id="menu-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="bot-menu" aria-label="Bot menu">⋯</button>
             <div class="menu-pop" id="bot-menu" hidden role="menu">
               <button type="button" data-act="profile" role="menuitem">View profile</button>
               <button type="button" data-act="state" role="menuitem">Bot state</button>
@@ -678,13 +669,22 @@ window.addEventListener("storage", function (ev) {
       </div>
     </section>
     <section class="view" id="view-profile">
+      <header class="solo-bar">
+        <button type="button" class="back solo-back" id="solo-back" aria-label="Back"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <span class="mark" id="profile-head-mark" aria-hidden="true"></span>
+        <div class="solo-id">
+          <span class="name" id="profile-head-name">Profile</span>
+          <span class="solo-kicker">Profile</span>
+        </div>
+        <button type="button" class="ghost" id="profile-log">Log</button>
+        <div class="menu">
+          <button type="button" id="profile-menu" aria-haspopup="menu" aria-expanded="false" aria-controls="bot-menu" aria-label="Bot menu">⋯</button>
+        </div>
+      </header>
       <div class="profile-layout">
         <nav class="profile-nav" aria-label="Profile sections"></nav>
         <div class="profile-col">
       <form class="panel profile" id="profile-form">
-        <div class="row" style="justify-content:space-between;align-items:center">
-          <h2 class="profile-head"><span class="mark" id="profile-head-mark" aria-hidden="true"></span><span class="name" id="profile-head-name">Profile</span></h2>
-        </div>
         <div class="shapes" id="shape-picker" role="group" aria-label="Mark shape"></div>
         <div class="colours" role="group" aria-label="Mark colour">
           <div class="swatches" id="color-picker"></div>
@@ -751,11 +751,12 @@ window.addEventListener("storage", function (ev) {
       </div>
     </section>
     <section class="view" id="view-log">
-      <div class="panel" style="display:flex;flex-direction:column;min-height:0;flex:1">
-        <div class="edit-bar">
-          <h2>Log</h2>
-          <button type="button" id="log-refresh">Refresh</button>
-        </div>
+      <header class="solo-bar">
+        <button type="button" class="back log-back" id="log-back" aria-label="Back"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <h2 class="solo-title">Log</h2>
+        <button type="button" id="log-refresh">Refresh</button>
+      </header>
+      <div style="display:flex;flex-direction:column;min-height:0;flex:1">
         <div style="padding:12px" class="filters">
           <select id="log-bot"><option value="">All bots</option></select>
           <select id="log-kind">
@@ -779,7 +780,7 @@ window.addEventListener("storage", function (ev) {
 <div class="state-backdrop" id="state-backdrop" hidden></div>
 <aside class="state-sheet" id="state-sheet" hidden role="dialog" aria-modal="true" aria-label="Bot state">
   <div class="sheet-grab" aria-hidden="true"></div>
-  <div class="sheet-head"><h2 id="state-sheet-title">Bot state</h2><button type="button" class="ghost sheet-close" id="state-close" aria-label="Close"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div>
+  <div class="sheet-head"><span class="mark mark-20" id="state-sheet-mark" hidden aria-hidden="true"></span><h2 id="state-sheet-title">state</h2><button type="button" class="ghost sheet-close" id="state-close" aria-label="Close"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div>
   <div class="sheet-body" id="state-sheet-body"></div>
 </aside>
 <script>
@@ -870,8 +871,14 @@ $("#log-toggle").addEventListener("click", () => {
   if (state.view === "log") navBack();
   else openLog(true);
 });
+$("#profile-log").addEventListener("click", () => openLog(true));
 $("#solo-back").addEventListener("click", navBack);
+$("#log-back").addEventListener("click", navBack);
 $("#thread-back").addEventListener("click", navBack);
+$("#profile-menu").addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleBotMenu($("#profile-menu"));
+});
 const wideMq = window.matchMedia("(min-width: 980px)");
 const onWideChange = () => setView(state.view);
 if (wideMq.addEventListener) wideMq.addEventListener("change", onWideChange);
@@ -991,9 +998,23 @@ function showRunError(text) {
   note.hidden = false;
   note.textContent = text;
 }
+function menuTriggers() { return document.querySelectorAll("[aria-controls='bot-menu']"); }
 function closeMenu() {
-  $("#bot-menu").hidden = true;
-  $("#menu-btn").setAttribute("aria-expanded", "false");
+  const menu = $("#bot-menu");
+  if (menu) menu.hidden = true;
+  for (const b of menuTriggers()) b.setAttribute("aria-expanded", "false");
+}
+// One menu node. The thread ⋯ and the profile ⋯ both anchor it.
+function toggleBotMenu(btn) {
+  const menu = $("#bot-menu");
+  const wrap = btn && btn.closest(".menu");
+  if (wrap && menu.parentElement !== wrap) {
+    wrap.append(menu);
+    menu.hidden = true;
+  }
+  const willOpen = menu.hidden;
+  menu.hidden = !willOpen;
+  for (const b of menuTriggers()) b.setAttribute("aria-expanded", b === btn && willOpen ? "true" : "false");
 }
 // The selected bot lives in the URL as {base}/bots/{id}. Profile and log stay
 // on that same path (or /) with a hash: the daemon only serves /, /index.html
@@ -1981,9 +2002,7 @@ async function pollActive() {
 }
 $("#menu-btn").addEventListener("click", (e) => {
   e.stopPropagation();
-  const menu = $("#bot-menu");
-  menu.hidden = !menu.hidden;
-  $("#menu-btn").setAttribute("aria-expanded", menu.hidden ? "false" : "true");
+  toggleBotMenu($("#menu-btn"));
 });
 document.addEventListener("click", (e) => {
   if (!e.target.closest(".menu")) closeMenu();
@@ -1996,7 +2015,7 @@ $("#bot-menu").addEventListener("click", async (e) => {
   const b = currentBot();
   try {
     if (act === "profile") { await openProfile(state.botId); }
-    else if (act === "state") { await openState($("#menu-btn")); }
+    else if (act === "state") { await openState(btn); }
     else if (act === "pin") {
       await api("/api/bots/" + state.botId, {method:"PATCH", body: JSON.stringify({pinned: !(b && b.pinned)})});
       await loadBots();
@@ -2476,9 +2495,21 @@ function motionOff() {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 function restoreStateFocus() {
-  const el = stateReturnFocus;
+  const opener = stateReturnFocus;
   stateReturnFocus = null;
-  if (el && document.contains(el) && typeof el.focus === "function") el.focus();
+  if (!opener || !document.contains(opener) || typeof opener.focus !== "function") return;
+  // After the click that closed the sheet, so the document click handler
+  // does not hide the menu again before the opener is focused.
+  setTimeout(() => {
+    if (!document.contains(opener)) return;
+    const pop = opener.closest && opener.closest(".menu-pop");
+    if (pop && pop.hidden) {
+      pop.hidden = false;
+      const trigger = pop.parentElement && pop.parentElement.querySelector("[aria-haspopup='menu']");
+      if (trigger) trigger.setAttribute("aria-expanded", "true");
+    }
+    opener.focus();
+  }, 0);
 }
 function closeState() {
   const sheet = $("#state-sheet");
@@ -2493,6 +2524,7 @@ function closeState() {
     if (sheet.classList.contains("is-open")) return;
     sheet.hidden = true;
     if (backdrop) backdrop.hidden = true;
+    restoreStateFocus();
   };
   if (motionOff()) hide();
   else {
@@ -2503,7 +2535,6 @@ function closeState() {
     });
     setTimeout(hide, 300);
   }
-  restoreStateFocus();
 }
 async function openState(opener) {
   if (!state.botId) return;
@@ -2511,7 +2542,12 @@ async function openState(opener) {
   stateHideToken++;
   stateReturnFocus = opener || null;
   const b = currentBot();
-  $("#state-sheet-title").textContent = (b ? b.name + " · " : "") + "state";
+  const title = b && b.name ? b.name + " · state" : "state";
+  $("#state-sheet-title").textContent = title;
+  $("#state-sheet").setAttribute("aria-label", title);
+  const sheetMark = $("#state-sheet-mark");
+  if (b) { paintMark(sheetMark, b.mark); sheetMark.hidden = false; }
+  else sheetMark.hidden = true;
   const sheet = $("#state-sheet");
   const backdrop = $("#state-backdrop");
   sheet.hidden = false;
