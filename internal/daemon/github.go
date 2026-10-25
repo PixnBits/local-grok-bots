@@ -106,12 +106,23 @@ func safeAuditID(s string) string {
 	return s
 }
 
+func allowlistNames(owner, repo string) (string, string, bool) {
+	name, err := github.NormalizeRepo(owner + "/" + repo)
+	if err != nil {
+		return "", "", false
+	}
+	owner, repo, _ = strings.Cut(name, "/")
+	return owner, repo, true
+}
+
 // auditSandboxGitHub records a jail denial of GitHub. The row has no token.
 func (a *App) auditSandboxGitHub(botID string, ev sandbox.Event) {
 	if a == nil || ev.Kind != "grant_denied" || ev.Grant != "github" {
 		return
 	}
-	if ev.Detail != sandbox.GitHubNetworkDenied && ev.Detail != sandbox.GitHubProxyDenied {
+	switch ev.Detail {
+	case sandbox.GitHubNetworkDenied, sandbox.GitHubProxyDenied, sandbox.GitHubAllowlistDenied:
+	default:
 		return
 	}
 	rec := map[string]any{
@@ -123,6 +134,12 @@ func (a *App) auditSandboxGitHub(botID string, ev sandbox.Event) {
 	}
 	if ev.Host != "" {
 		rec["host"] = ev.Host
+	}
+	if ev.Detail == sandbox.GitHubAllowlistDenied {
+		if owner, repo, ok := allowlistNames(ev.Owner, ev.Repo); ok {
+			rec["owner"] = owner
+			rec["repo"] = repo
+		}
 	}
 	if a.audit != nil {
 		a.audit.Write(rec)

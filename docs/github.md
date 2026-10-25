@@ -25,7 +25,7 @@ The write proxy accepts only the approved window. A push window allows `GET` `in
 
 `create_pr` reads the default branch through a read proxy, closes that proxy, then asks (`ForceAsk`). The pull-request `POST` uses the write proxy and only after approval. The head branch is refused when it matches the default branch in any letter case. The base branch may be the default. `pr_status` is a read through the read proxy and does not open a card.
 
-The splice proxy still refuses `github.com` and `api.github.com` even when they are on `net_allow`. A jail denial of that kind, and a missing GitHub socket, is an audit row with action `github_refuse`.
+The splice proxy still refuses `github.com` and `api.github.com` even when they are on `net_allow`. A jail denial of that kind, and a missing GitHub socket, is an audit row with action `github_refuse`. An off-allowlist clone, fetch, pull, ls-remote, or remote is the same action with reason `allowlist`. The row names the owner and repo when the URL is `https://github.com/owner/repo` or `git@github.com:owner/repo`. A URL that contains a newline is refused and is not written into the event log.
 
 ## Threat model
 

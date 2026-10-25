@@ -18,6 +18,8 @@ type Event struct {
 	Host   string `json:"host,omitempty"`
 	Detail string `json:"detail,omitempty"`
 	Notice string `json:"notice,omitempty"`
+	Owner  string `json:"owner,omitempty"`
+	Repo   string `json:"repo,omitempty"`
 }
 
 type proxy struct {
@@ -151,10 +153,12 @@ func (p *proxy) handle(conn net.Conn) {
 
 // GitHubNetworkDenied is the splice-proxy detail for github.com and
 // api.github.com. GitHubProxyDenied is the detail when the credential
-// bridge cannot be built. The daemon audits these two strings.
+// bridge cannot be built. GitHubAllowlistDenied is the jail-wrapper
+// detail for a remote outside the allowlist. The daemon audits these.
 const (
-	GitHubNetworkDenied = "github is not on the network grant"
-	GitHubProxyDenied   = "github proxy unavailable"
+	GitHubNetworkDenied   = "github is not on the network grant"
+	GitHubProxyDenied     = "github proxy unavailable"
+	GitHubAllowlistDenied = "allowlist"
 )
 
 func (p *proxy) decide(host string, port int) (bool, Event) {

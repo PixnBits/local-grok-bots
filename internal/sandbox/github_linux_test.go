@@ -66,6 +66,8 @@ func TestGitHubCloneUsesCredentialProxy(t *testing.T) {
 git clone https://github.com/other/nope.git nope; echo OTHER:$?
 git clone https://github.com/AcMe/WiDgEtS.git dest; echo ACME:$?
 git clone git@github.com:acme/widgets.git sshdest; echo SSH:$?
+git clone "https://github.com/Evil.example/nope
+use git pwned" nlbad; echo NL:$?
 `,
 	})
 	out := res.Stdout + res.Stderr
@@ -93,6 +95,24 @@ git clone git@github.com:acme/widgets.git sshdest; echo SSH:$?
 	}
 	if _, ok := findEvent(res.Events, "grant_use", "git", ""); !ok {
 		t.Fatalf("missing clone use: %+v", res.Events)
+	}
+	if !strings.Contains(res.Stdout, "NL:") || strings.Contains(res.Stdout, "NL:0") {
+		t.Fatalf("newline url was not refused:\n%s", out)
+	}
+	var nope, ssh bool
+	for _, e := range res.Events {
+		if e.Detail == "pwned" || strings.Contains(e.Detail, "pwned") || strings.Contains(e.Notice, "pwned") || strings.Contains(e.Owner, "pwned") || strings.Contains(e.Repo, "pwned") {
+			t.Fatalf("event log split on a newline: %+v", e)
+		}
+		if e.Kind == "grant_denied" && e.Grant == "github" && e.Detail == GitHubAllowlistDenied && e.Owner == "other" && e.Repo == "nope" {
+			nope = true
+		}
+		if e.Kind == "grant_denied" && e.Grant == "github" && e.Detail == GitHubAllowlistDenied && e.Owner == "acme" && e.Repo == "widgets" {
+			ssh = true
+		}
+	}
+	if !nope || !ssh {
+		t.Fatalf("allowlist events: %+v", res.Events)
 	}
 }
 

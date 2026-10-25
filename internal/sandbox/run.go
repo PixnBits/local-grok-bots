@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/PixnBits/local-grok-bots/internal/github"
 )
 
 // Request is one jailed shell command.
@@ -485,6 +487,38 @@ func captureReady(ctx context.Context, cmd *exec.Cmd, ready func() error) (strin
 	return stdout, stderr, nil
 }
 
+func allowlistEvent(raw string) Event {
+	ev := Event{Kind: "grant_denied", Grant: "github", Detail: GitHubAllowlistDenied}
+	raw = strings.TrimSpace(raw)
+	if owner, repo, err := github.ParseGitHubRemote(raw); err == nil {
+		ev.Owner, ev.Repo = owner, repo
+		return ev
+	}
+	if owner, repo, ok := gitHubSSHRepo(raw); ok {
+		ev.Owner, ev.Repo = owner, repo
+	}
+	return ev
+}
+
+func gitHubSSHRepo(raw string) (string, string, bool) {
+	const prefix = "git@github.com:"
+	if len(raw) < len(prefix) || !strings.EqualFold(raw[:len(prefix)], prefix) {
+		return "", "", false
+	}
+	rest := raw[len(prefix):]
+	rest = strings.TrimSuffix(rest, "/")
+	if len(rest) >= 4 && strings.EqualFold(rest[len(rest)-4:], ".git") {
+		rest = rest[:len(rest)-4]
+	}
+	rest = strings.TrimSuffix(rest, "/")
+	name, err := github.NormalizeRepo(rest)
+	if err != nil {
+		return "", "", false
+	}
+	owner, repo, _ := strings.Cut(name, "/")
+	return owner, repo, true
+}
+
 func parseEventFile(path string) []Event {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -500,6 +534,8 @@ func parseEventFile(path string) []Event {
 			out = append(out, Event{Kind: "grant_denied", Grant: "git", Detail: "push not sent"})
 		case line == "pkg":
 			out = append(out, Event{Kind: "grant_use", Detail: "package install", Notice: "Package install"})
+		case strings.HasPrefix(line, "deny github allowlist "):
+			out = append(out, allowlistEvent(strings.TrimPrefix(line, "deny github allowlist ")))
 		case strings.HasPrefix(line, "deny git "):
 			out = append(out, Event{Kind: "grant_denied", Grant: "git", Detail: strings.TrimPrefix(line, "deny git ")})
 		case strings.HasPrefix(line, "use git "):

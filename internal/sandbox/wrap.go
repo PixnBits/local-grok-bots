@@ -87,6 +87,8 @@ export GIT_CONFIG_NOSYSTEM=1
 unset SSH_AUTH_SOCK http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 real=/lgb/bin/git
 log=/lgb/events/log
+nl='
+'
 grant=@@GRANT@@
 bridge=@@BRIDGE@@
 author_name=@@NAME@@
@@ -118,10 +120,27 @@ GHPORT=
 need_bridge=0
 found_url=0
 pos=
+deny_allow() {
+  case "$1" in
+    *"$nl"*)
+      printf '%s\n' "deny git ${sub}" >> "$log"
+      ;;
+    *)
+      printf '%s\n' "deny github allowlist $1" >> "$log"
+      ;;
+  esac
+}
 vet() {
+  case "$1" in
+    *"$nl"*)
+      echo "git ${sub} denied: repository is not allowlisted" >&2
+      deny_allow "$1"
+      exit 1
+      ;;
+  esac
   folded=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || {
     echo "git ${sub} denied: repository is not allowlisted" >&2
-    printf '%s\n' "deny git ${sub}" >> "$log"
+    deny_allow "$1"
     exit 1
   }
   case "$folded" in
@@ -131,7 +150,7 @@ vet() {
 @@REPOS@@
     *://*|git@*)
       echo "git ${sub} denied: repository is not allowlisted" >&2
-      printf '%s\n' "deny git ${sub}" >> "$log"
+      deny_allow "$1"
       exit 1
       ;;
   esac
