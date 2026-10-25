@@ -168,8 +168,8 @@ func (a *App) openGitHubReadProxy(bot store.Bot) (*github.Proxy, error) {
 }
 
 // openGitHubWriteGate listens only after an approval card. The caller closes it.
-// The listener is not the jail socket.
-func (a *App) openGitHubWriteGate(bot store.Bot) (string, func(), error) {
+// The listener is not the jail socket. win is the only route it forwards.
+func (a *App) openGitHubWriteGate(bot store.Bot, win github.Window) (string, func(), error) {
 	noop := func() {}
 	if a == nil {
 		return "", noop, errors.New("proxy unavailable")
@@ -181,6 +181,7 @@ func (a *App) openGitHubWriteGate(bot store.Bot) (string, func(), error) {
 		APIBase: a.githubAPIBase,
 		Audit:   func(ev github.Audit) { a.auditGitHub(bot.ID, ev) },
 		Access:  github.AccessWrite,
+		Window:  win,
 	})
 	if err != nil {
 		return "", noop, errors.New("proxy unavailable")

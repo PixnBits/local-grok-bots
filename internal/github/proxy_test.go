@@ -355,8 +355,8 @@ func TestReadProxyRefusesWrites(t *testing.T) {
 			t.Fatal(err)
 		}
 		res.Body.Close()
-		if res.StatusCode != http.StatusOK {
-			t.Fatalf("write %s -> %d", path, res.StatusCode)
+		if res.StatusCode != http.StatusForbidden {
+			t.Fatalf("unscoped write %s -> %d", path, res.StatusCode)
 		}
 	}
 	res, err := http.Get(base + "/github/acme/widgets.git/info/refs?service=git-upload-pack")

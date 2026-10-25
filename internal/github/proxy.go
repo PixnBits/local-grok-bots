@@ -61,7 +61,26 @@ type Config struct {
 	// Access defaults to AccessRead. AccessWrite is a second instance used
 	// only for a push or create_pr after the card is approved.
 	Access Access
+	// Window scopes an AccessWrite proxy to one approved route. An empty
+	// window refuses every request. AccessRead ignores it.
+	Window Window
 }
+
+// Window is the single owner, repository, and branch a write proxy may use.
+type Window struct {
+	Kind    string
+	Owner   string
+	Repo    string
+	Branch  string
+	Default string
+}
+
+const (
+	// WindowPush allows receive-pack and its info/refs advertisement for one branch.
+	WindowPush = "push"
+	// WindowPR allows POST /repos/{owner}/{repo}/pulls for one head.
+	WindowPR = "pr"
+)
 
 // Proxy is a host-side reverse proxy. It adds Authorization only for an
 // allowlisted owner/repo on github.com or api.github.com, and it drops any
@@ -81,6 +100,7 @@ type Proxy struct {
 	bot     string
 	run     string
 	gate    string
+	window  Window
 	dir     string
 	sock    string
 	unixLn  net.Listener
@@ -126,6 +146,7 @@ func New(cfg Config) (*Proxy, error) {
 		apiBase: apiBase,
 		audit:   cfg.Audit,
 		gate:    gate,
+		window:  cfg.Window,
 		client: &http.Client{
 			Transport: lockedTransport(gitBase, apiBase),
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -402,7 +423,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, requireGate bool) 
 		return
 	}
 	write := isGenuineWrite(route, method)
-	if !accessOK(p.access, route, r.Method) {
+	if !accessOK(p.access, route, r.Method, p.window) {
 		reason := "method"
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {
 			reason = "route"
@@ -422,6 +443,22 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, requireGate bool) 
 	if strings.Contains(path, tok) || strings.Contains(r.URL.RawQuery, tok) {
 		p.finish(w, http.StatusForbidden, "/", "", "", "path", method, write)
 		return
+	}
+	if p.access == AccessWrite && p.window.Kind == WindowPush && method == http.MethodPost && gitTail(route.Path) == "git-receive-pack" {
+		body, berr := checkReceivePack(r.Body, p.window.Branch, p.window.Default)
+		if berr != nil {
+			p.finish(w, http.StatusForbidden, route.Path, route.Owner, route.Repo, "ref", method, write)
+			return
+		}
+		r.Body = io.NopCloser(body)
+	}
+	if p.access == AccessWrite && p.window.Kind == WindowPR && method == http.MethodPost && apiPullCreate(route.Path) {
+		body, berr := checkPullHead(r.Body, p.window.Branch)
+		if berr != nil {
+			p.finish(w, http.StatusForbidden, route.Path, route.Owner, route.Repo, "head", method, write)
+			return
+		}
+		r.Body = io.NopCloser(body)
 	}
 	base := p.gitBase
 	if route.Service == "api" {
@@ -559,9 +596,9 @@ func upstreamAuth(service, tok string) string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(raw))
 }
 
-func accessOK(access Access, route Route, method string) bool {
+func accessOK(access Access, route Route, method string, win Window) bool {
 	if access == AccessWrite {
-		return writeAccess(route, method)
+		return writeAccess(route, method, win)
 	}
 	return readAccess(route, method)
 }
@@ -583,8 +620,15 @@ func readAccess(route Route, method string) bool {
 	return apiReadPath(route.Path)
 }
 
-func writeAccess(route Route, method string) bool {
-	if route.Service == "github" {
+func writeAccess(route Route, method string, win Window) bool {
+	if !windowRepo(route, win) || win.Branch == "" {
+		return false
+	}
+	switch win.Kind {
+	case WindowPush:
+		if route.Service != "github" {
+			return false
+		}
 		switch gitTail(route.Path) {
 		case "info/refs":
 			return method == http.MethodGet && route.Query == "service=git-receive-pack"
@@ -593,11 +637,17 @@ func writeAccess(route Route, method string) bool {
 		default:
 			return false
 		}
-	}
-	if route.Service != "api" || method != http.MethodPost {
+	case WindowPR:
+		return route.Service == "api" && method == http.MethodPost && apiPullCreate(route.Path)
+	default:
 		return false
 	}
-	return apiPullCreate(route.Path)
+}
+
+func windowRepo(route Route, win Window) bool {
+	return win.Owner != "" && win.Repo != "" &&
+		strings.EqualFold(route.Owner, win.Owner) &&
+		strings.EqualFold(route.Repo, win.Repo)
 }
 
 func gitTail(path string) string {

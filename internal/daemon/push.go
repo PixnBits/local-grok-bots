@@ -123,7 +123,13 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	if workspaceConfigReason(ws) == "config" {
 		return a.pushDenied(bot, owner, repo, "config")
 	}
-	base, closeWrite, err := a.openGitHubWriteGate(bot)
+	branch := ""
+	if len(specs) > 0 {
+		branch = specs[0].branch
+	}
+	base, closeWrite, err := a.openGitHubWriteGate(bot, github.Window{
+		Kind: github.WindowPush, Owner: owner, Repo: repo, Branch: branch, Default: def,
+	})
 	if err != nil {
 		return a.pushDenied(bot, owner, repo, "proxy unavailable")
 	}
