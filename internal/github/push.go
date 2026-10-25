@@ -35,43 +35,55 @@ func ParsePushArgs(args []string) (PushArgs, error) {
 	if i < len(args) && args[i] == "push" {
 		i++
 	}
-	var pos []string
+	var first error
+	var out PushArgs
+	sawURL := false
+	note := func(err error) {
+		if err != nil && first == nil {
+			first = err
+		}
+	}
+	take := func(tok string) {
+		if tok == "" || strings.ContainsAny(tok, "\r\n\t\x00") {
+			note(ErrPushSpec)
+			return
+		}
+		if looksRemoteURL(tok) {
+			if sawURL {
+				note(ErrPushRemote)
+				return
+			}
+			sawURL = true
+			if _, _, err := ParseGitHubRemote(tok); err != nil {
+				out.URL = tok
+				note(err)
+				return
+			}
+			out.URL = tok
+			return
+		}
+		if _, _, err := SplitRefspec(tok); err != nil {
+			note(err)
+			return
+		}
+		out.Names = append(out.Names, tok)
+	}
 	for i < len(args) {
 		a := args[i]
 		i++
 		if a == "--" {
-			pos = append(pos, args[i:]...)
+			for _, tok := range args[i:] {
+				take(tok)
+			}
 			break
 		}
 		if a == "" || strings.HasPrefix(a, "-") {
-			if err := pushFlag(a); err != nil {
-				return PushArgs{}, err
-			}
+			note(pushFlag(a))
 			continue
 		}
-		pos = append(pos, a)
+		take(a)
 	}
-	var out PushArgs
-	for _, tok := range pos {
-		if tok == "" || strings.ContainsAny(tok, "\r\n\t\x00") {
-			return PushArgs{}, ErrPushSpec
-		}
-		if looksRemoteURL(tok) {
-			if out.URL != "" {
-				return PushArgs{}, ErrPushRemote
-			}
-			if _, _, err := ParseGitHubRemote(tok); err != nil {
-				return PushArgs{}, err
-			}
-			out.URL = tok
-			continue
-		}
-		if _, _, err := SplitRefspec(tok); err != nil {
-			return PushArgs{}, err
-		}
-		out.Names = append(out.Names, tok)
-	}
-	return out, nil
+	return out, first
 }
 
 func pushFlag(a string) error {

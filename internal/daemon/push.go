@@ -37,7 +37,12 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	}
 	parsed, err := github.ParsePushArgs(args)
 	if err != nil {
-		return a.pushDenied(bot, "", "", err.Error())
+		var repos []string
+		if a != nil {
+			repos = a.policy.EffectiveGitHubRepos(bot.GitHubAllow)
+		}
+		owner, repo := pushAuditNames(parsed, repos)
+		return a.pushDenied(bot, owner, repo, err.Error())
 	}
 	if !granted(bot.Grants, "git") || !granted(bot.Grants, "github") {
 		return a.pushDenied(bot, "", "", "missing grant")
@@ -217,6 +222,25 @@ func repoAllowed(repos []string, owner, repo string) bool {
 		}
 	}
 	return false
+}
+
+// pushAuditNames is the repository a denied push can name. An invalid URL
+// is left blank so it is not replaced by the single allowlisted repository.
+func pushAuditNames(parsed github.PushArgs, repos []string) (string, string) {
+	if parsed.URL != "" {
+		owner, repo, err := github.ParseGitHubRemote(parsed.URL)
+		if err != nil {
+			return "", ""
+		}
+		return owner, repo
+	}
+	if len(repos) == 1 {
+		owner, repo, ok := strings.Cut(repos[0], "/")
+		if ok && owner != "" && repo != "" {
+			return owner, repo
+		}
+	}
+	return "", ""
 }
 
 func pushTarget(parsed github.PushArgs, repos []string) (owner, repo, reason string) {
