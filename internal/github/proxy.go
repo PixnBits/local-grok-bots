@@ -530,6 +530,9 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, base *url.URL, r
 		return 0, err
 	}
 	copyHeaders(req.Header, r.Header, requestHeaders)
+	// Leave Accept-Encoding unset so the transport negotiates gzip and
+	// decompresses the body. A forwarded client value skips that.
+	req.Header.Del("Accept-Encoding")
 	req.Header.Set("Authorization", upstreamAuth(route.Service, tok))
 	req.Host = u.Host
 	if r.ContentLength > 0 {
@@ -545,6 +548,11 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, base *url.URL, r
 		return 0, errors.New("redirect")
 	}
 	copyHeaders(w.Header(), resp.Header, responseHeaders)
+	// The transport decompresses when it negotiated gzip. A copied
+	// Content-Encoding or the compressed Content-Length would make the
+	// client treat the plain body as still compressed.
+	w.Header().Del("Content-Encoding")
+	w.Header().Del("Content-Length")
 	w.WriteHeader(resp.StatusCode)
 	_, err = io.Copy(w, resp.Body)
 	if err != nil {
@@ -554,11 +562,10 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, base *url.URL, r
 }
 
 var requestHeaders = map[string]bool{
-	"content-type":    true,
-	"accept":          true,
-	"user-agent":      true,
-	"git-protocol":    true,
-	"accept-encoding": true,
+	"content-type": true,
+	"accept":       true,
+	"user-agent":   true,
+	"git-protocol": true,
 }
 
 var responseHeaders = map[string]bool{
