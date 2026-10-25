@@ -43,6 +43,9 @@ func (a *App) toolWriteFile(botID string, args map[string]any) (string, error) {
 	if err := clisession.WriteRegularInDir(a.ws, rel, []byte(content), 0o644); err != nil {
 		return "", fileErr(err)
 	}
+	if err := ownWorkspaceParents(a.ws, filepath.Join(a.ws, rel)); err != nil {
+		return "", err
+	}
 	return `{"ok":true}`, nil
 }
 

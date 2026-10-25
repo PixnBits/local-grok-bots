@@ -414,6 +414,12 @@ func sameTree(root, path string) bool {
 }
 
 func capture(ctx context.Context, cmd *exec.Cmd) (string, string, error) {
+	return captureReady(ctx, cmd, nil)
+}
+
+// captureReady runs cmd. ready, when set, runs after start and before the
+// command is expected to finish. A ready error kills the process group.
+func captureReady(ctx context.Context, cmd *exec.Cmd, ready func() error) (string, string, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var outBuf, errBuf bytes.Buffer
 	stdoutPipe, err := cmd.StdoutPipe()
@@ -439,6 +445,17 @@ func capture(ctx context.Context, cmd *exec.Cmd) (string, string, error) {
 	}()
 	waitErr := make(chan error, 1)
 	go func() { waitErr <- cmd.Wait() }()
+
+	if ready != nil {
+		if err := ready(); err != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Process.Kill()
+			<-waitErr
+			<-doneOut
+			<-doneErr
+			return "", "", err
+		}
+	}
 
 	var runErr error
 	select {

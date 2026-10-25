@@ -131,11 +131,22 @@ func (a *App) startLGB(ctx context.Context, bot store.Bot, runID, ws string) (*l
 		if err := os.Mkdir(d, 0o700); err != nil {
 			return nil, nil, err
 		}
+		if err := ownNewDir(d); err != nil {
+			return nil, nil, err
+		}
 	}
-	if err := os.WriteFile(filepath.Join(root, "bin", "lgb"), []byte(lgbScript), 0o700); err != nil {
+	lgbPath := filepath.Join(root, "bin", "lgb")
+	if err := os.WriteFile(lgbPath, []byte(lgbScript), 0o700); err != nil {
 		return nil, nil, err
 	}
-	if err := os.WriteFile(filepath.Join(root, "bin", "coi"), []byte(coiScript), 0o700); err != nil {
+	if err := ownFile(lgbPath); err != nil {
+		return nil, nil, err
+	}
+	coiPath := filepath.Join(root, "bin", "coi")
+	if err := os.WriteFile(coiPath, []byte(coiScript), 0o700); err != nil {
+		return nil, nil, err
+	}
+	if err := ownFile(coiPath); err != nil {
 		return nil, nil, err
 	}
 	req, err := openSpoolDir(filepath.Join(root, "req"))

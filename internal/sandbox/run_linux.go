@@ -5,10 +5,13 @@ package sandbox
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -20,13 +23,22 @@ func launch(ctx context.Context, p *prepared) (string, string, error) {
 }
 
 func runBwrap(ctx context.Context, p *prepared, bwrap string) (string, string, error) {
+	uid, gid := JailIDs()
+	drop := jailDrops(uid)
 	args := []string{
 		"--unshare-user", "--unshare-net", "--unshare-pid", "--unshare-uts",
-		"--die-with-parent", "--disable-userns", "--clearenv",
+		"--die-with-parent",
+	}
+	// A root jail writes its own uid map, which cannot be combined with this flag.
+	// The inner command sets the same nested-namespace limit before it drops.
+	if !drop {
+		args = append(args, "--disable-userns")
+	}
+	args = append(args, "--clearenv",
 		"--ro-bind", "/usr", "/usr",
 		"--ro-bind", "/bin", "/bin",
 		"--ro-bind", "/lib", "/lib",
-	}
+	)
 	if st, err := os.Stat("/lib64"); err == nil && st.IsDir() {
 		args = append(args, "--ro-bind", "/lib64", "/lib64")
 	}
@@ -61,9 +73,135 @@ func runBwrap(ctx context.Context, p *prepared, bwrap string) (string, string, e
 		}
 		args = append(args, "--setenv", k, v)
 	}
-	args = append(args, "--", "/bin/sh", "-c", p.command)
+	var infoR, infoW, blockR, blockW *os.File
+	if drop {
+		var err error
+		infoR, infoW, err = os.Pipe()
+		if err != nil {
+			return "", "", err
+		}
+		defer infoR.Close()
+		defer infoW.Close()
+		blockR, blockW, err = os.Pipe()
+		if err != nil {
+			return "", "", err
+		}
+		defer blockR.Close()
+		defer blockW.Close()
+		// ExtraFiles start at fd 3.
+		args = append(args, "--info-fd", "3", "--userns-block-fd", "4")
+	}
+	args = append(args, "--")
+	args = append(args, commandArgv(p.command)...)
 	cmd := exec.Command(bwrap, args...)
-	return capture(ctx, cmd)
+	if !drop {
+		return capture(ctx, cmd)
+	}
+	cmd.ExtraFiles = []*os.File{infoW, blockR}
+	return captureReady(ctx, cmd, func() error {
+		_ = infoW.Close()
+		_ = blockR.Close()
+		return finishUserNamespace(ctx, infoR, blockW, uid, gid)
+	})
+}
+
+// jailDrops is true when a root daemon has bubblewrap and must run the shell
+// as the overflow uid. The workspace is owned by that uid.
+func jailDrops(uid int) bool {
+	return os.Geteuid() == 0 && uid != 0
+}
+
+// commandArgv is the program bubblewrap executes. A non-root daemon keeps
+// /bin/sh. A root daemon maps the overflow uid and then drops to it.
+func commandArgv(command string) []string {
+	uid, gid := JailIDs()
+	if !jailDrops(uid) {
+		return []string{"/bin/sh", "-c", command}
+	}
+	return droppedArgv(uid, gid, command)
+}
+
+// droppedArgv locks nested user namespaces, then drops to uid/gid.
+// command is a separate argument so it is not interpolated into the script.
+func droppedArgv(uid, gid int, command string) []string {
+	script := "echo 1 > /proc/sys/user/max_user_namespaces || exit 1\n" +
+		"exec /usr/bin/setpriv --reuid=" + strconv.Itoa(uid) +
+		" --regid=" + strconv.Itoa(gid) +
+		" --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all /bin/sh -c \"$1\"\n"
+	return []string{"/bin/sh", "-c", script, "sh", command}
+}
+
+func idMapBody(id int) string {
+	if id < 0 {
+		return ""
+	}
+	if id == 0 {
+		return "0 0 1\n"
+	}
+	return fmt.Sprintf("0 0 1\n%d %d 1\n", id, id)
+}
+
+func finishUserNamespace(ctx context.Context, info, block *os.File, uid, gid int) error {
+	done := make(chan struct{})
+	var buf []byte
+	var rerr error
+	go func() {
+		buf, rerr = io.ReadAll(io.LimitReader(info, 1<<16))
+		close(done)
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-done:
+	}
+	if rerr != nil {
+		return rerr
+	}
+	pid, err := childPID(buf)
+	if err != nil {
+		return err
+	}
+	if err := writeIDMaps(pid, uid, gid); err != nil {
+		return err
+	}
+	_, err = block.Write([]byte{1})
+	return err
+}
+
+func childPID(buf []byte) (int, error) {
+	var info struct {
+		PID int `json:"child-pid"`
+	}
+	if err := json.Unmarshal(buf, &info); err != nil || info.PID < 2 {
+		return 0, errors.New("user namespace")
+	}
+	return info.PID, nil
+}
+
+func writeIDMaps(pid, uid, gid int) error {
+	if pid < 2 || uid < 0 || gid < 0 {
+		return errors.New("user namespace")
+	}
+	if err := writeMapFile(fmt.Sprintf("/proc/%d/uid_map", pid), idMapBody(uid)); err != nil {
+		return err
+	}
+	return writeMapFile(fmt.Sprintf("/proc/%d/gid_map", pid), idMapBody(gid))
+}
+
+func writeMapFile(path, body string) error {
+	if body == "" {
+		return errors.New("user namespace")
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write([]byte(body))
+	cerr := f.Close()
+	if werr != nil {
+		return werr
+	}
+	return cerr
 }
 
 func runUnshare(ctx context.Context, p *prepared) (string, string, error) {
