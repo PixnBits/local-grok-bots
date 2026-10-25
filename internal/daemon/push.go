@@ -202,7 +202,11 @@ func (a *App) auditPush(bot store.Bot, owner, repo, decision, reason string) san
 			"reason":   reason,
 		})
 	}
-	return sandbox.Event{Kind: kind, Grant: "github", Detail: reason}
+	detail := reason
+	if decision != "allow" {
+		detail = "push " + reason
+	}
+	return sandbox.Event{Kind: kind, Grant: "github", Detail: detail}
 }
 
 func repoAllowed(repos []string, owner, repo string) bool {

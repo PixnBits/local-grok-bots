@@ -8,6 +8,7 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/sandbox"
+	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
 func TestAuditSandboxGitHubDenial(t *testing.T) {
@@ -72,5 +73,41 @@ func TestAuditSandboxGitHubAllowlist(t *testing.T) {
 	}
 	if strings.Count(raw, "\n") != 2 {
 		t.Fatalf("audit line split:\n%s", raw)
+	}
+}
+
+func TestOffAllowlistPushAuditsOnce(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "no"}, nil
+	}})
+	app.policy.GitHub.Repos = []string{"acme/widgets"}
+	auditPath := filepath.Join(t.TempDir(), "audit.log")
+	lg, err := audit.Open(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lg.Close() })
+	app.audit = lg
+	bot := store.Bot{
+		ID: "bot_1", Grants: []string{"git", "github"}, GitHubAllow: []string{"acme/widgets"},
+	}
+	res := app.handleGitPush(t.Context(), t.Context(), bot, nil, ".", []string{
+		"git", "push", "https://github.com/other/nope.git", "feature",
+	})
+	if res.Code == 0 || !strings.Contains(res.Stderr, "allowlist") {
+		t.Fatalf("push result %+v", res)
+	}
+	for _, ev := range res.Events {
+		if ev.Detail == sandbox.GitHubAllowlistDenied {
+			t.Fatalf("daemon denial reused the allowlist detail: %+v", ev)
+		}
+		app.recordSandbox(bot.ID, ev)
+	}
+	raw := readAudit(t, auditPath)
+	if strings.Count(raw, `"action":"github_push_denied"`) != 1 || strings.Contains(raw, `"action":"github_refuse"`) {
+		t.Fatalf("audit:\n%s", raw)
+	}
+	if !strings.Contains(raw, `"owner":"other"`) || !strings.Contains(raw, `"repo":"nope"`) || !strings.Contains(raw, `"reason":"allowlist"`) {
+		t.Fatalf("audit fields:\n%s", raw)
 	}
 }
