@@ -21,8 +21,9 @@ import (
 // secretPayload is the one-shot record on the pipe created for re-exec.
 // AuthToken is a pointer so a missing field is distinct from an empty token.
 type secretPayload struct {
-	AuthToken *string `json:"t"`
-	Nonce     string  `json:"n"`
+	AuthToken  *string `json:"t"`
+	Nonce      string  `json:"n"`
+	TokensFile *string `json:"f,omitempty"`
 }
 
 // ReexecIfNeeded replaces this process once so /proc/self/environ no longer
@@ -31,19 +32,21 @@ type secretPayload struct {
 // without a matching payload exits instead of skipping the scrub.
 func ReexecIfNeeded() {
 	if raw := os.Getenv(readyKey); raw != "" {
-		tok, err := readReadyAuth(raw)
+		tok, file, err := readReadyAuth(raw)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "local-grok-bots: cannot scrub environment")
 			os.Exit(1)
 		}
 		heldAuth = tok
+		heldTokensFile = file
 		return
 	}
 	heldAuth = os.Getenv("AUTH_TOKEN")
-	reexecWithAuth(heldAuth)
+	heldTokensFile = os.Getenv("AUTH_TOKENS_FILE")
+	reexecWithAuth(heldAuth, heldTokensFile)
 }
 
-func reexecWithAuth(token string) {
+func reexecWithAuth(token, tokensFile string) {
 	fail := func() {
 		fmt.Fprintln(os.Stderr, "local-grok-bots: cannot scrub environment")
 		os.Exit(1)
@@ -56,7 +59,7 @@ func reexecWithAuth(token string) {
 	if err != nil {
 		fail()
 	}
-	payload := secretPayload{AuthToken: &token, Nonce: nonce}
+	payload := secretPayload{AuthToken: &token, TokensFile: &tokensFile, Nonce: nonce}
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		fail()
 	}
@@ -88,32 +91,36 @@ func newNonce() (string, error) {
 	return hex.EncodeToString(buf[:]), nil
 }
 
-func readReadyAuth(marker string) (string, error) {
+func readReadyAuth(marker string) (string, string, error) {
 	nonce, fd, err := parseReadyMarker(marker)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	f := os.NewFile(uintptr(fd), "env")
 	if f == nil {
-		return "", errors.New("missing env pipe")
+		return "", "", errors.New("missing env pipe")
 	}
 	defer f.Close()
 	st, err := f.Stat()
 	if err != nil || !pipeOrMemfd(fd, st) {
-		return "", errors.New("env pipe is not a pipe")
+		return "", "", errors.New("env pipe is not a pipe")
 	}
 	var p secretPayload
 	dec := json.NewDecoder(io.LimitReader(f, 1<<20))
 	if err := dec.Decode(&p); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if p.AuthToken == nil {
-		return "", errors.New("token missing")
+		return "", "", errors.New("token missing")
 	}
 	if subtle.ConstantTimeCompare([]byte(p.Nonce), []byte(nonce)) != 1 {
-		return "", errors.New("nonce mismatch")
+		return "", "", errors.New("nonce mismatch")
 	}
-	return *p.AuthToken, nil
+	file := ""
+	if p.TokensFile != nil {
+		file = *p.TokensFile
+	}
+	return *p.AuthToken, file, nil
 }
 
 func parseReadyMarker(raw string) (string, int, error) {

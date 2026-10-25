@@ -282,6 +282,7 @@ func TestPrepareIsolationGrokDropsDaemonMarkers(t *testing.T) {
 			"SSL_CERT_FILE=/etc/ssl/cert.pem",
 			"NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem",
 			"AUTH_TOKEN=" + token,
+			"AUTH_TOKENS_FILE=/tmp/lgb-tokens-file",
 			"LGB_FAKE_SECRET=" + secret,
 			"LGB_ADMIN_TOKEN_PATH=" + adminPath,
 			"LGB_CANARY_VAR=" + canary,
@@ -291,8 +292,9 @@ func TestPrepareIsolationGrokDropsDaemonMarkers(t *testing.T) {
 			"ANTHROPIC_API_KEY=k",
 		},
 		Extra: map[string]string{
-			"LGB_TOKEN": "lgbr_run",
-			"LGB_SPOOL": filepath.Join(home, ".lgb"),
+			"LGB_TOKEN":        "lgbr_run",
+			"LGB_SPOOL":        filepath.Join(home, ".lgb"),
+			"AUTH_TOKENS_FILE": "/tmp/lgb-tokens-file",
 		},
 	})
 	if err != nil {
@@ -333,7 +335,7 @@ func TestPrepareIsolationGrokDropsDaemonMarkers(t *testing.T) {
 	}
 	for _, k := range []string{
 		"USER", "LOGNAME", "SHELL", "TZ", "TMPDIR", "HTTP_PROXY", "HTTPS_PROXY",
-		"LC_ALL", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "AUTH_TOKEN",
+		"LC_ALL", "SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS", "AUTH_TOKEN", "AUTH_TOKENS_FILE",
 		"LGB_FAKE_SECRET", "LGB_ADMIN_TOKEN_PATH", "LGB_CANARY_VAR", "DAEMON_CANARY",
 		"GROK_CONFIG", "GROK_SANDBOX", "ANTHROPIC_API_KEY",
 	} {

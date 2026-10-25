@@ -213,6 +213,8 @@ func TestLinuxJailHidesHostProcEnviron(t *testing.T) {
 		secretVal  = "fake-secret-canary"
 		authToken  = "AUTH_TOKEN"
 		tokenVal   = "fake-token-canary"
+		tokensFile = "AUTH_TOKENS_FILE"
+		tokensVal  = "/tmp/lgb-tokens-file"
 		adminPath  = "LGB_ADMIN_TOKEN_PATH"
 		adminVal   = "/tmp/lgb-admin-token-canary"
 		canaryName = "LGB_CANARY_VAR"
@@ -222,9 +224,10 @@ func TestLinuxJailHidesHostProcEnviron(t *testing.T) {
 	t.Setenv(hostMarker, hostValue)
 	t.Setenv(fakeSecret, secretVal)
 	t.Setenv(authToken, tokenVal)
+	t.Setenv(tokensFile, tokensVal)
 	t.Setenv(adminPath, adminVal)
 	t.Setenv(canaryName, canaryVal)
-	values := []string{hostValue, secretVal, tokenVal, adminVal, canaryVal}
+	values := []string{hostValue, secretVal, tokenVal, adminVal, canaryVal, tokensVal}
 	root := t.TempDir()
 	ws := filepath.Join(root, "ws")
 	home := filepath.Join(root, "home")
@@ -254,11 +257,11 @@ func TestLinuxJailHidesHostProcEnviron(t *testing.T) {
 		"    name=${line%%=*}\n" +
 		"    echo \"NAME $p $c $name\"\n" +
 		"    case \"$name\" in\n" +
-		"      LGB_FAKE_SECRET|AUTH_TOKEN|LGB_ADMIN_TOKEN_PATH|LGB_CANARY_VAR|LGB_HOST_PROC_MARKER)\n" +
+		"      LGB_FAKE_SECRET|AUTH_TOKEN|AUTH_TOKENS_FILE|LGB_ADMIN_TOKEN_PATH|LGB_CANARY_VAR|LGB_HOST_PROC_MARKER)\n" +
 		"        echo \"LEAK_NAME=$p:$name\"; leak=1 ;;\n" +
 		"    esac\n" +
 		"    case \"$line\" in\n" +
-		"      *fake-secret-canary*|*fake-token-canary*|*lgb-admin-token-canary*|*canary-var-value*|*host-marker-value*)\n" +
+		"      *fake-secret-canary*|*fake-token-canary*|*lgb-admin-token-canary*|*canary-var-value*|*host-marker-value*|*lgb-tokens-file*)\n" +
 		"        echo \"LEAK_VALUE=$p:$name\"; leak=1 ;;\n" +
 		"    esac\n" +
 		"  done < /tmp/raw\n" +

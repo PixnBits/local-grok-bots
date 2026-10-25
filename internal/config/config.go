@@ -11,13 +11,14 @@ const Version = "0.1.0"
 // Config is the daemon's environment. Defaults match the MVP spec:
 // SQLite at ./data/state.db, workspace at ./data/workspace, Ollama on localhost.
 type Config struct {
-	DataDir    string
-	BindAddr   string
-	OllamaURL  string
-	Model      string
-	AuthToken  string
-	Version    string
-	BuildBinds []string
+	DataDir        string
+	BindAddr       string
+	OllamaURL      string
+	Model          string
+	AuthToken      string
+	AuthTokensFile string
+	Version        string
+	BuildBinds     []string
 	// PolicyPath is the policy.toml to load. Empty skips the file and keeps
 	// built-in defaults. The daemon sets this to "policy.toml" unless POLICY_PATH is set.
 	PolicyPath string
@@ -28,15 +29,20 @@ func FromEnv() Config {
 	if tok == "" {
 		tok = os.Getenv("AUTH_TOKEN")
 	}
+	tokensFile := heldTokensFile
+	if tokensFile == "" {
+		tokensFile = os.Getenv("AUTH_TOKENS_FILE")
+	}
 	return Config{
-		DataDir:    getenv("DATA_DIR", "./data"),
-		BindAddr:   getenv("BIND_ADDR", "127.0.0.1:8080"),
-		OllamaURL:  getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
-		Model:      getenv("OLLAMA_MODEL", "llama3.2"),
-		AuthToken:  tok,
-		Version:    Version,
-		BuildBinds: splitList(os.Getenv("SANDBOX_BUILD_BINDS")),
-		PolicyPath: getenv("POLICY_PATH", "policy.toml"),
+		DataDir:        getenv("DATA_DIR", "./data"),
+		BindAddr:       getenv("BIND_ADDR", "127.0.0.1:8080"),
+		OllamaURL:      getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
+		Model:          getenv("OLLAMA_MODEL", "llama3.2"),
+		AuthToken:      tok,
+		AuthTokensFile: tokensFile,
+		Version:        Version,
+		BuildBinds:     splitList(os.Getenv("SANDBOX_BUILD_BINDS")),
+		PolicyPath:     getenv("POLICY_PATH", "policy.toml"),
 	}
 }
 

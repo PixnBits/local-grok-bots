@@ -118,6 +118,7 @@ func TestCLIGrokMCPJSONRefusedEvenWhenIgnoring(t *testing.T) {
 	}
 	t.Setenv("LGB_ENV_LOG", envLog)
 	t.Setenv("AUTH_TOKEN", "fake-admin-token-value")
+	t.Setenv("AUTH_TOKENS_FILE", "/tmp/lgb-tokens-file")
 	t.Setenv("DAEMON_CANARY", "canary-var-value")
 	ws := filepath.Join(app.ws, "bots", bot.ID)
 	_ = os.MkdirAll(ws, 0o700)
@@ -130,7 +131,7 @@ func TestCLIGrokMCPJSONRefusedEvenWhenIgnoring(t *testing.T) {
 	for _, line := range strings.Split(env, "\n") {
 		name, _, _ := strings.Cut(line, "=")
 		switch name {
-		case "AUTH_TOKEN", "DAEMON_CANARY", "USER", "HTTP_PROXY", "LC_ALL", "SSL_CERT_FILE":
+		case "AUTH_TOKEN", "AUTH_TOKENS_FILE", "DAEMON_CANARY", "USER", "HTTP_PROXY", "LC_ALL", "SSL_CERT_FILE":
 			t.Fatalf("daemon env reached the cli: %s", name)
 		}
 	}

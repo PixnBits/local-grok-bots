@@ -55,6 +55,8 @@ func TestHelpExitsBeforeStartup(t *testing.T) {
 				"OLLAMA_URL", "http://127.0.0.1:11434",
 				"OLLAMA_MODEL", "llama3.2",
 				"AUTH_TOKEN", "unset",
+				"AUTH_TOKENS_FILE",
+				"name:token",
 				"SANDBOX_BUILD_BINDS",
 			} {
 				if !strings.Contains(out, needle) {

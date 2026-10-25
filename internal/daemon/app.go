@@ -64,6 +64,9 @@ type App struct {
 	// The value is the bot and run the token was issued for.
 	lgbMu   sync.Mutex
 	lgbLive map[string]lgbCred
+	// accessTokens are the named tokens from AUTH_TOKENS_FILE.
+	// cfg.AuthToken, when set, is the additional name "default".
+	accessTokens []namedToken
 	// protectByBot is the path deny list written for the bot's current turn.
 	// The broker will not use a credential home that is absent from it.
 	protectMu    sync.Mutex
@@ -158,11 +161,15 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		cfg.AuthToken = tok
 		fmt.Fprintf(os.Stderr, "local-grok-bots: a CLI backend is enabled, so the API requires a token; it is in %s. Open /login?token=<token> once per browser.\n", tokPath)
 	}
+	fileTokens, err := loadAuthTokens(cfg.AuthTokensFile, cfg.AuthToken)
+	if err != nil {
+		return nil, err
+	}
 	logw := logOut
 	if logw == nil {
 		logw = os.Stderr
 	}
-	if cfg.AuthToken == "" && !loopbackBind(cfg.BindAddr) {
+	if cfg.AuthToken == "" && len(fileTokens) == 0 && !loopbackBind(cfg.BindAddr) {
 		fmt.Fprint(logw, bindWarn)
 	}
 	aud, err := audit.Open(pol.AuditLog)
@@ -191,22 +198,23 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{
-		cfg:        cfg,
-		logw:       logw,
-		st:         st,
-		model:      m,
-		ws:         cfg.Workspace(),
-		bus:        NewBus(),
-		policy:     pol,
-		audit:      aud,
-		ctx:        ctx,
-		cancel:     cancel,
-		loops:      map[string]*loopState{},
-		resume:     map[string]resumeHold{},
-		pending:    map[string][]model.Message{},
-		activity:   map[string]time.Time{},
-		permTokens: map[string]permBind{},
-		permBase:   httpBase(cfg.BindAddr),
+		cfg:          cfg,
+		logw:         logw,
+		st:           st,
+		model:        m,
+		ws:           cfg.Workspace(),
+		bus:          NewBus(),
+		policy:       pol,
+		audit:        aud,
+		ctx:          ctx,
+		cancel:       cancel,
+		loops:        map[string]*loopState{},
+		resume:       map[string]resumeHold{},
+		pending:      map[string][]model.Message{},
+		activity:     map[string]time.Time{},
+		permTokens:   map[string]permBind{},
+		permBase:     httpBase(cfg.BindAddr),
+		accessTokens: fileTokens,
 	}
 	a.perm = permission.New(permission.Options{
 		Publish: func(runID, event string, payload any) {
@@ -315,7 +323,8 @@ func (a *App) writeStartup(format string, args ...any) {
 	fmt.Fprintf(w, format, args...)
 }
 
-// bindWarn is the one startup line for a non-loopback bind with no token.
+// bindWarn is the one startup line for a non-loopback bind when neither
+// AUTH_TOKEN, the generated admin token, nor AUTH_TOKENS_FILE supplies a token.
 const bindWarn = "local-grok-bots: WARN: the API is reachable beyond this machine without AUTH_TOKEN; set AUTH_TOKEN or a loopback BIND_ADDR\n"
 
 // loopbackBind reports whether addr's host is 127.0.0.0/8, ::1, or localhost.

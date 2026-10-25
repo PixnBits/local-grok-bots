@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -70,7 +69,7 @@ func (a *App) withAuth(next http.Handler) http.Handler {
 				return
 			}
 		}
-		if r.URL.Path == "/api/health" || r.URL.Path == "/login" || mcpPermissionOpen(r.URL.Path) || a.cfg.AuthToken == "" || authorized(r, a.cfg.AuthToken) {
+		if r.URL.Path == "/api/health" || r.URL.Path == "/login" || mcpPermissionOpen(r.URL.Path) || !a.tokensConfigured() || a.credentialAccepted(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -153,43 +152,64 @@ func (a *App) liveRunCredential(token string) bool {
 	return ok
 }
 
-func authorized(r *http.Request, token string) bool {
+// presentedAuth is the bearer token when that header is present, otherwise
+// the login cookie. A bearer header is not followed by a cookie check.
+func presentedAuth(r *http.Request) (string, bool) {
 	h := r.Header.Get("Authorization")
 	const prefix = "Bearer "
 	if len(h) >= len(prefix) && strings.EqualFold(h[:len(prefix)], prefix) {
-		return tokenEqual(h[len(prefix):], token)
+		return h[len(prefix):], true
 	}
-	if c, err := r.Cookie(authCookie); err == nil {
-		return tokenEqual(c.Value, token)
+	c, err := r.Cookie(authCookie)
+	if err != nil {
+		return "", false
 	}
-	return false
+	return c.Value, true
 }
 
-func tokenEqual(got, token string) bool {
-	if token == "" || len(got) != len(token) {
+func (a *App) credentialAccepted(r *http.Request) bool {
+	presented, ok := presentedAuth(r)
+	if !ok {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(got), []byte(token)) == 1
+	_, match := matchNamedToken(presented, a.configuredTokens())
+	return match
 }
 
 // handleLogin trades a token in the URL for an HttpOnly, same-site cookie,
-// then redirects to the UI. The token never reaches page script.
+// then redirects to the UI. The cookie value is the presented token.
+// The token never reaches page script.
 func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
-	if a.cfg.AuthToken == "" {
+	if !a.tokensConfigured() {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
 	}
-	if !tokenEqual(r.URL.Query().Get("token"), a.cfg.AuthToken) {
+	presented := r.URL.Query().Get("token")
+	name, ok := matchNamedToken(presented, a.configuredTokens())
+	if !ok {
+		a.auditAuthLogin(false, "")
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 		return
 	}
+	a.auditAuthLogin(true, name)
 	http.SetCookie(w, &http.Cookie{
-		Name: authCookie, Value: a.cfg.AuthToken, Path: "/",
+		Name: authCookie, Value: presented, Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil,
 	})
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (a *App) auditAuthLogin(ok bool, name string) {
+	if a == nil || a.audit == nil || !a.audit.Enabled() {
+		return
+	}
+	if !ok {
+		a.audit.Write(map[string]any{"action": "auth_login_failed"})
+		return
+	}
+	a.audit.Write(map[string]any{"action": "auth_login", "token_name": name})
 }
 
 func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {

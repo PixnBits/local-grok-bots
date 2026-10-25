@@ -8,5 +8,6 @@ import "os"
 // Unsetenv does not rewrite the original startup memory.
 func ReexecIfNeeded() {
 	heldAuth = os.Getenv("AUTH_TOKEN")
+	heldTokensFile = os.Getenv("AUTH_TOKENS_FILE")
 	unsetSecrets(heldAuth)
 }

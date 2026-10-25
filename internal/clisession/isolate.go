@@ -374,6 +374,7 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 		}
 	}
 	delete(env, "AUTH_TOKEN")
+	delete(env, "AUTH_TOKENS_FILE")
 	for k, v := range env {
 		for _, sec := range o.Secrets {
 			if sec != "" && strings.Contains(v, sec) {

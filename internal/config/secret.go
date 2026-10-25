@@ -13,6 +13,11 @@ const (
 // heldAuth is the admin token kept after the environment is scrubbed.
 var heldAuth string
 
+// heldTokensFile is the AUTH_TOKENS_FILE path kept after the environment
+// scrub. The name contains TOKEN, so the scrub drops it. The daemon still
+// needs the path in order to read the file. The tokens stay in the file.
+var heldTokensFile string
+
 var secretKeys = map[string]bool{
 	"AUTH_TOKEN":              true,
 	"XAI_API_KEY":             true,

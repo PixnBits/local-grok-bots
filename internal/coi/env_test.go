@@ -18,6 +18,7 @@ func TestScrubEnvDropsSecretsAndPointsHome(t *testing.T) {
 		"LGB_SPOOL=" + ws + "/.lgb",
 		"XAI_API_KEY=xai-supersecretvalue123456",
 		"AUTH_TOKEN=admin-token-value",
+		"AUTH_TOKENS_FILE=/tmp/lgb-tokens-file",
 		"FOO=bar",
 		"TERM=xterm",
 	}
@@ -45,9 +46,24 @@ func TestScrubEnvDropsSecretsAndPointsHome(t *testing.T) {
 	if got["PATH"] != systemPATH() {
 		t.Fatalf("PATH %q want %q", got["PATH"], systemPATH())
 	}
-	for _, banned := range []string{"LGB_TOKEN", "LGB_SPOOL", "XAI_API_KEY", "AUTH_TOKEN", "FOO", "HOME", "TMPDIR"} {
+	for _, banned := range []string{"LGB_TOKEN", "LGB_SPOOL", "XAI_API_KEY", "AUTH_TOKEN", "AUTH_TOKENS_FILE", "FOO", "HOME", "TMPDIR"} {
 		if _, ok := got[banned]; ok {
 			t.Fatalf("%s was copied", banned)
+		}
+	}
+}
+
+func TestJailEnvDropsAuthTokensFile(t *testing.T) {
+	env := pinJailEnv([]string{
+		"PATH=/bin",
+		"AUTH_TOKEN=admin-token-value",
+		"AUTH_TOKENS_FILE=/tmp/lgb-tokens-file",
+		"LANG=C",
+	}, "/home/x", "grok")
+	env = applyFixedEnv(env, []string{"AUTH_TOKENS_FILE=/tmp/other", "AUTH_TOKEN=other", "LANG=C.UTF-8"})
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "AUTH_TOKEN=") || strings.HasPrefix(kv, "AUTH_TOKENS_FILE=") {
+			t.Fatalf("kept %s", kv)
 		}
 	}
 }

@@ -155,6 +155,14 @@ func redactWalk(v any, clip bool) any {
 		out := make(map[string]any, rv.Len())
 		for _, key := range rv.MapKeys() {
 			ks := fmt.Sprint(key.Interface())
+			// token_name is a label, not a secret. Other keys that contain
+			// "token" stay redacted.
+			if ks == "token_name" {
+				if s, ok := rv.MapIndex(key).Interface().(string); ok {
+					out[ks] = s
+					continue
+				}
+			}
 			if secretKeyRe.MatchString(ks) {
 				out[ks] = "[redacted]"
 				continue

@@ -40,9 +40,20 @@ func TestRunningDaemonEnvironOmitsSecrets(t *testing.T) {
 	_ = ln.Close()
 	const (
 		token      = "unit-auth-token-canary"
+		named      = "named-token-reexec-value-0000001"
 		canaryName = "LGB_CANARY_PROC"
 		canaryVal  = "unit-canary-proc-value"
 	)
+	if len(named) < 32 {
+		t.Fatalf("named token length %d", len(named))
+	}
+	tokensPath := filepath.Join(dir, "tokens")
+	if err := os.WriteFile(tokensPath, []byte("reexec:"+named+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(tokensPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cmd := exec.Command(bin)
 	cmd.Env = []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -52,6 +63,7 @@ func TestRunningDaemonEnvironOmitsSecrets(t *testing.T) {
 		"BIND_ADDR=" + addr,
 		"POLICY_PATH=" + policyPath,
 		"AUTH_TOKEN=" + token,
+		"AUTH_TOKENS_FILE=" + tokensPath,
 		canaryName + "=" + canaryVal,
 		"DB_PASS=unit-pass",
 		"GPG_TTY=/dev/pts/1",
@@ -104,12 +116,12 @@ func TestRunningDaemonEnvironOmitsSecrets(t *testing.T) {
 	if marker == "" || marker == readyVal || !strings.Contains(marker, ".") {
 		t.Fatalf("ready marker %q", marker)
 	}
-	for _, name := range []string{"AUTH_TOKEN", canaryName, "XAI_API_KEY", "DB_PASS"} {
+	for _, name := range []string{"AUTH_TOKEN", "AUTH_TOKENS_FILE", canaryName, "XAI_API_KEY", "DB_PASS"} {
 		if strings.Contains(env, name+"=") || bytes.Contains(raw, []byte(name+"=")) {
 			t.Fatalf("environ still has %s", name)
 		}
 	}
-	for _, val := range []string{token, canaryVal} {
+	for _, val := range []string{token, named, canaryVal, tokensPath} {
 		if strings.Contains(env, val) {
 			t.Fatal("environ still has a secret value")
 		}
@@ -151,6 +163,19 @@ func TestRunningDaemonEnvironOmitsSecrets(t *testing.T) {
 	if auth.StatusCode != 200 {
 		t.Fatalf("auth %d", auth.StatusCode)
 	}
+	namedReq, err := http.NewRequest(http.MethodGet, "http://"+addr+"/api/bots", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	namedReq.Header.Set("Authorization", "Bearer "+named)
+	namedRes, err := http.DefaultClient.Do(namedReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	namedRes.Body.Close()
+	if namedRes.StatusCode != 200 {
+		t.Fatalf("named auth %d", namedRes.StatusCode)
+	}
 	envText := strings.ReplaceAll(env, "\x00", "\n")
 	if !strings.Contains(envText, "GPG_TTY=/dev/pts/1") || !strings.Contains(envText, "SSH_AUTH_SOCK=/tmp/agent.sock") {
 		t.Fatal("non-secret names were dropped")
@@ -178,15 +203,16 @@ func TestPresetReadyMarkerExits(t *testing.T) {
 func TestReadReadyAuthChecksPipeAndNonce(t *testing.T) {
 	const nonce = "0123456789abcdef0123456789abcdef"
 	tok := "unit-token"
+	tokensFile := "/tmp/lgb-tokens"
 	r, w := mustPipe(t)
-	if err := json.NewEncoder(w).Encode(secretPayload{AuthToken: &tok, Nonce: nonce}); err != nil {
+	if err := json.NewEncoder(w).Encode(secretPayload{AuthToken: &tok, TokensFile: &tokensFile, Nonce: nonce}); err != nil {
 		t.Fatal(err)
 	}
 	_ = w.Close()
 	fd := int(r.Fd())
-	got, err := readReadyAuth(nonce + "." + strconv.Itoa(fd))
-	if err != nil || got != tok {
-		t.Fatalf("read %q %v", got, err)
+	got, file, err := readReadyAuth(nonce + "." + strconv.Itoa(fd))
+	if err != nil || got != tok || file != tokensFile {
+		t.Fatalf("read %q %q %v", got, file, err)
 	}
 	_ = r.Close()
 
@@ -196,7 +222,7 @@ func TestReadReadyAuthChecksPipeAndNonce(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = w.Close()
-	if _, err := readReadyAuth("fedcba9876543210fedcba9876543210." + strconv.Itoa(int(r.Fd()))); err == nil {
+	if _, _, err := readReadyAuth("fedcba9876543210fedcba9876543210." + strconv.Itoa(int(r.Fd()))); err == nil {
 		t.Fatal("nonce mismatch was accepted")
 	}
 
@@ -206,7 +232,7 @@ func TestReadReadyAuthChecksPipeAndNonce(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = w.Close()
-	if _, err := readReadyAuth(nonce + "." + strconv.Itoa(int(r.Fd()))); err == nil {
+	if _, _, err := readReadyAuth(nonce + "." + strconv.Itoa(int(r.Fd()))); err == nil {
 		t.Fatal("missing token was accepted")
 	}
 
@@ -217,9 +243,9 @@ func TestReadReadyAuthChecksPipeAndNonce(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = w.Close()
-	got, err = readReadyAuth(nonce + "." + strconv.Itoa(int(r.Fd())))
-	if err != nil || got != "" {
-		t.Fatalf("empty token %q %v", got, err)
+	got, file, err = readReadyAuth(nonce + "." + strconv.Itoa(int(r.Fd())))
+	if err != nil || got != "" || file != "" {
+		t.Fatalf("empty token %q %q %v", got, file, err)
 	}
 
 	f, err := os.CreateTemp(t.TempDir(), "reg")
@@ -227,7 +253,7 @@ func TestReadReadyAuthChecksPipeAndNonce(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if _, err := readReadyAuth(nonce + "." + strconv.Itoa(int(f.Fd()))); err == nil {
+	if _, _, err := readReadyAuth(nonce + "." + strconv.Itoa(int(f.Fd()))); err == nil {
 		t.Fatal("regular file was accepted")
 	}
 	ln, err := net.Listen("unix", filepath.Join(t.TempDir(), "sock"))
@@ -249,7 +275,7 @@ func TestReadReadyAuthChecksPipeAndNonce(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer raw.Close()
-	if _, err := readReadyAuth(nonce + "." + strconv.Itoa(int(raw.Fd()))); err == nil {
+	if _, _, err := readReadyAuth(nonce + "." + strconv.Itoa(int(raw.Fd()))); err == nil {
 		t.Fatal("socket was accepted")
 	}
 
@@ -265,15 +291,15 @@ func TestReadReadyAuthChecksPipeAndNonce(t *testing.T) {
 	if _, err := mf.Seek(0, 0); err != nil {
 		t.Fatal(err)
 	}
-	got, err = readReadyAuth(nonce + "." + strconv.Itoa(mem))
-	if err != nil || got != tok {
-		t.Fatalf("memfd %q %v", got, err)
+	got, file, err = readReadyAuth(nonce + "." + strconv.Itoa(mem))
+	if err != nil || got != tok || file != "" {
+		t.Fatalf("memfd %q %q %v", got, file, err)
 	}
 
-	if _, err := readReadyAuth("1"); err == nil {
+	if _, _, err := readReadyAuth("1"); err == nil {
 		t.Fatal("preset marker was accepted")
 	}
-	if _, err := readReadyAuth(nonce + ".1"); err == nil {
+	if _, _, err := readReadyAuth(nonce + ".1"); err == nil {
 		t.Fatal("stdio fd was accepted")
 	}
 }

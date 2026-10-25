@@ -15,8 +15,13 @@ go build -o local-grok-bots ./cmd/local-grok-bots
 | `OLLAMA_URL` | `http://127.0.0.1:11434` | Local Ollama HTTP API |
 | `OLLAMA_MODEL` | `llama3.2` | Model used when a bot has no override. Set this to a model you have pulled. |
 | `BIND_ADDR` | `127.0.0.1:8080` | Address the daemon listens on |
-| `AUTH_TOKEN` | unset | If set, every route except `GET /api/health` requires `Authorization: Bearer <token>` (or the cookie from `/login?token=`). With a CLI backend and no `AUTH_TOKEN`, a token is generated at `DATA_DIR/admin-token` (0600); see [docs/cli-isolation.md](docs/cli-isolation.md#daemon-api) |
+| `AUTH_TOKEN` | unset | If set, every route except `GET /api/health` requires `Authorization: Bearer <token>` (or the cookie from `/login?token=`). It is accepted under the name `default`. With a CLI backend and no `AUTH_TOKEN`, a token is generated at `DATA_DIR/admin-token` (0600) and used the same way; see [docs/cli-isolation.md](docs/cli-isolation.md#daemon-api) |
+| `AUTH_TOKENS_FILE` | unset | Path of a file of named access tokens, one `name:token` per line. Read at startup. See below. |
 | `SANDBOX_BUILD_BINDS` | unset | Colon-separated absolute paths. With the `build` grant, each path is a read-only bind in the shell jail. |
+
+`AUTH_TOKENS_FILE` adds named tokens to the same gate as `AUTH_TOKEN`. Blank lines and lines whose first non-whitespace character is `#` are ignored. A name is 1–64 characters from `[A-Za-z0-9._-]`. The token is the remainder of the line after the first `:`, trimmed, at least 32 characters, and must not contain whitespace. `AUTH_TOKEN`, or the generated admin token, joins that set as `default`. A file entry named `default` is refused when that token is set. Duplicate names or duplicate tokens, including a copy of the default token, refuse startup. An empty file is allowed.
+
+The daemon opens the file without following a symlink. It must be a regular file, owned by the daemon user, mode `0600` or stricter (no group or other permission bits), and at most 64 KiB. The daemon refuses a file that fails those checks and leaves the mode unchanged. A line it cannot parse refuses startup; the error names the line number and does not include the token. Restart the daemon to pick up a change. Either source counts as a token: a non-loopback bind warns only when `AUTH_TOKEN`, the generated admin token, and the file are all empty.
 
 Paths inside `DATA_DIR`:
 

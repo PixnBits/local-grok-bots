@@ -2,6 +2,17 @@ package config
 
 import "testing"
 
+func TestAuthTokensFileFromEnv(t *testing.T) {
+	t.Setenv("AUTH_TOKENS_FILE", "")
+	if FromEnv().AuthTokensFile != "" {
+		t.Fatal("default path")
+	}
+	t.Setenv("AUTH_TOKENS_FILE", "/tmp/lgb-tokens-file")
+	if FromEnv().AuthTokensFile != "/tmp/lgb-tokens-file" {
+		t.Fatalf("path %q", FromEnv().AuthTokensFile)
+	}
+}
+
 func TestBindAddrDefault(t *testing.T) {
 	t.Setenv("BIND_ADDR", "")
 	if got := FromEnv().BindAddr; got != "127.0.0.1:8080" {

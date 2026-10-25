@@ -9,6 +9,7 @@ func TestScrubbedEnvironDropsSecrets(t *testing.T) {
 		"DATA_DIR=/tmp/data",
 		"BIND_ADDR=127.0.0.1:9",
 		"AUTH_TOKEN=" + token,
+		"AUTH_TOKENS_FILE=/tmp/lgb-tokens-file",
 		"XAI_API_KEY=xai-secret",
 		"LGB_CANARY_PROC=unit-canary-proc-value",
 		"LEAK=" + token,
@@ -33,7 +34,7 @@ func TestScrubbedEnvironDropsSecrets(t *testing.T) {
 	if m[readyKey] != readyVal {
 		t.Fatalf("marker %#v", m)
 	}
-	for _, k := range []string{"AUTH_TOKEN", "XAI_API_KEY", "LGB_CANARY_PROC", "LEAK", "API_KEY", "session_Token", "db_SECRET", "DB_PASS"} {
+	for _, k := range []string{"AUTH_TOKEN", "AUTH_TOKENS_FILE", "XAI_API_KEY", "LGB_CANARY_PROC", "LEAK", "API_KEY", "session_Token", "db_SECRET", "DB_PASS"} {
 		if _, ok := m[k]; ok {
 			t.Fatalf("kept %s", k)
 		}

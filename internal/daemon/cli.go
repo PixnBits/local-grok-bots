@@ -428,7 +428,7 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 		Workspace: ws,
 		Base:      os.Environ(),
 		Extra:     a.policy.CLIEnv,
-		Secrets:   []string{a.cfg.AuthToken},
+		Secrets:   a.authSecrets(),
 		Grants:    botGrants(bot),
 		Protect:   a.daemonSecrets(),
 		CredRoot:  a.cfg.DataDir,

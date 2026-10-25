@@ -192,16 +192,17 @@ func TestStartupWarn(t *testing.T) {
 	t.Setenv("BIND_ADDR", "")
 	t.Setenv("AUTH_TOKEN", "")
 
-	open := func(t *testing.T, bind, token, policy string) (*App, string) {
+	open := func(t *testing.T, bind, token, policy, tokensFile string) (*App, string) {
 		t.Helper()
 		dir := t.TempDir()
 		cfg := config.Config{
-			DataDir:   filepath.Join(dir, "data"),
-			BindAddr:  bind,
-			OllamaURL: "http://127.0.0.1:9",
-			Model:     "test-model",
-			Version:   "0.1.0",
-			AuthToken: token,
+			DataDir:        filepath.Join(dir, "data"),
+			BindAddr:       bind,
+			OllamaURL:      "http://127.0.0.1:9",
+			Model:          "test-model",
+			Version:        "0.1.0",
+			AuthToken:      token,
+			AuthTokensFile: tokensFile,
 		}
 		if policy != "" {
 			path := filepath.Join(dir, "policy.toml")
@@ -222,39 +223,68 @@ func TestStartupWarn(t *testing.T) {
 	}
 
 	t.Run("non-loopback", func(t *testing.T) {
-		_, out := open(t, "192.168.1.5:9", "", "")
+		_, out := open(t, "192.168.1.5:9", "", "", "")
 		if out != bindWarn || strings.Count(out, "local-grok-bots: WARN:") != 1 {
 			t.Fatalf("log:\n%s", out)
 		}
 	})
 	t.Run("loopback", func(t *testing.T) {
-		_, out := open(t, "127.0.0.1:0", "", "")
+		_, out := open(t, "127.0.0.1:0", "", "", "")
 		if strings.Contains(out, "local-grok-bots: WARN:") {
 			t.Fatalf("log:\n%s", out)
 		}
 	})
 	t.Run("token", func(t *testing.T) {
-		_, out := open(t, "192.168.1.5:9", "unit-token", "")
+		_, out := open(t, "192.168.1.5:9", "unit-token", "", "")
 		if strings.Contains(out, "local-grok-bots: WARN:") {
 			t.Fatalf("log:\n%s", out)
 		}
 	})
 	t.Run("policy bind", func(t *testing.T) {
-		app, out := open(t, "127.0.0.1:0", "", "[daemon]\nbind = \"192.168.1.5:9\"\n")
+		app, out := open(t, "127.0.0.1:0", "", "[daemon]\nbind = \"192.168.1.5:9\"\n", "")
 		if app.cfg.BindAddr != "192.168.1.5:9" || out != bindWarn {
 			t.Fatalf("bind %s log:\n%s", app.cfg.BindAddr, out)
 		}
 	})
 	t.Run("policy loopback", func(t *testing.T) {
-		app, out := open(t, "192.168.1.5:9", "", "[daemon]\nbind = \"127.0.0.1:0\"\n")
+		app, out := open(t, "192.168.1.5:9", "", "[daemon]\nbind = \"127.0.0.1:0\"\n", "")
 		if app.cfg.BindAddr != "127.0.0.1:0" || strings.Contains(out, "local-grok-bots: WARN:") {
 			t.Fatalf("bind %s log:\n%s", app.cfg.BindAddr, out)
 		}
 	})
 	t.Run("generated token", func(t *testing.T) {
-		app, out := open(t, "192.168.1.5:9", "", "[daemon]\nbind = \"192.168.1.5:9\"\n\n[backend]\nbackend = \"claude\"\n")
+		app, out := open(t, "192.168.1.5:9", "", "[daemon]\nbind = \"192.168.1.5:9\"\n\n[backend]\nbackend = \"claude\"\n", "")
 		if app.cfg.AuthToken == "" || strings.Contains(out, "local-grok-bots: WARN:") {
 			t.Fatalf("token %q log:\n%s", app.cfg.AuthToken, out)
+		}
+	})
+	t.Run("file tokens", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "tokens")
+		tok := strings.Repeat("a", 32)
+		if err := os.WriteFile(path, []byte("alice:"+tok+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, out := open(t, "192.168.1.5:9", "", "", path)
+		if strings.Contains(out, "local-grok-bots: WARN:") || strings.Contains(out, tok) {
+			t.Fatalf("log:\n%s", out)
+		}
+	})
+	t.Run("empty tokens file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "tokens")
+		if err := os.WriteFile(path, []byte("# none\n\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, out := open(t, "192.168.1.5:9", "", "", path)
+		if out != bindWarn {
+			t.Fatalf("log:\n%s", out)
 		}
 	})
 }
