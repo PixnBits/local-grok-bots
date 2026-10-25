@@ -71,23 +71,3 @@ func readTokenFile(path string) (string, error) {
 	}
 	return tokenFromBytes(buf[:n])
 }
-
-func tokenFromBytes(b []byte) (string, error) {
-	if len(b) == 0 || len(b) > 4096 {
-		return "", errToken("size")
-	}
-	s := string(b)
-	switch {
-	case strings.HasSuffix(s, "\r\n"):
-		s = strings.TrimSuffix(s, "\r\n")
-	case strings.HasSuffix(s, "\n"):
-		s = strings.TrimSuffix(s, "\n")
-	}
-	if strings.ContainsAny(s, "\r\n") {
-		return "", errToken("shape")
-	}
-	if !TokenShape(s) {
-		return "", errToken("shape")
-	}
-	return s, nil
-}

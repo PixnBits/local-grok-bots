@@ -83,11 +83,29 @@ func TestReadTokenShapeAndHook(t *testing.T) {
 	if err != nil || got != tokenSecret {
 		t.Fatalf("crlf %q %v", got, err)
 	}
-	for _, body := range []string{"", "\n", tokenSecret + "\nmore\n", "has space\n", "tab\there\n", tokenSecret + " "} {
+	for _, body := range []string{
+		tokenSecret + " ",
+		tokenSecret + "\t",
+		tokenSecret + "\n\n",
+		tokenSecret + "\r\n\r\n",
+		tokenSecret + " \t\r\n",
+		tokenSecret + "\n \n",
+		tokenSecret + "\r\n \t",
+	} {
+		write(body, 0o600)
+		got, err = ReadToken(path)
+		if err != nil || got != tokenSecret || strings.Contains(errString(err), tokenSecret) {
+			t.Fatalf("trailing %q -> %q %v", body, got, err)
+		}
+	}
+	for _, body := range []string{"", "\n", " \n", tokenSecret + "\nmore\n", " " + tokenSecret + "\n", "has space\n", "tab\there\n", tokenSecret + " x\n"} {
 		write(body, 0o600)
 		_, err = ReadToken(path)
 		if !errors.Is(err, ErrToken) || strings.Contains(err.Error(), tokenSecret) {
 			t.Fatalf("accepted %q: %v", body, err)
+		}
+		if !strings.Contains(err.Error(), "shape") && body != "" {
+			t.Fatalf("shape reason %q: %v", body, err)
 		}
 	}
 	big := strings.Repeat("a", 4097)
@@ -117,5 +135,31 @@ func TestReadTokenShapeAndHook(t *testing.T) {
 	tokenHook = func(string) (string, error) { return "bad token", nil }
 	if _, err := ReadToken("/no/such"); !errors.Is(err, ErrToken) {
 		t.Fatalf("hook shape: %v", err)
+	}
+}
+
+func errString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func TestTokenFailureReasonOmitsBytes(t *testing.T) {
+	if TokenFailureReason(errToken("owner")) != "token file: not root-owned" {
+		t.Fatal(TokenFailureReason(errToken("owner")))
+	}
+	if TokenFailureReason(errToken("mode")) != "mode" || TokenFailureReason(errToken("shape")) != "shape" {
+		t.Fatal("mode or shape")
+	}
+	if TokenFailureReason(errToken("read")) != "missing" || TokenFailureReason(errToken("path")) != "missing" {
+		t.Fatal("missing")
+	}
+	leak := errors.New("bad " + tokenSecret)
+	if TokenFailureReason(leak) != "token" || strings.Contains(TokenFailureReason(leak), tokenSecret) {
+		t.Fatal(TokenFailureReason(leak))
+	}
+	if strings.Contains(TokenFailureReason(errToken("owner")), tokenSecret) {
+		t.Fatal("owner reason leaked")
 	}
 }

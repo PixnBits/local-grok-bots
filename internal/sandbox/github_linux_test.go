@@ -3,6 +3,7 @@
 package sandbox
 
 import (
+	"encoding/base64"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -82,7 +83,8 @@ git clone git@github.com:acme/widgets.git sshdest; echo SSH:$?
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if hits == 0 || auth != "Bearer "+token {
+	wantAuth := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+token))
+	if hits == 0 || auth != wantAuth {
 		t.Fatalf("proxy hits=%d auth=%q path=%q err=%v\n%s", hits, auth, path, err, out)
 	}
 	if !strings.Contains(path, "/acme/widgets") || strings.Contains(path, "other/nope") {

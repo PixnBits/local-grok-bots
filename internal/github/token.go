@@ -37,8 +37,9 @@ var tokenHook func(path string) (string, error)
 var tokenCheck func(uid uint32, perm uint32) error
 
 // ReadToken reads a root-owned mode-0600 token file. A symlink, the wrong
-// owner, the wrong mode, or an unreadable file fails closed. The token is one
-// line, at most 4096 bytes, with no surrounding whitespace.
+// owner, the wrong mode, or an unreadable file fails closed. The token is at
+// most 4096 bytes. Trailing spaces, tabs, and newlines are removed. A leading
+// or inner space, tab, or newline is refused.
 func ReadToken(path string) (string, error) {
 	if tokenHook != nil {
 		tok, err := tokenHook(path)
@@ -64,4 +65,45 @@ func TokenShape(tok string) bool {
 		return false
 	}
 	return true
+}
+
+// tokenFromBytes accepts a file body. Trailing spaces, tabs, CR, and LF are
+// removed. Any leading or inner whitespace is a shape failure. The error
+// never contains the bytes.
+func tokenFromBytes(b []byte) (string, error) {
+	if len(b) == 0 || len(b) > 4096 {
+		return "", errToken("size")
+	}
+	s := strings.TrimRight(string(b), " \t\r\n")
+	if strings.ContainsAny(s, " \t\r\n") || !TokenShape(s) {
+		return "", errToken("shape")
+	}
+	return s, nil
+}
+
+// TokenFailureReason is a fixed audit phrase for a token read error.
+// It never copies err.Error(), so a wrapped value cannot leak token bytes.
+func TokenFailureReason(err error) string {
+	var te *tokenError
+	if err == nil || !errors.As(err, &te) {
+		return "token"
+	}
+	switch te.reason {
+	case "owner":
+		return "token file: not root-owned"
+	case "mode":
+		return "mode"
+	case "shape":
+		return "shape"
+	case "read", "path":
+		return "missing"
+	case "size":
+		return "size"
+	case "type":
+		return "type"
+	case "check":
+		return "check"
+	default:
+		return "token"
+	}
 }

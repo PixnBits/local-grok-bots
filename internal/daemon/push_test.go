@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -179,9 +180,20 @@ echo PUSH_DONE
 		if len(gotAuth) == 0 {
 			t.Fatal("upstream saw no requests")
 		}
-		for _, h := range gotAuth {
-			if h != "Bearer "+pushSecret {
-				t.Fatalf("upstream auth %q", h)
+		for i, h := range gotAuth {
+			pth := ""
+			if i < len(gotPaths) {
+				pth = gotPaths[i]
+			}
+			if strings.Contains(pth, "/repos/") {
+				if h != "Bearer "+pushSecret {
+					t.Fatalf("api auth %q path %s", h, pth)
+				}
+				continue
+			}
+			want := "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+pushSecret))
+			if h != want {
+				t.Fatalf("git auth %q path %s", h, pth)
 			}
 		}
 		var sawGit bool

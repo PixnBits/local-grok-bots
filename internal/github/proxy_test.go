@@ -1,6 +1,8 @@
 package github
 
 import (
+	"encoding/base64"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -10,6 +12,10 @@ import (
 	"sync"
 	"testing"
 )
+
+func gitBasic(tok string) string {
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte("x-access-token:"+tok))
+}
 
 func TestProxyStripsCallerAuthAndAudits(t *testing.T) {
 	const caller = "caller-supplied-auth-value"
@@ -65,7 +71,7 @@ func TestProxyStripsCallerAuthAndAudits(t *testing.T) {
 		t.Fatalf("status %d body %q", res.StatusCode, body)
 	}
 	mu.Lock()
-	if hits != 1 || gotAuth != "Bearer "+tokenSecret || gotProxy != "" || gotProto != "version=2" {
+	if hits != 1 || gotAuth != gitBasic(tokenSecret) || gotProxy != "" || gotProto != "version=2" {
 		mu.Unlock()
 		t.Fatalf("upstream hits=%d auth=%q proxy=%q proto=%q", hits, gotAuth, gotProxy, gotProto)
 	}
@@ -135,7 +141,7 @@ func TestProxyStripsCallerAuthAndAudits(t *testing.T) {
 
 func TestProxyTCPGateAndUnixSocket(t *testing.T) {
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer "+tokenSecret {
+		if r.Header.Get("Authorization") != gitBasic(tokenSecret) {
 			t.Errorf("auth %q", r.Header.Get("Authorization"))
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -295,7 +301,7 @@ func TestReadProxyRefusesWrites(t *testing.T) {
 		t.Fatalf("upload-pack POST %d %q", code, body)
 	}
 	mu.Lock()
-	if hits != 2 || sawAuth != "Bearer "+tokenSecret {
+	if hits != 2 || sawAuth != gitBasic(tokenSecret) {
 		mu.Unlock()
 		t.Fatalf("allowed hits=%d auth=%q", hits, sawAuth)
 	}
@@ -354,6 +360,132 @@ func TestReadProxyRefusesWrites(t *testing.T) {
 	res.Body.Close()
 	if res.StatusCode != http.StatusForbidden {
 		t.Fatalf("write proxy allowed upload-pack GET %d", res.StatusCode)
+	}
+}
+
+func TestUpstreamAuthOnBothProxies(t *testing.T) {
+	var mu sync.Mutex
+	var gotAuth, gotPath string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotAuth = r.Header.Get("Authorization")
+		gotPath = r.URL.RequestURI()
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer up.Close()
+	routes := []struct {
+		name    string
+		service string
+		method  string
+		path    string
+		query   string
+		basic   bool
+	}{
+		{"info/refs", "github", http.MethodGet, "/acme/widgets.git/info/refs", "service=git-upload-pack", true},
+		{"upload-pack", "github", http.MethodPost, "/acme/widgets.git/git-upload-pack", "", true},
+		{"receive-pack", "github", http.MethodPost, "/acme/widgets.git/git-receive-pack", "", true},
+		{"api", "api", http.MethodGet, "/repos/acme/widgets", "", false},
+	}
+	for _, access := range []Access{AccessRead, AccessWrite} {
+		p, err := New(Config{
+			Repos:   []string{"acme/widgets"},
+			Token:   func() (string, error) { return tokenSecret, nil },
+			GitBase: up.URL,
+			APIBase: up.URL,
+			Access:  access,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, tc := range routes {
+			base := p.gitBase
+			if tc.service == "api" {
+				base = p.apiBase
+			}
+			route := Route{Service: tc.service, Owner: "acme", Repo: "widgets", Path: tc.path, Query: tc.query}
+			req, err := http.NewRequest(tc.method, "http://proxy"+tc.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := httptest.NewRecorder()
+			if _, err := p.forward(rec, req, base, route, tokenSecret); err != nil {
+				t.Fatalf("%v %s: %v", access, tc.name, err)
+			}
+			mu.Lock()
+			auth, path := gotAuth, gotPath
+			mu.Unlock()
+			want := "Bearer " + tokenSecret
+			if tc.basic {
+				want = gitBasic(tokenSecret)
+			}
+			if auth != want {
+				t.Fatalf("%v %s auth %q", access, tc.name, auth)
+			}
+			if tc.basic {
+				raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Basic "))
+				if err != nil || string(raw) != "x-access-token:"+tokenSecret {
+					t.Fatalf("%v %s basic %q %v", access, tc.name, raw, err)
+				}
+			}
+			if strings.Contains(auth, "Bearer "+tokenSecret) && tc.basic {
+				t.Fatalf("%v %s used bearer", access, tc.name)
+			}
+			if !strings.Contains(path, tc.path) {
+				t.Fatalf("%v %s path %q", access, tc.name, path)
+			}
+		}
+	}
+}
+
+func TestProxyAuditsTokenReasonWithoutBytes(t *testing.T) {
+	cases := []struct {
+		name string
+		tok  string
+		err  error
+		want string
+	}{
+		{"owner", "", errToken("owner"), "token file: not root-owned"},
+		{"mode", "", errToken("mode"), "mode"},
+		{"missing", "", errToken("read"), "missing"},
+		{"shape", "bad token", nil, "shape"},
+		{"wrapped", "", errors.New("leak " + tokenSecret), "token"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var audits []Audit
+			p, err := New(Config{
+				Repos: []string{"acme/widgets"},
+				Token: func() (string, error) {
+					if tc.err != nil {
+						return "", tc.err
+					}
+					return tc.tok, nil
+				},
+				Audit: func(a Audit) { audits = append(audits, a) },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := httptest.NewServer(p)
+			defer srv.Close()
+			res, err := http.Get(srv.URL + "/github/acme/widgets.git/info/refs?service=git-upload-pack")
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(res.Body)
+			res.Body.Close()
+			if res.StatusCode != http.StatusServiceUnavailable {
+				t.Fatalf("status %d", res.StatusCode)
+			}
+			if len(audits) != 1 || audits[0].Reason != tc.want || audits[0].Status != http.StatusServiceUnavailable {
+				t.Fatalf("audit %#v", audits)
+			}
+			blob := string(body) + audits[0].Reason + audits[0].Path + audits[0].Action
+			if strings.Contains(blob, tokenSecret) || strings.Contains(blob, "bad token") || strings.Contains(blob, "leak") {
+				t.Fatalf("reason leaked %q", blob)
+			}
+		})
 	}
 }
 

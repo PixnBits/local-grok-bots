@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -408,7 +409,11 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, requireGate bool) 
 	}
 	tok, err := p.token()
 	if err != nil || !TokenShape(tok) {
-		p.finish(w, http.StatusServiceUnavailable, route.Path, route.Owner, route.Repo, "token", method)
+		reason := "shape"
+		if err != nil {
+			reason = TokenFailureReason(err)
+		}
+		p.finish(w, http.StatusServiceUnavailable, route.Path, route.Owner, route.Repo, reason, method)
 		return
 	}
 	if strings.Contains(path, tok) || strings.Contains(r.URL.RawQuery, tok) {
@@ -473,7 +478,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, base *url.URL, r
 		return 0, err
 	}
 	copyHeaders(req.Header, r.Header, requestHeaders)
-	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Authorization", upstreamAuth(route.Service, tok))
 	req.Host = u.Host
 	if r.ContentLength > 0 {
 		req.ContentLength = r.ContentLength
@@ -527,6 +532,16 @@ func copyHeaders(dst, src http.Header, allow map[string]bool) {
 			dst.Add(k, v)
 		}
 	}
+}
+
+// upstreamAuth is Basic for git smart HTTP and Bearer for the REST API.
+// GitHub rejects a bearer token on info/refs, upload-pack, and receive-pack.
+func upstreamAuth(service, tok string) string {
+	if service == "api" {
+		return "Bearer " + tok
+	}
+	raw := "x-access-token:" + tok
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(raw))
 }
 
 func accessOK(access Access, route Route, method string) bool {
