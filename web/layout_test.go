@@ -141,7 +141,7 @@ func TestDrillDownRouting(t *testing.T) {
 const snippet = ` + string(snippet) + `;
 const ctx = {};
 vm.createContext(ctx);
-vm.runInContext(snippet + "\nthis.parseLevel=parseLevel; this.levelURL=levelURL; this.backAction=backAction; this.parentLevel=parentLevel; this.botFromPathname=botFromPathname;", ctx);
+vm.runInContext(snippet + "\nthis.parseLevel=parseLevel; this.levelURL=levelURL; this.backAction=backAction; this.parentLevel=parentLevel; this.botFromPathname=botFromPathname; this.historyStamp=historyStamp;", ctx);
 const out = [];
 function eq(name, got, want) {
   const ok = JSON.stringify(got) === JSON.stringify(want);
@@ -179,6 +179,11 @@ eq("phone-profile-back", backFrom({view:"profile", bot:"abc"}, {lgb:1, idx:2, vi
 eq("phone-thread-back", backFrom({view:"chat", bot:"abc"}, {lgb:1, idx:1, view:"chat", bot:"abc"}), {op:"history.back"});
 eq("deep-thread-back", backFrom({view:"chat", bot:"abc"}, {lgb:1, idx:0, view:"chat", bot:"abc"}), {op:"up", view:"bots", bot:null, url:"/"});
 eq("deep-profile-back", backFrom({view:"profile", bot:"abc"}, {lgb:1, idx:0, view:"profile", bot:"abc"}), {op:"up", view:"chat", bot:"abc", url:"/bots/abc"});
+eq("stamp-profile", ctx.historyStamp(null, "/bots/abc", "#profile", ""), {op:"replace", view:"profile", bot:"abc"});
+eq("stamp-log", ctx.historyStamp(null, "/bots/abc", "#log", ""), {op:"replace", view:"log", bot:"abc"});
+eq("stamp-log-home", ctx.historyStamp(null, "/", "#log", ""), {op:"replace", view:"log", bot:null});
+eq("stamp-keep", ctx.historyStamp({lgb:1, view:"chat", bot:"abc", idx:2}, "/bots/abc", "#profile", ""), null);
+eq("stamp-pop-null", ctx.historyStamp(null, "/bots/abc", "", ""), {op:"replace", view:"chat", bot:"abc"});
 console.log(JSON.stringify(out));
 `
 	raw := runNode(t, node, script)
@@ -282,6 +287,303 @@ console.log(JSON.stringify(cases));
 	for _, row := range rows {
 		if !row.OK {
 			t.Errorf("focus case %s failed: %s", row.Name, raw)
+		}
+	}
+}
+
+func TestProfileMobileJustifyStart(t *testing.T) {
+	src := string(IndexHTML)
+	blocks := mediaBodies(t, src, `@media (max-width: 979px)`)
+	var mobile string
+	for _, block := range blocks {
+		if body, ok := ruleBody(block, ".profile-layout"); ok {
+			mobile = body
+		}
+	}
+	if mobile == "" {
+		t.Fatal("max-width:979px block has no .profile-layout rule")
+	}
+	if !strings.Contains(mobile, "justify-content: flex-start") {
+		t.Fatalf(".profile-layout in 979px block = %q", mobile)
+	}
+	if strings.Contains(mobile, "justify-content: center") {
+		t.Fatalf("mobile .profile-layout still centers: %q", mobile)
+	}
+	base, ok := ruleBody(src, ".profile-layout")
+	if !ok || !strings.Contains(base, "justify-content: center") {
+		t.Fatalf("desktop .profile-layout lost justify-content: center: %q", base)
+	}
+}
+
+func TestMenuButtonPattern(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	src := string(IndexHTML)
+	snippet, err := json.Marshal(between(t, src, "// menu:begin", "// menu:end"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	menuClick := between(t, src, `$("#bot-menu").addEventListener("click"`, "async function setArchived")
+	if !strings.Contains(menuClick, "closeMenu()") {
+		t.Error("activating a menu item must close the menu")
+	}
+	if strings.Contains(between(t, src, "// menu:begin", "// menu:end"), "hidden = false") {
+		t.Error("menu close path reopens the popup")
+	}
+	script := `const vm = require("vm");
+const snippet = ` + string(snippet) + `;
+const ctx = {};
+vm.createContext(ctx);
+vm.runInContext(snippet + "\nthis.restoreStateFocus=restoreStateFocus; this.handleMenuEscape=handleMenuEscape; this.handleMenuFocusOut=handleMenuFocusOut;", ctx);
+function make(match) {
+  return {
+    match: match,
+    hidden: false,
+    attrs: {},
+    children: [],
+    parent: null,
+    focused: 0,
+    focusArg: null,
+    setAttribute(k, v) { this.attrs[k] = String(v); },
+    focus(arg) { this.focused++; this.focusArg = arg || null; },
+    matches(sel) { return sel === this.match; },
+    closest(sel) {
+      let cur = this;
+      while (cur) {
+        if (cur.matches && cur.matches(sel)) return cur;
+        cur = cur.parent;
+      }
+      return null;
+    },
+    querySelector(sel) {
+      const walk = (node) => {
+        for (const c of node.children) {
+          if (c.matches && c.matches(sel)) return c;
+          const found = walk(c);
+          if (found) return found;
+        }
+        return null;
+      };
+      return walk(this);
+    },
+    contains(node) {
+      const walk = (cur) => {
+        if (!cur) return false;
+        if (cur === node) return true;
+        for (const c of cur.children || []) if (walk(c)) return true;
+        return false;
+      };
+      return walk(this);
+    }
+  };
+}
+function link(parent, child) {
+  child.parent = parent;
+  parent.children.push(child);
+  return child;
+}
+function build(triggerMatch) {
+  const menu = make(".menu");
+  const trigger = link(menu, make(triggerMatch || "[aria-haspopup='menu']"));
+  trigger.attrs["aria-expanded"] = "true";
+  const pop = link(menu, make(".menu-pop"));
+  pop.hidden = true;
+  const item = link(pop, make("[role='menuitem']"));
+  return { menu, trigger, pop, item };
+}
+const cases = [];
+function check(name, ok, extra) {
+  cases.push(Object.assign({ name, ok }, extra || {}));
+}
+ctx.document = { contains() { return true; } };
+ctx.setTimeout = (fn) => { fn(); };
+const thread = build("[aria-haspopup='menu']");
+ctx.stateReturnFocus = thread.item;
+ctx.restoreStateFocus();
+check("close-focuses-trigger",
+  thread.trigger.focused === 1 && thread.item.focused === 0 && thread.pop.hidden === true && thread.trigger.attrs["aria-expanded"] === "false",
+  { focused: thread.trigger.focused, item: thread.item.focused, hidden: thread.pop.hidden, expanded: thread.trigger.attrs["aria-expanded"] });
+const profile = build("[aria-haspopup='menu']");
+profile.trigger.id = "profile-menu";
+ctx.stateReturnFocus = profile.item;
+ctx.restoreStateFocus();
+check("close-profile-trigger",
+  profile.trigger.focused === 1 && profile.pop.hidden === true && profile.trigger.attrs["aria-expanded"] === "false");
+const chip = make("#state-chip");
+ctx.stateReturnFocus = chip;
+ctx.restoreStateFocus();
+check("close-chip", chip.focused === 1 && chip.hidden !== true);
+const open = build();
+open.pop.hidden = false;
+let behind = false;
+const esc = {
+  key: "Escape",
+  preventDefault() { this.prevented = true; },
+  stopPropagation() { this.stopped = true; },
+  stopImmediatePropagation() { this.immediate = true; }
+};
+const handled = ctx.handleMenuEscape(esc, open.pop);
+if (!esc.immediate) behind = true;
+check("escape-closes",
+  handled === true && esc.prevented === true && esc.stopped === true && esc.immediate === true && behind === false && open.pop.hidden === true && open.trigger.focused === 1 && open.trigger.attrs["aria-expanded"] === "false",
+  { handled, prevented: esc.prevented, hidden: open.pop.hidden, focused: open.trigger.focused, behind });
+const quiet = build();
+quiet.pop.hidden = true;
+const escClosed = { key: "Escape", preventDefault() { this.prevented = true; }, stopPropagation() {}, stopImmediatePropagation() {} };
+check("escape-closed-menu", ctx.handleMenuEscape(escClosed, quiet.pop) === false && escClosed.prevented !== true);
+const tab = build();
+tab.pop.hidden = false;
+const outside = make("#elsewhere");
+const left = ctx.handleMenuFocusOut({ relatedTarget: outside }, tab.pop);
+check("focusout-closes", left === true && tab.pop.hidden === true && tab.trigger.attrs["aria-expanded"] === "false");
+const stay = build();
+stay.pop.hidden = false;
+const stayed = ctx.handleMenuFocusOut({ relatedTarget: stay.trigger }, stay.pop);
+check("focusout-trigger", stayed === false && stay.pop.hidden === false);
+const inside = build();
+inside.pop.hidden = false;
+const itemStay = ctx.handleMenuFocusOut({ relatedTarget: inside.item }, inside.pop);
+check("focusout-item", itemStay === false && inside.pop.hidden === false);
+console.log(JSON.stringify(cases));
+`
+	raw := runNode(t, node, script)
+	assertCases(t, raw)
+}
+
+func TestProfileScrollAndDrillFocus(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	src := string(IndexHTML)
+	open := between(t, src, "async function openProfile", "async function loadRoutines")
+	if !strings.Contains(open, `resetScrollTops(document.querySelectorAll(".profile-layout, .profile-col"))`) {
+		t.Fatal("openProfile must reset profile scroll containers")
+	}
+	setView := between(t, src, "function setView(name)", `$("#log-toggle")`)
+	if !strings.Contains(setView, "shouldFocusDrill(prev, name, wide)") {
+		t.Fatal("setView must focus a new narrow drill level")
+	}
+	hash := between(t, src, `addEventListener("hashchange"`, `addEventListener("popstate"`)
+	if !strings.Contains(hash, "ensureHistory()") || !strings.Contains(hash, "revealLevel") {
+		t.Fatal("hashchange must restamp and reveal")
+	}
+	pop := between(t, src, `addEventListener("popstate"`, "async function openBot")
+	if !strings.Contains(pop, "ensureHistory()") {
+		t.Fatal("popstate must restamp a null history.state")
+	}
+	scroll, err := json.Marshal(between(t, src, "// scroll:begin", "// scroll:end"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	drill, err := json.Marshal(between(t, src, "// drill:begin", "// drill:end"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `const vm = require("vm");
+const ctx = {};
+vm.createContext(ctx);
+vm.runInContext(` + string(scroll) + ` + "\n" + ` + string(drill) + ` + "\nthis.resetScrollTops=resetScrollTops; this.shouldFocusDrill=shouldFocusDrill; this.drillFocusTarget=drillFocusTarget; this.applyDrillFocus=applyDrillFocus; this.focusDrillView=focusDrillView;", ctx);
+const cases = [];
+function check(name, ok, extra) { cases.push(Object.assign({name, ok}, extra || {})); }
+const layout = { scrollTop: 480 };
+const col = { scrollTop: 220 };
+ctx.resetScrollTops([layout, col, null]);
+check("scroll-reset", layout.scrollTop === 0 && col.scrollTop === 0, { layout: layout.scrollTop, col: col.scrollTop });
+check("home-load", ctx.shouldFocusDrill("bots", "bots", false) === false);
+check("deep-thread", ctx.shouldFocusDrill("bots", "chat", false) === true);
+check("wide-thread", ctx.shouldFocusDrill("bots", "chat", true) === false);
+check("open-profile", ctx.shouldFocusDrill("chat", "profile", false) === true);
+check("open-log", ctx.shouldFocusDrill("chat", "log", false) === true);
+check("back-roster", ctx.shouldFocusDrill("profile", "bots", false) === true);
+check("same-profile", ctx.shouldFocusDrill("profile", "profile", false) === false);
+const want = {
+  bots: "#view-bots h1",
+  chat: "#thread-name",
+  profile: "#profile-head-name",
+  log: "#view-log h2.solo-title"
+};
+for (const name of Object.keys(want)) {
+  const spec = ctx.drillFocusTarget(name, false);
+  check("target-"+name, !!spec && spec.sel === want[name] && spec.tabindex === -1, spec);
+}
+check("target-wide", ctx.drillFocusTarget("chat", true) === null);
+const el = { tabIndex: 0, focused: 0, focusArg: null, focus(arg) { this.focused++; this.focusArg = arg; } };
+check("apply-focus", ctx.applyDrillFocus(el, -1) === true && el.tabIndex === -1 && el.focused === 1 && el.focusArg && el.focusArg.preventScroll === true);
+const found = { tabIndex: 0, focused: 0, focusArg: null, focus(arg) { this.focused++; this.focusArg = arg; } };
+check("focus-view", ctx.focusDrillView("chat", false, (sel) => sel === "#thread-name" ? found : null) === true && found.tabIndex === -1 && found.focusArg.preventScroll === true);
+check("focus-wide", ctx.focusDrillView("chat", true, () => found) === false);
+console.log(JSON.stringify(cases));
+`
+	raw := runNode(t, node, script)
+	assertCases(t, raw)
+}
+
+func mediaBodies(t *testing.T, src, header string) []string {
+	t.Helper()
+	var blocks []string
+	from := 0
+	for {
+		i := strings.Index(src[from:], header)
+		if i < 0 {
+			break
+		}
+		i += from
+		rest := src[i+len(header):]
+		brace := strings.Index(rest, "{")
+		if brace < 0 {
+			t.Fatalf("media %s missing body", header)
+		}
+		start := i + len(header) + brace + 1
+		depth := 1
+		p := start
+		for p < len(src) && depth > 0 {
+			switch src[p] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+			}
+			p++
+		}
+		if depth != 0 {
+			t.Fatalf("unbalanced %s", header)
+		}
+		blocks = append(blocks, src[start:p-1])
+		from = p
+	}
+	if len(blocks) == 0 {
+		t.Fatalf("no %s blocks", header)
+	}
+	return blocks
+}
+
+func ruleBody(block, selector string) (string, bool) {
+	re := regexp.MustCompile(`(?s)` + regexp.QuoteMeta(selector) + `\s*\{([^}]*)\}`)
+	m := re.FindStringSubmatch(block)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
+func assertCases(t *testing.T, raw string) {
+	t.Helper()
+	var rows []struct {
+		Name string `json:"name"`
+		OK   bool   `json:"ok"`
+	}
+	if err := json.Unmarshal([]byte(raw), &rows); err != nil {
+		t.Fatalf("decode %v: %s", err, raw)
+	}
+	if len(rows) == 0 {
+		t.Fatal("no cases")
+	}
+	for _, row := range rows {
+		if !row.OK {
+			t.Errorf("case %s failed: %s", row.Name, raw)
 		}
 	}
 }

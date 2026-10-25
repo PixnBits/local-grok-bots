@@ -589,7 +589,7 @@ window.addEventListener("storage", function (ev) {
   @media (max-width: 979px) {
     .thread-back { display: inline-flex; }
     .roster-head, .thread-bar, .solo-bar { height: 56px; }
-    .profile-layout { display: flex; flex-direction: column; overflow: auto; }
+    .profile-layout { display: flex; flex-direction: column; overflow: auto; justify-content: flex-start; }
     .profile-nav, .profile-col { overflow: visible; min-height: auto; flex: none; }
   }
   @media (max-width: 540px) {
@@ -853,8 +853,34 @@ function markEl(mark) {
   return paintMark(el("span", "mark"), mark);
 }
 function isWide() { return window.matchMedia("(min-width: 980px)").matches; }
+// drill:begin
+function shouldFocusDrill(prev, next, wide) {
+  return !wide && prev !== next;
+}
+function drillFocusTarget(name, wide) {
+  if (wide) return null;
+  if (name === "bots") return { sel: "#view-bots h1", tabindex: -1 };
+  if (name === "chat") return { sel: "#thread-name", tabindex: -1 };
+  if (name === "profile") return { sel: "#profile-head-name", tabindex: -1 };
+  if (name === "log") return { sel: "#view-log h2.solo-title", tabindex: -1 };
+  return null;
+}
+function applyDrillFocus(el, tabindex) {
+  if (!el || typeof el.focus !== "function") return false;
+  if (tabindex != null) el.tabIndex = tabindex;
+  el.focus({ preventScroll: true });
+  return true;
+}
+function focusDrillView(name, wide, query) {
+  const spec = drillFocusTarget(name, wide);
+  if (!spec) return false;
+  const el = typeof query === "function" ? query(spec.sel) : null;
+  return applyDrillFocus(el, spec.tabindex);
+}
+// drill:end
 function setView(name) {
-  const enter = state.view !== name;
+  const prev = state.view;
+  const enter = prev !== name;
   state.view = name;
   const wide = isWide();
   const solo = name === "profile" || name === "log";
@@ -866,6 +892,7 @@ function setView(name) {
     $("#view-" + v).classList.toggle("on", on);
   }
   if (name === "log" && enter) loadLog();
+  if (shouldFocusDrill(prev, name, wide)) focusDrillView(name, wide, (sel) => $(sel));
 }
 $("#log-toggle").addEventListener("click", () => {
   if (state.view === "log") navBack();
@@ -1055,6 +1082,11 @@ function parentLevel(level) {
   if (level && level.view === "log") return bot ? { view: "chat", bot: bot } : { view: "bots", bot: null };
   return { view: "bots", bot: null };
 }
+function historyStamp(hist, pathname, hash, root) {
+  if (hist && hist.lgb === 1) return null;
+  const level = parseLevel(pathname, hash, root, hist);
+  return { op: "replace", view: level.view, bot: level.bot };
+}
 // route:end
 function botPath(id) { return base() + (id ? "/bots/" + encodeURIComponent(id) : "/"); }
 function botFromPath() { return botFromPathname(location.pathname, base()); }
@@ -1071,8 +1103,9 @@ function commitLevel(level, mode) {
   else history.replaceState(rec, "", url);
 }
 function ensureHistory() {
-  if (history.state && history.state.lgb === 1) return;
-  commitLevel(parseLevel(location.pathname, location.hash, base(), history.state), "replace");
+  const stamp = historyStamp(history.state, location.pathname, location.hash, base());
+  if (!stamp) return;
+  commitLevel(stamp, "replace");
 }
 function navBack() {
   if (backAction(history.state) === "back") {
@@ -1131,7 +1164,13 @@ function goHome(push = true) {
   setTitle();
   setView("bots");
 }
+window.addEventListener("hashchange", () => {
+  if (history.state && history.state.lgb === 1) return;
+  ensureHistory();
+  revealLevel(parseLevel(location.pathname, location.hash, base(), history.state));
+});
 window.addEventListener("popstate", () => {
+  ensureHistory();
   revealLevel(parseLevel(location.pathname, location.hash, base(), history.state));
 });
 async function openBot(id, push = true) {
@@ -1140,6 +1179,8 @@ async function openBot(id, push = true) {
   if (push) commitLevel({ view: "chat", bot: id }, "push");
   setTitle();
   closeMenu();
+  const named = currentBot();
+  if (named && named.name) $("#thread-name").textContent = named.name;
   setView("chat");
   await refreshBot();
   await loadThread();
@@ -2153,7 +2194,14 @@ async function openProfile(id, push = true) {
   setTitle();
   if (push) commitLevel({ view: "profile", bot: id }, "push");
   setView("profile");
+  resetScrollTops(document.querySelectorAll(".profile-layout, .profile-col"));
 }
+// scroll:begin
+function resetScrollTops(nodes) {
+  if (!nodes) return;
+  for (const n of nodes) if (n) n.scrollTop = 0;
+}
+// scroll:end
 async function loadRoutines() {
   const box = $("#routines");
   box.replaceChildren();
@@ -2494,23 +2542,62 @@ let stateHideToken = 0;
 function motionOff() {
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
+// menu:begin
+function menuTriggerOf(pop) {
+  if (!pop) return null;
+  const owner = (pop.closest && pop.closest(".menu")) || pop.parentElement || null;
+  if (!owner || typeof owner.querySelector !== "function") return null;
+  return owner.querySelector("[aria-haspopup='menu']");
+}
+function restoreMenuOrOpener(opener) {
+  const pop = opener && opener.closest && opener.closest(".menu-pop");
+  if (!pop) return opener || null;
+  pop.hidden = true;
+  const trigger = menuTriggerOf(pop);
+  if (trigger && trigger.setAttribute) trigger.setAttribute("aria-expanded", "false");
+  return trigger || null;
+}
 function restoreStateFocus() {
   const opener = stateReturnFocus;
   stateReturnFocus = null;
-  if (!opener || !document.contains(opener) || typeof opener.focus !== "function") return;
-  // After the click that closed the sheet, so the document click handler
-  // does not hide the menu again before the opener is focused.
+  if (!opener || !document.contains(opener)) return;
+  // After the closing click, so focus lands on the trigger once the sheet is gone.
   setTimeout(() => {
     if (!document.contains(opener)) return;
-    const pop = opener.closest && opener.closest(".menu-pop");
-    if (pop && pop.hidden) {
-      pop.hidden = false;
-      const trigger = pop.parentElement && pop.parentElement.querySelector("[aria-haspopup='menu']");
-      if (trigger) trigger.setAttribute("aria-expanded", "true");
-    }
-    opener.focus();
+    const target = restoreMenuOrOpener(opener);
+    if (typeof closeMenu === "function") closeMenu();
+    if (target && typeof target.focus === "function") target.focus();
   }, 0);
 }
+function handleMenuEscape(event, pop) {
+  if (!pop || pop.hidden || !event || event.key !== "Escape") return false;
+  if (event.preventDefault) event.preventDefault();
+  if (event.stopPropagation) event.stopPropagation();
+  if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+  pop.hidden = true;
+  const trigger = menuTriggerOf(pop);
+  if (trigger && trigger.setAttribute) trigger.setAttribute("aria-expanded", "false");
+  if (trigger && typeof trigger.focus === "function") trigger.focus();
+  return true;
+}
+function handleMenuFocusOut(event, pop) {
+  if (!pop || pop.hidden) return false;
+  const next = event && event.relatedTarget;
+  if (next && pop.contains && pop.contains(next)) return false;
+  const owner = (pop.closest && pop.closest(".menu")) || pop.parentElement || null;
+  if (next && owner && owner.contains && owner.contains(next)) return false;
+  pop.hidden = true;
+  const trigger = menuTriggerOf(pop);
+  if (trigger && trigger.setAttribute) trigger.setAttribute("aria-expanded", "false");
+  return true;
+}
+// menu:end
+document.addEventListener("keydown", (e) => {
+  if (handleMenuEscape(e, $("#bot-menu"))) closeMenu();
+}, true);
+$("#bot-menu").addEventListener("focusout", (e) => {
+  if (handleMenuFocusOut(e, $("#bot-menu"))) closeMenu();
+});
 function closeState() {
   const sheet = $("#state-sheet");
   const backdrop = $("#state-backdrop");
