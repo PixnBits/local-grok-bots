@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -43,7 +44,9 @@ type loopState struct {
 
 // App is the daemon: HTTP API, turn queue, timers, and the model loop.
 type App struct {
-	cfg    config.Config
+	cfg config.Config
+	// logw receives startup lines. Nil means stderr.
+	logw   io.Writer
 	st     *store.Store
 	model  model.Client
 	ws     string
@@ -117,6 +120,9 @@ type App struct {
 	wg           sync.WaitGroup
 }
 
+// logOut is copied onto each App as the startup writer. Nil means stderr.
+var logOut io.Writer
+
 func New(cfg config.Config, m model.Client) (*App, error) {
 	pol, err := policy.Load(policy.Options{
 		Path:           cfg.PolicyPath,
@@ -151,6 +157,10 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		cfg.AuthToken = tok
 		fmt.Fprintf(os.Stderr, "local-grok-bots: a CLI backend is enabled, so the API requires a token; it is in %s. Open /login?token=<token> once per browser.\n", tokPath)
 	}
+	logw := logOut
+	if logw == nil {
+		logw = os.Stderr
+	}
 	aud, err := audit.Open(pol.AuditLog)
 	if err != nil {
 		return nil, err
@@ -178,6 +188,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{
 		cfg:        cfg,
+		logw:       logw,
 		st:         st,
 		model:      m,
 		ws:         cfg.Workspace(),
@@ -260,14 +271,19 @@ func (a *App) Shutdown() {
 
 // Run serves HTTP until ctx is cancelled, then shuts down cleanly.
 func (a *App) Run(ctx context.Context) error {
+	ln, err := net.Listen("tcp", a.cfg.BindAddr)
+	if err != nil {
+		a.Shutdown()
+		return err
+	}
+	a.writeStartup("local-grok-bots %s listening on %s\n", a.cfg.Version, ln.Addr().String())
 	srv := &http.Server{
-		Addr:              a.cfg.BindAddr,
 		Handler:           a.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		err := srv.ListenAndServe()
+		err := srv.Serve(ln)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
@@ -285,6 +301,14 @@ func (a *App) Run(ctx context.Context) error {
 		a.Shutdown()
 		return err
 	}
+}
+
+func (a *App) writeStartup(format string, args ...any) {
+	w := io.Writer(os.Stderr)
+	if a != nil && a.logw != nil {
+		w = a.logw
+	}
+	fmt.Fprintf(w, format, args...)
 }
 
 func (a *App) timerLoop() {
