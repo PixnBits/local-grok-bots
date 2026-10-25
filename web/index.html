@@ -452,11 +452,14 @@
           <legend>Grants</legend>
           <label><input type="checkbox" name="grant" value="net"> net</label>
           <label><input type="checkbox" name="grant" value="git"> git</label>
+          <label><input type="checkbox" name="grant" value="github"> github</label>
           <label><input type="checkbox" name="grant" value="ssh"> ssh</label>
           <label><input type="checkbox" name="grant" value="build"> build</label>
         </fieldset>
         <label>Network allowlist<input id="profile-net" placeholder="host.example" autocomplete="off"></label>
         <label>SSH allowlist<input id="profile-ssh" placeholder="host.example" autocomplete="off"></label>
+        <label>GitHub repositories<input id="profile-github" placeholder="owner/repo" autocomplete="off"></label>
+        <p class="empty" style="padding:0">An empty GitHub list allows no repositories. It does not inherit the policy list. It can only narrow the policy ceiling.</p>
         <fieldset class="grants" id="server-tools">
           <legend>Server tools</legend>
           <label><input type="radio" name="server-tools-mode" id="server-tools-inherit" value="inherit" checked> Inherit from policy</label>
@@ -1753,6 +1756,7 @@ async function openProfile(id) {
   }
   $("#profile-net").value = (b.net_allow || []).join(", ");
   $("#profile-ssh").value = (b.ssh_allow || []).join(", ");
+  $("#profile-github").value = (b.github_allow || []).join(", ");
   const tools = b.server_tools;
   $("#server-tools-inherit").checked = tools == null;
   $("#server-tools-explicit").checked = tools != null;
@@ -1863,6 +1867,7 @@ $("#profile-form").addEventListener("submit", async (e) => {
       grants,
       net_allow: splitList($("#profile-net").value),
       ssh_allow: splitList($("#profile-ssh").value),
+      github_allow: splitList($("#profile-github").value),
       server_tools: serverToolsPayload()
     })});
     await loadBots();
@@ -2181,10 +2186,11 @@ function renderState(box, s) {
   out.push(ms);
   const as = stSection("Access");
   const tags = el("div");
-  for (const g of ["net", "git", "ssh", "build"]) tags.append(el("span", "st-tag" + ((s.grants || []).includes(g) ? " ok" : " off"), g));
+  for (const g of ["net", "git", "github", "ssh", "build"]) tags.append(el("span", "st-tag" + ((s.grants || []).includes(g) ? " ok" : " off"), g));
   as.append(stRow(tags, [
     (s.net_allow && s.net_allow.length) ? "Network: " + s.net_allow.join(", ") : "",
-    (s.ssh_allow && s.ssh_allow.length) ? "SSH: " + s.ssh_allow.join(", ") : ""
+    (s.ssh_allow && s.ssh_allow.length) ? "SSH: " + s.ssh_allow.join(", ") : "",
+    (s.github_allow && s.github_allow.length) ? "GitHub: " + s.github_allow.join(", ") : "GitHub: no repositories"
   ]));
   out.push(as);
   const tl = stSection("Tools", s.tools.current.length);

@@ -228,7 +228,7 @@ func TestDuplicateOmitsGrants(t *testing.T) {
 		t.Fatal("duplicateBot missing")
 	}
 	body := src[i:j]
-	if strings.Contains(body, "grants") || strings.Contains(body, "net_allow") || strings.Contains(body, "ssh_allow") {
+	if strings.Contains(body, "grants") || strings.Contains(body, "net_allow") || strings.Contains(body, "ssh_allow") || strings.Contains(body, "github_allow") {
 		t.Fatalf("duplicate copies grants:\n%s", body)
 	}
 	if !strings.Contains(body, "server_tools") || !strings.Contains(body, "full.server_tools") {
@@ -458,12 +458,12 @@ git commit -m note
 git push
 echo PUSH_DONE
 `})
-	if err != nil || !strings.Contains(out, "not sent") || !strings.Contains(out, "PUSH_DONE") {
-		t.Fatalf("git review: %v\n%s", err, out)
+	if err == nil || strings.Contains(out, "PUSH_DONE") || !strings.Contains(out, "denied") {
+		t.Fatalf("git push: %v\n%s", err, out)
 	}
 	thread := botThread(t, srv.URL, bot.ID)
-	if !hasMessage(thread, "system", "Notice: Git push held for review") {
-		t.Fatalf("thread %#v", thread)
+	if hasMessage(thread, "system", "Notice: Git push held for review") {
+		t.Fatalf("push was held: %#v", thread)
 	}
 
 	out, err = app.dispatchTool(ctx, bot, "run_shell", map[string]any{"command": "ssh -o ConnectTimeout=2 allowed.test true; echo ssh:$?"})
@@ -556,8 +556,8 @@ func TestPushNoticeDoesNotStartTurn(t *testing.T) {
 	if err != nil || need {
 		t.Fatalf("NeedsRun after notice: %v %v", need, err)
 	}
-	if !hasMessage(botThread(t, srv.URL, bot.ID), "system", "Notice: Git push held for review") {
-		t.Fatal("push notice missing from the thread")
+	if hasMessage(botThread(t, srv.URL, bot.ID), "system", "Notice: Git push held for review") {
+		t.Fatal("denied push was posted as held")
 	}
 	res, b = do(t, "GET", srv.URL+"/api/bots/"+bot.ID, nil, "")
 	decodeJSON(t, b, &bot)

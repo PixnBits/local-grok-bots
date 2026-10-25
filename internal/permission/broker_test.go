@@ -411,6 +411,149 @@ func TestTransportIsRecorded(t *testing.T) {
 	}
 }
 
+func TestForceAskShowsTheCard(t *testing.T) {
+	ws := t.TempDir()
+	mustFile(t, ws, "a.txt")
+	base := Request{
+		RunID: "run", BotID: "bot", Tool: "git_push", Workspace: ws, ForceAsk: true,
+		Args: map[string]any{"repo": "acme/widgets", "branch": "feature"},
+	}
+	card := func(t *testing.T, b *Broker, pol policy.Permission, req Request) Outcome {
+		t.Helper()
+		if req.ID == "" {
+			req.ID = "card"
+		}
+		done := make(chan Outcome, 1)
+		go func() {
+			done <- b.Evaluate(context.Background(), pol, req)
+		}()
+		select {
+		case out := <-done:
+			t.Fatalf("resolved without a card: %+v", out)
+		case <-time.After(80 * time.Millisecond):
+		}
+		if len(b.Pending(req.BotID)) == 0 {
+			t.Fatal("no approval card")
+		}
+		if err := b.DecideFor(req.BotID, req.RunID, req.ID, AllowOnce); err != nil {
+			t.Fatal(err)
+		}
+		out := <-done
+		if out.Behavior != "allow" || out.Source != "ui" || out.Decision != AllowOnce {
+			t.Fatalf("card result %+v", out)
+		}
+		return out
+	}
+
+	t.Run("bypass", func(t *testing.T) {
+		b := New(Options{})
+		card(t, b, policy.Permission{Mode: "bypassPermissions", UIPrompts: true, PromptTimeout: time.Second}, base)
+	})
+	t.Run("managed allow", func(t *testing.T) {
+		b := New(Options{})
+		req := base
+		req.ID = "allow"
+		card(t, b, policy.Permission{Allow: []string{"git_push"}, UIPrompts: true, PromptTimeout: time.Second}, req)
+	})
+	t.Run("durable allow", func(t *testing.T) {
+		b := New(Options{})
+		req := Request{
+			ID: "read", RunID: "run", BotID: "bot", Tool: "Read", Workspace: ws, ForceAsk: true,
+			Args:      map[string]any{"file_path": "a.txt"},
+			UserRules: []UserRule{{ID: "r", Effect: "allow", Pattern: "Read(a.txt)"}},
+		}
+		plain := b.Evaluate(context.Background(), policy.Permission{UIPrompts: false}, Request{
+			RunID: "run", BotID: "bot", Tool: "Read", Workspace: ws,
+			Args:      map[string]any{"file_path": "a.txt"},
+			UserRules: req.UserRules,
+		})
+		if plain.Decision != Allow || plain.Source != "user" {
+			t.Fatalf("durable allow did not match without ForceAsk: %+v", plain)
+		}
+		card(t, b, policy.Permission{UIPrompts: true, PromptTimeout: time.Second}, req)
+	})
+	t.Run("session grant", func(t *testing.T) {
+		b := New(Options{})
+		pol := policy.Permission{UIPrompts: true, PromptTimeout: time.Second, AllowSessionGrants: true}
+		first := Request{ID: "s1", RunID: "run", BotID: "bot", Tool: "Bash", Args: map[string]any{"command": "pwd"}}
+		done := make(chan Outcome, 1)
+		go func() { done <- b.Evaluate(context.Background(), pol, first) }()
+		waitForPending(t, b, "s1")
+		if err := b.DecideFor("bot", "run", "s1", AllowSession); err != nil {
+			t.Fatal(err)
+		}
+		if out := <-done; out.Decision != AllowSession {
+			t.Fatalf("session approve %+v", out)
+		}
+		again := b.Evaluate(context.Background(), policy.Permission{UIPrompts: false}, first)
+		if again.Source != "ui" || again.Rule != "session" {
+			t.Fatalf("session grant %+v", again)
+		}
+		forced := first
+		forced.ID = "s2"
+		forced.ForceAsk = true
+		done2 := make(chan Outcome, 1)
+		go func() { done2 <- b.Evaluate(context.Background(), pol, forced) }()
+		waitForPending(t, b, "s2")
+		if err := b.DecideFor("bot", "run", "s2", AllowSession); !errors.Is(err, ErrSessionGrant) {
+			t.Fatalf("allow_session on a forced card: %v", err)
+		}
+		if len(b.Pending("bot")) == 0 {
+			t.Fatal("session refusal closed the card")
+		}
+		if err := b.DecideFor("bot", "run", "s2", AllowOnce); err != nil {
+			t.Fatal(err)
+		}
+		if out := <-done2; out.Decision != AllowOnce || out.Source != "ui" {
+			t.Fatalf("forced card %+v", out)
+		}
+	})
+	t.Run("hook allow", func(t *testing.T) {
+		b := New(Options{})
+		b.AddHook(func(Request) HookResult { return HookResult{Decision: "allow", Rule: "hook-ok"} })
+		req := base
+		req.ID = "hook"
+		card(t, b, policy.Permission{UIPrompts: true, PromptTimeout: time.Second}, req)
+	})
+	t.Run("deny still denies", func(t *testing.T) {
+		b := New(Options{})
+		var saw bool
+		b.AddHook(func(Request) HookResult {
+			saw = true
+			return HookResult{Decision: "deny", Rule: "nope"}
+		})
+		out := b.Evaluate(context.Background(), policy.Permission{Mode: "bypassPermissions", UIPrompts: true}, base)
+		if !saw || out.Decision != Deny || out.Source != "hook" {
+			t.Fatalf("hook deny %+v saw=%v", out, saw)
+		}
+		if len(b.Pending("bot")) != 0 {
+			t.Fatal("deny opened a card")
+		}
+		managedBroker := New(Options{})
+		managed := managedBroker.Evaluate(context.Background(), policy.Permission{
+			Mode: "bypassPermissions", Deny: []string{"git_push"}, UIPrompts: true,
+		}, Request{ID: "d2", RunID: "run", BotID: "bot", Tool: "git_push", ForceAsk: true})
+		if managed.Decision != Deny || managed.Source != "policy" || len(managedBroker.Pending("bot")) != 0 {
+			t.Fatalf("managed deny %+v", managed)
+		}
+	})
+	t.Run("prompts off", func(t *testing.T) {
+		b := New(Options{})
+		var saw bool
+		b.AddHook(func(Request) HookResult {
+			saw = true
+			return HookResult{}
+		})
+		out := b.Evaluate(context.Background(), policy.Permission{Mode: "bypassPermissions", UIPrompts: false}, base)
+		if !saw || out.Decision != Deny || out.Source != "no_ui" {
+			t.Fatalf("prompts off %+v saw=%v", out, saw)
+		}
+		if len(b.Pending("bot")) != 0 {
+			t.Fatal("prompts off opened a card")
+		}
+	})
+}
+
 func waitForPending(t *testing.T, b *Broker, id string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

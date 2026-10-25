@@ -1,0 +1,293 @@
+package daemon
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/PixnBits/local-grok-bots/internal/github"
+	"github.com/PixnBits/local-grok-bots/internal/sandbox"
+	"github.com/PixnBits/local-grok-bots/internal/store"
+)
+
+// readGitHubToken reads the token file owned by the daemon user. Tests replace it.
+var readGitHubToken = github.ReadToken
+
+// openGitHubProxy listens on a private socket for this shell. The token
+// stays in the proxy. A nil proxy means GitHub fetch is unavailable.
+func (a *App) openGitHubProxy(bot store.Bot) (*github.Proxy, error) {
+	if a == nil || !granted(bot.Grants, "github") {
+		return nil, nil
+	}
+	repos := a.policy.EffectiveGitHubRepos(bot.GitHubAllow)
+	p, err := github.New(github.Config{
+		Repos:   repos,
+		Token:   func() (string, error) { return readGitHubToken(a.policy.GitHub.TokenFile) },
+		GitBase: a.githubGitBase,
+		APIBase: a.githubAPIBase,
+		Audit:   func(ev github.Audit) { a.auditGitHub(bot.ID, ev) },
+	})
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Join(a.cfg.DataDir, "github")
+	if err := p.ListenUnix(dir); err != nil {
+		_ = p.Close()
+		return nil, err
+	}
+	if sandbox.EUID() == 0 {
+		uid, gid := sandbox.JailIDs()
+		if err := sandbox.Chown(p.Sock(), uid, gid); err != nil {
+			_ = p.Close()
+			return nil, err
+		}
+		if err := sandbox.Chown(filepath.Dir(p.Sock()), uid, gid); err != nil {
+			_ = p.Close()
+			return nil, err
+		}
+	}
+	p.Bind(safeAuditID(bot.ID), safeAuditID(a.loopRunID(bot.ID)))
+	return p, nil
+}
+
+func (a *App) loopRunID(botID string) string {
+	if a == nil {
+		return ""
+	}
+	a.rtMu.Lock()
+	defer a.rtMu.Unlock()
+	if st := a.loops[botID]; st != nil {
+		return st.runID
+	}
+	return ""
+}
+
+func (a *App) auditGitHub(botID string, ev github.Audit) {
+	if ev.Bot == "" {
+		ev.Bot = safeAuditID(botID)
+	}
+	rec := map[string]any{
+		"bot": ev.Bot, "run": ev.Run, "action": ev.Action,
+		"owner": ev.Owner, "repo": ev.Repo, "decision": ev.Decision,
+		"reason": ev.Reason, "method": ev.Method, "path": ev.Path, "status": ev.Status,
+	}
+	if a.audit != nil {
+		a.audit.Write(rec)
+	}
+	a.log(botID, ev.Action, rec)
+}
+
+func granted(grants []string, name string) bool {
+	for _, g := range grants {
+		if strings.EqualFold(strings.TrimSpace(g), name) {
+			return true
+		}
+	}
+	return false
+}
+
+func safeAuditID(s string) string {
+	if len(s) > 128 {
+		return ""
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return ""
+		}
+	}
+	return s
+}
+
+func allowlistNames(owner, repo string) (string, string, bool) {
+	name, err := github.NormalizeRepo(owner + "/" + repo)
+	if err != nil {
+		return "", "", false
+	}
+	owner, repo, _ = strings.Cut(name, "/")
+	return owner, repo, true
+}
+
+// auditSandboxGitHub records a jail denial of GitHub. The row has no token.
+func (a *App) auditSandboxGitHub(botID string, ev sandbox.Event) {
+	if a == nil || ev.Kind != "grant_denied" || ev.Grant != "github" {
+		return
+	}
+	switch ev.Detail {
+	case sandbox.GitHubNetworkDenied, sandbox.GitHubProxyDenied, sandbox.GitHubAllowlistDenied:
+	default:
+		return
+	}
+	rec := map[string]any{
+		"bot":      safeAuditID(botID),
+		"run":      safeAuditID(a.loopRunID(botID)),
+		"action":   "github_refuse",
+		"decision": "deny",
+		"reason":   ev.Detail,
+	}
+	if ev.Host != "" {
+		rec["host"] = ev.Host
+	}
+	if ev.Detail == sandbox.GitHubAllowlistDenied {
+		if owner, repo, ok := allowlistNames(ev.Owner, ev.Repo); ok {
+			rec["owner"] = owner
+			rec["repo"] = repo
+		}
+	}
+	if a.audit != nil {
+		a.audit.Write(rec)
+	}
+}
+
+func (a *App) noteGitHubSock(botID, sock string) {
+	if a == nil {
+		return
+	}
+	a.rtMu.Lock()
+	defer a.rtMu.Unlock()
+	if a.githubReadSock == nil {
+		a.githubReadSock = map[string]string{}
+	}
+	if sock == "" {
+		delete(a.githubReadSock, botID)
+		return
+	}
+	a.githubReadSock[botID] = sock
+}
+
+func (a *App) gitHubReadSock(botID string) string {
+	if a == nil {
+		return ""
+	}
+	a.rtMu.Lock()
+	defer a.rtMu.Unlock()
+	return a.githubReadSock[botID]
+}
+
+func (a *App) writeProxyUp() bool {
+	return a != nil && a.githubWriteUp.Load()
+}
+
+// githubUnixClient dials a read proxy. The URL host is ignored.
+func githubUnixClient(sock string) *http.Client {
+	return &http.Client{
+		Timeout: 20 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", sock)
+			},
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+// openGitHubReadProxy is the jail-style read proxy. It does not listen on TCP.
+func (a *App) openGitHubReadProxy(bot store.Bot) (*github.Proxy, error) {
+	return a.openGitHubProxy(bot)
+}
+
+// openGitHubWriteGate listens only after an approval card. The caller closes it.
+// The listener is not the jail socket. win is the only route it forwards.
+// The second result is the gate secret. It belongs in the X-LGB-Gate header,
+// not in a URL.
+func (a *App) openGitHubWriteGate(bot store.Bot, win github.Window) (string, string, func(), error) {
+	noop := func() {}
+	if a == nil {
+		return "", "", noop, errors.New("proxy unavailable")
+	}
+	p, err := github.New(github.Config{
+		Repos:   a.policy.EffectiveGitHubRepos(bot.GitHubAllow),
+		Token:   func() (string, error) { return readGitHubToken(a.policy.GitHub.TokenFile) },
+		GitBase: a.githubGitBase,
+		APIBase: a.githubAPIBase,
+		Audit:   func(ev github.Audit) { a.auditGitHub(bot.ID, ev) },
+		Access:  github.AccessWrite,
+		Window:  win,
+	})
+	if err != nil {
+		return "", "", noop, errors.New("proxy unavailable")
+	}
+	p.Bind(safeAuditID(bot.ID), safeAuditID(a.loopRunID(bot.ID)))
+	a.githubWriteUp.Store(true)
+	base, err := p.ListenTCP()
+	if err != nil || base == "" || p.Gate() == "" {
+		a.githubWriteUp.Store(false)
+		_ = p.Close()
+		return "", "", noop, errors.New("proxy unavailable")
+	}
+	var once bool
+	return base, p.Gate(), func() {
+		if once {
+			return
+		}
+		once = true
+		_ = p.Close()
+		a.githubWriteUp.Store(false)
+	}, nil
+}
+
+// gateRoundTripper adds X-LGB-Gate on a clone of the request. It does not
+// log the value.
+type gateRoundTripper struct {
+	base http.RoundTripper
+	gate string
+}
+
+func (g gateRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r == nil || g.gate == "" || strings.ContainsAny(g.gate, "\r\n\x00") {
+		return nil, errors.New("gate")
+	}
+	r2 := r.Clone(r.Context())
+	r2.Header.Set("X-LGB-Gate", g.gate)
+	rt := g.base
+	if rt == nil {
+		rt = http.DefaultTransport
+	}
+	return rt.RoundTrip(r2)
+}
+
+// githubBranchOID reads refs/heads/<branch> through the read proxy. An absent
+// ref is the zero id. A transport or parse failure is "remote ref" with no body.
+func (a *App) githubBranchOID(ctx context.Context, px *github.Proxy, owner, repo, branch string) (string, error) {
+	if px == nil || px.Sock() == "" || !github.BranchOK(branch) {
+		return "", errors.New("remote ref")
+	}
+	name, err := github.NormalizeRepo(owner + "/" + repo)
+	if err != nil || name != owner+"/"+repo {
+		return "", errors.New("remote ref")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	rawURL := "http://proxy/github/" + owner + "/" + repo + ".git/info/refs?service=git-upload-pack"
+	req, err := http.NewRequestWithContext(lctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return "", errors.New("remote ref")
+	}
+	resp, err := githubUnixClient(px.Sock()).Do(req)
+	if err != nil {
+		return "", errors.New("remote ref")
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil || resp.StatusCode != http.StatusOK {
+		return "", errors.New("remote ref")
+	}
+	oid, err := github.AdvertisedOID(body, "refs/heads/"+branch)
+	if err != nil {
+		return "", errors.New("remote ref")
+	}
+	return oid, nil
+}

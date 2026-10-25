@@ -6,21 +6,93 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/PixnBits/local-grok-bots/internal/github"
 )
 
-func gitWrap(grant bool) string {
-	g := 0
-	if grant {
-		g = 1
+// gitWrapOpts is the git wrapper embedded in the jail. Name and email are
+// checked before they are written into the script. A value that fails the
+// charset check produces a wrapper that refuses every git command and does
+// not contain that value.
+type gitWrapOpts struct {
+	Grant  bool
+	Repos  []string
+	Bridge bool
+	Name   string
+	Email  string
+	// RefuseAuthor denies every git command and embeds no author value.
+	RefuseAuthor bool
+}
+
+func gitWrap(opts gitWrapOpts) string {
+	if opts.RefuseAuthor {
+		return denyAuthorScript
 	}
-	return fmt.Sprintf(`#!/bin/sh
+	if opts.Name == "" {
+		opts.Name = "local-grok-bots"
+	}
+	if opts.Email == "" {
+		opts.Email = "bot@localhost"
+	}
+	if !authorEmbeddable(opts.Name, opts.Email) {
+		return denyAuthorScript
+	}
+	grant, bridge := "0", "0"
+	if opts.Grant {
+		grant = "1"
+	}
+	if opts.Bridge {
+		bridge = "1"
+	}
+	var arms strings.Builder
+	for _, raw := range opts.Repos {
+		repo, err := github.NormalizeRepo(raw)
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(&arms, "    https://github.com/%s|https://github.com/%s.git|https://github.com/%s/|https://github.com/%s.git/)\n      need_bridge=1\n      return 0\n      ;;\n", repo, repo, repo, repo)
+	}
+	script := gitWrapScript
+	script = strings.ReplaceAll(script, "@@GRANT@@", grant)
+	script = strings.ReplaceAll(script, "@@BRIDGE@@", bridge)
+	script = strings.ReplaceAll(script, "@@NAME@@", opts.Name)
+	script = strings.ReplaceAll(script, "@@EMAIL@@", opts.Email)
+	script = strings.ReplaceAll(script, "@@REPOS@@", arms.String())
+	return script
+}
+
+const denyAuthorScript = "#!/bin/sh\n" +
+	"echo \"git denied: invalid author\" >&2\n" +
+	"printf '%s\\n' \"deny git author\" >> /lgb/events/log\n" +
+	"exit 1\n"
+
+func authorEmbeddable(name, email string) bool {
+	if !github.ValidAuthorName(name) {
+		return false
+	}
+	if email == "" || len(email) > 254 || strings.ContainsAny(email, " \t'\"\\$`;|&<>(){}[]!*?#\r\n\x00") {
+		return false
+	}
+	local, domain, ok := strings.Cut(email, "@")
+	if !ok || local == "" || domain == "" || strings.Contains(domain, "@") {
+		return false
+	}
+	return true
+}
+
+const gitWrapScript = `#!/bin/sh
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
-unset SSH_AUTH_SOCK
+unset SSH_AUTH_SOCK http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
 real=/lgb/bin/git
 log=/lgb/events/log
-grant=%d
+nl='
+'
+grant=@@GRANT@@
+bridge=@@BRIDGE@@
+author_name=@@NAME@@
+author_email=@@EMAIL@@
 sub=
 prev=
 for arg in "$@"; do
@@ -44,10 +116,108 @@ for arg in "$@"; do
       ;;
   esac
 done
+GHPORT=
+need_bridge=0
+found_url=0
+pos=
+deny_allow() {
+  case "$1" in
+    *"$nl"*)
+      printf '%s\n' "deny git ${sub}" >> "$log"
+      ;;
+    *)
+      printf '%s\n' "deny github allowlist $1" >> "$log"
+      ;;
+  esac
+}
+vet() {
+  case "$1" in
+    *"$nl"*)
+      echo "git ${sub} denied: repository is not allowlisted" >&2
+      deny_allow "$1"
+      exit 1
+      ;;
+  esac
+  folded=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || {
+    echo "git ${sub} denied: repository is not allowlisted" >&2
+    deny_allow "$1"
+    exit 1
+  }
+  case "$folded" in
+    ""|file://*)
+      return 0
+      ;;
+@@REPOS@@
+    *://*|git@*)
+      echo "git ${sub} denied: repository is not allowlisted" >&2
+      deny_allow "$1"
+      exit 1
+      ;;
+  esac
+  return 0
+}
+resolve_remote() {
+  name=$1
+  case "$name" in
+    ""|-*)
+      return
+      ;;
+    *://*|git@*|file://*|/*|./*|../*)
+      vet "$name"
+      found_url=1
+      return
+      ;;
+  esac
+  u=$("$real" remote get-url "$name" 2>/dev/null) || return
+  vet "$u"
+}
+ensure_bridge() {
+  if [ -n "$GHPORT" ]; then
+    return 0
+  fi
+  if [ "$bridge" != "1" ] || [ ! -S /lgb/sock/github.sock ]; then
+    echo "git denied: github proxy unavailable" >&2
+    printf '%s\n' "deny git ${sub}" >> "$log"
+    return 1
+  fi
+  /lgb/bin/ghbridge http /lgb/sock/github.sock > /tmp/gh.port &
+  i=0
+  p=
+  while [ "$i" -lt 100000 ]; do
+    if [ -s /tmp/gh.port ]; then
+      p=$(tr -cd 0-9 < /tmp/gh.port)
+    fi
+    if [ -n "$p" ]; then
+      break
+    fi
+    i=$((i + 1))
+  done
+  if [ -z "$p" ]; then
+    echo "git denied: github proxy unavailable" >&2
+    printf '%s\n' "deny git ${sub}" >> "$log"
+    return 1
+  fi
+  GHPORT=$p
+  return 0
+}
 run() {
+  if [ -n "$GHPORT" ]; then
+    exec "$real" \
+      -c user.name="$author_name" \
+      -c user.email="$author_email" \
+      -c commit.gpgsign=false \
+      -c core.sshCommand=/bin/false \
+      -c core.hooksPath=/dev/null \
+      -c diff.external= \
+      -c core.pager=cat \
+      -c http.proxy= \
+      -c "url.http://127.0.0.1:${GHPORT}/github/.insteadOf=https://github.com/" \
+      -c "url.http://127.0.0.1:${GHPORT}/api/.insteadOf=https://api.github.com/" \
+      "$@"
+  fi
   exec "$real" \
-    -c user.name=local-grok-bots \
-    -c user.email=bot@localhost \
+    -c user.name="$author_name" \
+    -c user.email="$author_email" \
     -c commit.gpgsign=false \
     -c core.sshCommand=/bin/false \
     -c core.hooksPath=/dev/null \
@@ -62,22 +232,85 @@ case "$sub" in
 esac
 if [ "$grant" != "1" ]; then
   echo "git ${sub} denied: missing git grant" >&2
-  printf '%%s\n' "deny git ${sub}" >> "$log"
+  printf '%s\n' "deny git ${sub}" >> "$log"
   exit 1
 fi
 if [ "$sub" = "push" ]; then
-  printf '%%s\n' push >> "$log"
-  echo "git push held for review; not sent"
-  "$real" --no-pager -c core.pager=cat -c diff.external= -c core.sshCommand=/bin/false status --short
-  "$real" --no-pager -c core.pager=cat -c diff.external= -c core.sshCommand=/bin/false diff
-  "$real" --no-pager -c core.pager=cat -c diff.external= -c core.sshCommand=/bin/false diff --cached
-  "$real" --no-pager -c core.pager=cat -c core.sshCommand=/bin/false log --oneline -20
-  exit 0
+  if [ ! -x /lgb/bin/ghbridge ] || [ ! -S /lgb/sock/push.sock ]; then
+    echo "git push denied: not sent" >&2
+    printf '%s\n' "deny git push" >> "$log"
+    exit 1
+  fi
+  case "$PWD" in
+    /work)
+      rel=.
+      ;;
+    /work/*)
+      rel=${PWD#/work/}
+      ;;
+    *)
+      echo "git push denied: repository not found in workspace" >&2
+      printf '%s\n' "deny git push" >> "$log"
+      exit 1
+      ;;
+  esac
+  /lgb/bin/ghbridge push /lgb/sock/push.sock "$rel" "$@"
+  exit $?
 fi
-printf '%%s\n' "use git ${sub}" >> "$log"
+case "$sub" in
+  clone|fetch|pull|ls-remote|remote)
+    prev=
+    seen_sub=
+    for arg in "$@"; do
+      if [ -n "$prev" ]; then
+        prev=
+        continue
+      fi
+      case "$arg" in
+        -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path|--upload-pack|--depth|--branch|-b|-o|--origin|--reference|--separate-git-dir|--template|--config|--server-option)
+          prev=1
+          continue
+          ;;
+        --)
+          continue
+          ;;
+        -*)
+          continue
+          ;;
+      esac
+      if [ -z "$seen_sub" ]; then
+        seen_sub=1
+        continue
+      fi
+      case "$arg" in
+        *://*|git@*)
+          vet "$arg"
+          found_url=1
+          ;;
+        *)
+          if [ -z "$pos" ]; then
+            pos=$arg
+          fi
+          ;;
+      esac
+    done
+    if [ "$found_url" = "0" ]; then
+      if [ -n "$pos" ]; then
+        resolve_remote "$pos"
+      elif [ "$sub" = "fetch" ] || [ "$sub" = "pull" ]; then
+        for r in $("$real" remote 2>/dev/null); do
+          resolve_remote "$r"
+        done
+      fi
+    fi
+    if [ "$need_bridge" = "1" ]; then
+      ensure_bridge || exit 1
+    fi
+    ;;
+esac
+printf '%s\n' "use git ${sub}" >> "$log"
 run "$@"
-`, g)
-}
+`
 
 func sshWrap(grant bool, hosts []string) string {
 	g := 0

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
+	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 	"github.com/PixnBits/local-grok-bots/web"
 )
@@ -192,7 +193,11 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "version": a.cfg.Version})
+	body := map[string]any{"status": "ok", "version": a.cfg.Version}
+	if w := sandbox.RootJailWarning(); w != "" {
+		body["warning"] = w
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -221,6 +226,7 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 		Grants       []string    `json:"grants"`
 		NetAllow     []string    `json:"net_allow"`
 		SSHAllow     []string    `json:"ssh_allow"`
+		GitHubAllow  []string    `json:"github_allow"`
 		ServerTools  *[]string   `json:"server_tools"`
 	}
 	if err := readJSON(w, r, &body); err != nil {
@@ -248,7 +254,7 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 	}
 	b, err := a.st.InsertBot(store.BotDraft{
 		Name: name, Label: body.Label, Description: description, Mark: mark, Model: modelPtr,
-		Grants: body.Grants, NetAllow: body.NetAllow, SSHAllow: body.SSHAllow, ServerTools: body.ServerTools,
+		Grants: body.Grants, NetAllow: body.NetAllow, SSHAllow: body.SSHAllow, GitHubAllow: body.GitHubAllow, ServerTools: body.ServerTools,
 	}, "user")
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
@@ -374,6 +380,15 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 		}
 		patch.SSHSet = true
 		patch.SSHAllow = list
+	}
+	if v, ok := raw["github_allow"]; ok {
+		list, err := decodeStringList(v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid github_allow"})
+			return
+		}
+		patch.GitHubSet = true
+		patch.GitHubAllow = list
 	}
 	if v, ok := raw["server_tools"]; ok {
 		patch.ServerToolsSet = true

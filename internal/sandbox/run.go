@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/PixnBits/local-grok-bots/internal/github"
 )
 
 // Request is one jailed shell command.
@@ -23,6 +25,18 @@ type Request struct {
 	SSHAllow   []string
 	BuildBinds []string
 	SSHKey     string
+	// GitHubSock is the host credential-proxy socket. Empty leaves GitHub
+	// fetch unavailable. GitHubRepos is the allowlist copied into the wrapper.
+	GitHubSock      string
+	GitHubRepos     []string
+	GitAuthor       string
+	GitAuthorEmail  string
+	GitAuthorRefuse bool
+	// OnPush answers a git push while the shell is still running. Nil denies.
+	// The string is the shell's logical directory relative to /work.
+	// OnPushStart runs after the request is read and before OnPush.
+	OnPush      func(context.Context, string, []string) PushResult
+	OnPushStart func()
 	// Dial, when set, is the proxy's outbound TCP dial. Tests use it.
 	Dial func(context.Context, string, string) (net.Conn, error)
 }
@@ -55,6 +69,7 @@ type prepared struct {
 	mounts    []mount
 	events    string
 	proxy     *proxy
+	push      *pushSrv
 	before    *treeSnap
 	extra     []Event
 	grants    map[string]bool
@@ -67,6 +82,9 @@ func (p *prepared) close() {
 	if p.proxy != nil {
 		p.proxy.close()
 	}
+	if p.push != nil {
+		p.push.close()
+	}
 	if p.dir != "" {
 		_ = os.RemoveAll(p.dir)
 	}
@@ -75,8 +93,12 @@ func (p *prepared) close() {
 // Run executes command in the workspace jail.
 // Bubblewrap is used when it is installed. Otherwise the unshare jail is used.
 // Both paths keep the host filesystem outside the workspace hidden and start
-// with no network. A missing bwrap and a missing unshare fails closed.
+// with no network. A root daemon without bubblewrap fails closed. A missing
+// bwrap and a missing unshare fails closed.
 func Run(ctx context.Context, req Request) (Result, error) {
+	if err := refuseUnsandboxedRoot(); err != nil {
+		return Result{}, err
+	}
 	if strings.TrimSpace(req.Command) == "" {
 		return Result{}, fmt.Errorf("command required")
 	}
@@ -101,6 +123,9 @@ func Run(ctx context.Context, req Request) (Result, error) {
 	events := append([]Event{}, p.extra...)
 	if p.proxy != nil {
 		events = append(events, p.proxy.drain()...)
+	}
+	if p.push != nil {
+		events = append(events, p.push.drain()...)
 	}
 	events = append(events, parseEventFile(p.events)...)
 	if blockErr != nil {
@@ -172,8 +197,36 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 	if err := os.MkdirAll(filepath.Join(rw, "bin"), 0o755); err != nil {
 		return nil, err
 	}
+	ghSock := ""
+	bridgeBin := ""
+	if b, err := ensureBridge(); err == nil {
+		bridgeBin = b
+	}
+	if githubSockOK(req.GitHubSock) {
+		if bridgeBin == "" {
+			p.extra = append(p.extra, Event{Kind: "grant_denied", Grant: "github", Detail: GitHubProxyDenied})
+		} else {
+			if err := overlayFile(ro, "ghbridge", mustRead(bridgeBin), 0o755); err != nil {
+				return nil, err
+			}
+			touch(filepath.Join(rw, "bin", "ghbridge"))
+			touch(filepath.Join(rw, "sock", "github.sock"))
+			p.mounts = append(p.mounts,
+				mount{Src: filepath.Join(ro, "ghbridge"), Dst: "/lgb/bin/ghbridge", RO: true},
+				mount{Src: req.GitHubSock, Dst: "/lgb/sock/github.sock", RO: true},
+			)
+			ghSock = req.GitHubSock
+		}
+	}
 	if path, err := exec.LookPath("git"); err == nil {
-		if err := writeExec(filepath.Join(ro, "gitwrap"), gitWrap(grants["git"])); err != nil {
+		if err := writeExec(filepath.Join(ro, "gitwrap"), gitWrap(gitWrapOpts{
+			Grant:        grants["git"],
+			Repos:        req.GitHubRepos,
+			Bridge:       ghSock != "",
+			Name:         req.GitAuthor,
+			Email:        req.GitAuthorEmail,
+			RefuseAuthor: req.GitAuthorRefuse,
+		})); err != nil {
 			return nil, err
 		}
 		touch(filepath.Join(rw, "bin", "git"))
@@ -181,6 +234,21 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 			mount{Src: path, Dst: "/lgb/bin/git", RO: true},
 			mount{Src: filepath.Join(ro, "gitwrap"), Dst: "/usr/bin/git", RO: true},
 		)
+		if bridgeBin != "" && ghSock == "" {
+			if err := overlayFile(ro, "ghbridge", mustRead(bridgeBin), 0o755); err != nil {
+				return nil, err
+			}
+			touch(filepath.Join(rw, "bin", "ghbridge"))
+			p.mounts = append(p.mounts, mount{Src: filepath.Join(ro, "ghbridge"), Dst: "/lgb/bin/ghbridge", RO: true})
+		}
+		ps, perr := startPush(ctx, filepath.Join(dir, "push.sock"), req.OnPush, req.OnPushStart)
+		if perr != nil {
+			p.extra = append(p.extra, Event{Kind: "grant_denied", Grant: "git", Detail: "push socket unavailable"})
+		} else {
+			p.push = ps
+			touch(filepath.Join(rw, "sock", "push.sock"))
+			p.mounts = append(p.mounts, mount{Src: filepath.Join(dir, "push.sock"), Dst: "/lgb/sock/push.sock", RO: true})
+		}
 	}
 	if path, err := exec.LookPath("ssh"); err == nil {
 		if err := writeExec(filepath.Join(ro, "sshwrap"), sshWrap(grants["ssh"], normalizeHosts(req.SSHAllow))); err != nil {
@@ -353,6 +421,12 @@ func sameTree(root, path string) bool {
 }
 
 func capture(ctx context.Context, cmd *exec.Cmd) (string, string, error) {
+	return captureReady(ctx, cmd, nil)
+}
+
+// captureReady runs cmd. ready, when set, runs after start and before the
+// command is expected to finish. A ready error kills the process group.
+func captureReady(ctx context.Context, cmd *exec.Cmd, ready func() error) (string, string, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var outBuf, errBuf bytes.Buffer
 	stdoutPipe, err := cmd.StdoutPipe()
@@ -379,6 +453,17 @@ func capture(ctx context.Context, cmd *exec.Cmd) (string, string, error) {
 	waitErr := make(chan error, 1)
 	go func() { waitErr <- cmd.Wait() }()
 
+	if ready != nil {
+		if err := ready(); err != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = cmd.Process.Kill()
+			<-waitErr
+			<-doneOut
+			<-doneErr
+			return "", "", err
+		}
+	}
+
 	var runErr error
 	select {
 	case <-ctx.Done():
@@ -402,6 +487,38 @@ func capture(ctx context.Context, cmd *exec.Cmd) (string, string, error) {
 	return stdout, stderr, nil
 }
 
+func allowlistEvent(raw string) Event {
+	ev := Event{Kind: "grant_denied", Grant: "github", Detail: GitHubAllowlistDenied}
+	raw = strings.TrimSpace(raw)
+	if owner, repo, err := github.ParseGitHubRemote(raw); err == nil {
+		ev.Owner, ev.Repo = owner, repo
+		return ev
+	}
+	if owner, repo, ok := gitHubSSHRepo(raw); ok {
+		ev.Owner, ev.Repo = owner, repo
+	}
+	return ev
+}
+
+func gitHubSSHRepo(raw string) (string, string, bool) {
+	const prefix = "git@github.com:"
+	if len(raw) < len(prefix) || !strings.EqualFold(raw[:len(prefix)], prefix) {
+		return "", "", false
+	}
+	rest := raw[len(prefix):]
+	rest = strings.TrimSuffix(rest, "/")
+	if len(rest) >= 4 && strings.EqualFold(rest[len(rest)-4:], ".git") {
+		rest = rest[:len(rest)-4]
+	}
+	rest = strings.TrimSuffix(rest, "/")
+	name, err := github.NormalizeRepo(rest)
+	if err != nil {
+		return "", "", false
+	}
+	owner, repo, _ := strings.Cut(name, "/")
+	return owner, repo, true
+}
+
 func parseEventFile(path string) []Event {
 	b, err := os.ReadFile(path)
 	if err != nil {
@@ -414,9 +531,11 @@ func parseEventFile(path string) []Event {
 		case line == "":
 			continue
 		case line == "push":
-			out = append(out, Event{Kind: "grant_use", Grant: "git", Detail: "push held", Notice: "Git push held for review"})
+			out = append(out, Event{Kind: "grant_denied", Grant: "git", Detail: "push not sent"})
 		case line == "pkg":
 			out = append(out, Event{Kind: "grant_use", Detail: "package install", Notice: "Package install"})
+		case strings.HasPrefix(line, "deny github allowlist "):
+			out = append(out, allowlistEvent(strings.TrimPrefix(line, "deny github allowlist ")))
 		case strings.HasPrefix(line, "deny git "):
 			out = append(out, Event{Kind: "grant_denied", Grant: "git", Detail: strings.TrimPrefix(line, "deny git ")})
 		case strings.HasPrefix(line, "use git "):

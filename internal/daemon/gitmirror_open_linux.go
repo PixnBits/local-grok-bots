@@ -1,0 +1,80 @@
+//go:build linux
+
+package daemon
+
+import (
+	"errors"
+	"strings"
+
+	"golang.org/x/sys/unix"
+)
+
+// openat2Fn resolves one path from a directory descriptor. Tests replace it.
+var openat2Fn = unix.Openat2
+
+// openChain resolves parts from rootFd. openat2 applies
+// RESOLVE_BENEATH, RESOLVE_NO_SYMLINKS, and RESOLVE_NO_XDEV. ENOSYS uses the
+// component walk.
+func openChain(rootFd int, parts []string) ([]heldDir, error) {
+	if len(parts) == 0 {
+		return nil, nil
+	}
+	nodes, err := openChainAt2(rootFd, parts)
+	if errors.Is(err, unix.ENOSYS) {
+		return openChainWalk(rootFd, parts)
+	}
+	return nodes, err
+}
+
+func openChainAt2(rootFd int, parts []string) ([]heldDir, error) {
+	var rootStat unix.Stat_t
+	if err := unix.Fstat(rootFd, &rootStat); err != nil {
+		return nil, err
+	}
+	rootDev := uint64(rootStat.Dev)
+	final, err := openat2Dir(rootFd, strings.Join(parts, "/"))
+	if err != nil {
+		return nil, componentErr(rootFd, parts, err)
+	}
+	var finalStat unix.Stat_t
+	if err := unix.Fstat(final, &finalStat); err != nil {
+		unix.Close(final)
+		return nil, err
+	}
+	unix.Close(final)
+	if finalStat.Mode&unix.S_IFMT != unix.S_IFDIR || uint64(finalStat.Dev) != rootDev {
+		return nil, unix.ENOTDIR
+	}
+	var nodes []heldDir
+	parent := rootFd
+	for _, part := range parts {
+		fd, err := openat2Dir(parent, part)
+		if err != nil {
+			classified := directoryErr(parent, part, err)
+			closeHeldDirs(nodes)
+			return nil, classified
+		}
+		node, err := heldFrom(parent, fd, part, rootDev)
+		if err != nil {
+			unix.Close(fd)
+			closeHeldDirs(nodes)
+			return nil, err
+		}
+		nodes = append(nodes, node)
+		parent = fd
+	}
+	last := nodes[len(nodes)-1]
+	if last.dev != uint64(finalStat.Dev) || last.ino != uint64(finalStat.Ino) {
+		closeHeldDirs(nodes)
+		return nil, unix.EXDEV
+	}
+	return nodes, nil
+}
+
+func openat2Dir(dirfd int, path string) (int, error) {
+	how := &unix.OpenHow{
+		Flags:   uint64(unix.O_RDONLY | unix.O_DIRECTORY | unix.O_NOFOLLOW | unix.O_CLOEXEC),
+		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_XDEV,
+	}
+	return openat2Fn(dirfd, path, how)
+}

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/audit"
@@ -17,6 +18,7 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
+	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
@@ -87,8 +89,15 @@ type App struct {
 	audit  *audit.Logger
 	// shellDial, when set, is the sandbox proxy's outbound dial. Tests use it.
 	shellDial func(context.Context, string, string) (net.Conn, error)
-	ctx       context.Context
-	cancel    context.CancelFunc
+	// githubGitBase and githubAPIBase replace the GitHub upstreams. Tests set them.
+	githubGitBase string
+	githubAPIBase string
+	// githubReadSock is the jail read-proxy socket for a bot's live shell.
+	// githubWriteUp is true only while a post-approval write proxy is listening.
+	githubReadSock map[string]string
+	githubWriteUp  atomic.Bool
+	ctx            context.Context
+	cancel         context.CancelFunc
 
 	rtMu sync.Mutex
 	// turns counts bot- and timer-started turns per bot (turncap.go).
@@ -120,6 +129,9 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		return nil, err
 	}
 	for _, w := range pol.Warnings {
+		fmt.Fprintf(os.Stderr, "local-grok-bots: %s\n", w)
+	}
+	if w := sandbox.RootJailWarning(); w != "" {
 		fmt.Fprintf(os.Stderr, "local-grok-bots: %s\n", w)
 	}
 	if pol.HasBind {
