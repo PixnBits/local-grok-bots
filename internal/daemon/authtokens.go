@@ -30,6 +30,48 @@ type namedToken struct {
 
 var authTokenName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
+// Auth reload reasons. The audit row carries one of these codes and nothing
+// from the underlying error text.
+var (
+	errAuthLocation = errors.New("location")
+	errAuthBind     = errors.New("bind")
+	errAuthOpen     = errors.New("open")
+	errAuthType     = errors.New("type")
+	errAuthMode     = errors.New("mode")
+	errAuthOwner    = errors.New("owner")
+	errAuthNlink    = errors.New("nlink")
+	errAuthSize     = errors.New("size")
+	errAuthParse    = errors.New("parse")
+	errAuthEmpty    = errors.New("empty")
+)
+
+func authReloadReason(err error) string {
+	switch {
+	case errors.Is(err, errAuthLocation):
+		return "location"
+	case errors.Is(err, errAuthBind):
+		return "bind"
+	case errors.Is(err, errAuthOpen):
+		return "open"
+	case errors.Is(err, errAuthType):
+		return "type"
+	case errors.Is(err, errAuthMode):
+		return "mode"
+	case errors.Is(err, errAuthOwner):
+		return "owner"
+	case errors.Is(err, errAuthNlink):
+		return "nlink"
+	case errors.Is(err, errAuthSize):
+		return "size"
+	case errors.Is(err, errAuthParse):
+		return "parse"
+	case errors.Is(err, errAuthEmpty):
+		return "empty"
+	default:
+		return "other"
+	}
+}
+
 // asciiSpace is the only whitespace trimmed from token files.
 // A Unicode space stays in the value and fails the printable-ASCII check.
 const asciiSpace = " \t\r\n"
@@ -54,7 +96,7 @@ func loadAuthTokens(path, defaultToken string) ([]namedToken, error) {
 		return nil, err
 	}
 	if len(toks) == 0 {
-		return nil, errors.New("auth tokens: AUTH_TOKENS_FILE has no tokens")
+		return nil, fmt.Errorf("auth tokens: AUTH_TOKENS_FILE has no tokens: %w", errAuthEmpty)
 	}
 	return toks, nil
 }
@@ -86,9 +128,9 @@ func readProtectedFile(path string, max int64, kind, tooBig string) ([]byte, err
 			return nil, fmt.Errorf("%s: symlink", kind)
 		}
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, err
+			return nil, fmt.Errorf("%w: %w", errAuthOpen, err)
 		}
-		return nil, fmt.Errorf("%s: %w", kind, err)
+		return nil, fmt.Errorf("%s: %w: %w", kind, errAuthOpen, err)
 	}
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
@@ -97,19 +139,19 @@ func readProtectedFile(path string, max int64, kind, tooBig string) ([]byte, err
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		unix.Close(fd)
-		return nil, fmt.Errorf("%s: not a regular file", kind)
+		return nil, fmt.Errorf("%s: not a regular file: %w", kind, errAuthType)
 	}
 	if st.Mode&0o077 != 0 {
 		unix.Close(fd)
-		return nil, fmt.Errorf("%s: mode allows group or other access", kind)
+		return nil, fmt.Errorf("%s: mode allows group or other access: %w", kind, errAuthMode)
 	}
 	if int(st.Uid) != euid() {
 		unix.Close(fd)
-		return nil, fmt.Errorf("%s: owner mismatch", kind)
+		return nil, fmt.Errorf("%s: owner mismatch: %w", kind, errAuthOwner)
 	}
 	if st.Nlink != 1 {
 		unix.Close(fd)
-		return nil, fmt.Errorf("%s: hard link", kind)
+		return nil, fmt.Errorf("%s: hard link: %w", kind, errAuthNlink)
 	}
 	if st.Size > max {
 		unix.Close(fd)
@@ -138,9 +180,9 @@ func readProtectedFile(path string, max int64, kind, tooBig string) ([]byte, err
 
 func oversizeError(kind, path string, max int64, tooBig string) error {
 	if tooBig != "" {
-		return errors.New(tooBig)
+		return fmt.Errorf("%s: %w", tooBig, errAuthSize)
 	}
-	return fmt.Errorf("%s: %s exceeds %d bytes", kind, path, max)
+	return fmt.Errorf("%s: %s exceeds %d bytes: %w", kind, path, max, errAuthSize)
 }
 
 // authTokensPaths is the cleaned absolute path of AUTH_TOKENS_FILE and, when
@@ -181,7 +223,7 @@ func checkAuthTokensLocation(path, workspace, dataDir string) error {
 	for _, p := range authTokensPaths(path) {
 		for _, root := range roots {
 			if pathInside(root, p) {
-				return errors.New("auth tokens: AUTH_TOKENS_FILE is inside the workspace or a bot home")
+				return fmt.Errorf("auth tokens: AUTH_TOKENS_FILE is inside the workspace or a bot home: %w", errAuthLocation)
 			}
 		}
 	}
@@ -241,24 +283,24 @@ func parseAuthTokens(text, defaultToken string) ([]namedToken, error) {
 		}
 		name, val, ok := strings.Cut(line, ":")
 		if !ok {
-			return nil, fmt.Errorf("auth tokens: line %d: invalid line", lineNo)
+			return nil, fmt.Errorf("auth tokens: line %d: invalid line: %w", lineNo, errAuthParse)
 		}
 		name = trimASCIISpace(name)
 		val = trimASCIISpace(val)
 		if !authTokenName.MatchString(name) {
-			return nil, fmt.Errorf("auth tokens: line %d: invalid name", lineNo)
+			return nil, fmt.Errorf("auth tokens: line %d: invalid name: %w", lineNo, errAuthParse)
 		}
 		if name == defaultTokenName {
-			return nil, fmt.Errorf("auth tokens: line %d: name \"default\" is reserved", lineNo)
+			return nil, fmt.Errorf("auth tokens: line %d: name \"default\" is reserved: %w", lineNo, errAuthParse)
 		}
 		if !printableToken(val) {
-			return nil, fmt.Errorf("auth tokens: line %d: invalid token", lineNo)
+			return nil, fmt.Errorf("auth tokens: line %d: invalid token: %w", lineNo, errAuthParse)
 		}
 		if _, dup := seenName[name]; dup {
-			return nil, fmt.Errorf("auth tokens: line %d: duplicate name", lineNo)
+			return nil, fmt.Errorf("auth tokens: line %d: duplicate name: %w", lineNo, errAuthParse)
 		}
 		if _, dup := seenVal[val]; dup {
-			return nil, fmt.Errorf("auth tokens: line %d: duplicate token", lineNo)
+			return nil, fmt.Errorf("auth tokens: line %d: duplicate token: %w", lineNo, errAuthParse)
 		}
 		seenName[name] = struct{}{}
 		seenVal[val] = struct{}{}
@@ -339,11 +381,14 @@ func (a *App) ReloadAuthTokens() {
 	toks, err := readAuthTokenSet(a.cfg, a.cfg.AuthToken)
 	if err != nil || len(toks) == 0 {
 		if err == nil {
-			err = errors.New("auth tokens: AUTH_TOKENS_FILE has no tokens")
+			err = fmt.Errorf("auth tokens: AUTH_TOKENS_FILE has no tokens: %w", errAuthEmpty)
 		}
 		a.writeStartup("local-grok-bots: WARN: AUTH_TOKENS_FILE reload failed; keeping the previous tokens: %s\n", err)
 		if a.audit != nil && a.audit.Enabled() {
-			a.audit.Write(map[string]any{"action": "auth_tokens_reload_failed"})
+			a.audit.Write(map[string]any{
+				"action": "auth_tokens_reload_failed",
+				"reason": authReloadReason(err),
+			})
 		}
 		return
 	}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -55,6 +56,9 @@ type mount struct {
 	Src string `json:"src"`
 	Dst string `json:"dst"`
 	RO  bool   `json:"ro"`
+	// file is a Linux build-bind fd (O_PATH|O_CLOEXEC). Nil mounts use Src.
+	// It is not serialized for the unshare stage.
+	file *os.File
 }
 
 type stage2File struct {
@@ -88,8 +92,18 @@ func (p *prepared) close() {
 	if p.push != nil {
 		p.push.close()
 	}
+	closeMountFiles(p.mounts)
 	if p.dir != "" {
 		_ = os.RemoveAll(p.dir)
+	}
+}
+
+func closeMountFiles(mounts []mount) {
+	for i := range mounts {
+		if mounts[i].file != nil {
+			_ = mounts[i].file.Close()
+			mounts[i].file = nil
+		}
 	}
 }
 
@@ -403,10 +417,11 @@ func normalizeHosts(hosts []string) []string {
 // selectBuildBinds decides which SANDBOX_BUILD_BINDS entries are mounted.
 // Each absolute path is resolved with EvalSymlinks. A path that is not
 // absolute, is a refused toolchain path, cannot be resolved, or overlaps
-// protected (raw or resolved) is not mounted. The turn continues and a
-// sandbox_block names the bind path. A path inside the workspace is skipped
-// with no event. Mounts use the resolved path so the bind does not follow
-// a symlink again.
+// protected (raw or resolved) is not mounted. On Linux the resolved path
+// is then opened without following symlinks and checked again; a failure
+// skips that bind. The turn continues and a sandbox_block names the bind
+// path. A path inside the workspace is skipped with no event. The mount
+// destination stays the resolved path.
 func selectBuildBinds(ws string, binds, protected []string) (mounts []mount, events []Event, applied []string) {
 	ws = filepath.Clean(ws)
 	var roots []string
@@ -447,7 +462,15 @@ func selectBuildBinds(ws string, binds, protected []string) (mounts []mount, eve
 		if skip {
 			continue
 		}
-		mounts = append(mounts, mount{Src: resolved, Dst: resolved, RO: true})
+		f, err := openBuildBind(resolved, protected)
+		if err != nil {
+			if f != nil {
+				_ = f.Close()
+			}
+			events = append(events, Event{Kind: "sandbox_block", Detail: "refused bind " + raw})
+			continue
+		}
+		mounts = append(mounts, mount{Src: resolved, Dst: resolved, RO: true, file: f})
 		applied = append(applied, raw)
 	}
 	return mounts, events, applied
@@ -488,17 +511,27 @@ func pathHolds(root, path string) bool {
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
-// mountArgs is the bwrap bind list for mounts. Read-only mounts use --ro-bind.
-func mountArgs(mounts []mount) []string {
-	var args []string
+// mountArgs is the bwrap bind list for mounts. Read-only path mounts use
+// --ro-bind. A mount with an open fd is a build bind and uses --ro-bind-fd.
+// already is the number of ExtraFiles the caller will place before these fds.
+// Child fd numbers are 3+index in the final ExtraFiles slice. Build binds
+// never fall back to a path --ro-bind.
+func mountArgs(mounts []mount, already int) (args []string, files []*os.File) {
+	n := already
 	for _, m := range mounts {
+		if m.file != nil {
+			args = append(args, "--ro-bind-fd", strconv.Itoa(3+n), m.Dst)
+			files = append(files, m.file)
+			n++
+			continue
+		}
 		flag := "--bind"
 		if m.RO {
 			flag = "--ro-bind"
 		}
 		args = append(args, flag, m.Src, m.Dst)
 	}
-	return args
+	return args, files
 }
 
 func sameTree(root, path string) bool {
@@ -507,12 +540,14 @@ func sameTree(root, path string) bool {
 }
 
 func capture(ctx context.Context, cmd *exec.Cmd) (string, string, error) {
-	return captureReady(ctx, cmd, nil)
+	return captureReady(ctx, cmd, nil, nil)
 }
 
-// captureReady runs cmd. ready, when set, runs after start and before the
-// command is expected to finish. A ready error kills the process group.
-func captureReady(ctx context.Context, cmd *exec.Cmd, ready func() error) (string, string, error) {
+// captureReady runs cmd. started, when set, runs after Start returns,
+// including when Start fails. ready, when set, runs after a successful
+// start and before the command is expected to finish. A ready error kills
+// the process group.
+func captureReady(ctx context.Context, cmd *exec.Cmd, started func(), ready func() error) (string, string, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var outBuf, errBuf bytes.Buffer
 	stdoutPipe, err := cmd.StdoutPipe()
@@ -523,8 +558,12 @@ func captureReady(ctx context.Context, cmd *exec.Cmd, ready func() error) (strin
 	if err != nil {
 		return "", "", err
 	}
-	if err := cmd.Start(); err != nil {
-		return "", "", fmt.Errorf("shell sandbox: %w", err)
+	startErr := cmd.Start()
+	if started != nil {
+		started()
+	}
+	if startErr != nil {
+		return "", "", fmt.Errorf("shell sandbox: %w", startErr)
 	}
 	doneOut := make(chan struct{})
 	doneErr := make(chan struct{})

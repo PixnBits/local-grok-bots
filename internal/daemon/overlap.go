@@ -104,7 +104,7 @@ func checkAuthTokensBinds(file string, binds []string) error {
 		}
 		for _, p := range paths {
 			if pathsOverlap(p, bind) {
-				return fmt.Errorf("AUTH_TOKENS_FILE %s overlaps SANDBOX_BUILD_BINDS %s", p, bind)
+				return fmt.Errorf("AUTH_TOKENS_FILE %s overlaps SANDBOX_BUILD_BINDS %s: %w", p, bind, errAuthBind)
 			}
 		}
 	}
@@ -129,7 +129,7 @@ func checkPathOverlaps(cfg config.Config, pol policy.Policy) error {
 		}
 		for _, secret := range secrets {
 			if pathsOverlap(bind, secret) {
-				return fmt.Errorf("SANDBOX_BUILD_BINDS %s overlaps a protected path", bind)
+				return fmt.Errorf("SANDBOX_BUILD_BINDS %s overlaps protected path %s", bind, secret)
 			}
 		}
 		if _, err := os.Stat(bind); err != nil {
@@ -146,12 +146,12 @@ func checkPathOverlaps(cfg config.Config, pol policy.Policy) error {
 		if home == "" {
 			continue
 		}
-		if credentialHomeOverlaps(home, cfg.DataDir, base) {
-			return fmt.Errorf("tools.cli credential_home %s overlaps a protected path", home)
+		if hit, ok := credentialHomeOverlaps(home, cfg.DataDir, base); ok {
+			return fmt.Errorf("tools.cli credential_home %s overlaps protected path %s", home, hit)
 		}
 		for _, other := range homes {
 			if credentialHomesNest(home, other) {
-				return fmt.Errorf("tools.cli credential_home %s overlaps a protected path", home)
+				return fmt.Errorf("tools.cli credential_home %s overlaps protected path %s", home, other)
 			}
 		}
 		homes = append(homes, home)
@@ -160,37 +160,38 @@ func checkPathOverlaps(cfg config.Config, pol policy.Policy) error {
 }
 
 // credentialHomeOverlaps reports whether home equals or contains DATA_DIR,
-// or overlaps a specific secret. A home strictly inside DATA_DIR/cli or
-// DATA_DIR/coi does not overlap that parent directory. It still overlaps
-// any other secret.
-func credentialHomeOverlaps(home, dataDir string, secrets []string) bool {
-	if homeContainsDataDir(home, dataDir) {
-		return true
+// or overlaps a specific secret. The returned path is the protected path
+// that matched. A home strictly inside DATA_DIR/cli or DATA_DIR/coi does
+// not overlap that parent directory. It still overlaps any other secret.
+func credentialHomeOverlaps(home, dataDir string, secrets []string) (string, bool) {
+	if hit, ok := homeContainsDataDir(home, dataDir); ok {
+		return hit, true
 	}
 	parents := map[string]struct{}{}
 	for _, form := range homeParentForms(dataDir) {
 		parents[form] = struct{}{}
 	}
 	for _, secret := range secrets {
-		if homeOverlapsSecret(home, secret, parents) {
-			return true
+		if hit, ok := homeOverlapsSecret(home, secret, parents); ok {
+			return hit, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // homeContainsDataDir reports whether any form of home is DATA_DIR or has
-// DATA_DIR inside it. A home nested under DATA_DIR is not a match.
-func homeContainsDataDir(home, dataDir string) bool {
+// DATA_DIR inside it. A home nested under DATA_DIR is not a match. The
+// returned path is the DATA_DIR form that matched.
+func homeContainsDataDir(home, dataDir string) (string, bool) {
 	homes := pathForms(home)
 	for _, d := range pathForms(dataDir) {
 		for _, h := range homes {
 			if pathInside(h, d) {
-				return true
+				return d, true
 			}
 		}
 	}
-	return false
+	return "", false
 }
 
 // homeParentForms is DATA_DIR/cli and DATA_DIR/coi, raw and resolved.
@@ -235,20 +236,21 @@ func credentialHomesNest(a, b string) bool {
 
 // homeOverlapsSecret compares home with one secret path. Equality, and a
 // home that contains the secret, overlap. A home strictly inside DATA_DIR/cli
-// or DATA_DIR/coi does not overlap that parent directory.
-func homeOverlapsSecret(home, secret string, parents map[string]struct{}) bool {
+// or DATA_DIR/coi does not overlap that parent directory. The returned path
+// is the secret form that matched.
+func homeOverlapsSecret(home, secret string, parents map[string]struct{}) (string, bool) {
 	for _, h := range pathForms(home) {
 		for _, s := range pathForms(secret) {
 			if pathInside(h, s) {
-				return true
+				return s, true
 			}
 			if pathInside(s, h) {
 				if _, ok := parents[s]; ok && h != s {
 					continue
 				}
-				return true
+				return s, true
 			}
 		}
 	}
-	return false
+	return "", false
 }

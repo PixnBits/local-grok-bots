@@ -3,6 +3,7 @@ package sandbox
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -61,9 +62,17 @@ func TestSelectBuildBinds(t *testing.T) {
 	if !found {
 		t.Fatalf("events %+v", events)
 	}
-	args := mountArgs(mounts)
+	args, _ := mountArgs(mounts, 0)
+	t.Cleanup(func() { closeMountFiles(mounts) })
 	joined := strings.Join(args, "\n")
-	if !strings.Contains(joined, "--ro-bind\n"+normalResolved+"\n"+normalResolved) {
+	if runtime.GOOS == "linux" {
+		if !strings.Contains(joined, "--ro-bind-fd\n3\n"+normalResolved) {
+			t.Fatalf("bwrap args:\n%s", joined)
+		}
+		if strings.Contains(joined, "--ro-bind\n"+normalResolved) || strings.Contains(joined, "--ro-bind\n"+normal) {
+			t.Fatalf("path bind of a build bind:\n%s", joined)
+		}
+	} else if !strings.Contains(joined, "--ro-bind\n"+normalResolved+"\n"+normalResolved) {
 		t.Fatalf("bwrap args:\n%s", joined)
 	}
 	if strings.Contains(joined, bind) || strings.Contains(joined, secretDir) || strings.Contains(joined, canary) {

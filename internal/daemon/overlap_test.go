@@ -20,7 +20,8 @@ func TestBuildBindOverlapsSecret(t *testing.T) {
 			DataDir:    dir,
 			BuildBinds: []string{dir},
 		})
-		if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), dir) {
+		prot := filepath.Join(dir, adminTokenFile)
+		if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), dir) || !strings.Contains(err.Error(), prot) || !strings.Contains(err.Error(), "protected path") {
 			t.Fatalf("err %v", err)
 		}
 	})
@@ -34,7 +35,8 @@ func TestBuildBindOverlapsSecret(t *testing.T) {
 			DataDir:    dir,
 			BuildBinds: []string{link},
 		})
-		if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), link) {
+		prot := filepath.Join(dir, adminTokenFile)
+		if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), link) || !strings.Contains(err.Error(), prot) || !strings.Contains(err.Error(), "protected path") {
 			t.Fatalf("err %v", err)
 		}
 	})
@@ -51,7 +53,7 @@ func TestCredentialHomeOverlapsSecret(t *testing.T) {
 			DataDir:    dir,
 			PolicyPath: writeHomePolicy(t, dir, home),
 		})
-		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), home) {
+		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), home) || !strings.Contains(err.Error(), "protected path "+home) {
 			t.Fatalf("err %v", err)
 		}
 	})
@@ -69,7 +71,7 @@ func TestCredentialHomeOverlapsSecret(t *testing.T) {
 			DataDir:    dir,
 			PolicyPath: writeHomePolicy(t, dir, link),
 		})
-		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), link) {
+		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), link) || !strings.Contains(err.Error(), "protected path "+target) {
 			t.Fatalf("err %v", err)
 		}
 	})
@@ -108,7 +110,7 @@ func TestCredentialHomeOverlapsSecret(t *testing.T) {
 		if err := os.WriteFile(policyPath, []byte(homePolicy(link)), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := app.policyNow(); err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), link) {
+		if _, err := app.policyNow(); err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), link) || !strings.Contains(err.Error(), "protected path "+target) {
 			t.Fatalf("reload %v", err)
 		}
 		secrets := app.daemonSecrets()
@@ -235,7 +237,8 @@ func TestLinkedDataDirBuildBinds(t *testing.T) {
 	}
 	t.Run("resolved data dir", func(t *testing.T) {
 		err := check(t, real)
-		if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), real) {
+		prot := filepath.Join(link, adminTokenFile)
+		if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), real) || !strings.Contains(err.Error(), prot) || !strings.Contains(err.Error(), "protected path") {
 			t.Fatalf("err %v", err)
 		}
 	})
@@ -244,7 +247,8 @@ func TestLinkedDataDirBuildBinds(t *testing.T) {
 		// symlink ancestor is resolved.
 		bind := filepath.Join(real, "cli", "child")
 		err := check(t, bind)
-		if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), bind) {
+		prot := filepath.Join(link, "cli")
+		if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), bind) || !strings.Contains(err.Error(), prot) || !strings.Contains(err.Error(), "protected path") {
 			t.Fatalf("err %v", err)
 		}
 	})
@@ -269,12 +273,12 @@ func TestPathFormsResolvesMissingAncestor(t *testing.T) {
 	cfg := config.Config{DataDir: data, PolicyPath: missing}
 	cfg.BuildBinds = []string{filepath.Join(real, "nested", "policy.toml")}
 	err := checkPathOverlaps(cfg, policy.Policy{})
-	if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), cfg.BuildBinds[0]) {
+	if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), cfg.BuildBinds[0]) || !strings.Contains(err.Error(), missing) || !strings.Contains(err.Error(), "protected path") {
 		t.Fatalf("resolved secret %v", err)
 	}
 	cfg.BuildBinds = []string{filepath.Join(real, "nested", "policy.toml", "child")}
 	err = checkPathOverlaps(cfg, policy.Policy{})
-	if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") {
+	if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), missing) || !strings.Contains(err.Error(), "protected path") {
 		t.Fatalf("child of missing secret %v", err)
 	}
 	cfg.BuildBinds = []string{t.TempDir()}
@@ -303,7 +307,7 @@ func TestCredentialHomeUnderDataDirCLI(t *testing.T) {
 			DataDir:    dir,
 			PolicyPath: writeHomePolicy(t, dir, dir),
 		})
-		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), dir) {
+		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), "protected path "+dir) {
 			t.Fatalf("err %v", err)
 		}
 	})
@@ -317,7 +321,7 @@ func TestCredentialHomeUnderDataDirCLI(t *testing.T) {
 			DataDir:    dir,
 			PolicyPath: writeHomePolicy(t, dir, parent),
 		})
-		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), parent) {
+		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), parent) || !strings.Contains(err.Error(), "protected path "+dir) {
 			t.Fatalf("err %v", err)
 		}
 	})
@@ -337,17 +341,18 @@ func TestBuildBindOverlapsConfiguredSecrets(t *testing.T) {
 	checks := []struct {
 		name string
 		bind string
+		prot string
 	}{
-		{"github token dir", ghDir},
-		{"sandbox", filepath.Join(data, "sandbox")},
-		{"audit dir", audDir},
-		{"secrets", filepath.Join(data, "secrets")},
+		{"github token dir", ghDir, gh},
+		{"sandbox", filepath.Join(data, "sandbox"), filepath.Join(data, "sandbox")},
+		{"audit dir", audDir, aud},
+		{"secrets", filepath.Join(data, "secrets"), filepath.Join(data, "secrets")},
 	}
 	for _, tc := range checks {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg.BuildBinds = []string{tc.bind}
 			err := checkPathOverlaps(cfg, pol)
-			if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), tc.bind) {
+			if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), tc.bind) || !strings.Contains(err.Error(), "protected path "+tc.prot) {
 				t.Fatalf("err %v", err)
 			}
 		})
@@ -395,7 +400,7 @@ func TestCredentialHomeUnderDataDirCOI(t *testing.T) {
 			DataDir:    dir,
 			PolicyPath: writeHomePolicy(t, dir, home),
 		})
-		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), home) {
+		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), "protected path "+home) {
 			t.Fatalf("err %v", err)
 		}
 	})
@@ -406,7 +411,8 @@ func TestCredentialHomeUnderDataDirCOI(t *testing.T) {
 			DataDir:    dir,
 			PolicyPath: writeHomePolicy(t, dir, home),
 		})
-		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), home) {
+		prot := filepath.Join(dir, "sandbox")
+		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), home) || !strings.Contains(err.Error(), "protected path "+prot) {
 			t.Fatalf("err %v", err)
 		}
 	})
@@ -420,7 +426,7 @@ func TestCredentialHomeUnderDataDirCOI(t *testing.T) {
 			t.Fatal(err)
 		}
 		err := overlapStart(t, config.Config{DataDir: dir, PolicyPath: path})
-		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), inner) {
+		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), inner) || !strings.Contains(err.Error(), "protected path "+outer) {
 			t.Fatalf("err %v", err)
 		}
 	})
@@ -432,7 +438,7 @@ func TestCredentialHomeUnderDataDirCOI(t *testing.T) {
 			PolicyPath: writeHomePolicy(t, dir, home),
 			BuildBinds: []string{home},
 		})
-		if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), home) {
+		if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), "protected path "+home) {
 			t.Fatalf("err %v", err)
 		}
 	})

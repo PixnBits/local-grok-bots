@@ -398,6 +398,40 @@ func (a *App) fireDue() {
 
 func (a *App) log(botID, kind string, detail any) {
 	_ = a.st.AddLog(botID, kind, detail)
+	if kind == "sandbox_block" {
+		a.auditSandboxBlock(botID, detail)
+	}
+}
+
+// auditSandboxBlock mirrors a sandbox_block row into the audit log when
+// audit is enabled. detail is the path text already logged, never file bytes.
+func (a *App) auditSandboxBlock(botID string, detail any) {
+	if a == nil || a.audit == nil || !a.audit.Enabled() {
+		return
+	}
+	rec := map[string]any{"action": "sandbox_block"}
+	if botID != "" {
+		rec["bot_id"] = botID
+	}
+	if d := sandboxBlockDetail(detail); d != "" {
+		rec["detail"] = d
+	}
+	a.audit.Write(rec)
+}
+
+func sandboxBlockDetail(detail any) string {
+	switch v := detail.(type) {
+	case string:
+		return v
+	case map[string]any:
+		if s, ok := v["detail"].(string); ok && s != "" {
+			return s
+		}
+		if s, ok := v["path"].(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // kick starts a run if the bot is idle and has pending messages.

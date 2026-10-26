@@ -46,6 +46,14 @@ User-configured connectors (COIs) are mediated the same way: credentials stay on
 
 To give a bot material, copy or mount it into `workspace/`. The shell PATH includes `/usr/bin`, `/bin`, and toolchain directories already on the read-only `/usr` mount, such as `/usr/local/go/bin` and `/usr/local/bin` when they exist. Home directories and `/snap` are not added.
 
+## Startup changes
+
+A `[[tools.cli]]` `credential_home` that contains a protected path, for example the `[github]` `token_file`, refuses startup. Move the token file outside that home.
+
+A `DATA_DIR` that is a symlink, is not owned by the daemon user, or is group or other writable refuses every start.
+
+A `SANDBOX_BUILD_BINDS` entry that does not exist, or that overlaps a protected path, refuses startup. At run time, a bind that cannot be opened without following symlinks, or that overlaps a protected path, is skipped and logged. The turn continues without that bind.
+
 ## systemd
 
 `deploy/local-grok-bots.service` is a system unit. It is not installed by this repo.

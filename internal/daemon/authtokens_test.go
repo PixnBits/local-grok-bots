@@ -667,7 +667,80 @@ func TestAuthTokensReloadFailureAudited(t *testing.T) {
 		t.Fatalf("rows %d:\n%s", len(rows), text)
 	}
 	row := rows[0]
-	if len(row) != 2 || row["action"] != "auth_tokens_reload_failed" || row["ts"] == "" {
+	if len(row) != 3 || row["action"] != "auth_tokens_reload_failed" || row["reason"] != "parse" || row["ts"] == "" {
+		t.Fatalf("row %#v", row)
+	}
+	if _, ok := row["ts"].(string); !ok {
+		t.Fatalf("ts %#v", row["ts"])
+	}
+}
+
+func TestAuthTokensReloadReasons(t *testing.T) {
+	cases := []struct {
+		name   string
+		reason string
+		mutate func(t *testing.T, dir, path string)
+	}{
+		{name: "mode", reason: "mode", mutate: func(t *testing.T, dir, path string) {
+			writeTokenFile(t, dir, "alice:"+aliceTok+"\n", 0o644)
+		}},
+		{name: "nlink", reason: "nlink", mutate: func(t *testing.T, dir, path string) {
+			writeTokenFile(t, dir, "alice:"+aliceTok+"\n", 0o600)
+			if err := os.Link(path, filepath.Join(dir, "tokens-link")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "parse", reason: "parse", mutate: func(t *testing.T, dir, path string) {
+			writeTokenFile(t, dir, "not-a-pair-"+strings.Repeat("q", 16)+"\n", 0o600)
+		}},
+		{name: "empty", reason: "empty", mutate: func(t *testing.T, dir, path string) {
+			writeTokenFile(t, dir, "", 0o600)
+		}},
+		{name: "open", reason: "open", mutate: func(t *testing.T, dir, path string) {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			auditPath := filepath.Join(dir, "audit.log")
+			path := writeTokenFile(t, dir, "alice:"+aliceTok+"\n", 0o600)
+			app := newTokenApp(t, dir, path, "", auditPath)
+			tc.mutate(t, dir, path)
+			app.ReloadAuthTokens()
+			assertReloadReason(t, auditPath, path, tc.reason)
+		})
+	}
+}
+
+func assertReloadReason(t *testing.T, auditPath, tokensPath, reason string) {
+	t.Helper()
+	raw, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if strings.Contains(text, aliceTok) || strings.Contains(text, tokensPath) || strings.Contains(text, "invalid line") || strings.Contains(text, "auth tokens:") {
+		t.Fatalf("audit leaked:\n%s", text)
+	}
+	var rows []map[string]any
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatalf("row %q: %v", line, err)
+		}
+		rows = append(rows, row)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows %d:\n%s", len(rows), text)
+	}
+	row := rows[0]
+	if len(row) != 3 || row["action"] != "auth_tokens_reload_failed" || row["reason"] != reason || row["ts"] == "" {
 		t.Fatalf("row %#v", row)
 	}
 	if _, ok := row["ts"].(string); !ok {
