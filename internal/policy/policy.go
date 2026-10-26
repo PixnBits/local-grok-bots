@@ -62,16 +62,31 @@ type Policy struct {
 	// PromptTimeout is how long a UI answer may take. Zero means
 	// DefaultPromptTimeout.
 	PromptTimeout time.Duration
-	// OllamaRunTimeout bounds a whole Ollama run. OllamaModelTimeout bounds
-	// one model call inside it. Zero means the defaults.
-	OllamaRunTimeout   time.Duration
-	OllamaModelTimeout time.Duration
+	// OllamaRunTimeout bounds a whole Ollama run. Zero means the default.
+	// OllamaModelTimeout is an optional hard cap on one model call. Zero
+	// means the effective run timeout, still capped by max_model_timeout.
+	OllamaRunTimeout         time.Duration
+	OllamaModelTimeout       time.Duration
+	OllamaFirstOutputTimeout time.Duration
+	OllamaStallTimeout       time.Duration
+	// OllamaStallRetriesSet is false when stall_retries was not set. Zero
+	// retries is a real setting and is distinct from the default.
+	OllamaStallRetries    int
+	OllamaStallRetriesSet bool
+	// OllamaKeepAlive is a duration string or an integer number of seconds.
+	// Unset means DefaultOllamaKeepAlive.
+	OllamaKeepAlive    any
+	OllamaKeepAliveSet bool
 	// Max* are ceilings only managed policy sets. Zero means no ceiling.
 	// The effective timeout is min(setting or default, ceiling).
-	MaxTurnTimeout        time.Duration
-	MaxPromptTimeout      time.Duration
-	MaxOllamaRunTimeout   time.Duration
-	MaxOllamaModelTimeout time.Duration
+	MaxTurnTimeout              time.Duration
+	MaxPromptTimeout            time.Duration
+	MaxOllamaRunTimeout         time.Duration
+	MaxOllamaModelTimeout       time.Duration
+	MaxOllamaFirstOutputTimeout time.Duration
+	MaxOllamaStallTimeout       time.Duration
+	MaxOllamaStallRetries       int
+	MaxOllamaStallRetriesSet    bool
 	// AllowSessionGrants is true only when managed policy set it.
 	AllowSessionGrants bool
 	// ClaudeTransport is how Claude asks this daemon about a tool.
@@ -443,10 +458,15 @@ type Permission struct {
 
 // Default timeouts. Each one is a policy key; see docs/cli-isolation.md.
 const (
-	DefaultTurnTimeout        = 2 * time.Hour
-	DefaultPromptTimeout      = 10 * time.Minute
-	DefaultOllamaRunTimeout   = 10 * time.Minute
-	DefaultOllamaModelTimeout = 3 * time.Minute
+	DefaultTurnTimeout              = 2 * time.Hour
+	DefaultPromptTimeout            = 10 * time.Minute
+	DefaultOllamaRunTimeout         = 10 * time.Minute
+	DefaultOllamaFirstOutputTimeout = 5 * time.Minute
+	DefaultOllamaStallTimeout       = 2 * time.Minute
+	DefaultOllamaStallRetries       = 1
+	DefaultOllamaKeepAlive          = "30m"
+	// maxStallRetries is the fail-closed upper bound for stall_retries.
+	maxStallRetries = 5
 )
 
 func capped(v, def, ceiling time.Duration) time.Duration {
@@ -475,9 +495,50 @@ func (p Policy) EffectiveOllamaRunTimeout() time.Duration {
 	return capped(p.OllamaRunTimeout, DefaultOllamaRunTimeout, p.MaxOllamaRunTimeout)
 }
 
-// EffectiveOllamaModelTimeout bounds one Ollama model call.
+// EffectiveOllamaModelTimeout is the optional hard cap on one model call.
+// When model_timeout is unset, it equals the effective run timeout, then
+// the managed max_model_timeout ceiling.
 func (p Policy) EffectiveOllamaModelTimeout() time.Duration {
-	return capped(p.OllamaModelTimeout, DefaultOllamaModelTimeout, p.MaxOllamaModelTimeout)
+	v := p.OllamaModelTimeout
+	if v <= 0 {
+		v = p.EffectiveOllamaRunTimeout()
+	}
+	if p.MaxOllamaModelTimeout > 0 && v > p.MaxOllamaModelTimeout {
+		v = p.MaxOllamaModelTimeout
+	}
+	return v
+}
+
+// EffectiveOllamaFirstOutputTimeout is the wait for the first output chunk.
+func (p Policy) EffectiveOllamaFirstOutputTimeout() time.Duration {
+	return capped(p.OllamaFirstOutputTimeout, DefaultOllamaFirstOutputTimeout, p.MaxOllamaFirstOutputTimeout)
+}
+
+// EffectiveOllamaStallTimeout is the max gap between output chunks.
+func (p Policy) EffectiveOllamaStallTimeout() time.Duration {
+	return capped(p.OllamaStallTimeout, DefaultOllamaStallTimeout, p.MaxOllamaStallTimeout)
+}
+
+// EffectiveOllamaStallRetries is how many stall or first-output failures
+// one run may retry. A managed max_stall_retries ceiling can only lower it.
+func (p Policy) EffectiveOllamaStallRetries() int {
+	n := DefaultOllamaStallRetries
+	if p.OllamaStallRetriesSet {
+		n = p.OllamaStallRetries
+	}
+	if p.MaxOllamaStallRetriesSet && n > p.MaxOllamaStallRetries {
+		n = p.MaxOllamaStallRetries
+	}
+	return n
+}
+
+// EffectiveOllamaKeepAlive is the keep_alive value sent on every chat.
+// A duration stays a string. An integer number of seconds stays an integer.
+func (p Policy) EffectiveOllamaKeepAlive() any {
+	if !p.OllamaKeepAliveSet || p.OllamaKeepAlive == nil || p.OllamaKeepAlive == "" {
+		return DefaultOllamaKeepAlive
+	}
+	return p.OllamaKeepAlive
 }
 
 // Permission returns tool-approval settings. A non-positive prompt timeout
@@ -1052,13 +1113,20 @@ type backendDoc struct {
 }
 
 type ollamaDoc struct {
-	Host            *string   `toml:"host" json:"host"`
-	Model           *string   `toml:"model" json:"model"`
-	Models          *[]string `toml:"models" json:"models"`
-	RunTimeout      flexText  `toml:"run_timeout" json:"run_timeout"`
-	ModelTimeout    flexText  `toml:"model_timeout" json:"model_timeout"`
-	MaxRunTimeout   flexText  `toml:"max_run_timeout" json:"max_run_timeout"`
-	MaxModelTimeout flexText  `toml:"max_model_timeout" json:"max_model_timeout"`
+	Host                  *string   `toml:"host" json:"host"`
+	Model                 *string   `toml:"model" json:"model"`
+	Models                *[]string `toml:"models" json:"models"`
+	RunTimeout            flexText  `toml:"run_timeout" json:"run_timeout"`
+	ModelTimeout          flexText  `toml:"model_timeout" json:"model_timeout"`
+	FirstOutputTimeout    flexText  `toml:"first_output_timeout" json:"first_output_timeout"`
+	StallTimeout          flexText  `toml:"stall_timeout" json:"stall_timeout"`
+	StallRetries          flexText  `toml:"stall_retries" json:"stall_retries"`
+	KeepAlive             flexText  `toml:"keep_alive" json:"keep_alive"`
+	MaxRunTimeout         flexText  `toml:"max_run_timeout" json:"max_run_timeout"`
+	MaxModelTimeout       flexText  `toml:"max_model_timeout" json:"max_model_timeout"`
+	MaxFirstOutputTimeout flexText  `toml:"max_first_output_timeout" json:"max_first_output_timeout"`
+	MaxStallTimeout       flexText  `toml:"max_stall_timeout" json:"max_stall_timeout"`
+	MaxStallRetries       flexText  `toml:"max_stall_retries" json:"max_stall_retries"`
 }
 
 type cliDoc struct {
@@ -1247,8 +1315,12 @@ func (p *Policy) apply(doc document, trusted bool) error {
 	}{
 		{"ollama.run_timeout", doc.Ollama.RunTimeout, &p.OllamaRunTimeout, false},
 		{"ollama.model_timeout", doc.Ollama.ModelTimeout, &p.OllamaModelTimeout, false},
+		{"ollama.first_output_timeout", doc.Ollama.FirstOutputTimeout, &p.OllamaFirstOutputTimeout, false},
+		{"ollama.stall_timeout", doc.Ollama.StallTimeout, &p.OllamaStallTimeout, false},
 		{"ollama.max_run_timeout", doc.Ollama.MaxRunTimeout, &p.MaxOllamaRunTimeout, true},
 		{"ollama.max_model_timeout", doc.Ollama.MaxModelTimeout, &p.MaxOllamaModelTimeout, true},
+		{"ollama.max_first_output_timeout", doc.Ollama.MaxFirstOutputTimeout, &p.MaxOllamaFirstOutputTimeout, true},
+		{"ollama.max_stall_timeout", doc.Ollama.MaxStallTimeout, &p.MaxOllamaStallTimeout, true},
 		{"cli.max_turn_timeout", doc.CLI.MaxTurnTimeout, &p.MaxTurnTimeout, true},
 	}
 	if doc.CLI.Permission != nil {
@@ -1272,6 +1344,34 @@ func (p *Policy) apply(doc document, trusted bool) error {
 			continue
 		}
 		*t.dst = d
+	}
+	if doc.Ollama.StallRetries.Set {
+		n, err := parseStallRetries(doc.Ollama.StallRetries.Value)
+		if err != nil {
+			return fmt.Errorf("ollama.stall_retries: %w", err)
+		}
+		p.OllamaStallRetries = n
+		p.OllamaStallRetriesSet = true
+	}
+	if doc.Ollama.MaxStallRetries.Set {
+		n, err := parseStallRetries(doc.Ollama.MaxStallRetries.Value)
+		if err != nil {
+			return fmt.Errorf("ollama.max_stall_retries: %w", err)
+		}
+		if !trusted {
+			p.Warnings = append(p.Warnings, "ollama.max_stall_retries is ignored; only managed policy can set a timeout ceiling")
+		} else {
+			p.MaxOllamaStallRetries = n
+			p.MaxOllamaStallRetriesSet = true
+		}
+	}
+	if doc.Ollama.KeepAlive.Set {
+		v, err := parseKeepAlive(doc.Ollama.KeepAlive.Value)
+		if err != nil {
+			return fmt.Errorf("ollama.keep_alive: %w", err)
+		}
+		p.OllamaKeepAlive = v
+		p.OllamaKeepAliveSet = true
 	}
 	if doc.CLI.PermissionMode != nil {
 		p.setMode(*doc.CLI.PermissionMode, trusted)
@@ -1549,6 +1649,38 @@ func hex64(s string) bool {
 		}
 	}
 	return true
+}
+
+func parseStallRetries(s string) (int, error) {
+	s = strings.TrimSpace(s)
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || strconv.FormatInt(n, 10) != s {
+		return 0, fmt.Errorf("must be an integer from 0 to %d", maxStallRetries)
+	}
+	if n < 0 || n > maxStallRetries {
+		return 0, fmt.Errorf("must be an integer from 0 to %d", maxStallRetries)
+	}
+	return int(n), nil
+}
+
+// parseKeepAlive accepts the forms Ollama accepts: a Go duration, an integer
+// number of seconds, or -1. Durations stay strings. Integers stay integers.
+func parseKeepAlive(s string) (any, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, fmt.Errorf("must be -1, a number of seconds, or a Go duration")
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil && strconv.FormatInt(n, 10) == s {
+		if n < -1 {
+			return nil, fmt.Errorf("must be -1, a number of seconds, or a Go duration")
+		}
+		return n, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return nil, fmt.Errorf("must be -1, a number of seconds, or a Go duration")
+	}
+	return s, nil
 }
 
 func parseTurnTimeout(s string) (time.Duration, error) {

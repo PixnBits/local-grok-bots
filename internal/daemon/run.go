@@ -102,64 +102,118 @@ func (a *App) execute(botID, runID string) {
 	}
 	through := run.StartedAt
 
-	a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "working"})
 	parseRetried := false
+	retriesLeft := a.policy.EffectiveOllamaStallRetries()
+	retried := 0
+	var lastFirst time.Duration
 	for round := 0; round < maxToolRounds; round++ {
-		if ctx.Err() != nil {
-			a.finishInterrupted(bot.ID, runID, ctx)
+		if a.finishOllamaCtx(bot, runID, ctx, msgs, "", retried, lastFirst) {
 			return
 		}
 		a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "working"})
-		msgs, through = a.foldInput(bot.ID, runID, msgs, through, seen)
-		mctx, mcancel := context.WithTimeout(ctx, a.policy.EffectiveOllamaModelTimeout())
-		var roundText strings.Builder
-		resp, err := a.model.Chat(mctx, model.ChatRequest{
-			Model:    modelName,
-			Messages: msgs,
-			Tools:    toolDefs(),
-		}, func(tok string) {
-			roundText.WriteString(tok)
-			a.bus.Publish(runID, "token", map[string]string{"text": tok})
-		})
-		mcancel()
-		if err != nil {
-			// Text streamed before the failure stays in the thread.
-			savePartial := func() {
-				if t := strings.TrimSpace(roundText.String()); t != "" {
-					a.persistBotText(bot.ID, runID, t)
-				}
+		var resp model.ChatResponse
+		parseContinue := false
+		attempt := 0
+		for {
+			attempt++
+			if attempt == 1 {
+				msgs, through = a.foldInput(bot.ID, runID, msgs, through, seen)
 			}
-			if ctx.Err() != nil {
-				savePartial()
-				a.finishInterrupted(bot.ID, runID, ctx)
+			if a.finishOllamaCtx(bot, runID, ctx, msgs, "", retried, lastFirst) {
 				return
 			}
-			var parseErr *model.ToolCallParseError
-			// One more call, and only when a round remains. The failed call still counts toward the cap.
-			if errors.As(err, &parseErr) && !parseRetried && round+1 < maxToolRounds {
-				parseRetried = true
-				a.log(bot.ID, "model_call", map[string]any{
-					"model": modelName, "ok": false, "error": err.Error(), "retry": true,
-				})
-				a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "retrying"})
-				msgs = append(msgs, model.Message{
-					Role:    "user",
-					Content: "The tool call could not be parsed: " + clip(parseErr.Detail, 500) + ". Call the tool again with valid arguments, or reply in text.",
-				})
-				continue
+			mctx, mcancel := context.WithTimeout(ctx, a.policy.EffectiveOllamaModelTimeout())
+			var roundText strings.Builder
+			callResp, err := a.model.Chat(mctx, model.ChatRequest{
+				Model:              modelName,
+				Messages:           msgs,
+				Tools:              toolDefs(),
+				FirstOutputTimeout: a.policy.EffectiveOllamaFirstOutputTimeout(),
+				StallTimeout:       a.policy.EffectiveOllamaStallTimeout(),
+				KeepAlive:          a.policy.EffectiveOllamaKeepAlive(),
+			}, func(tok string) {
+				roundText.WriteString(tok)
+				a.bus.Publish(runID, "token", map[string]string{"text": tok})
+			})
+			mcancel()
+			resp = callResp
+			first := resp.FirstOutput
+			var te *model.TimeoutError
+			if errors.As(err, &te) && te != nil && te.FirstOutput > 0 {
+				first = te.FirstOutput
 			}
-			a.log(bot.ID, "model_call", map[string]any{"model": modelName, "ok": false, "error": err.Error()})
-			savePartial()
-			_, _ = a.finishRun(runID, "error", err.Error())
-			a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
-			return
+			if first > 0 {
+				lastFirst = first
+			}
+			partial := roundText.String()
+			if strings.TrimSpace(partial) == "" && te != nil {
+				partial = te.Partial
+			}
+			// A dead run context wins over a typed stall: Stop, shutdown,
+			// and the run deadline are not retried.
+			if a.ctx.Err() != nil || ctx.Err() != nil {
+				limit, limitValue := "", ""
+				if a.ctx.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					limit = "run_timeout"
+					limitValue = compactDuration(a.policy.EffectiveOllamaRunTimeout())
+				}
+				errLogged := err
+				if errLogged == nil {
+					errLogged = ctx.Err()
+				}
+				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, errLogged, 0, limit, limitValue)
+				a.finishOllamaCtx(bot, runID, ctx, msgs, partial, retried, first)
+				return
+			}
+			if te != nil && (te.Limit == "first_output_timeout" || te.Limit == "stall_timeout") {
+				willRetry := retriesLeft > 0
+				a.logOllamaCall(bot.ID, modelName, false, attempt, willRetry, first, te, 0, te.Limit, compactDuration(a.limitDuration(te.Limit)))
+				if willRetry {
+					retriesLeft--
+					retried++
+					a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "retrying"})
+					a.bus.Publish(runID, "stream_reset", map[string]any{"run_id": runID, "reason": te.Limit})
+					continue
+				}
+				a.finishOllamaTimeout(bot, runID, msgs, te.Limit, partial, retried, first)
+				return
+			}
+			if te != nil && te.Limit == "model_timeout" {
+				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, te, 0, "model_timeout", compactDuration(a.policy.EffectiveOllamaModelTimeout()))
+				a.finishOllamaTimeout(bot, runID, msgs, "model_timeout", partial, retried, first)
+				return
+			}
+			if err != nil {
+				var parseErr *model.ToolCallParseError
+				// One more call, and only when a round remains. The failed call still counts toward the cap.
+				if errors.As(err, &parseErr) && !parseRetried && round+1 < maxToolRounds {
+					parseRetried = true
+					a.logOllamaCall(bot.ID, modelName, false, attempt, true, first, err, 0, "", "")
+					a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "retrying"})
+					msgs = append(msgs, model.Message{
+						Role:    "user",
+						Content: "The tool call could not be parsed: " + clip(parseErr.Detail, 500) + ". Call the tool again with valid arguments, or reply in text.",
+					})
+					parseContinue = true
+					break
+				}
+				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, err, 0, "", "")
+				if t := strings.TrimSpace(partial); t != "" {
+					a.persistBotText(bot.ID, runID, t, false)
+				}
+				_, _ = a.finishRun(runID, "error", err.Error())
+				a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+				return
+			}
+			a.logOllamaCall(bot.ID, modelName, true, attempt, false, first, nil, resp.PromptTokens+resp.OutputTokens, "", "")
+			break
 		}
-		a.log(bot.ID, "model_call", map[string]any{
-			"model": modelName, "ok": true, "tokens": resp.PromptTokens + resp.OutputTokens,
-		})
+		if parseContinue {
+			continue
+		}
 		if len(resp.ToolCalls) == 0 {
 			if strings.TrimSpace(resp.Content) != "" {
-				a.persistBotText(bot.ID, runID, resp.Content)
+				a.persistBotText(bot.ID, runID, resp.Content, false)
 			}
 			_, _ = a.finishRun(runID, "done", "")
 			a.bus.Publish(runID, "done", map[string]any{"run_id": runID})
@@ -177,8 +231,7 @@ func (a *App) execute(botID, runID string) {
 			})
 		}
 		for _, tc := range resp.ToolCalls {
-			if ctx.Err() != nil {
-				a.finishInterrupted(bot.ID, runID, ctx)
+			if a.finishOllamaCtx(bot, runID, ctx, msgs, "", retried, lastFirst) {
 				return
 			}
 			a.bus.Publish(runID, "status", map[string]any{"state": tc.Name, "text": tc.Name})
@@ -245,6 +298,11 @@ func runNoticeText(status, errText string) string {
 	switch {
 	case status == "cancelled":
 		return "Notice: Run cancelled."
+	case status == "timeout":
+		if errText == "" {
+			return "Notice: Run timed out."
+		}
+		return "Notice: " + errText
 	case status == "stopped" && errText == "stopped after denial":
 		return "Notice: Stopped after denial."
 	case errText == "interrupted":
@@ -268,15 +326,164 @@ func (a *App) persistRunNotice(botID, runID, status, errText string) {
 	a.log(botID, "run_notice", map[string]any{"message_id": m.ID, "run_id": runID, "status": status})
 }
 
-func (a *App) persistBotText(botID, runID, content string) {
+func (a *App) persistBotText(botID, runID, content string, timedOut bool) {
 	content = clip(content, maxReplyBytes)
 	m, err := a.st.AddMessage(store.Message{
-		BotID: botID, Thread: "user", Role: "bot", Content: content, RunID: &runID,
+		BotID: botID, Thread: "user", Role: "bot", Content: content, RunID: &runID, TimedOut: timedOut,
 	})
 	if err != nil {
 		return
 	}
 	a.log(botID, "bot_message", map[string]any{"message_id": m.ID, "run_id": runID})
+}
+
+// finishOllamaCtx ends the run when the daemon is shutting down, the user
+// stopped it, or the run deadline fired. A stall is not this path. False
+// means the run context is still alive.
+func (a *App) finishOllamaCtx(bot store.Bot, runID string, ctx context.Context, msgs []model.Message, partial string, retried int, first time.Duration) bool {
+	if a.ctx.Err() == nil && ctx.Err() == nil {
+		return false
+	}
+	if a.ctx.Err() != nil {
+		if t := strings.TrimSpace(partial); t != "" {
+			a.persistBotText(bot.ID, runID, t, false)
+		}
+		a.finishInterrupted(bot.ID, runID, a.ctx)
+		return true
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		a.finishOllamaTimeout(bot, runID, msgs, "run_timeout", partial, retried, first)
+		return true
+	}
+	if t := strings.TrimSpace(partial); t != "" {
+		a.persistBotText(bot.ID, runID, t, false)
+	}
+	a.finishInterrupted(bot.ID, runID, ctx)
+	return true
+}
+
+// finishOllamaTimeout keeps the partial reply, offers Continue, and ends
+// the run as timeout. errText on the run is the notice without "Notice: ".
+func (a *App) finishOllamaTimeout(bot store.Bot, runID string, msgs []model.Message, limit, partial string, retried int, first time.Duration) {
+	dur := a.limitDuration(limit)
+	kept := ""
+	if t := strings.TrimSpace(partial); t != "" {
+		kept = clip(t, maxReplyBytes)
+		a.persistBotText(bot.ID, runID, kept, true)
+	}
+	resume := append([]model.Message{}, msgs...)
+	if kept != "" {
+		resume = append(resume, model.Message{Role: "assistant", Content: kept})
+	}
+	resume = append(resume, model.Message{Role: "user", Content: "Continue from where you stopped."})
+	a.holdResume(bot.ID, runID, resume)
+	body := timeoutBody(limit, dur, retried, kept)
+	_, _ = a.finishRun(runID, "timeout", body)
+	a.bus.Publish(runID, "timeout", map[string]any{"run_id": runID, "error": body, "limit": limit})
+	a.log(bot.ID, "run_timed_out", map[string]any{
+		"run_id":          runID,
+		"limit":           limit,
+		"limit_value":     compactDuration(dur),
+		"first_output_ms": first.Milliseconds(),
+		"retried":         retried > 0,
+		"partial_bytes":   len(kept),
+	})
+}
+
+func (a *App) limitDuration(limit string) time.Duration {
+	switch limit {
+	case "first_output_timeout":
+		return a.policy.EffectiveOllamaFirstOutputTimeout()
+	case "stall_timeout":
+		return a.policy.EffectiveOllamaStallTimeout()
+	case "model_timeout":
+		return a.policy.EffectiveOllamaModelTimeout()
+	default:
+		return a.policy.EffectiveOllamaRunTimeout()
+	}
+}
+
+func (a *App) logOllamaCall(botID, modelName string, ok bool, attempt int, retry bool, first time.Duration, err error, tokens int, limit, limitValue string) {
+	detail := map[string]any{
+		"model":           modelName,
+		"ok":              ok,
+		"attempt":         attempt,
+		"retry":           retry,
+		"first_output_ms": first.Milliseconds(),
+	}
+	if err != nil {
+		detail["error"] = err.Error()
+	}
+	if ok {
+		detail["tokens"] = tokens
+	}
+	if limit != "" {
+		detail["limit"] = limit
+		detail["limit_value"] = limitValue
+	}
+	a.log(botID, "model_call", detail)
+}
+
+// timeoutBody is the run error text. The thread notice prefixes "Notice: ".
+func timeoutBody(limit string, d time.Duration, retried int, partial string) string {
+	shown := compactDuration(d)
+	var b strings.Builder
+	switch limit {
+	case "stall_timeout":
+		fmt.Fprintf(&b, "No output from the model for %s (stall_timeout).", shown)
+	case "first_output_timeout":
+		fmt.Fprintf(&b, "The model sent no output within %s (first_output_timeout).", shown)
+	case "model_timeout":
+		fmt.Fprintf(&b, "The model call hit its %s limit (model_timeout).", shown)
+	case "run_timeout":
+		fmt.Fprintf(&b, "The run hit its %s limit (run_timeout).", shown)
+	default:
+		fmt.Fprintf(&b, "The run hit its %s limit (%s).", shown, limit)
+	}
+	switch {
+	case retried == 1:
+		b.WriteString(" Retried once.")
+	case retried > 1:
+		fmt.Fprintf(&b, " Retried %d times.", retried)
+	}
+	if strings.TrimSpace(partial) != "" {
+		b.WriteString(" The partial reply is kept above.")
+	}
+	return b.String()
+}
+
+// compactDuration drops zero units: 2m, 1h30m, 45s. Under a second it keeps
+// milliseconds so a short test limit stays exact.
+func compactDuration(d time.Duration) string {
+	if d < 0 {
+		d = -d
+	}
+	if d == 0 {
+		return "0s"
+	}
+	if d < time.Second {
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	}
+	d = d.Truncate(time.Second)
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	d -= m * time.Minute
+	s := d / time.Second
+	var b strings.Builder
+	if h > 0 {
+		fmt.Fprintf(&b, "%dh", h)
+	}
+	if m > 0 {
+		fmt.Fprintf(&b, "%dm", m)
+	}
+	if s > 0 {
+		fmt.Fprintf(&b, "%ds", s)
+	}
+	if b.Len() == 0 {
+		return "0s"
+	}
+	return b.String()
 }
 
 // foldInput appends turn input that arrived after through to the live

@@ -307,7 +307,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		a.finishCLIInterrupted(bot.ID, runID, text)
 	case turnCtx.Err() != nil && ctx.Err() == nil && errors.Is(turnCtx.Err(), context.DeadlineExceeded):
 		if text != "" {
-			a.persistBotText(bot.ID, runID, text)
+			a.persistBotText(bot.ID, runID, text, false)
 		}
 		_, _ = a.finishRun(runID, "error", "turn_timeout")
 		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": "turn_timeout"})
@@ -317,7 +317,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 			break
 		}
 		if text != "" {
-			a.persistBotText(bot.ID, runID, text)
+			a.persistBotText(bot.ID, runID, text, false)
 		}
 		a.finishInterrupted(bot.ID, runID, ctx)
 	case errors.Is(err, clisession.ErrTruncated) || res.Interrupted:
@@ -352,12 +352,12 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		}
 		// Text the CLI wrote before it failed stays in the thread.
 		if text != "" {
-			a.persistBotText(bot.ID, runID, text)
+			a.persistBotText(bot.ID, runID, text, false)
 		}
 		a.failCLI(bot.ID, runID, backend, err)
 	default:
 		if text != "" {
-			a.persistBotText(bot.ID, runID, text)
+			a.persistBotText(bot.ID, runID, text, false)
 		}
 		// A card denial cancels the turn. Other denials keep the existing end state.
 		if cardDenied.Load() && cancelledStop(res.StopReason) {
@@ -381,7 +381,7 @@ func cancelledStop(reason string) bool {
 
 func (a *App) finishCLIInterrupted(botID, runID, text string) {
 	if strings.TrimSpace(text) != "" {
-		a.persistBotText(botID, runID, text)
+		a.persistBotText(botID, runID, text, false)
 	}
 	_, _ = a.finishRun(runID, "error", "interrupted")
 	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": "interrupted"})

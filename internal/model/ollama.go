@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -28,6 +30,7 @@ func NewOllama(base string) *Ollama {
 type wireMessage struct {
 	Role      string         `json:"role"`
 	Content   string         `json:"content"`
+	Thinking  string         `json:"thinking,omitempty"`
 	ToolCalls []wireToolCall `json:"tool_calls,omitempty"`
 	ToolName  string         `json:"tool_name,omitempty"`
 }
@@ -66,17 +69,35 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest, onToken func(string)
 	if len(req.Tools) > 0 {
 		body["tools"] = toWireTools(req.Tools)
 	}
+	if req.KeepAlive != nil && req.KeepAlive != "" {
+		body["keep_alive"] = req.KeepAlive
+	}
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return ChatResponse{}, err
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, o.BaseURL+"/api/chat", bytes.NewReader(raw))
+	// callCtx is cancelled by the stall watchdog without cancelling the
+	// caller's hard cap. A parent deadline still cancels this request.
+	callCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	started := time.Now()
+	w := newWatchdog(cancel, started, req.FirstOutputTimeout, req.StallTimeout)
+	defer w.stop()
+
+	httpReq, err := http.NewRequestWithContext(callCtx, http.MethodPost, o.BaseURL+"/api/chat", bytes.NewReader(raw))
 	if err != nil {
 		return ChatResponse{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	resp, err := o.HTTP.Do(httpReq)
 	if err != nil {
+		if te := w.timeout(""); te != nil {
+			return ChatResponse{FirstOutput: te.FirstOutput}, te
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			te := modelTimeout(ctx, started, w.snapshot())
+			return ChatResponse{FirstOutput: te.FirstOutput}, te
+		}
 		return ChatResponse{}, fmt.Errorf("ollama unreachable at %s: %w", o.BaseURL, err)
 	}
 	defer resp.Body.Close()
@@ -93,6 +114,7 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest, onToken func(string)
 	var content strings.Builder
 	var calls []ToolCall
 	var out ChatResponse
+	sawDone := false
 	for sc.Scan() {
 		line := bytes.TrimSpace(sc.Bytes())
 		if len(line) == 0 {
@@ -108,6 +130,9 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest, onToken func(string)
 			}
 			return ChatResponse{}, fmt.Errorf("ollama: %s", chunk.Error)
 		}
+		if chunkIsOutput(chunk) {
+			w.activity(time.Now())
+		}
 		if chunk.Message.Content != "" {
 			content.WriteString(chunk.Message.Content)
 			if onToken != nil {
@@ -118,16 +143,171 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest, onToken func(string)
 			calls = mergeCalls(calls, parsed)
 		}
 		if chunk.Done {
+			sawDone = true
 			out.PromptTokens = chunk.PromptEvalCount
 			out.OutputTokens = chunk.EvalCount
 		}
 	}
-	if err := sc.Err(); err != nil {
-		return ChatResponse{}, fmt.Errorf("ollama stream: %w", err)
-	}
-	out.Content = content.String()
+	partial := content.String()
+	out.Content = partial
 	out.ToolCalls = calls
+	out.FirstOutput = w.elapsedToFirst()
+	if err := sc.Err(); err != nil && !sawDone {
+		if te := w.timeout(partial); te != nil {
+			out.FirstOutput = te.FirstOutput
+			return out, te
+		}
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			te := modelTimeout(ctx, started, w.snapshot())
+			te.Partial = partial
+			out.FirstOutput = te.FirstOutput
+			return out, te
+		}
+		return out, fmt.Errorf("ollama stream: %w", err)
+	}
+	if te := w.timeout(partial); te != nil && !sawDone {
+		out.FirstOutput = te.FirstOutput
+		return out, te
+	}
 	return out, nil
+}
+
+// chunkIsOutput reports a chunk that counts as model activity: content,
+// thinking, tool calls, or the final done line. Thinking is not copied
+// into the reply.
+func chunkIsOutput(ch ollamaChunk) bool {
+	if ch.Done || ch.Message.Content != "" || ch.Message.Thinking != "" {
+		return true
+	}
+	return len(ch.Message.ToolCalls) > 0
+}
+
+func modelTimeout(ctx context.Context, started time.Time, snap watchdogSnap) *TimeoutError {
+	after := time.Since(started)
+	if dl, ok := ctx.Deadline(); ok {
+		if d := dl.Sub(started); d > 0 {
+			after = d
+		}
+	}
+	return &TimeoutError{
+		Limit:       "model_timeout",
+		After:       after,
+		GotOutput:   snap.got,
+		FirstOutput: snap.first,
+	}
+}
+
+// watchdog cancels the request when the first output, or the gap since the
+// last output, exceeds its limit. A generation counter drops a timer that
+// lost the race with a newer chunk.
+type watchdog struct {
+	mu       sync.Mutex
+	cancel   context.CancelFunc
+	started  time.Time
+	firstLim time.Duration
+	stallLim time.Duration
+	timer    *time.Timer
+	gen      int
+	got      bool
+	first    time.Duration
+	fired    *TimeoutError
+}
+
+type watchdogSnap struct {
+	got   bool
+	first time.Duration
+}
+
+func newWatchdog(cancel context.CancelFunc, started time.Time, first, stall time.Duration) *watchdog {
+	w := &watchdog{cancel: cancel, started: started, firstLim: first, stallLim: stall}
+	if first > 0 {
+		w.arm(first)
+	}
+	return w
+}
+
+func (w *watchdog) arm(d time.Duration) {
+	w.gen++
+	gen := w.gen
+	if w.timer != nil {
+		w.timer.Stop()
+	}
+	w.timer = time.AfterFunc(d, func() { w.fire(gen) })
+}
+
+func (w *watchdog) fire(gen int) {
+	w.mu.Lock()
+	var cancel context.CancelFunc
+	if gen == w.gen && w.fired == nil {
+		limit := "first_output_timeout"
+		after := w.firstLim
+		if w.got {
+			limit = "stall_timeout"
+			after = w.stallLim
+		}
+		w.fired = &TimeoutError{Limit: limit, After: after, GotOutput: w.got, FirstOutput: w.first}
+		cancel = w.cancel
+	}
+	w.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (w *watchdog) activity(now time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fired != nil {
+		return
+	}
+	if !w.got {
+		w.got = true
+		w.first = now.Sub(w.started)
+	}
+	if w.stallLim > 0 {
+		w.arm(w.stallLim)
+		return
+	}
+	w.gen++
+	if w.timer != nil {
+		w.timer.Stop()
+		w.timer = nil
+	}
+}
+
+func (w *watchdog) elapsedToFirst() time.Duration {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.first
+}
+
+func (w *watchdog) snapshot() watchdogSnap {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return watchdogSnap{got: w.got, first: w.first}
+}
+
+func (w *watchdog) timeout(partial string) *TimeoutError {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.fired == nil {
+		return nil
+	}
+	te := *w.fired
+	te.Partial = partial
+	te.GotOutput = w.got
+	te.FirstOutput = w.first
+	return &te
+}
+
+func (w *watchdog) stop() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.gen++
+	if w.timer != nil {
+		w.timer.Stop()
+		w.timer = nil
+	}
 }
 
 func toWire(msgs []Message) []wireMessage {
@@ -213,6 +393,3 @@ func callsPrefix(all, prefix []ToolCall) bool {
 	}
 	return true
 }
-
-// Ensure the client honors a deadline when the caller set one.
-var _ = time.Second

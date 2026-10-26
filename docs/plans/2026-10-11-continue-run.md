@@ -9,7 +9,7 @@ Tool calls and tool results stay in the run's in-memory transcript. The thread s
 - The default cap stays 8. Continue does not raise it for other bots or later runs. The bot has no tool that extends the cap.
 - The capped run stays `error`. Continue is a new run. A run still ends in exactly one terminal status.
 - The daemon keeps one transcript per bot, in memory, keyed by the capped run. The client does not send a transcript. A restart drops it.
-- `GET /api/bots` and `GET /api/bots/{id}` include `continue_run_id` while the offer is held. `POST /api/bots/{id}/runs/{run_id}/continue` starts the new run and returns its `run_id`. While that bot is running, a second continue is 409 and does not take the transcript. A missing or mismatched offer is 404. A paused bot and a shutting-down daemon refuse without taking it.
+- `GET /api/bots` and `GET /api/bots/{id}` include `continue_run_id` while the offer is held. `POST /api/bots/{id}/runs/{run_id}/continue` starts the new run and returns its `run_id`. While that bot is running, a second continue is 409 and does not take the transcript. A missing or mismatched offer is 404. A paused bot and a shutting-down daemon refuse without taking it. A timed-out Ollama run uses the same continue offer (partial included). `POST /api/bots/{id}/runs/{run_id}/retry` starts a new run of that user turn without the partial or the notice; see `docs/specs.md`.
 - A new user message drops the offer before the next run starts. A timer or DM turn drops it by running without the saved transcript. Hitting the cap again offers continue for the new run.
 - The note says "Stopped after 8 tool rounds." and has a Continue button. Other failures still say "Run failed". Hide, pin, and the rest of the page stay as they are.
 

@@ -32,9 +32,20 @@ model = "llama3.1"
 # Empty (default) allows any model the local Ollama serves.
 # Useful when the enterprise wants to restrict which weights can run.
 # models = ["llama3.1", "qwen2.5-coder:7b", "gemma2"]
-# Whole run and one model call. Defaults 10m and 3m.
+# Whole run (default 10m) is the backstop. first_output_timeout (default 5m)
+# is the wait for the first output chunk, including a cold load.
+# stall_timeout (default 2m) is the max gap between output chunks after that.
+# stall_retries (default 1, 0 disables, max 5) retries a stall or that first
+# wait once. model_timeout is an optional hard cap on one call; unset means
+# the effective run timeout. A file that still sets the old 3m default keeps
+# that cap and can drop the key. keep_alive (default "30m") is sent on every
+# chat: a Go duration, seconds, or -1. See docs/cli-isolation.md.
 # run_timeout = "10m"
-# model_timeout = "3m"
+# first_output_timeout = "5m"
+# stall_timeout = "2m"
+# stall_retries = 1
+# keep_alive = "30m"
+# model_timeout = "10m"
 
 [cli]
 # Only consulted when backend = "claude" or "grok"

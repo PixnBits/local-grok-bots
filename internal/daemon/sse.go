@@ -46,7 +46,7 @@ func (b *Bus) Publish(runID, event string, payload any) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	h := append(b.hist[runID], f)
-	if len(h) > 400 && event != "done" && event != "error" {
+	if len(h) > 400 && !terminal(event) {
 		h = h[len(h)-400:]
 	}
 	b.hist[runID] = h
@@ -152,5 +152,5 @@ func (b *Bus) remove(runID string, ch chan frame) bool {
 }
 
 func terminal(event string) bool {
-	return event == "done" || event == "error"
+	return event == "done" || event == "error" || event == "timeout"
 }
