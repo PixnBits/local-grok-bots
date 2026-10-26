@@ -29,7 +29,7 @@ func TestMarkMarkup(t *testing.T) {
 		`.mark[data-shape="triangle"]::after { clip-path: polygon(50% 0, 100% 100%, 0 100%); }`,
 		`.mark[data-shape="hex"]::after { clip-path: polygon(25% 6%, 75% 6%, 100% 50%, 75% 94%, 25% 94%, 0 50%); }`,
 		`b.setAttribute("aria-label", SHAPE_NAMES[shape] || shape)`,
-		`"Custom " + color`,
+		`"Current colour " + color`,
 		`id="color-custom"`,
 		`id="thread-mark"`,
 		".mark[hidden] { display: none; }",
