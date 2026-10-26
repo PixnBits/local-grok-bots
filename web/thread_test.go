@@ -121,7 +121,9 @@ func TestThreadPolish(t *testing.T) {
 		`event === "stream_reset"`,
 		`event === "done" || event === "error" || event === "timeout"`,
 		`el("span", "timed-out", "Timed out")`,
-		`el("button", "secondary small", "Retry")`,
+		`el("button", b.continue_run_id ? "secondary small" : "primary small", "Retry")`,
+		`paintNote("attention", timeoutOffer.text, actions)`,
+		`.note.attention { color: var(--text); background: var(--attention-soft); }`,
 		"if (b.continue_run_id) {\n      cont = el(\"button\", \"primary small\", \"Continue\");",
 		"retryTimeout(runId || timeoutRunId(b, state.messages, state.timeoutRunId))",
 		`tool !== "working" && tool !== "running" && tool !== "retrying"`,
@@ -130,6 +132,7 @@ func TestThreadPolish(t *testing.T) {
 		`r.status === "error" || r.status === "timeout"`,
 		`"run_timed_out"`,
 		`node.tabIndex = -1`,
+		`if (event === "timeout") announce(timeoutAnnouncement(payload.error));`,
 	} {
 		if !strings.Contains(src, s) {
 			t.Errorf("missing %q", s)
@@ -160,7 +163,7 @@ vm.runInContext(snippet + "\n" + [
   "cardEyebrow", "cardTitle", "cardRecordText", "recordKind", "countdownAnnounce",
   "archiveFocusTarget", "themeRadioKey", "retryTrigger", "toolCallLabel",
   "partialsToShow", "mergeRunRecords", "runRecordKey", "stoppedNoticeText",
-  "timeoutNoteActions", "streamResetApplies", "timedOutTag", "timeoutRunId", "focusTargetAfterNote",
+  "timeoutNoteActions", "streamResetApplies", "timedOutTag", "timeoutRunId", "focusTargetAfterNote", "timeoutAnnouncement",
   "STOP_TIMEOUT_MS", "QUEUED_CAPTION", "STOP_FAILED_NOTE", "HINT_IDLE", "HINT_RUNNING"
 ].map(function (n) { return "this." + n + "=" + n + ";"; }).join("\n"), ctx);
 const cases = [];
@@ -442,6 +445,8 @@ check("timeout-run-message", ctx.timeoutRunId({}, [{run_id:"old"}, {run_id:"new"
 check("focus-composer", ctx.focusTargetAfterNote("BUTTON", true) === "composer-input" && ctx.focusTargetAfterNote("BODY", true) === "composer-input" && ctx.focusTargetAfterNote("", true) === "composer-input");
 check("focus-heading", ctx.focusTargetAfterNote("BODY", false) === "thread-name");
 check("focus-keep", ctx.focusTargetAfterNote("TEXTAREA", true) === "");
+check("timeout-announce", ctx.timeoutAnnouncement("No output from the model for 2m (stall_timeout). Retried once.") === "Run timed out. No output from the model for 2m (stall_timeout). Retried once.");
+check("timeout-announce-bare", ctx.timeoutAnnouncement("") === "Run timed out." && ctx.timeoutAnnouncement(null) === "Run timed out.");
 console.log(JSON.stringify(cases));
 `
 	raw := runNode(t, node, script)

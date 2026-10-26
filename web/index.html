@@ -935,6 +935,7 @@ window.addEventListener("storage", function (ev) {
   }
   .note.quiet { color: var(--text-2); background: var(--surface-2); }
   .note.continue { color: var(--text); background: var(--accent-soft); }
+  .note.attention { color: var(--text); background: var(--attention-soft); }
   .note .note-text { flex: 1; min-width: 0; }
   .note button.small { flex: none; height: 28px; min-height: 28px; padding: 0 10px; font-size: 12px; border-radius: 8px; }
   .note button.secondary { background: var(--surface); border: 1px solid var(--border-strong); color: var(--text); }
@@ -2094,7 +2095,8 @@ function paintHeader(b) {
   const timeoutOffer = (typeof timeoutNoteActions === "function") ? timeoutNoteActions(b, !!state.streaming) : null;
   if (timeoutOffer) {
     const runId = (typeof timeoutRunId === "function") ? timeoutRunId(b, state.messages, state.timeoutRunId) : (b.continue_run_id || "");
-    const retry = el("button", "secondary small", "Retry");
+    // With a partial, Continue is primary. With none, Retry alone is primary.
+    const retry = el("button", b.continue_run_id ? "secondary small" : "primary small", "Retry");
     retry.type = "button";
     const actions = [retry];
     let cont = null;
@@ -2112,7 +2114,7 @@ function paintHeader(b) {
       const id = b.continue_run_id;
       cont.addEventListener("click", () => { disableBoth(); continueRun(id); });
     }
-    paintNote("continue", timeoutOffer.text, actions);
+    paintNote("attention", timeoutOffer.text, actions);
     return;
   }
   const offer = !state.streaming && b.status !== "running" && b.last_run_error === "tool round limit" && b.continue_run_id;
@@ -3807,6 +3809,7 @@ async function follow(runId) {
         } else if (event === "done" || event === "error" || event === "timeout") {
           const status = event === "error" ? "error" : (event === "timeout" ? "timeout" : (payload.status || ""));
           if (event === "timeout" && payload.run_id) state.timeoutRunId = String(payload.run_id);
+          if (event === "timeout") announce(timeoutAnnouncement(payload.error));
           const prevPhase = state.stop ? state.stop.phase : "";
           applyStop(reduceStop(state.stop || freshStop(), { type: "stream-done", status: status }));
           if (prevPhase === "stopping" && state.stop.phase === "stopped") {
@@ -6509,6 +6512,13 @@ function streamResetApplies(eventRunId, currentRunId) {
   const b = currentRunId == null || currentRunId === "" ? "" : String(currentRunId);
   if (a && b && a !== b) return false;
   return true;
+}
+
+// The docked timeout note is not a live region. The polite #a11y-status
+// region says the notice once, when the timeout event arrives.
+function timeoutAnnouncement(error) {
+  const t = error == null ? "" : String(error).trim();
+  return t ? "Run timed out. " + t : "Run timed out.";
 }
 
 function timedOutTag(message) {
