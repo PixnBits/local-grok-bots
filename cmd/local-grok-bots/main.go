@@ -21,7 +21,11 @@ const usage = `local-grok-bots is a local daemon for a personal bot roster.
   OLLAMA_URL            http://127.0.0.1:11434
   OLLAMA_MODEL          llama3.2
   AUTH_TOKEN            unset
+  AUTH_TOKENS_FILE      unset
   SANDBOX_BUILD_BINDS   unset
+
+A policy.toml bind overrides BIND_ADDR.
+AUTH_TOKENS_FILE is a file of name:token lines and is read at startup.
 `
 
 func main() {
@@ -44,7 +48,6 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	fmt.Fprintf(os.Stderr, "local-grok-bots %s listening on %s\n", cfg.Version, cfg.BindAddr)
 	if err := app.Run(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "local-grok-bots:", err)
 		os.Exit(1)

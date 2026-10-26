@@ -8,6 +8,27 @@ import (
 	"time"
 )
 
+func TestFixedEnvRejectsTokenFiles(t *testing.T) {
+	for _, key := range []string{"AUTH_TOKEN", "AUTH_TOKENS_FILE"} {
+		t.Run(key, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "policy.toml")
+			body := "[[tools.cli]]\nname = \"grok\"\npath = \"/usr/bin/grok\"\ncredential_home = \"/var/lib/lgb/grok\"\nfixed_env = [\"" + key + "=/tmp/tokens\"]\ntimeout = \"1s\"\nmax_output = 1\nmax_calls_per_hour = 1\n"
+			if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			p, err := Load(Options{Path: path})
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := strings.Join(p.Warnings, "\n")
+			if !strings.Contains(text, key) || len(p.CLITools) != 0 {
+				t.Fatalf("warnings %v tools %+v", p.Warnings, p.CLITools)
+			}
+		})
+	}
+}
+
 func TestSampleHasNoLiveCLI(t *testing.T) {
 	path := filepath.Join("..", "..", "policy.toml.sample")
 	p, err := Load(Options{Path: path})

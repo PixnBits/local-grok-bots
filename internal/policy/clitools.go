@@ -487,7 +487,7 @@ func normFixedEnv(name string, in []string) ([]string, error) {
 			return nil, fmt.Errorf("tools.cli %q fixed_env key %q is not a name", name, k)
 		}
 		uk := strings.ToUpper(k)
-		if strings.HasPrefix(uk, "LGB_") || uk == "AUTH_TOKEN" {
+		if strings.HasPrefix(uk, "LGB_") || uk == "AUTH_TOKEN" || uk == "AUTH_TOKENS_FILE" {
 			return nil, fmt.Errorf("tools.cli %q fixed_env cannot set %s", name, k)
 		}
 		lk := strings.ToLower(k)

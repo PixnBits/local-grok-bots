@@ -41,6 +41,7 @@ func ScrubEnv(base []string, credHome, workspace string) ([]string, error) {
 	delete(env, "LGB_SPOOL")
 	delete(env, "LGB_SESSION_MARKER")
 	delete(env, "AUTH_TOKEN")
+	delete(env, "AUTH_TOKENS_FILE")
 	_ = credHome
 	_ = workspace
 	return envList(env), nil
@@ -89,7 +90,7 @@ func envMap(list []string) map[string]string {
 }
 
 func keepEnv(k string) bool {
-	if strings.HasPrefix(k, "LGB_") || k == "AUTH_TOKEN" {
+	if strings.HasPrefix(k, "LGB_") || k == "AUTH_TOKEN" || k == "AUTH_TOKENS_FILE" {
 		return false
 	}
 	upper := strings.ToUpper(k)

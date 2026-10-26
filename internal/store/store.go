@@ -52,34 +52,45 @@ type Mark struct {
 }
 
 // DefaultMark is used when a bot is created without one.
-func DefaultMark() Mark { return Mark{Shape: "circle", Color: "#1b654c"} }
+func DefaultMark() Mark { return Mark{Shape: "circle", Color: "#787B8A"} }
 
-// NormalizeMark accepts a shape and a #rrggbb color. Empty fields use the default.
+// NormalizeMark accepts a shape and a #rgb or #rrggbb color. Empty fields use the default.
 func NormalizeMark(m Mark) (Mark, error) {
 	shape := strings.ToLower(strings.TrimSpace(m.Shape))
 	color := strings.ToLower(strings.TrimSpace(m.Color))
+	def := DefaultMark()
 	if shape == "" {
-		shape = "circle"
+		shape = def.Shape
 	}
 	if color == "" {
-		color = "#1b654c"
+		color = def.Color
 	}
 	switch shape {
 	case "circle", "square", "diamond", "triangle", "hex":
 	default:
 		return Mark{}, errors.New("unknown mark shape")
 	}
-	if len(color) != 7 || color[0] != '#' {
-		return Mark{}, errors.New("mark color must be #rrggbb")
+	if !markColorOK(color) {
+		return Mark{}, errors.New("mark color must be #rgb or #rrggbb")
+	}
+	return Mark{Shape: shape, Color: color}, nil
+}
+
+func markColorOK(color string) bool {
+	if len(color) != 4 && len(color) != 7 {
+		return false
+	}
+	if color[0] != '#' {
+		return false
 	}
 	for _, c := range color[1:] {
 		switch {
-		case c >= '0' && c <= '9', c >= 'a' && c <= 'f':
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
 		default:
-			return Mark{}, errors.New("mark color must be #rrggbb")
+			return false
 		}
 	}
-	return Mark{Shape: shape, Color: color}, nil
+	return true
 }
 
 // NormalizeGrants keeps net, git, ssh, build, and github. Anything else is an error.
@@ -371,7 +382,7 @@ CREATE TABLE IF NOT EXISTS bots (
   label TEXT NOT NULL DEFAULT '',
   description TEXT NOT NULL DEFAULT '',
   mark_shape TEXT NOT NULL DEFAULT 'circle',
-  mark_color TEXT NOT NULL DEFAULT '#1b654c',
+  mark_color TEXT NOT NULL DEFAULT '#787B8A',
   pinned INTEGER NOT NULL DEFAULT 0,
   hidden INTEGER NOT NULL DEFAULT 0,
   grants TEXT NOT NULL DEFAULT '[]',
@@ -507,7 +518,7 @@ func (s *Store) evolve() error {
 		{"bots", "description", "TEXT NOT NULL DEFAULT ''"},
 		{"bots", "label", "TEXT NOT NULL DEFAULT ''"},
 		{"bots", "mark_shape", "TEXT NOT NULL DEFAULT 'circle'"},
-		{"bots", "mark_color", "TEXT NOT NULL DEFAULT '#1b654c'"},
+		{"bots", "mark_color", "TEXT NOT NULL DEFAULT '#787B8A'"},
 		{"bots", "pinned", "INTEGER NOT NULL DEFAULT 0"},
 		{"bots", "hidden", "INTEGER NOT NULL DEFAULT 0"},
 		{"bots", "grants", "TEXT NOT NULL DEFAULT '[]'"},

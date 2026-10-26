@@ -113,7 +113,7 @@ func TestFIFOConfigDenialReturnsBlank(t *testing.T) {
 	type named struct{ owner, repo string }
 	ch := make(chan named, 1)
 	go func() {
-		owner, repo := app.deniedPushNames("proj", []string{"git", "push", "--force", "origin"})
+		owner, repo, _ := app.deniedPushNames("proj", []string{"git", "push", "--force", "origin"})
 		ch <- named{owner, repo}
 	}()
 	select {

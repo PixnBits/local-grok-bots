@@ -279,6 +279,7 @@ func pinJailEnv(env []string, home, name string) []string {
 	delete(m, "LGB_TOKEN")
 	delete(m, "LGB_SPOOL")
 	delete(m, "AUTH_TOKEN")
+	delete(m, "AUTH_TOKENS_FILE")
 	if name == "grok" {
 		m["GROK_HOME"] = filepath.Join(home, ".grok")
 		m["GROK_DISABLE_AUTOUPDATER"] = "1"
@@ -295,7 +296,7 @@ func pinnedEnv(k string) bool {
 		"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME":
 		return true
 	}
-	return strings.HasPrefix(k, "LGB_") || k == "AUTH_TOKEN"
+	return strings.HasPrefix(k, "LGB_") || k == "AUTH_TOKEN" || k == "AUTH_TOKENS_FILE"
 }
 
 // SandboxReady reports whether the inner CLI jail can start. A missing

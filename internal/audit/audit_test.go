@@ -44,6 +44,13 @@ func TestRedactValueHidesKeysAndTokens(t *testing.T) {
 	if got["api_key"] != "[redacted]" {
 		t.Fatalf("key %#v", got["api_key"])
 	}
+	named := RedactValue(map[string]any{
+		"token_name": "alice",
+		"token":      "abcdefghijklmnopqrstuvwxyz012345",
+	}).(map[string]any)
+	if named["token_name"] != "alice" || named["token"] != "[redacted]" {
+		t.Fatalf("token_name %#v", named)
+	}
 }
 
 // Real-shaped fakes. Lengths follow the formats this daemon handles:

@@ -50,10 +50,13 @@ func TestHelpExitsBeforeStartup(t *testing.T) {
 				"local-grok-bots",
 				"DATA_DIR", "./data",
 				"BIND_ADDR", "127.0.0.1:8080",
+				"A policy.toml bind overrides BIND_ADDR.",
 				"POLICY_PATH", "policy.toml",
 				"OLLAMA_URL", "http://127.0.0.1:11434",
 				"OLLAMA_MODEL", "llama3.2",
 				"AUTH_TOKEN", "unset",
+				"AUTH_TOKENS_FILE",
+				"name:token",
 				"SANDBOX_BUILD_BINDS",
 			} {
 				if !strings.Contains(out, needle) {

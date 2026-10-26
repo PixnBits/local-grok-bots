@@ -270,6 +270,84 @@ func TestTurnDeniesCredentialHomeAddedAfterStartup(t *testing.T) {
 	}
 }
 
+func TestAuthTokensFileSymlinkIsDenied(t *testing.T) {
+	old := claudeSandboxMissing
+	claudeSandboxMissing = func() []string { return nil }
+	t.Cleanup(func() { claudeSandboxMissing = old })
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))
+	outside := t.TempDir()
+	target := filepath.Join(outside, "tokens")
+	if err := os.WriteFile(target, []byte("alice:"+strings.Repeat("a", 32)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(outside, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	app.cfg.AuthTokensFile = link
+	linkAbs, err := filepath.Abs(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkAbs = filepath.Clean(linkAbs)
+	resolved, err := filepath.EvalSymlinks(linkAbs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved = filepath.Clean(resolved)
+	if linkAbs == resolved {
+		t.Fatalf("symlink %s resolved to itself", linkAbs)
+	}
+	st, err := os.Stat(target)
+	if err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("target mode %v %v", st, err)
+	}
+	secrets := app.daemonSecrets()
+	for _, p := range []string{linkAbs, resolved} {
+		if !coiListed(secrets, p) {
+			t.Fatalf("secrets %v lack %s", secrets, p)
+		}
+	}
+	ws := filepath.Join(dir, "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bot := store.Bot{ID: "b1"}
+	iso, err := app.cliIsolation(bot, "claude", ws, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(iso.SettingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{linkAbs, resolved} {
+		for _, rule := range []string{"Read(/" + p + ")", "Edit(/" + p + ")"} {
+			if !strings.Contains(string(raw), rule) {
+				t.Fatalf("claude settings lack %s:\n%s", rule, raw)
+			}
+		}
+	}
+	noted, ok := app.botProtect(bot.ID)
+	if !ok || !coiListed(noted, linkAbs) || !coiListed(noted, resolved) {
+		t.Fatalf("botProtect %v ok=%v", noted, ok)
+	}
+	run, _, err := app.startLGB(context.Background(), bot, "run1", ws)
+	if err != nil || run == nil || !run.protectSet {
+		t.Fatalf("lgb %v set=%v err=%v", run, run != nil && run.protectSet, err)
+	}
+	t.Cleanup(run.stop)
+	roots := run.argRoots(app.policy)
+	if !coiListed(roots, linkAbs) || !coiListed(roots, resolved) {
+		t.Fatalf("argRoots %v lack %s and %s", roots, linkAbs, resolved)
+	}
+}
+
 func coiListed(paths []string, home string) bool {
 	for _, p := range paths {
 		if p == home {

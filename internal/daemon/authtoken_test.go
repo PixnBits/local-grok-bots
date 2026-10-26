@@ -102,7 +102,11 @@ func TestCLIEnvNeverCarriesAdminToken(t *testing.T) {
 	dir := t.TempDir()
 	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))
 	tok := app.cfg.AuthToken
+	fileTok := strings.Repeat("e", 32)
+	app.accessTokens = append(app.accessTokens, namedToken{name: "alice", val: fileTok})
 	t.Setenv("AUTH_TOKEN", tok)
+	t.Setenv("AUTH_TOKENS_FILE", filepath.Join(dir, "tokens"))
+	t.Setenv("SSL_CERT_FILE", "/etc/ssl/"+fileTok+".pem")
 	t.Setenv("LGB_TOKEN_COPY", "x"+tok)
 	ws := filepath.Join(dir, "ws")
 	if err := os.MkdirAll(ws, 0o755); err != nil {
@@ -114,7 +118,7 @@ func TestCLIEnvNeverCarriesAdminToken(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, kv := range iso.Env {
-			if strings.HasPrefix(kv, "AUTH_TOKEN=") || strings.Contains(kv, tok) {
+			if strings.HasPrefix(kv, "AUTH_TOKEN=") || strings.HasPrefix(kv, "AUTH_TOKENS_FILE=") || strings.Contains(kv, tok) || strings.Contains(kv, fileTok) {
 				t.Fatalf("%s env leaks token: %s", backend, kv)
 			}
 		}

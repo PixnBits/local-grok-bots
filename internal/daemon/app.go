@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,7 +45,9 @@ type loopState struct {
 
 // App is the daemon: HTTP API, turn queue, timers, and the model loop.
 type App struct {
-	cfg    config.Config
+	cfg config.Config
+	// logw receives startup lines. Nil means stderr.
+	logw   io.Writer
 	st     *store.Store
 	model  model.Client
 	ws     string
@@ -60,6 +64,9 @@ type App struct {
 	// The value is the bot and run the token was issued for.
 	lgbMu   sync.Mutex
 	lgbLive map[string]lgbCred
+	// accessTokens are the named tokens from AUTH_TOKENS_FILE.
+	// cfg.AuthToken, when set, is the additional name "default".
+	accessTokens []namedToken
 	// protectByBot is the path deny list written for the bot's current turn.
 	// The broker will not use a credential home that is absent from it.
 	protectMu    sync.Mutex
@@ -117,6 +124,9 @@ type App struct {
 	wg           sync.WaitGroup
 }
 
+// logOut is copied onto each App as the startup writer. Nil means stderr.
+var logOut io.Writer
+
 func New(cfg config.Config, m model.Client) (*App, error) {
 	pol, err := policy.Load(policy.Options{
 		Path:           cfg.PolicyPath,
@@ -151,6 +161,20 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		cfg.AuthToken = tok
 		fmt.Fprintf(os.Stderr, "local-grok-bots: a CLI backend is enabled, so the API requires a token; it is in %s. Open /login?token=<token> once per browser.\n", tokPath)
 	}
+	if err := checkAuthTokensLocation(cfg.AuthTokensFile, cfg.Workspace(), cfg.DataDir); err != nil {
+		return nil, err
+	}
+	fileTokens, err := loadAuthTokens(cfg.AuthTokensFile, cfg.AuthToken)
+	if err != nil {
+		return nil, err
+	}
+	logw := logOut
+	if logw == nil {
+		logw = os.Stderr
+	}
+	if cfg.AuthToken == "" && len(fileTokens) == 0 && !loopbackBind(cfg.BindAddr) {
+		fmt.Fprint(logw, bindWarn)
+	}
 	aud, err := audit.Open(pol.AuditLog)
 	if err != nil {
 		return nil, err
@@ -177,21 +201,23 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{
-		cfg:        cfg,
-		st:         st,
-		model:      m,
-		ws:         cfg.Workspace(),
-		bus:        NewBus(),
-		policy:     pol,
-		audit:      aud,
-		ctx:        ctx,
-		cancel:     cancel,
-		loops:      map[string]*loopState{},
-		resume:     map[string]resumeHold{},
-		pending:    map[string][]model.Message{},
-		activity:   map[string]time.Time{},
-		permTokens: map[string]permBind{},
-		permBase:   httpBase(cfg.BindAddr),
+		cfg:          cfg,
+		logw:         logw,
+		st:           st,
+		model:        m,
+		ws:           cfg.Workspace(),
+		bus:          NewBus(),
+		policy:       pol,
+		audit:        aud,
+		ctx:          ctx,
+		cancel:       cancel,
+		loops:        map[string]*loopState{},
+		resume:       map[string]resumeHold{},
+		pending:      map[string][]model.Message{},
+		activity:     map[string]time.Time{},
+		permTokens:   map[string]permBind{},
+		permBase:     httpBase(cfg.BindAddr),
+		accessTokens: fileTokens,
 	}
 	a.perm = permission.New(permission.Options{
 		Publish: func(runID, event string, payload any) {
@@ -260,14 +286,19 @@ func (a *App) Shutdown() {
 
 // Run serves HTTP until ctx is cancelled, then shuts down cleanly.
 func (a *App) Run(ctx context.Context) error {
+	ln, err := net.Listen("tcp", a.cfg.BindAddr)
+	if err != nil {
+		a.Shutdown()
+		return err
+	}
+	a.writeStartup("local-grok-bots %s listening on %s\n", a.cfg.Version, ln.Addr().String())
 	srv := &http.Server{
-		Addr:              a.cfg.BindAddr,
 		Handler:           a.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	errCh := make(chan error, 1)
 	go func() {
-		err := srv.ListenAndServe()
+		err := srv.Serve(ln)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
@@ -285,6 +316,32 @@ func (a *App) Run(ctx context.Context) error {
 		a.Shutdown()
 		return err
 	}
+}
+
+func (a *App) writeStartup(format string, args ...any) {
+	w := io.Writer(os.Stderr)
+	if a != nil && a.logw != nil {
+		w = a.logw
+	}
+	fmt.Fprintf(w, format, args...)
+}
+
+// bindWarn is the one startup line for a non-loopback bind when neither
+// AUTH_TOKEN, the generated admin token, nor AUTH_TOKENS_FILE supplies a token.
+const bindWarn = "local-grok-bots: WARN: the API is reachable beyond this machine without AUTH_TOKEN or AUTH_TOKENS_FILE; set AUTH_TOKEN, AUTH_TOKENS_FILE, or a loopback BIND_ADDR\n"
+
+// loopbackBind reports whether addr's host is 127.0.0.0/8, ::1, or localhost.
+// An empty host is not loopback.
+func loopbackBind(addr string) bool {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		host = strings.TrimSpace(addr)
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (a *App) timerLoop() {
