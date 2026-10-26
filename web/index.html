@@ -434,8 +434,8 @@ window.addEventListener("storage", function (ev) {
     border: 1px solid var(--border); background: var(--surface); color: var(--text);
     border-radius: 99px; padding: 0 8px 0 12px; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap;
   }
-  .state-chip .seg { display: inline-flex; align-items: center; gap: 4px; }
-  .state-chip .seg.warn { color: var(--attention-text); }
+  .state-chip .chip-seg { display: inline-flex; align-items: center; gap: 4px; }
+  .state-chip .chip-seg.warn { color: var(--attention-text); }
   .state-chip svg { display: block; flex: none; }
   .state-chip:hover { background: var(--surface-2); }
   .state-chip.zero { color: var(--muted); }
@@ -608,8 +608,11 @@ window.addEventListener("storage", function (ev) {
     display: inline-flex; align-items: center; gap: 8px; height: 28px; min-height: 28px;
     padding: 0 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface);
     color: var(--text); font-size: 13px; font-weight: 400;
+    max-width: 100%; box-sizing: border-box; white-space: nowrap;
   }
   .tsum .n { font-weight: 650; }
+  .tsum svg, .tsum .n { flex: none; }
+  .tsum .names { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .tsum .denied { color: var(--danger-text); }
   .tsum-panel {
     border: 1px solid var(--border); border-radius: 14px; padding: 8px 10px; background: var(--surface);
@@ -730,6 +733,7 @@ window.addEventListener("storage", function (ev) {
     resize: none; overflow-y: hidden; border: 0; background: transparent;
     box-shadow: none; padding: 7px 0; border-radius: 0;
   }
+  .composer textarea:focus-visible { outline: 2px solid transparent; outline-offset: 0; box-shadow: none; }
   .composer-slot { display: flex; align-items: center; gap: 8px; flex: none; }
   .composer-hint { margin: 8px 0 0; text-align: center; font-size: 12px; color: var(--muted); }
   .composer-hint[hidden] { display: none !important; }
@@ -828,6 +832,7 @@ window.addEventListener("storage", function (ev) {
     button:not(.copy-btn):not(.swatch):not(.shape-btn):not(.bot):not([role="radio"]):not(.state-chip):not(.stop-btn):not(#send-btn):not(.tsum), .icon-btn, #menu-btn { min-height: 44px; }
     .state-chip { height: 32px; min-height: 32px; gap: 6px; padding: 0 8px; }
     .state-chip svg { width: 14px; height: 14px; }
+    .state-chip .chip-chev { display: none; }
     .composer-hint { display: none; }
     .composer-wrap { padding: 6px 10px 10px; }
     /* 44px hit, 36px visual face, so a thumb cannot hit the neighbour. */
@@ -1385,6 +1390,13 @@ function restoreRosterFocus(list, key) {
     if (!rosterFocusMatch(key, kind, botId)) continue;
     if (typeof el.focus === "function") el.focus({ preventScroll: true });
     return;
+  }
+  if (key === rosterFocusKey("retry", "")) {
+    const h = document.querySelector("#view-bots h1");
+    if (h && h.offsetParent !== null) {
+      if (!h.hasAttribute("tabindex")) h.setAttribute("tabindex", "-1");
+      h.focus({ preventScroll: true });
+    }
   }
 }
 function syncRosterMenus(live, archived) {
@@ -1960,7 +1972,7 @@ function toolSummary(recs) {
   btn.setAttribute("aria-expanded", "false");
   const n = el("span", "n", calls.length + (calls.length === 1 ? " tool call" : " tool calls"));
   btn.append(chipIcon("wrench", 14), n);
-  if (names.length) btn.append(document.createTextNode(" " + names.join(", ")));
+  if (names.length) btn.append(el("span", "names", names.join(", ")));
   if (perms.length) {
     const word = perms.length + (perms.length === 1 ? " permission" : " permissions");
     const extra = denied ? " (" + denied + " denied)" : " (allowed)";
@@ -3097,6 +3109,17 @@ async function requestStop() {
   const streamEnded = state.streaming !== runId;
   applyStop(reduceStop(state.stop, { type: "cancel-result", status: status, streamEnded: streamEnded }));
 }
+// placeCaret keeps the streaming caret at the end of the last text block.
+function placeCaret(bubble, text) {
+  // renderMarkdown replaces the text's children, so keep our own reference.
+  if (!bubble) return;
+  if (!bubble.lgbCaret && bubble.querySelector) bubble.lgbCaret = bubble.querySelector(".caret");
+  const caret = bubble.lgbCaret;
+  if (!caret || !text) return;
+  let tgt = text;
+  while (tgt.lastElementChild && /^(P|LI|UL|OL|BLOCKQUOTE|H[1-6])$/.test(tgt.lastElementChild.tagName)) tgt = tgt.lastElementChild;
+  if (caret.parentNode !== tgt || tgt.lastChild !== caret) tgt.append(caret);
+}
 function stopStream() {
   clearPermissionCards();
   if (state.streamCtl) { state.streamCtl.abort(); state.streamCtl = null; }
@@ -3193,6 +3216,7 @@ async function follow(runId) {
           }
           acc += payload.text || "";
           renderMarkdown(acc, text);
+          placeCaret(bubble, text);
           if (!bubble.parentNode) live.append(bubble);
         } else if (event === "tool_call") {
           closeBubble();
@@ -3910,13 +3934,15 @@ function paintStateChip() {
   chip.classList.toggle("warn", warns > 0);
   chip.replaceChildren();
   const seg = (kind, n, warn) => {
-    const g = el("span", "seg" + (warn ? " warn" : ""));
+    const g = el("span", "chip-seg" + (warn ? " warn" : ""));
     g.append(chipIcon(kind, 16), document.createTextNode(String(n)));
     return g;
   };
   chip.append(seg("clock", on, false), seg("note", notes, false));
   if (warns > 0) chip.append(seg("warn", warns, true));
-  chip.append(chipIcon("chev", 14));
+  const chev = chipIcon("chev", 14);
+  chev.classList.add("chip-chev");
+  chip.append(chev);
 }
 let stateReturnFocus = null;
 let stateHideToken = 0;

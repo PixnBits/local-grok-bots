@@ -88,6 +88,34 @@ func TestThreadStatic(t *testing.T) {
 	}
 }
 
+// Phone header and thread details found in the live check.
+func TestThreadPolish(t *testing.T) {
+	src := string(IndexHTML)
+	for _, s := range []string{
+		// The chip's segments must not pick up the theme control's .seg box.
+		`.state-chip .chip-seg {`,
+		`el("span", "chip-seg"`,
+		// Phone chip is icons and numbers only, as in 09b.
+		`.state-chip .chip-chev { display: none; }`,
+		// Tool summary stays one line; the names truncate.
+		`.tsum .names { min-width: 0; overflow: hidden; text-overflow: ellipsis; }`,
+		// The caret follows the last text block of the live bubble.
+		"placeCaret(bubble, text);",
+		// The composer pill carries focus; the textarea ring is transparent
+		// (still shown in forced-colors mode).
+		`.composer textarea:focus-visible { outline: 2px solid transparent; outline-offset: 0; box-shadow: none; }`,
+		// When Retry now goes away on recovery, focus lands on the Bots heading.
+		`if (key === rosterFocusKey("retry", "")) {`,
+	} {
+		if !strings.Contains(src, s) {
+			t.Errorf("missing %q", s)
+		}
+	}
+	if strings.Contains(src, `el("span", "seg"`) {
+		t.Error("state chip segment still uses the .seg class")
+	}
+}
+
 func TestThreadLogic(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
