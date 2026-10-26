@@ -157,16 +157,38 @@ func (a *App) auditSandboxNet(botID string, ev sandbox.Event) {
 	if a == nil || a.audit == nil || !a.audit.Enabled() || ev.Untrusted {
 		return
 	}
-	action := ""
+	action := netAuditAction(ev)
+	if action == "" {
+		return
+	}
+	a.writeNetAudit(botID, ev, action, 0)
+}
+
+// netAuditAction is the audit action for one trusted net or ssh event.
+// An off-allowlist net denial is grant_denied. Any other net_request stays
+// net_request. An empty result is not an audit row.
+func netAuditAction(ev sandbox.Event) string {
+	if ev.Untrusted {
+		return ""
+	}
 	switch ev.Kind {
 	case "grant_denied":
-		if ev.Grant != "net" && ev.Grant != "ssh" {
-			return
+		if ev.Grant == "net" || ev.Grant == "ssh" {
+			return "grant_denied"
 		}
-		action = "grant_denied"
 	case "net_request":
-		action = "net_request"
-	default:
+		if strings.TrimSpace(ev.Detail) == "not allowlisted" {
+			return "grant_denied"
+		}
+		return "net_request"
+	}
+	return ""
+}
+
+// writeNetAudit writes one trusted net or ssh audit row. count is omitted
+// when it is below 2 so a single event keeps the original fields.
+func (a *App) writeNetAudit(botID string, ev sandbox.Event, action string, count int) {
+	if a == nil || a.audit == nil || !a.audit.Enabled() || action == "" {
 		return
 	}
 	rec := map[string]any{
@@ -177,6 +199,9 @@ func (a *App) auditSandboxNet(botID string, ev sandbox.Event) {
 	}
 	if ev.Host != "" {
 		rec["host"] = clipASCII(ev.Host)
+	}
+	if count > 1 {
+		rec["count"] = count
 	}
 	a.audit.Write(rec)
 }
@@ -291,15 +316,15 @@ func (g gateRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
 	return rt.RoundTrip(r2)
 }
 
-// githubBranchOID reads refs/heads/<branch> through the read proxy. An absent
-// ref is the zero id. A transport or parse failure is "remote ref" with no body.
-func (a *App) githubBranchOID(ctx context.Context, px *github.Proxy, owner, repo, branch string) (string, error) {
-	if px == nil || px.Sock() == "" || !github.BranchOK(branch) {
-		return "", errors.New("remote ref")
+// fetchUploadAdvertisement reads one smart-HTTP info/refs body through the
+// read proxy. The body is capped. A transport or status failure is "remote ref".
+func (a *App) fetchUploadAdvertisement(ctx context.Context, px *github.Proxy, owner, repo string) ([]byte, error) {
+	if px == nil || px.Sock() == "" {
+		return nil, errors.New("remote ref")
 	}
 	name, err := github.NormalizeRepo(owner + "/" + repo)
 	if err != nil || name != owner+"/"+repo {
-		return "", errors.New("remote ref")
+		return nil, errors.New("remote ref")
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -309,20 +334,48 @@ func (a *App) githubBranchOID(ctx context.Context, px *github.Proxy, owner, repo
 	rawURL := "http://proxy/github/" + owner + "/" + repo + ".git/info/refs?service=git-upload-pack"
 	req, err := http.NewRequestWithContext(lctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return "", errors.New("remote ref")
+		return nil, errors.New("remote ref")
 	}
 	resp, err := githubUnixClient(px.Sock()).Do(req)
 	if err != nil {
-		return "", errors.New("remote ref")
+		return nil, errors.New("remote ref")
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil || resp.StatusCode != http.StatusOK {
+		return nil, errors.New("remote ref")
+	}
+	return body, nil
+}
+
+// githubBranchOID reads refs/heads/<branch> through the read proxy. An absent
+// ref is the zero id. A transport or parse failure is "remote ref" with no body.
+func (a *App) githubBranchOID(ctx context.Context, px *github.Proxy, owner, repo, branch string) (string, error) {
+	if !github.BranchOK(branch) {
 		return "", errors.New("remote ref")
+	}
+	body, err := a.fetchUploadAdvertisement(ctx, px, owner, repo)
+	if err != nil {
+		return "", err
 	}
 	oid, err := github.AdvertisedOID(body, "refs/heads/"+branch)
 	if err != nil {
 		return "", errors.New("remote ref")
 	}
 	return oid, nil
+}
+
+// githubAdvertisedHeads reads every advertised refs/heads tip in one
+// info/refs response. zero is the id length for a missing ref. The map
+// does not include the bot's refs/remotes.
+func (a *App) githubAdvertisedHeads(ctx context.Context, px *github.Proxy, owner, repo string) (map[string]string, string, error) {
+	body, err := a.fetchUploadAdvertisement(ctx, px, owner, repo)
+	if err != nil {
+		return nil, "", err
+	}
+	heads, zero, err := github.AdvertisedHeads(body)
+	if err != nil {
+		return nil, "", errors.New("remote ref")
+	}
+	return heads, zero, nil
 }

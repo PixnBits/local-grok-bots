@@ -18,7 +18,7 @@ func TestWatchSIGHUP(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		go func() {
-			WatchSIGHUP(ctx, hup, "/tmp/lgb-tokens", func() { n.Add(1) }, nil, buf)
+			WatchSIGHUP(ctx, hup, "/tmp/lgb-tokens", func() { n.Add(1) }, buf)
 			close(done)
 		}()
 		hup <- syscall.SIGHUP
@@ -47,7 +47,7 @@ func TestWatchSIGHUP(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		go func() {
-			WatchSIGHUP(ctx, hup, "", func() { n.Add(1) }, nil, buf)
+			WatchSIGHUP(ctx, hup, "", func() { n.Add(1) }, buf)
 			close(done)
 		}()
 		hup <- syscall.SIGHUP
@@ -70,20 +70,22 @@ func TestWatchSIGHUP(t *testing.T) {
 			t.Fatalf("log %q", got)
 		}
 	})
-	t.Run("refreshes when unset", func(t *testing.T) {
+	t.Run("unset does not change the snapshot", func(t *testing.T) {
+		app := newApp(t, "", nil)
+		before := app.protectInodes()
 		hup := make(chan os.Signal, 1)
 		var n atomic.Int32
-		var also atomic.Int32
 		buf := &safeBuf{}
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		go func() {
-			WatchSIGHUP(ctx, hup, "", func() { n.Add(1) }, func() { also.Add(1) }, buf)
+			WatchSIGHUP(ctx, hup, "", func() { n.Add(1) }, buf)
 			close(done)
 		}()
 		hup <- syscall.SIGHUP
+		want := sighupIgnoreLine + "\n"
 		deadline := time.Now().Add(2 * time.Second)
-		for also.Load() < 1 && time.Now().Before(deadline) {
+		for buf.String() != want && time.Now().Before(deadline) {
 			time.Sleep(5 * time.Millisecond)
 		}
 		cancel()
@@ -92,11 +94,20 @@ func TestWatchSIGHUP(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatal("watch did not return")
 		}
-		if n.Load() != 0 || also.Load() != 1 {
-			t.Fatalf("reload %d also %d", n.Load(), also.Load())
+		if n.Load() != 0 {
+			t.Fatalf("reloads %d", n.Load())
 		}
-		if buf.String() != sighupIgnoreLine+"\n" {
-			t.Fatalf("log %q", buf.String())
+		after := app.protectInodes()
+		if len(before) == 0 || len(before) != len(after) {
+			t.Fatalf("snapshot len %d -> %d", len(before), len(after))
+		}
+		for i := range before {
+			if before[i] != after[i] {
+				t.Fatalf("snapshot changed %+v -> %+v", before[i], after[i])
+			}
+		}
+		if app.protectBlockReason() != "" {
+			t.Fatal(app.protectBlockReason())
 		}
 	})
 }

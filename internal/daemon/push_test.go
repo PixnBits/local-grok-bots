@@ -445,6 +445,65 @@ echo PUSH_DONE
 			t.Fatal("prompts off pushed")
 		}
 	})
+
+	t.Run("replace", func(t *testing.T) {
+		deny(t, `set -e
+git init
+git checkout -b feature-repl
+echo hello > readme.txt
+git add readme.txt
+GIT_AUTHOR_NAME=Evil GIT_AUTHOR_EMAIL=evil@evil.example GIT_COMMITTER_NAME=Evil GIT_COMMITTER_EMAIL=evil@evil.example git commit -m evil
+evil=$(git rev-parse HEAD)
+git checkout --orphan goodtmp
+echo good > readme.txt
+git add readme.txt
+git commit -m good
+good=$(git rev-parse HEAD)
+git replace "$evil" "$good"
+git checkout feature-repl
+git push https://github.com/acme/widgets.git feature-repl
+echo PUSH_DONE
+`, "replace")
+	})
+	t.Run("shallow", func(t *testing.T) {
+		deny(t, `set -e
+git init
+git checkout -b feature-shallow
+echo hello > readme.txt
+git add readme.txt
+git commit -m note-shallow
+printf '%s\n' "$(git rev-parse HEAD)" > .git/shallow
+git push https://github.com/acme/widgets.git feature-shallow
+echo PUSH_DONE
+`, "shallow")
+	})
+	t.Run("grafts", func(t *testing.T) {
+		deny(t, `set -e
+git init
+git checkout -b feature-graft
+echo hello > readme.txt
+git add readme.txt
+git commit -m note-graft
+mkdir -p .git/info
+printf '%s\n' "$(git rev-parse HEAD)" > .git/info/grafts
+git push https://github.com/acme/widgets.git feature-graft
+echo PUSH_DONE
+`, "shallow")
+	})
+	t.Run("packed replace", func(t *testing.T) {
+		deny(t, `set -e
+git init
+git checkout -b feature-packed
+echo hello > readme.txt
+git add readme.txt
+git commit -m note-packed
+oid=$(git rev-parse HEAD)
+git pack-refs --all
+printf '%s refs/replace/%s\n' "$oid" "$oid" >> .git/packed-refs
+git push https://github.com/acme/widgets.git feature-packed
+echo PUSH_DONE
+`, "replace")
+	})
 }
 
 func approveGitPush(app *App, botID string) <-chan error {
@@ -545,4 +604,236 @@ func logBody(t *testing.T, base string) string {
 	t.Helper()
 	_, b := do(t, "GET", base+"/api/logs", nil, "")
 	return string(b)
+}
+
+func TestGitPushAuthorRange(t *testing.T) {
+	for _, bin := range []string{"git", "bwrap", "gcc"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Fatalf("%s is required", bin)
+		}
+	}
+	bare := t.TempDir()
+	gitOK(t, "init", "--bare", bare)
+	gitOK(t, "-C", bare, "symbolic-ref", "HEAD", "refs/heads/main")
+	seed := t.TempDir()
+	gitOK(t, "-C", seed, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(seed, "readme.txt"), []byte("human\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitEnv(t, seed, []string{
+		"GIT_AUTHOR_NAME=Human", "GIT_AUTHOR_EMAIL=human@example.com",
+		"GIT_COMMITTER_NAME=Human", "GIT_COMMITTER_EMAIL=human@example.com",
+	}, "add", "readme.txt")
+	gitEnv(t, seed, []string{
+		"GIT_AUTHOR_NAME=Human", "GIT_AUTHOR_EMAIL=human@example.com",
+		"GIT_COMMITTER_NAME=Human", "GIT_COMMITTER_EMAIL=human@example.com",
+	}, "commit", "-m", "human-main")
+	gitOK(t, "-C", seed, "remote", "add", "origin", bare)
+	gitOK(t, "-C", seed, "push", "origin", "HEAD:refs/heads/main")
+
+	var packs atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/info/refs"):
+			w.Header().Set("Content-Type", "application/x-git-receive-pack-advertisement")
+			w.Header().Set("Cache-Control", "no-cache")
+			pkt := "# service=git-receive-pack\n"
+			fmt.Fprintf(w, "%04x%s0000", len(pkt)+4, pkt)
+			cmd := exec.Command("git", "receive-pack", "--stateless-rpc", "--advertise-refs", bare)
+			cmd.Stdout = w
+			_ = cmd.Run()
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git-receive-pack"):
+			packs.Add(1)
+			w.Header().Set("Content-Type", "application/x-git-receive-pack-result")
+			cmd := exec.Command("git", "receive-pack", "--stateless-rpc", bare)
+			cmd.Stdin = r.Body
+			cmd.Stdout = w
+			_ = cmd.Run()
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets":
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"default_branch":"main"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+	prev := readGitHubToken
+	readGitHubToken = func(string) (string, error) { return pushSecret, nil }
+	t.Cleanup(func() { readGitHubToken = prev })
+
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "no"}, nil
+	}})
+	app.githubGitBase = upstream.URL
+	app.githubAPIBase = upstream.URL
+	app.policy.GitHub.Repos = []string{"acme/widgets"}
+	app.policy.GitHub.TokenFile = filepath.Join(t.TempDir(), "github.token")
+	if err := os.WriteFile(app.policy.GitHub.TokenFile, []byte(pushSecret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app.policy.UIPrompts = true
+	app.policy.PromptTimeout = 20 * time.Second
+	auditPath := filepath.Join(t.TempDir(), "audit.log")
+	lg, err := audit.Open(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lg.Close() })
+	app.audit = lg
+	var evals atomic.Int32
+	app.perm.AddHook(func(req permission.Request) permission.HookResult {
+		if req.Tool == "git_push" {
+			evals.Add(1)
+		}
+		return permission.HookResult{}
+	})
+	srv := serve(t, app)
+	bot := createGrantedBot(t, srv.URL, "Ada", []string{"git", "github"})
+	res, b := do(t, "PATCH", srv.URL+"/api/bots/"+bot.ID, map[string]any{"github_allow": []string{"acme/widgets"}}, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("allow %d %s", res.StatusCode, b)
+	}
+	if err := os.MkdirAll(filepath.Join(app.ws, "runs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ada := []string{
+		"GIT_AUTHOR_NAME=Ada", "GIT_AUTHOR_EMAIL=Ada@users.noreply",
+		"GIT_COMMITTER_NAME=Ada", "GIT_COMMITTER_EMAIL=Ada@users.noreply",
+	}
+	human := []string{
+		"GIT_AUTHOR_NAME=Human", "GIT_AUTHOR_EMAIL=human@example.com",
+		"GIT_COMMITTER_NAME=Human", "GIT_COMMITTER_EMAIL=human@example.com",
+	}
+	run := func(t *testing.T, command string, approve bool) (string, error) {
+		t.Helper()
+		var done <-chan error
+		if approve {
+			done = approveGitPush(app, bot.ID)
+		}
+		out, err := app.dispatchTool(t.Context(), bot, "run_shell", map[string]any{"command": command})
+		if done != nil {
+			if aerr := <-done; aerr != nil {
+				t.Error(aerr)
+			}
+		}
+		return out, err
+	}
+
+	t.Run("new branch over human history", func(t *testing.T) {
+		sub := filepath.Join(app.ws, "runs", "a")
+		gitOK(t, "clone", bare, sub)
+		beforeE, beforeP := evals.Load(), packs.Load()
+		out, err := run(t, `set -e
+cd runs/a
+git checkout -b feature-a
+echo bot >> readme.txt
+git add readme.txt
+git commit -m bot-a
+git push https://github.com/acme/widgets.git feature-a
+echo PUSH_DONE
+`, true)
+		if err != nil || !strings.Contains(out, "git push sent") || !strings.Contains(out, "PUSH_DONE") {
+			t.Fatalf("send: %v\n%s", err, out)
+		}
+		if evals.Load() <= beforeE || packs.Load() <= beforeP {
+			t.Fatalf("evals %d packs %d", evals.Load(), packs.Load())
+		}
+		if strings.Contains(out, "proxy unavailable") {
+			t.Fatalf("proxy unavailable:\n%s", out)
+		}
+	})
+	t.Run("foreign commit on new branch", func(t *testing.T) {
+		sub := filepath.Join(app.ws, "runs", "b")
+		gitOK(t, "clone", bare, sub)
+		beforeE, beforeP := evals.Load(), packs.Load()
+		out, err := run(t, `set -e
+cd runs/b
+git checkout -b feature-b
+echo bot >> readme.txt
+git add readme.txt
+GIT_AUTHOR_NAME=Evil GIT_AUTHOR_EMAIL=evil@evil.example GIT_COMMITTER_NAME=Evil GIT_COMMITTER_EMAIL=evil@evil.example git commit -m evil-b
+git push https://github.com/acme/widgets.git feature-b
+echo PUSH_DONE
+`, false)
+		if err == nil || strings.Contains(out, "PUSH_DONE") || strings.Contains(out, "git push sent") {
+			t.Fatalf("sent: %v\n%s", err, out)
+		}
+		if strings.Contains(out, "proxy unavailable") || !strings.Contains(out, "author") {
+			t.Fatalf("reason:\n%s", out)
+		}
+		if evals.Load() != beforeE || packs.Load() != beforeP {
+			t.Fatalf("evals %d->%d packs %d->%d", beforeE, evals.Load(), beforeP, packs.Load())
+		}
+	})
+	t.Run("merge newer upstream", func(t *testing.T) {
+		sub := filepath.Join(app.ws, "runs", "c")
+		gitOK(t, "clone", bare, sub)
+		gitOK(t, "-C", sub, "checkout", "-b", "feature-c")
+		if err := os.WriteFile(filepath.Join(sub, "bot.txt"), []byte("bot\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitEnv(t, sub, ada, "add", "bot.txt")
+		gitEnv(t, sub, ada, "commit", "-m", "bot-c")
+		gitOK(t, "-C", sub, "push", "origin", "HEAD:refs/heads/feature-c")
+		gitOK(t, "-C", sub, "checkout", "main")
+		if err := os.WriteFile(filepath.Join(sub, "readme.txt"), []byte("human-2\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitEnv(t, sub, human, "add", "readme.txt")
+		gitEnv(t, sub, human, "commit", "-m", "human-2")
+		gitOK(t, "-C", sub, "push", "origin", "HEAD:refs/heads/main")
+		gitOK(t, "-C", sub, "checkout", "feature-c")
+		gitEnv(t, sub, ada, "merge", "--no-ff", "main", "-m", "merge-main")
+		beforeE, beforeP := evals.Load(), packs.Load()
+		out, err := run(t, `set -e
+cd runs/c
+git push https://github.com/acme/widgets.git feature-c
+echo PUSH_DONE
+`, true)
+		if err != nil || !strings.Contains(out, "git push sent") || !strings.Contains(out, "PUSH_DONE") {
+			t.Fatalf("merge push: %v\n%s", err, out)
+		}
+		if strings.Contains(out, "proxy unavailable") || evals.Load() <= beforeE || packs.Load() <= beforeP {
+			t.Fatalf("evals %d packs %d\n%s", evals.Load(), packs.Load(), out)
+		}
+	})
+	t.Run("local remote ref is not upstream", func(t *testing.T) {
+		beforeE, beforeP := evals.Load(), packs.Load()
+		out, err := run(t, `set -e
+mkdir -p runs/d
+cd runs/d
+git init
+git checkout -b feature-d
+echo bad > readme.txt
+git add readme.txt
+GIT_AUTHOR_NAME=Evil GIT_AUTHOR_EMAIL=evil@evil.example GIT_COMMITTER_NAME=Evil GIT_COMMITTER_EMAIL=evil@evil.example git commit -m evil-d
+git update-ref refs/remotes/origin/main HEAD
+git push https://github.com/acme/widgets.git feature-d
+echo PUSH_DONE
+`, false)
+		if err == nil || strings.Contains(out, "PUSH_DONE") || strings.Contains(out, "git push sent") {
+			t.Fatalf("sent: %v\n%s", err, out)
+		}
+		if strings.Contains(out, "proxy unavailable") || !strings.Contains(out, "author") {
+			t.Fatalf("reason:\n%s", out)
+		}
+		if evals.Load() != beforeE || packs.Load() != beforeP {
+			t.Fatalf("evals %d->%d packs %d->%d", beforeE, evals.Load(), beforeP, packs.Load())
+		}
+	})
+}
+
+func gitEnv(t *testing.T, dir string, env []string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_TERMINAL_PROMPT=0",
+	)
+	cmd.Env = append(cmd.Env, env...)
+	b, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v %s", strings.Join(args, " "), err, b)
+	}
 }

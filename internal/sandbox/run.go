@@ -34,7 +34,11 @@ type Request struct {
 	// device or inode changed refuses every build bind for the turn.
 	// A regular file in the snapshot does not.
 	ProtectInodes []ProtectInode
-	SSHKey        string
+	// ProtectTripped, when set, refuses every build bind for this turn.
+	// The daemon latches it until restart. The text is the refusal suffix,
+	// for example "protected path changed (restart required)".
+	ProtectTripped string
+	SSHKey         string
 	// GitHubSock is the host credential-proxy socket. Empty leaves GitHub
 	// fetch unavailable. GitHubRepos is the allowlist copied into the wrapper.
 	GitHubSock      string
@@ -363,7 +367,7 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 				p.extra = append(p.extra, blockEvent("refused bind "+raw+": unsupported without bwrap"))
 			}
 		} else {
-			mounts, events, applied := selectBuildBinds(ws, req.BuildBinds, req.Protect, req.ProtectInodes)
+			mounts, events, applied := selectBuildBinds(ws, req.BuildBinds, req.Protect, req.ProtectInodes, req.ProtectTripped)
 			p.mounts = append(p.mounts, mounts...)
 			p.extra = append(p.extra, events...)
 			if len(applied) > 0 {
@@ -457,6 +461,7 @@ func normalizeHosts(hosts []string) []string {
 }
 
 // selectBuildBinds decides which SANDBOX_BUILD_BINDS entries are mounted.
+// A non-empty tripped suffix refuses every bind until the process restarts.
 // An empty protected list, or an empty inode snapshot, refuses every bind.
 // A protected directory in the snapshot that is missing, no longer a
 // directory, or whose device or inode changed refuses every bind for the
@@ -468,7 +473,17 @@ func normalizeHosts(hosts []string) []string {
 // continues and a sandbox_block names the bind path. A path inside the
 // workspace is skipped with no event when the protected list is non-empty
 // and the snapshot is unchanged. The mount destination stays the resolved path.
-func selectBuildBinds(ws string, binds, protected []string, snap []ProtectInode) (mounts []mount, events []Event, applied []string) {
+func selectBuildBinds(ws string, binds, protected []string, snap []ProtectInode, tripped string) (mounts []mount, events []Event, applied []string) {
+	if strings.TrimSpace(tripped) != "" {
+		for _, raw := range binds {
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				continue
+			}
+			events = append(events, blockEvent("refused bind "+raw+": "+strings.TrimSpace(tripped)))
+		}
+		return nil, events, nil
+	}
 	if !protectListed(protected) || len(snap) == 0 {
 		for _, raw := range binds {
 			raw = strings.TrimSpace(raw)

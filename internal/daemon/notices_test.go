@@ -55,6 +55,31 @@ func TestUntrustedJailNoticeIncludesDropped(t *testing.T) {
 	}
 }
 
+func TestDroppedCountOncePerTurn(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "no"}, nil
+	}})
+	ev := []sandbox.Event{
+		{Kind: "jail_report", Untrusted: true, Reported: "grant_use", Detail: "package install", Notice: "Untrusted jail report: Package install"},
+		{Kind: "jail_report", Untrusted: true, Reported: "grant_use", Detail: "other", Notice: "Untrusted jail report: Other"},
+		{Kind: "jail_report_truncated", Detail: "dropped 8"},
+	}
+	app.recordSandboxEvents("bot_1", ev)
+	msgs, err := app.st.ListMessages("bot_1", "user", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 2 {
+		t.Fatalf("notices %+v", msgs)
+	}
+	if msgs[0].Content != "Notice: Untrusted jail report: Package install (dropped 8)" {
+		t.Fatalf("first %q", msgs[0].Content)
+	}
+	if msgs[1].Content != "Notice: Untrusted jail report: Other" || strings.Contains(msgs[1].Content, "dropped") {
+		t.Fatalf("second %q", msgs[1].Content)
+	}
+}
+
 func TestTrustedNoticeStaysOnePerEvent(t *testing.T) {
 	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
 		return model.ChatResponse{Content: "no"}, nil

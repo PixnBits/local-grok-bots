@@ -522,7 +522,10 @@ func fillMirror(ctx context.Context, dir string, h *repoHandle) error {
 	}
 	rootMnt, rootOK := mountID(h.git)
 	c := &copier{ctx: ctx, rootDev: uint64(root.Dev), rootMnt: rootMnt, rootMntOK: rootOK}
-	for _, name := range []string{"HEAD", "packed-refs", "shallow"} {
+	if err := rejectMirrorHistory(h.git); err != nil {
+		return err
+	}
+	for _, name := range []string{"HEAD", "packed-refs"} {
 		if err := c.alive(); err != nil {
 			return err
 		}
@@ -635,8 +638,15 @@ func copyDirFd(c *copier, fd int, dst, rel string) error {
 			return errors.New("name")
 		}
 		childRel := rel + "/" + ent
-		if childRel == "objects/info/alternates" || strings.HasPrefix(childRel, "objects/info/alternates/") {
+		switch {
+		case childRel == "objects/info/alternates" || strings.HasPrefix(childRel, "objects/info/alternates/"):
 			continue
+		case childRel == "objects/info/commit-graph" || childRel == "objects/info/commit-graphs" || strings.HasPrefix(childRel, "objects/info/commit-graphs/"):
+			continue
+		case childRel == "refs/replace" || strings.HasPrefix(childRel, "refs/replace/"):
+			return errMirrorReplace
+		case childRel == "info/grafts" || strings.HasPrefix(childRel, "info/grafts/"):
+			return errMirrorShallow
 		}
 		if err := copyEntry(c, fd, ent, filepath.Join(dst, ent), childRel); err != nil {
 			return err
@@ -715,4 +725,128 @@ func safeGitName(s string) bool {
 		return false
 	}
 	return !strings.ContainsAny(s, "/\\\x00")
+}
+
+// rejectMirrorHistory refuses a source that can hide the commits pack-objects
+// would send. A shallow file or info/grafts is errMirrorShallow. Any
+// refs/replace entry, including a packed-refs line, is errMirrorReplace.
+// The shallow file, grafts, replace refs, and commit-graph files are not copied.
+func rejectMirrorHistory(gitfd int) error {
+	if err := rejectShallowFile(gitfd); err != nil {
+		return err
+	}
+	if err := rejectGrafts(gitfd); err != nil {
+		return err
+	}
+	return rejectReplaceRefs(gitfd)
+}
+
+func rejectShallowFile(gitfd int) error {
+	ok, err := gitNameExists(gitfd, "shallow")
+	if err != nil || ok {
+		return errMirrorShallow
+	}
+	return nil
+}
+
+func rejectGrafts(gitfd int) error {
+	fd, err := unix.Openat(gitfd, "info", unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if err == unix.ENOENT {
+			return nil
+		}
+		return errMirrorShallow
+	}
+	defer unix.Close(fd)
+	ok, err := gitNameExists(fd, "grafts")
+	if err != nil || ok {
+		return errMirrorShallow
+	}
+	return nil
+}
+
+func rejectReplaceRefs(gitfd int) error {
+	fd, err := unix.Openat(gitfd, "refs", unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if err == unix.ENOENT {
+			return scanPackedReplace(gitfd)
+		}
+		return errors.New("mirror")
+	}
+	defer unix.Close(fd)
+	ok, err := gitNameExists(fd, "replace")
+	if err != nil || ok {
+		return errMirrorReplace
+	}
+	return scanPackedReplace(gitfd)
+}
+
+func scanPackedReplace(gitfd int) error {
+	fd, err := unix.Openat(gitfd, "packed-refs", unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if err == unix.ENOENT {
+			return nil
+		}
+		return errors.New("mirror")
+	}
+	defer unix.Close(fd)
+	buf, err := readFDLimit(fd, 1<<20)
+	if err != nil {
+		return errors.New("mirror")
+	}
+	for _, line := range strings.Split(string(buf), "\n") {
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "^") {
+			continue
+		}
+		_, name, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		if name == "refs/replace" || strings.HasPrefix(name, "refs/replace/") {
+			return errMirrorReplace
+		}
+	}
+	return nil
+}
+
+func gitNameExists(dirfd int, name string) (bool, error) {
+	// O_NONBLOCK so a fifo at this name cannot stall the check. O_PATH is
+	// Linux-only; this open has to build on other unixes too.
+	fd, err := unix.Openat(dirfd, name, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		if err == unix.ENOENT {
+			return false, nil
+		}
+		return false, err
+	}
+	unix.Close(fd)
+	return true, nil
+}
+
+func readFDLimit(fd int, max int64) ([]byte, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return nil, err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Size < 0 || st.Size > max {
+		return nil, errors.New("mirror")
+	}
+	buf := make([]byte, st.Size)
+	off := 0
+	for off < len(buf) {
+		n, err := unix.Read(fd, buf[off:])
+		if n > 0 {
+			off += n
+		}
+		if err != nil {
+			if err == unix.EINTR {
+				continue
+			}
+			return nil, err
+		}
+		if n == 0 {
+			break
+		}
+	}
+	return buf[:off], nil
 }

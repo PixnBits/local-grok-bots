@@ -58,19 +58,25 @@ func SnapshotProtect(paths []string) []ProtectInode {
 	return out
 }
 
-// protectDirsChanged reports whether a directory in the snapshot is
+// ProtectChanged returns the first directory in the snapshot that is
 // missing, no longer a directory, or has a different device or inode.
 // Regular files are ignored so state.db-wal and similar churn does not
-// refuse every bind. An lstat error fails closed.
-func protectDirsChanged(snap []ProtectInode) bool {
+// refuse every bind. An lstat error fails closed. An empty result means
+// the directory entries still match.
+func ProtectChanged(snap []ProtectInode) string {
 	for _, ent := range snap {
 		if !ent.IsDir {
 			continue
 		}
 		dev, ino, isDir, err := lstatInode(ent.Path)
 		if err != nil || !isDir || dev != ent.Dev || ino != ent.Ino {
-			return true
+			return ent.Path
 		}
 	}
-	return false
+	return ""
+}
+
+// protectDirsChanged reports whether ProtectChanged found a directory.
+func protectDirsChanged(snap []ProtectInode) bool {
+	return ProtectChanged(snap) != ""
 }

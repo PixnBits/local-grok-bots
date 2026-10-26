@@ -487,6 +487,7 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			}
 		}
 		gate := &gitHubGate{px: px}
+		a.observeProtectBaseline()
 		protect := a.shellProtect()
 		binds := a.cfg.BuildBinds
 		if granted(current.Grants, "build") {
@@ -505,6 +506,7 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			BuildBinds:      binds,
 			Protect:         protect,
 			ProtectInodes:   a.protectInodes(),
+			ProtectTripped:  a.protectBlockReason(),
 			SSHKey:          a.sshKeyPath(),
 			GitHubSock:      ghSock,
 			GitHubRepos:     ghRepos,
@@ -538,14 +540,31 @@ func (a *App) recordSandbox(botID string, ev sandbox.Event) {
 	a.recordSandboxNotice(botID, ev, true)
 }
 
+// netAuditKey is one trusted net or ssh audit row for this turn.
+type netAuditKey struct {
+	action string
+	grant  string
+	host   string
+}
+
+type netAuditRow struct {
+	ev sandbox.Event
+	n  int
+}
+
 // recordSandboxEvents logs every event from one turn. Untrusted jail
 // notices are posted once per notice text. A count is added when the same
-// text was reported more than once. Dropped-line counts from
-// jail_report_truncated are included. Trusted notices stay one per event.
+// text was reported more than once. A dropped-line count is included on
+// the first notice only, or as its own summary when there is no notice.
+// Trusted net and ssh audit rows are deduped per action, grant, and host.
+// The bot log stays one row per event. Trusted notices stay one per event.
 func (a *App) recordSandboxEvents(botID string, events []sandbox.Event) {
 	counts := map[string]int{}
 	var order []string
 	dropped := 0
+	var netOrder []netAuditKey
+	netRows := map[netAuditKey]*netAuditRow{}
+	suppressed := 0
 	for _, ev := range events {
 		if ev.Untrusted || ev.Kind == "jail_report" || ev.Kind == "jail_report_truncated" {
 			a.recordSandboxNotice(botID, ev, false)
@@ -558,7 +577,32 @@ func (a *App) recordSandboxEvents(botID string, events []sandbox.Event) {
 			}
 			continue
 		}
+		if action := netAuditAction(ev); action != "" {
+			a.logSandboxEvent(botID, ev)
+			key := netAuditKey{action: action, grant: ev.Grant, host: ev.Host}
+			if row := netRows[key]; row != nil {
+				row.n++
+				continue
+			}
+			if len(netOrder) >= 64 {
+				suppressed++
+				continue
+			}
+			netRows[key] = &netAuditRow{ev: ev, n: 1}
+			netOrder = append(netOrder, key)
+			continue
+		}
 		a.recordSandbox(botID, ev)
+	}
+	for _, key := range netOrder {
+		row := netRows[key]
+		a.writeNetAudit(botID, row.ev, key.action, row.n)
+	}
+	if suppressed > 0 && a != nil && a.audit != nil && a.audit.Enabled() {
+		a.audit.Write(map[string]any{
+			"action": "audit_suppressed",
+			"count":  suppressed,
+		})
 	}
 	if len(order) == 0 {
 		if dropped > 0 {
@@ -566,19 +610,44 @@ func (a *App) recordSandboxEvents(botID string, events []sandbox.Event) {
 		}
 		return
 	}
-	for _, text := range order {
+	for i, text := range order {
 		n := counts[text]
 		msg := "Notice: " + text
 		switch {
-		case n > 1 && dropped > 0:
+		case i == 0 && n > 1 && dropped > 0:
 			msg = fmt.Sprintf("%s (x%d, dropped %d)", msg, n, dropped)
+		case i == 0 && dropped > 0:
+			msg = fmt.Sprintf("%s (dropped %d)", msg, dropped)
 		case n > 1:
 			msg = fmt.Sprintf("%s (x%d)", msg, n)
-		case dropped > 0:
-			msg = fmt.Sprintf("%s (dropped %d)", msg, dropped)
 		}
 		a.postSystemNotice(botID, msg)
 	}
+}
+
+// logSandboxEvent writes the bot log and a trusted notice without auditing.
+func (a *App) logSandboxEvent(botID string, ev sandbox.Event) {
+	if ev.Kind == "" {
+		return
+	}
+	a.log(botID, ev.Kind, sandboxEventDetail(ev))
+	if ev.Notice != "" {
+		a.postSystemNotice(botID, "Notice: "+ev.Notice)
+	}
+}
+
+func sandboxEventDetail(ev sandbox.Event) map[string]any {
+	detail := map[string]any{}
+	if ev.Grant != "" {
+		detail["grant"] = ev.Grant
+	}
+	if ev.Host != "" {
+		detail["host"] = ev.Host
+	}
+	if ev.Detail != "" {
+		detail["detail"] = ev.Detail
+	}
+	return detail
 }
 
 func droppedLines(ev sandbox.Event) int {
@@ -646,17 +715,7 @@ func (a *App) recordSandboxNotice(botID string, ev sandbox.Event, postNotice boo
 		return
 	}
 	if ev.Kind != "" {
-		detail := map[string]any{}
-		if ev.Grant != "" {
-			detail["grant"] = ev.Grant
-		}
-		if ev.Host != "" {
-			detail["host"] = ev.Host
-		}
-		if ev.Detail != "" {
-			detail["detail"] = ev.Detail
-		}
-		a.log(botID, ev.Kind, detail)
+		a.log(botID, ev.Kind, sandboxEventDetail(ev))
 		a.auditSandboxGitHub(botID, ev)
 		a.auditSandboxNet(botID, ev)
 	}

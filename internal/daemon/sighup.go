@@ -12,11 +12,12 @@ import (
 const sighupIgnoreLine = "local-grok-bots: SIGHUP ignored; AUTH_TOKENS_FILE is not set"
 
 // WatchSIGHUP handles each value from hup until ctx is done.
-// also runs on every signal, including when AUTH_TOKENS_FILE is unset.
-// A non-empty tokens file then calls reload. An empty path logs
-// sighupIgnoreLine and does not reload. One signal produces one log line
-// when the file is unset.
-func WatchSIGHUP(ctx context.Context, hup <-chan os.Signal, tokensFile string, reload, also func(), logw io.Writer) {
+// A non-empty tokens file calls reload. An empty path logs
+// sighupIgnoreLine and does not reload or change the protected-path
+// snapshot. One signal produces one log line when the file is unset.
+// A failed reload must not refresh the snapshot; reload does that only
+// after a successful read.
+func WatchSIGHUP(ctx context.Context, hup <-chan os.Signal, tokensFile string, reload func(), logw io.Writer) {
 	if logw == nil {
 		logw = os.Stderr
 	}
@@ -28,9 +29,6 @@ func WatchSIGHUP(ctx context.Context, hup <-chan os.Signal, tokensFile string, r
 		case _, ok := <-hup:
 			if !ok {
 				return
-			}
-			if also != nil {
-				also()
 			}
 			if !set {
 				fmt.Fprintln(logw, sighupIgnoreLine)

@@ -4,7 +4,6 @@ package sandbox
 
 import (
 	"os"
-	"path/filepath"
 
 	"golang.org/x/sys/unix"
 )
@@ -18,32 +17,45 @@ func openEventsFile(path string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), path), nil
 }
 
-// openEventsDirectory is a no-op outside Linux. The read lstats the path.
-func openEventsDirectory(string) (*os.File, error) {
-	return nil, nil
+// openEventsDirectory pins prep/rw/events. The fd is
+// O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC, opened from the prep directory
+// so a later replacement of the path is not what the read uses.
+func openEventsDirectory(prep string) (*os.File, error) {
+	parent, err := unix.Open(prep, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(parent)
+	rw, err := unix.Openat(parent, "rw", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(rw)
+	fd, err := unix.Openat(rw, "events", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), "events"), nil
 }
 
-// readPreparedEvents refuses a symlink at prep/rw/events or at the log,
-// and refuses a directory that is not a directory or a log that is not a
-// regular file. Any failure is one daemon event, events unavailable.
+// readPreparedEvents opens "log" relative to the directory pinned in prepare.
+// A symlink, a missing file, a non-regular file, or any other error is one
+// daemon event, events unavailable.
 func readPreparedEvents(p *prepared) []Event {
-	if p == nil || p.dir == "" {
+	if p == nil || p.eventsDir == nil {
 		return eventsUnavailable()
 	}
-	dir := filepath.Join(p.dir, "rw", "events")
-	logPath := filepath.Join(dir, "log")
-	dst, err := os.Lstat(dir)
-	if err != nil || dst.Mode()&os.ModeSymlink != 0 || !dst.IsDir() {
-		return eventsUnavailable()
-	}
-	lst, err := os.Lstat(logPath)
-	if err != nil || lst.Mode()&os.ModeSymlink != 0 || !lst.Mode().IsRegular() {
-		return eventsUnavailable()
-	}
-	f, err := openEventsFile(logPath)
+	dirfd := int(p.eventsDir.Fd())
+	fd, err := unix.Openat(dirfd, "log", unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return eventsUnavailable()
 	}
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFREG {
+		unix.Close(fd)
+		return eventsUnavailable()
+	}
+	f := os.NewFile(uintptr(fd), "log")
 	defer f.Close()
 	return eventsFromFile(f)
 }

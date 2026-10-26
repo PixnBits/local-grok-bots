@@ -29,7 +29,7 @@ func TestBuildBindFDArgs(t *testing.T) {
 	dirResolved := mustResolved(t, dir)
 
 	protect := t.TempDir()
-	mounts, events, applied := selectBuildBinds(ws, []string{file, dir}, []string{protect}, SnapshotProtect([]string{protect}))
+	mounts, events, applied := selectBuildBinds(ws, []string{file, dir}, []string{protect}, SnapshotProtect([]string{protect}), "")
 	t.Cleanup(func() { closeMountFiles(mounts) })
 	if len(events) != 0 || len(applied) != 2 {
 		t.Fatalf("events %+v applied %v", events, applied)
@@ -109,7 +109,7 @@ func TestBuildBindSymlinkSwapRefused(t *testing.T) {
 	}
 	t.Cleanup(func() { buildBindBeforeOpen = nil })
 
-	mounts, events, applied := selectBuildBinds(ws, []string{leaf}, []string{secret}, SnapshotProtect([]string{secret}))
+	mounts, events, applied := selectBuildBinds(ws, []string{leaf}, []string{secret}, SnapshotProtect([]string{secret}), "")
 	t.Cleanup(func() { closeMountFiles(mounts) })
 	if len(mounts) != 0 || len(applied) != 0 {
 		t.Fatalf("swapped symlink was mounted: %+v %v", mounts, applied)
@@ -152,7 +152,7 @@ func TestBuildBindRenameRecheckRefused(t *testing.T) {
 	}
 	t.Cleanup(func() { buildBindBeforeOpen = nil })
 
-	mounts, events, applied := selectBuildBinds(ws, []string{pub}, []string{sec}, SnapshotProtect([]string{sec}))
+	mounts, events, applied := selectBuildBinds(ws, []string{pub}, []string{sec}, SnapshotProtect([]string{sec}), "")
 	t.Cleanup(func() { closeMountFiles(mounts) })
 	if len(mounts) != 0 || len(applied) != 0 {
 		t.Fatalf("renamed protected dir was mounted: %+v %v", mounts, applied)
@@ -290,7 +290,7 @@ func TestBuildBindAncestorRenameRefused(t *testing.T) {
 	}
 	t.Cleanup(func() { buildBindBeforeOpen = nil })
 
-	mounts, events, applied := selectBuildBinds(ws, []string{pub}, []string{secret}, SnapshotProtect([]string{secret}))
+	mounts, events, applied := selectBuildBinds(ws, []string{pub}, []string{secret}, SnapshotProtect([]string{secret}), "")
 	t.Cleanup(func() { closeMountFiles(mounts) })
 	if len(mounts) != 0 || len(applied) != 0 {
 		t.Fatalf("ancestor of a secret was mounted: %+v %v", mounts, applied)
@@ -370,7 +370,7 @@ func TestProtectSnapshotDirChange(t *testing.T) {
 		if err := os.RemoveAll(sec); err != nil {
 			t.Fatal(err)
 		}
-		mounts, events, applied := selectBuildBinds(ws, []string{bind}, []string{sec}, snap)
+		mounts, events, applied := selectBuildBinds(ws, []string{bind}, []string{sec}, snap, "")
 		t.Cleanup(func() { closeMountFiles(mounts) })
 		if len(mounts) != 0 || len(applied) != 0 {
 			t.Fatalf("mounted %+v %v", mounts, applied)
@@ -392,7 +392,7 @@ func TestProtectSnapshotDirChange(t *testing.T) {
 		if err := os.Mkdir(sec, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		mounts, events, applied := selectBuildBinds(ws, []string{bind}, []string{sec}, snap)
+		mounts, events, applied := selectBuildBinds(ws, []string{bind}, []string{sec}, snap, "")
 		t.Cleanup(func() { closeMountFiles(mounts) })
 		if len(mounts) != 0 || len(applied) != 0 {
 			t.Fatalf("mounted %+v %v", mounts, applied)
@@ -421,7 +421,7 @@ func TestProtectSnapshotFileChangeDoesNotFailAll(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(bind, "tool.txt"), []byte("toolchain\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	mounts, events, applied := selectBuildBinds(ws, []string{bind}, []string{file}, snap)
+	mounts, events, applied := selectBuildBinds(ws, []string{bind}, []string{file}, snap, "")
 	t.Cleanup(func() { closeMountFiles(mounts) })
 	if len(applied) != 1 || applied[0] != bind || len(mounts) != 1 {
 		t.Fatalf("mounted %+v applied %v events %+v", mounts, applied, events)
@@ -606,6 +606,73 @@ func TestBuildBindRenameExchangeRace(t *testing.T) {
 	if readSecret != 0 {
 		t.Fatalf("secret was readable")
 	}
+}
+
+func TestBindOpenInodeRefusesSecretFile(t *testing.T) {
+	ws := t.TempDir()
+	secretDir := t.TempDir()
+	secret := filepath.Join(secretDir, "secret")
+	if err := os.WriteFile(secret, []byte("SECRET-FILE-BYTES\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snap := SnapshotProtect([]string{secret})
+	if got := ProtectChanged(snap); got != "" {
+		t.Fatalf("file snapshot changed %s", got)
+	}
+	t.Run("rename", func(t *testing.T) {
+		bind := filepath.Join(t.TempDir(), "tool.txt")
+		if err := os.WriteFile(bind, []byte("public\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(bind); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(secret, bind); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Rename(bind, secret) })
+		if got := ProtectChanged(snap); got != "" {
+			t.Fatalf("directory check fired: %s", got)
+		}
+		mounts, events, applied := selectBuildBinds(ws, []string{bind}, []string{secret}, snap, "")
+		t.Cleanup(func() { closeMountFiles(mounts) })
+		if len(mounts) != 0 || len(applied) != 0 {
+			t.Fatalf("mounted %+v %v", mounts, applied)
+		}
+		if len(events) != 1 || events[0].Kind != "sandbox_block" || events[0].Untrusted || !strings.Contains(events[0].Detail, "refused bind "+bind) {
+			t.Fatalf("events %+v", events)
+		}
+	})
+	t.Run("hardlink", func(t *testing.T) {
+		bind := filepath.Join(t.TempDir(), "tool.txt")
+		if err := os.Link(secret, bind); err != nil {
+			t.Fatal(err)
+		}
+		if got := ProtectChanged(snap); got != "" {
+			t.Fatalf("directory check fired: %s", got)
+		}
+		mounts, events, applied := selectBuildBinds(ws, []string{bind}, []string{secret}, snap, "")
+		t.Cleanup(func() { closeMountFiles(mounts) })
+		if len(mounts) != 0 || len(applied) != 0 {
+			t.Fatalf("mounted %+v %v", mounts, applied)
+		}
+		if len(events) != 1 || events[0].Kind != "sandbox_block" || !strings.Contains(events[0].Detail, "refused bind "+bind) {
+			t.Fatalf("events %+v", events)
+		}
+	})
+	t.Run("control", func(t *testing.T) {
+		other := t.TempDir()
+		bind := filepath.Join(t.TempDir(), "tool.txt")
+		if err := os.WriteFile(bind, []byte("public\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		plain := SnapshotProtect([]string{other})
+		mounts, events, applied := selectBuildBinds(ws, []string{bind}, []string{other}, plain, "")
+		t.Cleanup(func() { closeMountFiles(mounts) })
+		if len(mounts) != 1 || len(applied) != 1 || applied[0] != bind {
+			t.Fatalf("mounted %+v applied %v events %+v", mounts, applied, events)
+		}
+	})
 }
 
 func mustResolved(t *testing.T, path string) string {

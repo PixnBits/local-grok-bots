@@ -134,6 +134,80 @@ func AdvertisedOID(buf []byte, ref string) (string, error) {
 	return strings.Repeat("0", n), nil
 }
 
+// AdvertisedHeads reads a smart-HTTP info/refs body and returns every
+// refs/heads tip. zero is the object id of a missing ref: 40 hex zeros, or
+// 64 when the advertisement is sha256. A bad body is errPkt and contains
+// no body bytes. Duplicate tips with different ids are errPkt.
+func AdvertisedHeads(buf []byte) (map[string]string, string, error) {
+	if len(buf) == 0 || len(buf) > 1<<20 {
+		return nil, "", errPkt
+	}
+	payloads, err := pktPayloads(buf)
+	if err != nil {
+		return nil, "", errPkt
+	}
+	sha256 := false
+	sawFlush := false
+	heads := map[string]string{}
+	for _, data := range payloads {
+		if data == nil {
+			sawFlush = true
+			continue
+		}
+		if bytes.HasPrefix(data, []byte("#")) {
+			continue
+		}
+		var caps []byte
+		if j := bytes.IndexByte(data, 0); j >= 0 {
+			caps = data[j+1:]
+			data = data[:j]
+		}
+		if !capabilityOK(caps) {
+			return nil, "", errPkt
+		}
+		if bytes.Contains(caps, []byte("object-format=sha256")) {
+			sha256 = true
+		}
+		data = bytes.TrimRight(data, "\n")
+		parts := bytes.Split(data, []byte{' '})
+		if len(parts) != 2 {
+			return nil, "", errPkt
+		}
+		oid := string(parts[0])
+		name := string(parts[1])
+		if !oidOK(oid) {
+			return nil, "", errPkt
+		}
+		if len(oid) == 64 {
+			sha256 = true
+		}
+		if name == "capabilities^{}" {
+			if !isZeroOID(oid) {
+				return nil, "", errPkt
+			}
+			continue
+		}
+		if strings.ContainsAny(name, "\r\n\x00") || name == "" {
+			return nil, "", errPkt
+		}
+		if !strings.HasPrefix(name, "refs/heads/") {
+			continue
+		}
+		if prev, ok := heads[name]; ok && prev != oid {
+			return nil, "", errPkt
+		}
+		heads[name] = oid
+	}
+	if !sawFlush {
+		return nil, "", errPkt
+	}
+	n := 40
+	if sha256 {
+		n = 64
+	}
+	return heads, strings.Repeat("0", n), nil
+}
+
 func pktPayloads(buf []byte) ([][]byte, error) {
 	var out [][]byte
 	i := 0

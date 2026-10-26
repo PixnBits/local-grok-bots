@@ -13,10 +13,16 @@ func TestRefreshProtectSnapshot(t *testing.T) {
 	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
 		return model.ChatResponse{Content: "no"}, nil
 	}})
-	sec := filepath.Join(app.cfg.DataDir, "secrets")
-	before := inodeAt(t, app.protectInodes(), sec)
-	if !before.IsDir {
-		t.Fatalf("snapshot missing %s in %+v", sec, app.protectInodes())
+	data := filepath.Clean(app.cfg.DataDir)
+	sec := filepath.Join(data, "secrets")
+	if err := os.MkdirAll(sec, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	app.RefreshProtectSnapshot()
+	beforeData := inodeAt(t, app.protectInodes(), data)
+	beforeSec := inodeAt(t, app.protectInodes(), sec)
+	if !beforeData.IsDir || !beforeSec.IsDir {
+		t.Fatalf("snapshot %+v", app.protectInodes())
 	}
 	if err := os.Rename(sec, sec+"-away"); err != nil {
 		t.Fatal(err)
@@ -25,9 +31,13 @@ func TestRefreshProtectSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.RefreshProtectSnapshot()
-	after := inodeAt(t, app.protectInodes(), sec)
-	if !after.IsDir || (after.Dev == before.Dev && after.Ino == before.Ino) {
-		t.Fatalf("snapshot did not follow the new directory: before %+v after %+v", before, after)
+	afterData := inodeAt(t, app.protectInodes(), data)
+	afterSec := inodeAt(t, app.protectInodes(), sec)
+	if afterData != beforeData || afterSec != beforeSec {
+		t.Fatalf("baseline replaced data %+v -> %+v secrets %+v -> %+v", beforeData, afterData, beforeSec, afterSec)
+	}
+	if app.protectBlockReason() != "" {
+		t.Fatal(app.protectBlockReason())
 	}
 }
 
