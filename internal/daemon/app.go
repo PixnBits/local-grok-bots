@@ -136,9 +136,16 @@ type App struct {
 	closing      bool
 	wg           sync.WaitGroup
 
-	stt       STT
-	sttMu     sync.Mutex
-	voiceHits voiceGate
+	stt STT
+	// sttSlot is a capacity-1 semaphore. Sending takes the one transcription.
+	// The buffer starts empty. sttSlotOnce builds it if New did not.
+	sttSlot     chan struct{}
+	sttSlotOnce sync.Once
+	// sttBusyTimer replaces the busy-wait clock when non-nil. Tests return
+	// an already-fired channel, or a channel the test closes. The stop
+	// function may be nil. A nil field uses time.NewTimer(sttBusyWait).
+	sttBusyTimer func(time.Duration) (<-chan time.Time, func())
+	voiceHits    voiceGate
 }
 
 // logOut is copied onto each App as the startup writer. Nil means stderr.
@@ -263,6 +270,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		permTokens: map[string]permBind{},
 		permBase:   httpBase(cfg.BindAddr),
 		stt:        stt,
+		sttSlot:    make(chan struct{}, 1),
 	}
 	if len(fileTokens) > 0 {
 		a.authTokens.Store(&authTokenSet{toks: fileTokens})

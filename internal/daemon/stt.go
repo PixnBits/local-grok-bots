@@ -17,6 +17,19 @@ import (
 
 const sttSampleRate = 16000
 
+// sttBusyWait is how long a request waits for the single transcription
+// before the handler returns 429. It is not the 60s transcription deadline.
+const sttBusyWait = 2 * time.Second
+
+// sttBusyMsg is the 429 when that wait elapses. The hourly cap uses a
+// different sentence, speech recognition rate limit exceeded.
+const sttBusyMsg = "speech recognition is busy"
+
+// sttWaitEndedMsg is the body for a wait aborted by the request context.
+// The status is 408 Request Timeout. 499 is not a registered code, so a
+// client disconnect and the 60s deadline use 408 while the request is queued.
+const sttWaitEndedMsg = "speech recognition request ended"
+
 // errSTTUnavailable is a missing binary, a missing model, or no configuration.
 // The handler answers 503. It is never a reason to call another service.
 var errSTTUnavailable = errors.New("speech recognition is not available")
@@ -223,9 +236,18 @@ func (a *App) handleSTT(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	a.sttMu.Lock()
+	release, waitCode := a.acquireSTT(ctx)
+	if release == nil {
+		msg := sttBusyMsg
+		if waitCode == http.StatusRequestTimeout {
+			msg = sttWaitEndedMsg
+		}
+		a.auditSTT(who, len(pcm), dur, waitCode, true)
+		writeJSON(w, waitCode, map[string]string{"error": msg})
+		return
+	}
+	defer release()
 	text, err := a.stt.Transcribe(ctx, pcm)
-	a.sttMu.Unlock()
 	if err != nil {
 		code := http.StatusBadGateway
 		if errors.Is(err, errSTTUnavailable) {
@@ -237,6 +259,49 @@ func (a *App) handleSTT(w http.ResponseWriter, r *http.Request) {
 	}
 	a.auditSTT(who, len(pcm), dur, http.StatusOK, true)
 	writeJSON(w, http.StatusOK, map[string]any{"text": text})
+}
+
+// sttSem returns the capacity-1 transcription slot.
+func (a *App) sttSem() chan struct{} {
+	a.sttSlotOnce.Do(func() {
+		if a.sttSlot == nil {
+			a.sttSlot = make(chan struct{}, 1)
+		}
+	})
+	return a.sttSlot
+}
+
+// armSTTBusy starts the busy-wait timer. Tests set sttBusyTimer so the
+// channel is already fired, or so the test closes it, without sleeping.
+func (a *App) armSTTBusy() (<-chan time.Time, func()) {
+	if a != nil && a.sttBusyTimer != nil {
+		return a.sttBusyTimer(sttBusyWait)
+	}
+	t := time.NewTimer(sttBusyWait)
+	return t.C, func() { t.Stop() }
+}
+
+// acquireSTT takes the single transcription slot.
+// release is nil when the slot was not taken: 429 if the busy wait elapsed
+// while another transcription held it, or 408 if ctx ended first.
+// A nil release means the caller must not call whisper and must not release.
+func (a *App) acquireSTT(ctx context.Context) (release func(), code int) {
+	slot := a.sttSem()
+	wait, stop := a.armSTTBusy()
+	if stop == nil {
+		stop = func() {}
+	}
+	select {
+	case slot <- struct{}{}:
+		stop()
+		return func() { <-slot }, 0
+	case <-ctx.Done():
+		stop()
+		return nil, http.StatusRequestTimeout
+	case <-wait:
+		stop()
+		return nil, http.StatusTooManyRequests
+	}
 }
 
 func (a *App) voicePolicy() policySnap {

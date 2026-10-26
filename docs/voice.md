@@ -16,7 +16,9 @@ body only. It is not written to the log or the audit sink.
 | 403 | Voice is disabled. An audit row is still written |
 | 413 | The body exceeds `max_body_bytes`, or the PCM is longer than `max_audio_seconds` |
 | 400 | The body is shorter than one sample, or its length is odd |
-| 429 | That user is over `max_requests_per_hour` |
+| 429 | That user is over `max_requests_per_hour`. The message is `speech recognition rate limit exceeded` |
+| 429 | A transcription is already running and the 2 second wait elapsed. The message is `speech recognition is busy` |
+| 408 | The request context ended while waiting for the transcription slot (the client went away, or the 60 second limit elapsed). Whisper is not started. The status is 408 Request Timeout |
 | 503 | Whisper is unset, or the binary or model file is missing |
 | 502 | The local binary ran and failed. The message is `speech recognition failed` |
 
@@ -24,6 +26,11 @@ The rate limit is a rolling hour, keyed by the token name (`default` for
 `AUTH_TOKEN`). It is checked after the enabled check and before the body is
 read. A limit of zero or less denies the request. Audio longer than the cap
 is rejected before whisper runs.
+
+One transcription runs at a time. A second request waits up to 2 seconds
+for that slot, then returns 429. If the request context ends while it is
+still waiting, the response is 408 Request Timeout and whisper is not
+started. 499 is not used.
 
 ## Policy
 

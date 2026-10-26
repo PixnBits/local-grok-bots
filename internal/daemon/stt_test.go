@@ -2,11 +2,15 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -236,7 +240,7 @@ func TestSTTRateLimitPerUser(t *testing.T) {
 		}
 	}
 	res, out := postSTT(t, srv.URL, "voice-test-token", pcm)
-	if res.StatusCode != http.StatusTooManyRequests {
+	if res.StatusCode != http.StatusTooManyRequests || out["error"] != "speech recognition rate limit exceeded" {
 		t.Fatalf("third %d %v", res.StatusCode, out)
 	}
 	logs := sttLogText(t, app)
@@ -279,6 +283,177 @@ func TestSTTAuditOmitsTranscript(t *testing.T) {
 		if !strings.Contains(blob, needle) {
 			t.Fatalf("missing %s in %s", needle, blob)
 		}
+	}
+}
+
+// blockingSTT holds the first Transcribe on hold and counts every call.
+type blockingSTT struct {
+	calls   atomic.Int32
+	entered chan struct{}
+	hold    chan struct{}
+	text    string
+}
+
+func (b *blockingSTT) Transcribe(ctx context.Context, pcm []byte) (string, error) {
+	if b.calls.Add(1) == 1 {
+		close(b.entered)
+		select {
+		case <-b.hold:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	return b.text, nil
+}
+
+func newBlockingVoice(t *testing.T) (*App, *blockingSTT, func()) {
+	t.Helper()
+	app := newVoiceApp(t, voicePolicy(true, "/whisper/whisper-cli", "/whisper/model.bin", 240, 1<<20, 60))
+	fake := &blockingSTT{
+		entered: make(chan struct{}),
+		hold:    make(chan struct{}),
+		text:    "slot-hold-transcript",
+	}
+	app.stt = fake
+	var once sync.Once
+	release := func() { once.Do(func() { close(fake.hold) }) }
+	return app, fake, release
+}
+
+func callHandleSTT(app *App, ctx context.Context, pcm []byte) (int, map[string]any) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/stt", bytes.NewReader(pcm))
+	req = req.WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer voice-test-token")
+	rec := httptest.NewRecorder()
+	app.handleSTT(rec, req)
+	var out map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec.Code, out
+}
+
+func firedSTTWait() <-chan time.Time {
+	ch := make(chan time.Time, 1)
+	ch <- time.Now()
+	return ch
+}
+
+func TestSTTBusyReturns429(t *testing.T) {
+	app, fake, release := newBlockingVoice(t)
+	var arms atomic.Int32
+	idle := make(chan time.Time)
+	fired := firedSTTWait()
+	app.sttBusyTimer = func(time.Duration) (<-chan time.Time, func()) {
+		if arms.Add(1) == 1 {
+			return idle, func() {}
+		}
+		return fired, func() {}
+	}
+	pcm := make([]byte, 3200)
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		callHandleSTT(app, context.Background(), pcm)
+	}()
+	defer func() {
+		release()
+		wg.Wait()
+	}()
+	<-fake.entered
+
+	code, out := callHandleSTT(app, context.Background(), pcm)
+	if code != http.StatusTooManyRequests || out["error"] != sttBusyMsg {
+		t.Fatalf("status %d %v", code, out)
+	}
+	if out["error"] == "speech recognition rate limit exceeded" {
+		t.Fatal("busy 429 uses the rate-limit message")
+	}
+	if text, ok := out["text"].(string); ok && text != "" {
+		t.Fatalf("transcript in response %q", text)
+	}
+	if fake.calls.Load() != 1 {
+		t.Fatalf("whisper calls %d", fake.calls.Load())
+	}
+	logs := sttLogText(t, app)
+	if strings.Contains(logs, fake.text) || strings.Contains(logs, "transcript") {
+		t.Fatalf("audit leaked transcript: %s", logs)
+	}
+	for _, needle := range []string{`"who":"default"`, `"bytes":3200`, `"code":429`, `"duration_ms":`} {
+		if !strings.Contains(logs, needle) {
+			t.Fatalf("missing %s in %s", needle, logs)
+		}
+	}
+}
+
+func TestSTTCancelWhileWaiting(t *testing.T) {
+	app, fake, release := newBlockingVoice(t)
+	waiting := make(chan struct{})
+	var arms atomic.Int32
+	app.sttBusyTimer = func(time.Duration) (<-chan time.Time, func()) {
+		if arms.Add(1) == 2 {
+			close(waiting)
+		}
+		return make(chan time.Time), func() {}
+	}
+	pcm := make([]byte, 3200)
+
+	firstDone := make(chan struct{})
+	var firstCode int
+	var firstOut map[string]any
+	go func() {
+		defer close(firstDone)
+		firstCode, firstOut = callHandleSTT(app, context.Background(), pcm)
+	}()
+	defer func() {
+		release()
+		<-firstDone
+	}()
+	<-fake.entered
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	secondDone := make(chan struct{})
+	var secondCode int
+	var secondOut map[string]any
+	go func() {
+		defer close(secondDone)
+		secondCode, secondOut = callHandleSTT(app, ctx, pcm)
+	}()
+	<-waiting
+	cancel()
+	<-secondDone
+
+	if secondCode != http.StatusRequestTimeout || secondOut["error"] != sttWaitEndedMsg {
+		t.Fatalf("cancel %d %v", secondCode, secondOut)
+	}
+	if fake.calls.Load() != 1 {
+		t.Fatalf("whisper calls %d", fake.calls.Load())
+	}
+	logs := sttLogText(t, app)
+	if strings.Contains(logs, fake.text) || strings.Contains(logs, "transcript") {
+		t.Fatalf("audit leaked transcript: %s", logs)
+	}
+	for _, needle := range []string{`"who":"default"`, `"bytes":3200`, `"code":408`, `"duration_ms":100`} {
+		if !strings.Contains(logs, needle) {
+			t.Fatalf("missing %s in %s", needle, logs)
+		}
+	}
+
+	release()
+	<-firstDone
+	if firstCode != http.StatusOK || firstOut["text"] != fake.text {
+		t.Fatalf("holder %d %v", firstCode, firstOut)
+	}
+
+	thirdCode, thirdOut := callHandleSTT(app, context.Background(), pcm)
+	if thirdCode != http.StatusOK || thirdOut["text"] != fake.text {
+		t.Fatalf("third %d %v", thirdCode, thirdOut)
+	}
+	if fake.calls.Load() != 2 {
+		t.Fatalf("whisper calls %d", fake.calls.Load())
 	}
 }
 
