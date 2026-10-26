@@ -5,9 +5,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/config"
 	"github.com/PixnBits/local-grok-bots/internal/store"
+	"golang.org/x/sys/unix"
 )
 
 func TestOllamaOnlyNeedsNoToken(t *testing.T) {
@@ -103,7 +107,7 @@ func TestCLIEnvNeverCarriesAdminToken(t *testing.T) {
 	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))
 	tok := app.cfg.AuthToken
 	fileTok := strings.Repeat("e", 32)
-	app.accessTokens = append(app.accessTokens, namedToken{name: "alice", val: fileTok})
+	app.authTokens.Store(&authTokenSet{toks: []namedToken{{name: "alice", val: fileTok}}})
 	t.Setenv("AUTH_TOKEN", tok)
 	t.Setenv("AUTH_TOKENS_FILE", filepath.Join(dir, "tokens"))
 	t.Setenv("SSL_CERT_FILE", "/etc/ssl/"+fileTok+".pem")
@@ -140,5 +144,439 @@ func TestAdminTokenSymlinkIsRefused(t *testing.T) {
 	st, err := os.Stat(target)
 	if err != nil || st.Mode().Perm() != 0o644 {
 		t.Fatalf("target touched: %v %v", st.Mode(), err)
+	}
+}
+
+func TestAdminTokenRefusesLooseMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, adminTokenFile)
+	body := []byte(strings.Repeat("a", 64) + "\n")
+	writeExact(t, path, body, 0o640)
+	_, _, err := ensureAdminToken(dir, "", true)
+	if err == nil || !strings.Contains(err.Error(), path) || !strings.Contains(err.Error(), "mode") || strings.Contains(err.Error(), strings.Repeat("a", 64)) {
+		t.Fatalf("err %v", err)
+	}
+	st, statErr := os.Lstat(path)
+	got, _ := os.ReadFile(path)
+	if statErr != nil || st.Mode().Perm() != 0o640 || string(got) != string(body) {
+		t.Fatalf("mode %v body %q err %v", st.Mode(), got, statErr)
+	}
+}
+
+func TestAdminTokenRefusesFIFO(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, adminTokenFile)
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		_, _, err := ensureAdminToken(dir, "", true)
+		errCh <- err
+	}()
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "regular") || !strings.Contains(err.Error(), path) {
+			t.Fatalf("err %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("admin token open blocked on a FIFO")
+	}
+}
+
+func TestAdminTokenRefusesHardLink(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, adminTokenFile)
+	body := []byte(strings.Repeat("b", 64) + "\n")
+	writeExact(t, path, body, 0o600)
+	if err := os.Link(path, path+".link"); err != nil {
+		t.Fatal(err)
+	}
+	_, _, err := ensureAdminToken(dir, "", true)
+	if err == nil || !strings.Contains(err.Error(), "hard link") || !strings.Contains(err.Error(), path) || strings.Contains(err.Error(), strings.Repeat("b", 64)) {
+		t.Fatalf("err %v", err)
+	}
+	got, _ := os.ReadFile(path)
+	if string(got) != string(body) {
+		t.Fatalf("overwritten %q", got)
+	}
+}
+
+func TestAdminTokenRefusesOversize(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, adminTokenFile)
+	body := []byte(strings.Repeat("c", adminTokenMax+1))
+	writeExact(t, path, body, 0o600)
+	_, _, err := ensureAdminToken(dir, "", true)
+	if err == nil || !strings.Contains(err.Error(), path) || strings.Contains(err.Error(), "cccc") {
+		t.Fatalf("err %v", err)
+	}
+	got, _ := os.ReadFile(path)
+	if len(got) != len(body) {
+		t.Fatalf("len %d", len(got))
+	}
+}
+
+func TestAdminTokenRefusesEmptyShortAndNonASCII(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"empty", ""},
+		{"short", "short-token\n"},
+		{"non-ascii", strings.Repeat("d", 32) + "é\n"},
+		{"leading nbsp", "\u00A0" + strings.Repeat("e", 32) + "\n"},
+		{"trailing nbsp", strings.Repeat("f", 32) + "\u00A0\n"},
+		{"em space", strings.Repeat("g", 32) + "\u2003\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, adminTokenFile)
+			writeExact(t, path, []byte(tc.body), 0o600)
+			_, _, err := ensureAdminToken(dir, "", true)
+			secret := strings.TrimRight(tc.body, "\n")
+			if err == nil || !strings.Contains(err.Error(), path) || (secret != "" && strings.Contains(err.Error(), secret)) {
+				t.Fatalf("err %v", err)
+			}
+			got, _ := os.ReadFile(path)
+			if string(got) != tc.body {
+				t.Fatalf("overwritten %q", got)
+			}
+		})
+	}
+}
+
+func TestAdminTokenTrimsASCIISpace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, adminTokenFile)
+	tok := strings.Repeat("h", 64)
+	writeExact(t, path, []byte(" \t"+tok+" \t\r\n"), 0o600)
+	got, gotPath, err := ensureAdminToken(dir, "", true)
+	if err != nil || got != tok || gotPath != path {
+		t.Fatalf("%q %q %v", got, gotPath, err)
+	}
+}
+
+func TestAdminTokenGeneration(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "data")
+	canary := filepath.Join(parent, "canary")
+	if err := os.WriteFile(canary, []byte("canary-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// The old predictable temp name must not be followed.
+	if err := os.Symlink(canary, filepath.Join(dir, adminTokenFile+".tmp")); err != nil {
+		t.Fatal(err)
+	}
+	tok, path, err := ensureAdminToken(dir, "", true)
+	if err != nil || len(tok) != 64 || path != filepath.Join(dir, adminTokenFile) {
+		t.Fatalf("%q %q %v", tok, path, err)
+	}
+	st, err := os.Stat(path)
+	if err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v %v", st, err)
+	}
+	var ust unix.Stat_t
+	if err := unix.Stat(path, &ust); err != nil || ust.Nlink != 1 {
+		t.Fatalf("nlink %d %v", ust.Nlink, err)
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if strings.Contains(e.Name(), ".tmp-") {
+			t.Fatalf("temp left behind: %s", e.Name())
+		}
+	}
+	raw, _ := os.ReadFile(canary)
+	if string(raw) != "canary-bytes" {
+		t.Fatalf("old temp name was followed: %q", raw)
+	}
+	dst, err := os.Lstat(dir)
+	if err != nil || !dst.IsDir() || dst.Mode().Perm()&0o022 != 0 {
+		t.Fatalf("data dir %v %v", dst.Mode(), err)
+	}
+}
+
+func TestAdminTokenTempSymlinkIsNotFollowed(t *testing.T) {
+	dir := t.TempDir()
+	canary := filepath.Join(t.TempDir(), "canary")
+	if err := os.WriteFile(canary, []byte("canary-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(dir, adminTokenFile+".tmp-fixed")
+	if err := os.Symlink(canary, tmp); err != nil {
+		t.Fatal(err)
+	}
+	prev := adminTokenTempPath
+	adminTokenTempPath = func(string) (string, error) { return tmp, nil }
+	t.Cleanup(func() { adminTokenTempPath = prev })
+	if _, _, err := ensureAdminToken(dir, "", true); err == nil {
+		t.Fatal("temp symlink was followed")
+	}
+	raw, err := os.ReadFile(canary)
+	if err != nil || string(raw) != "canary-bytes" {
+		t.Fatalf("canary %q %v", raw, err)
+	}
+	lst, err := os.Lstat(tmp)
+	if err != nil || lst.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("temp symlink replaced: %v %v", lst, err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, adminTokenFile)); err == nil {
+		t.Fatal("admin token written through the temp symlink")
+	}
+}
+
+func TestAdminTokenDataDirRefused(t *testing.T) {
+	t.Run("group writable", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o775); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := ensureAdminToken(dir, "", true)
+		if err == nil || !strings.Contains(err.Error(), dir) || !strings.Contains(err.Error(), "writable") {
+			t.Fatalf("err %v", err)
+		}
+		if _, statErr := os.Lstat(filepath.Join(dir, adminTokenFile)); !os.IsNotExist(statErr) {
+			t.Fatalf("token file created: %v", statErr)
+		}
+		st, statErr := os.Lstat(dir)
+		if statErr != nil || st.Mode().Perm() != 0o775 {
+			t.Fatalf("dir mode %v %v", st.Mode(), statErr)
+		}
+	})
+	t.Run("symlink", func(t *testing.T) {
+		real := t.TempDir()
+		parent := t.TempDir()
+		link := filepath.Join(parent, "data")
+		if err := os.Symlink(real, link); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := ensureAdminToken(link, "", true)
+		if err == nil || !strings.Contains(err.Error(), link) || !strings.Contains(err.Error(), "symlink") {
+			t.Fatalf("err %v", err)
+		}
+		if _, statErr := os.Lstat(filepath.Join(real, adminTokenFile)); !os.IsNotExist(statErr) {
+			t.Fatalf("wrote through DATA_DIR symlink: %v", statErr)
+		}
+	})
+}
+
+func TestStaleAdminTokenTempsRemoved(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, adminTokenFile+".tmp-stale")
+	if err := os.WriteFile(stale, []byte("old-temp"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	canary := filepath.Join(t.TempDir(), "canary")
+	if err := os.WriteFile(canary, []byte("canary-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, adminTokenFile+".tmp-link")
+	if err := os.Symlink(canary, link); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(dir, adminTokenFile+".tmp-dir")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldName := filepath.Join(dir, adminTokenFile+".tmp")
+	if err := os.WriteFile(oldName, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareAdminDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale temp remains: %v", err)
+	}
+	lst, err := os.Lstat(link)
+	if err != nil || lst.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("symlink temp %v %v", lst, err)
+	}
+	raw, err := os.ReadFile(canary)
+	if err != nil || string(raw) != "canary-bytes" {
+		t.Fatalf("canary %q %v", raw, err)
+	}
+	st, err := os.Lstat(sub)
+	if err != nil || !st.IsDir() {
+		t.Fatalf("dir temp %v %v", st, err)
+	}
+	if _, err := os.Lstat(oldName); err != nil {
+		t.Fatalf("unrelated temp name removed: %v", err)
+	}
+}
+
+func TestStaleAdminTokenTempOtherEUIDKept(t *testing.T) {
+	dir := t.TempDir()
+	stale := filepath.Join(dir, adminTokenFile+".tmp-other")
+	if err := os.WriteFile(stale, []byte("old-temp"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prev := euid
+	euid = func() int { return otherEUID() }
+	t.Cleanup(func() { euid = prev })
+	if err := cleanAdminTokenTemps(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(stale); err != nil {
+		t.Fatalf("other owner's temp removed: %v", err)
+	}
+}
+
+func TestEUIDMismatchRefuses(t *testing.T) {
+	prev := euid
+	euid = func() int { return otherEUID() }
+	t.Cleanup(func() { euid = prev })
+	t.Run("data dir", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		err := prepareAdminDir(dir)
+		if err == nil || !strings.Contains(err.Error(), "owner mismatch") || !strings.Contains(err.Error(), dir) {
+			t.Fatalf("err %v", err)
+		}
+	})
+	t.Run("protected file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "tokens")
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := readProtectedFile(path, 1024, "auth tokens", "")
+		if err == nil || !strings.Contains(err.Error(), "owner mismatch") {
+			t.Fatalf("err %v", err)
+		}
+	})
+}
+
+func otherEUID() int {
+	if os.Geteuid() == 1 {
+		return 2
+	}
+	return 1
+}
+
+func TestDataDirModeCheckedOnNew(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("BIND_ADDR", "")
+	t.Setenv("AUTH_TOKEN", "")
+	t.Setenv("AUTH_TOKENS_FILE", "")
+
+	start := func(t *testing.T, dir string, cli bool, token string) error {
+		t.Helper()
+		cfg := config.Config{
+			DataDir:   dir,
+			BindAddr:  "127.0.0.1:0",
+			OllamaURL: "http://127.0.0.1:9",
+			Model:     "test-model",
+			Version:   "0.1.0",
+			AuthToken: token,
+		}
+		if cli {
+			cfg.PolicyPath = writeCLIPolicy(t, dir)
+		}
+		app, err := New(cfg, nil)
+		if app != nil {
+			app.Shutdown()
+		}
+		return err
+	}
+	assertLoose := func(t *testing.T, dir string, mode os.FileMode, err error, secret string) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), dir) || !strings.Contains(err.Error(), "writable") || (secret != "" && strings.Contains(err.Error(), secret)) {
+			t.Fatalf("err %v", err)
+		}
+		st, statErr := os.Lstat(dir)
+		if statErr != nil || st.Mode().Perm() != mode {
+			t.Fatalf("mode %v %v", st.Mode(), statErr)
+		}
+	}
+
+	tok := strings.Repeat("a", 64)
+	for _, tc := range []struct {
+		name string
+		mode os.FileMode
+	}{
+		{"0777 existing token", 0o777},
+		{"0775 existing token", 0o775},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeExact(t, filepath.Join(dir, adminTokenFile), []byte(tok+"\n"), 0o600)
+			if err := os.Chmod(dir, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			err := start(t, dir, true, "")
+			assertLoose(t, dir, tc.mode, err, tok)
+			path := filepath.Join(dir, adminTokenFile)
+			st, statErr := os.Lstat(path)
+			got, _ := os.ReadFile(path)
+			if statErr != nil || st.Mode().Perm() != 0o600 || string(got) != tok+"\n" {
+				t.Fatalf("token %v %q %v", st.Mode(), got, statErr)
+			}
+		})
+	}
+	t.Run("0777 auth token", func(t *testing.T) {
+		envTok := strings.Repeat("p", 32)
+		t.Setenv("AUTH_TOKEN", envTok)
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		err := start(t, dir, false, envTok)
+		assertLoose(t, dir, 0o777, err, envTok)
+		if _, statErr := os.Lstat(filepath.Join(dir, adminTokenFile)); !os.IsNotExist(statErr) {
+			t.Fatalf("admin token created: %v", statErr)
+		}
+	})
+	t.Run("0777 ollama", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		err := start(t, dir, false, "")
+		assertLoose(t, dir, 0o777, err, "")
+		if _, statErr := os.Lstat(filepath.Join(dir, adminTokenFile)); !os.IsNotExist(statErr) {
+			t.Fatalf("admin token created: %v", statErr)
+		}
+	})
+	t.Run("0700 starts", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := start(t, dir, false, ""); err != nil {
+			t.Fatal(err)
+		}
+		if _, statErr := os.Lstat(filepath.Join(dir, adminTokenFile)); !os.IsNotExist(statErr) {
+			t.Fatalf("ollama wrote a token: %v", statErr)
+		}
+		st, err := os.Lstat(dir)
+		if err != nil || st.Mode().Perm() != 0o700 {
+			t.Fatalf("mode %v %v", st.Mode(), err)
+		}
+	})
+}
+
+func writeExact(t *testing.T, path string, body []byte, mode os.FileMode) {
+	t.Helper()
+	if err := os.WriteFile(path, body, mode); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		t.Fatal(err)
 	}
 }

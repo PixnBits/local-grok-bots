@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -24,7 +25,10 @@ type Request struct {
 	NetAllow   []string
 	SSHAllow   []string
 	BuildBinds []string
-	SSHKey     string
+	// Protect is the daemon's current protected set, raw and resolved.
+	// A build bind that overlaps it, or that cannot be resolved, is not mounted.
+	Protect []string
+	SSHKey  string
 	// GitHubSock is the host credential-proxy socket. Empty leaves GitHub
 	// fetch unavailable. GitHubRepos is the allowlist copied into the wrapper.
 	GitHubSock      string
@@ -52,6 +56,9 @@ type mount struct {
 	Src string `json:"src"`
 	Dst string `json:"dst"`
 	RO  bool   `json:"ro"`
+	// file is a Linux build-bind fd (O_PATH|O_CLOEXEC). Nil mounts use Src.
+	// It is not serialized for the unshare stage.
+	file *os.File
 }
 
 type stage2File struct {
@@ -85,8 +92,18 @@ func (p *prepared) close() {
 	if p.push != nil {
 		p.push.close()
 	}
+	closeMountFiles(p.mounts)
 	if p.dir != "" {
 		_ = os.RemoveAll(p.dir)
+	}
+}
+
+func closeMountFiles(mounts []mount) {
+	for i := range mounts {
+		if mounts[i].file != nil {
+			_ = mounts[i].file.Close()
+			mounts[i].file = nil
+		}
 	}
 }
 
@@ -305,27 +322,9 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 	})
 
 	if grants["build"] {
-		var applied []string
-		for _, raw := range req.BuildBinds {
-			raw = strings.TrimSpace(raw)
-			if raw == "" {
-				continue
-			}
-			if !filepath.IsAbs(raw) || refusedBind(raw) {
-				p.extra = append(p.extra, Event{Kind: "sandbox_block", Detail: "refused bind " + raw})
-				continue
-			}
-			st, err := os.Stat(raw)
-			if err != nil {
-				continue
-			}
-			if sameTree(ws, raw) {
-				continue
-			}
-			p.mounts = append(p.mounts, mount{Src: raw, Dst: raw, RO: true})
-			applied = append(applied, raw)
-			_ = st
-		}
+		mounts, events, applied := selectBuildBinds(ws, req.BuildBinds, req.Protect)
+		p.mounts = append(p.mounts, mounts...)
+		p.extra = append(p.extra, events...)
 		if len(applied) > 0 {
 			p.extra = append(p.extra, Event{Kind: "grant_use", Grant: "build", Detail: strings.Join(applied, ",")})
 		}
@@ -415,18 +414,140 @@ func normalizeHosts(hosts []string) []string {
 	return out
 }
 
+// selectBuildBinds decides which SANDBOX_BUILD_BINDS entries are mounted.
+// Each absolute path is resolved with EvalSymlinks. A path that is not
+// absolute, is a refused toolchain path, cannot be resolved, or overlaps
+// protected (raw or resolved) is not mounted. On Linux the resolved path
+// is then opened without following symlinks and checked again; a failure
+// skips that bind. The turn continues and a sandbox_block names the bind
+// path. A path inside the workspace is skipped with no event. The mount
+// destination stays the resolved path.
+func selectBuildBinds(ws string, binds, protected []string) (mounts []mount, events []Event, applied []string) {
+	ws = filepath.Clean(ws)
+	var roots []string
+	roots = append(roots, ws)
+	if real, err := filepath.EvalSymlinks(ws); err == nil {
+		real = filepath.Clean(real)
+		if real != ws {
+			roots = append(roots, real)
+		}
+	}
+	for _, raw := range binds {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if !filepath.IsAbs(raw) || refusedBind(raw) {
+			events = append(events, Event{Kind: "sandbox_block", Detail: "refused bind " + raw})
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(raw)
+		if err != nil {
+			events = append(events, Event{Kind: "sandbox_block", Detail: "refused bind " + raw})
+			continue
+		}
+		resolved = filepath.Clean(resolved)
+		clean := filepath.Clean(raw)
+		if bindOverlapsProtected(clean, resolved, protected) {
+			events = append(events, Event{Kind: "sandbox_block", Detail: "refused bind " + raw})
+			continue
+		}
+		skip := false
+		for _, root := range roots {
+			if sameTree(root, clean) || sameTree(root, resolved) {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+		f, err := openBuildBind(resolved, protected)
+		if err != nil {
+			if f != nil {
+				_ = f.Close()
+			}
+			events = append(events, Event{Kind: "sandbox_block", Detail: "refused bind " + raw})
+			continue
+		}
+		mounts = append(mounts, mount{Src: resolved, Dst: resolved, RO: true, file: f})
+		applied = append(applied, raw)
+	}
+	return mounts, events, applied
+}
+
+// bindOverlapsProtected reports whether the raw or resolved bind is the same
+// path as a protected path or one contains the other.
+func bindOverlapsProtected(raw, resolved string, protected []string) bool {
+	forms := []string{filepath.Clean(raw)}
+	if resolved != "" && filepath.Clean(resolved) != forms[0] {
+		forms = append(forms, filepath.Clean(resolved))
+	}
+	for _, bind := range forms {
+		for _, secret := range protected {
+			secret = filepath.Clean(strings.TrimSpace(secret))
+			if secret == "" || secret == "." {
+				continue
+			}
+			if pathHolds(bind, secret) || pathHolds(secret, bind) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// pathHolds reports whether path is root or a descendant of root.
+func pathHolds(root, path string) bool {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	if root == "" || path == "" || root == "." || path == "." {
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// mountArgs is the bwrap bind list for mounts. Read-only path mounts use
+// --ro-bind. A mount with an open fd is a build bind and uses --ro-bind-fd.
+// already is the number of ExtraFiles the caller will place before these fds.
+// Child fd numbers are 3+index in the final ExtraFiles slice. Build binds
+// never fall back to a path --ro-bind.
+func mountArgs(mounts []mount, already int) (args []string, files []*os.File) {
+	n := already
+	for _, m := range mounts {
+		if m.file != nil {
+			args = append(args, "--ro-bind-fd", strconv.Itoa(3+n), m.Dst)
+			files = append(files, m.file)
+			n++
+			continue
+		}
+		flag := "--bind"
+		if m.RO {
+			flag = "--ro-bind"
+		}
+		args = append(args, flag, m.Src, m.Dst)
+	}
+	return args, files
+}
+
 func sameTree(root, path string) bool {
 	rel, err := filepath.Rel(root, path)
 	return err == nil && !escapes(rel)
 }
 
 func capture(ctx context.Context, cmd *exec.Cmd) (string, string, error) {
-	return captureReady(ctx, cmd, nil)
+	return captureReady(ctx, cmd, nil, nil)
 }
 
-// captureReady runs cmd. ready, when set, runs after start and before the
-// command is expected to finish. A ready error kills the process group.
-func captureReady(ctx context.Context, cmd *exec.Cmd, ready func() error) (string, string, error) {
+// captureReady runs cmd. started, when set, runs after Start returns,
+// including when Start fails. ready, when set, runs after a successful
+// start and before the command is expected to finish. A ready error kills
+// the process group.
+func captureReady(ctx context.Context, cmd *exec.Cmd, started func(), ready func() error) (string, string, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var outBuf, errBuf bytes.Buffer
 	stdoutPipe, err := cmd.StdoutPipe()
@@ -437,8 +558,12 @@ func captureReady(ctx context.Context, cmd *exec.Cmd, ready func() error) (strin
 	if err != nil {
 		return "", "", err
 	}
-	if err := cmd.Start(); err != nil {
-		return "", "", fmt.Errorf("shell sandbox: %w", err)
+	startErr := cmd.Start()
+	if started != nil {
+		started()
+	}
+	if startErr != nil {
+		return "", "", fmt.Errorf("shell sandbox: %w", startErr)
 	}
 	doneOut := make(chan struct{})
 	doneErr := make(chan struct{})

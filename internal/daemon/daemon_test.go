@@ -67,10 +67,34 @@ func (f fakeModel) Chat(ctx context.Context, req model.ChatRequest, onToken func
 	return resp, nil
 }
 
+// chmodDataDir makes a DATA_DIR usable at startup. t.TempDir is 0775 when
+// umask is 0002, and every start refuses a group-writable DATA_DIR. A
+// missing path is left for prepareAdminDir to create at 0700. A symlink is
+// left alone so the symlink check still runs.
+func chmodDataDir(dir string) error {
+	if dir == "" {
+		return nil
+	}
+	st, err := os.Lstat(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if st.Mode()&os.ModeSymlink != 0 || !st.IsDir() {
+		return nil
+	}
+	return os.Chmod(dir, 0o700)
+}
+
 func newApp(t *testing.T, dir string, m model.Client) *App {
 	t.Helper()
 	if dir == "" {
 		dir = t.TempDir()
+	}
+	if err := chmodDataDir(dir); err != nil {
+		t.Fatal(err)
 	}
 	cfg := config.Config{
 		DataDir: dir, BindAddr: "127.0.0.1:0",

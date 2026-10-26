@@ -11,17 +11,17 @@ go build -o local-grok-bots ./cmd/local-grok-bots
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DATA_DIR` | `./data` | Directory for `state.db` and `workspace/` |
+| `DATA_DIR` | `./data` | Directory for `state.db` and `workspace/`. It must be owned by the daemon user and not group or other writable. That is checked at every start |
 | `OLLAMA_URL` | `http://127.0.0.1:11434` | Local Ollama HTTP API |
 | `OLLAMA_MODEL` | `llama3.2` | Model used when a bot has no override. Set this to a model you have pulled. |
 | `BIND_ADDR` | `127.0.0.1:8080` | Address the daemon listens on |
 | `AUTH_TOKEN` | unset | If set, every route except `GET /api/health` requires `Authorization: Bearer <token>` (or the cookie from `/login?token=`). It is accepted under the name `default`. With a CLI backend and no `AUTH_TOKEN`, a token is generated at `DATA_DIR/admin-token` (0600) and used the same way; see [docs/cli-isolation.md](docs/cli-isolation.md#daemon-api) |
-| `AUTH_TOKENS_FILE` | unset | Path of a file of named access tokens, one `name:token` per line. Read at startup. See below. |
+| `AUTH_TOKENS_FILE` | unset | Path of a file of named access tokens, one `name:token` per line. Read at startup. SIGHUP reloads it when set, and is otherwise ignored (logged). See below. |
 | `SANDBOX_BUILD_BINDS` | unset | Colon-separated absolute paths. With the `build` grant, each path is a read-only bind in the shell jail. |
 
-`AUTH_TOKENS_FILE` adds named tokens to the same gate as `AUTH_TOKEN`. Blank lines and lines whose first non-whitespace character is `#` are ignored. A name is 1–64 characters from `[A-Za-z0-9._-]`. The token is the remainder of the line after the first `:`, trimmed, at least 32 characters, and each byte must be printable ASCII (`0x21`–`0x7E`: no spaces, control bytes, or non-ASCII). Generate one with `openssl rand -hex 32`. The name `default` is reserved. `AUTH_TOKEN`, or the generated admin token, joins the set under that name, and a file entry named `default` is refused even when both are unset. Duplicate names or duplicate tokens, including a copy of the default token, refuse startup. A file that is empty, or that contains only blank lines and comments, refuses startup.
+`AUTH_TOKENS_FILE` adds named tokens to the same gate as `AUTH_TOKEN`. Blank lines and lines whose first character after ASCII space, tab, and line-ending trim is `#` are ignored. A name is 1–64 characters from `[A-Za-z0-9._-]`. The token is the remainder of the line after the first `:`, trimmed, at least 32 characters, and each byte must be printable ASCII (`0x21`–`0x7E`: no spaces, control bytes, or non-ASCII). Only ASCII spaces, tabs and line endings are trimmed; any other character is part of the token and must be printable ASCII. Generate one with `openssl rand -hex 32`. The name `default` is reserved. `AUTH_TOKEN`, or the generated admin token, joins the set under that name, and a file entry named `default` is refused even when both are unset. Duplicate names or duplicate tokens, including a copy of the default token, refuse startup. A file that is empty, or that contains only blank lines and comments, refuses startup.
 
-The file must live outside the workspace and any bot home (`DATA_DIR/workspace` and `DATA_DIR/cli`). The daemon refuses to start when that path, or the path a symlink resolves to, is inside either tree. It opens the file without following a symlink. The file must be a regular file, owned by the daemon user, mode `0600` or stricter (no group or other permission bits), and at most 64 KiB. The daemon refuses a file that fails those checks and leaves the mode unchanged. A line it cannot parse refuses startup; the error names the line number and does not include the token. Restart the daemon to pick up a change. Either source counts as a token. A non-loopback bind warns only when `AUTH_TOKEN` is unset, no admin token was generated, and `AUTH_TOKENS_FILE` is unset. That warning names both `AUTH_TOKEN` and `AUTH_TOKENS_FILE`.
+The file must live outside the workspace and any bot home (`DATA_DIR/workspace` and `DATA_DIR/cli`). The daemon refuses to start when that path, or the path a symlink resolves to, is inside either tree. It opens the file without following a symlink. The file must be a regular file, owned by the daemon user, mode `0600` or stricter (no group or other permission bits), with no extra hard link, and at most 64 KiB. The daemon refuses a file that fails those checks and leaves the mode unchanged. A line it cannot parse refuses startup; the error names the line number and does not include the token. Send SIGHUP to reload the file when `AUTH_TOKENS_FILE` is set. When it is unset, SIGHUP is ignored and the daemon logs that. Restart also picks up a change. Deleting `AUTH_TOKENS_FILE` and sending SIGHUP keeps the previous tokens. To revoke a token, write a file with the remaining tokens, or restart. A cookie whose token was removed stops working after the reload. Either source counts as a token. A non-loopback bind warns only when `AUTH_TOKEN` is unset, no admin token was generated, and `AUTH_TOKENS_FILE` is unset. That warning names both `AUTH_TOKEN` and `AUTH_TOKENS_FILE`.
 
 Paths inside `DATA_DIR`:
 
@@ -45,6 +45,14 @@ Grants on the bot (`net`, `git`, `ssh`, `build`) are set from the profile. A mis
 User-configured connectors (COIs) are mediated the same way: credentials stay on the host, the daemon performs the real call, and the sandbox sees only a tool or a narrow call site. See the COI section in `docs/sandbox.md`.
 
 To give a bot material, copy or mount it into `workspace/`. The shell PATH includes `/usr/bin`, `/bin`, and toolchain directories already on the read-only `/usr` mount, such as `/usr/local/go/bin` and `/usr/local/bin` when they exist. Home directories and `/snap` are not added.
+
+## Startup changes
+
+A `[[tools.cli]]` `credential_home` that contains a protected path, for example the `[github]` `token_file`, refuses startup. Move the token file outside that home.
+
+A `DATA_DIR` that is a symlink, is not owned by the daemon user, or is group or other writable refuses every start.
+
+A `SANDBOX_BUILD_BINDS` entry that does not exist, or that overlaps a protected path, refuses startup. At run time, a bind that cannot be opened without following symlinks, or that overlaps a protected path, is skipped and logged. The turn continues without that bind.
 
 ## systemd
 

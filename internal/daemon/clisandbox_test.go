@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
+	"github.com/PixnBits/local-grok-bots/internal/coi"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
@@ -345,6 +347,67 @@ func TestAuthTokensFileSymlinkIsDenied(t *testing.T) {
 	roots := run.argRoots(app.policy)
 	if !coiListed(roots, linkAbs) || !coiListed(roots, resolved) {
 		t.Fatalf("argRoots %v lack %s and %s", roots, linkAbs, resolved)
+	}
+}
+
+func TestWorkspaceSymlinkToSecretIsDenied(t *testing.T) {
+	old := claudeSandboxMissing
+	claudeSandboxMissing = func() []string { return nil }
+	t.Cleanup(func() { claudeSandboxMissing = old })
+	t.Setenv("HOME", t.TempDir())
+	dir := t.TempDir()
+	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))
+	admin := filepath.Join(dir, adminTokenFile)
+	before, err := os.ReadFile(admin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := filepath.Join(dir, "ws")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	leak := filepath.Join(ws, "leak")
+	if err := os.Symlink(admin, leak); err != nil {
+		t.Fatal(err)
+	}
+	if !coiListed(app.daemonSecrets(), admin) {
+		t.Fatalf("secrets %v lack %s", app.daemonSecrets(), admin)
+	}
+	bot := store.Bot{ID: "b1"}
+	iso, err := app.cliIsolation(bot, "claude", ws, "run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(iso.SettingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range []string{"Read(/" + admin + ")", "Edit(/" + admin + ")"} {
+		if !strings.Contains(string(raw), rule) {
+			t.Fatalf("claude settings lack %s:\n%s", rule, raw)
+		}
+	}
+	noted, ok := app.botProtect(bot.ID)
+	if !ok || !coiListed(noted, admin) {
+		t.Fatalf("botProtect %v ok=%v", noted, ok)
+	}
+	run, _, err := app.startLGB(context.Background(), bot, "run1", ws)
+	if err != nil || run == nil || !run.protectSet {
+		t.Fatalf("lgb %v set=%v err=%v", run, run != nil && run.protectSet, err)
+	}
+	t.Cleanup(run.stop)
+	roots := run.argRoots(app.policy)
+	if !coiListed(roots, admin) {
+		t.Fatalf("argRoots %v lack %s", roots, admin)
+	}
+	for _, arg := range []string{"leak", admin} {
+		if err := coi.CheckArgs([]string{"edit"}, []string{"edit", arg}, ws, "", nil, roots...); !errors.Is(err, coi.ErrCredHome) {
+			t.Fatalf("path %s: %v", arg, err)
+		}
+	}
+	after, err := os.ReadFile(admin)
+	if err != nil || string(after) != string(before) {
+		t.Fatalf("admin token changed: %v", err)
 	}
 }
 

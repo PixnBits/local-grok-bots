@@ -69,21 +69,8 @@ func runBwrap(ctx context.Context, p *prepared, bwrap string) (string, string, e
 	if st, err := os.Stat("/etc/services"); err == nil && !st.IsDir() {
 		args = append(args, "--ro-bind", "/etc/services", "/etc/services")
 	}
-	for _, m := range p.mounts {
-		flag := "--bind"
-		if m.RO {
-			flag = "--ro-bind"
-		}
-		args = append(args, flag, m.Src, m.Dst)
-	}
-	for _, e := range p.env {
-		k, v, ok := strings.Cut(e, "=")
-		if !ok {
-			continue
-		}
-		args = append(args, "--setenv", k, v)
-	}
 	var infoR, infoW, blockR, blockW *os.File
+	var extra []*os.File
 	if drop {
 		var err error
 		infoR, infoW, err = os.Pipe()
@@ -98,21 +85,47 @@ func runBwrap(ctx context.Context, p *prepared, bwrap string) (string, string, e
 		}
 		defer blockR.Close()
 		defer blockW.Close()
-		// ExtraFiles start at fd 3.
+		// ExtraFiles start at fd 3. Info and block stay 3 and 4.
+		extra = []*os.File{infoW, blockR}
 		args = append(args, "--info-fd", "3", "--userns-block-fd", "4")
+	}
+	margs, bindFiles := mountArgs(p.mounts, len(extra))
+	args = append(args, margs...)
+	for _, e := range p.env {
+		k, v, ok := strings.Cut(e, "=")
+		if !ok {
+			continue
+		}
+		args = append(args, "--setenv", k, v)
 	}
 	args = append(args, "--")
 	args = append(args, commandArgv(p.command)...)
 	cmd := exec.Command(bwrap, args...)
-	if !drop {
-		return capture(ctx, cmd)
+	cmd.ExtraFiles = cmdExtraFiles(extra, bindFiles)
+	closeBinds := func() {
+		for _, f := range bindFiles {
+			if f != nil {
+				_ = f.Close()
+			}
+		}
 	}
-	cmd.ExtraFiles = []*os.File{infoW, blockR}
-	return captureReady(ctx, cmd, func() error {
+	if !drop {
+		return captureReady(ctx, cmd, closeBinds, nil)
+	}
+	return captureReady(ctx, cmd, closeBinds, func() error {
 		_ = infoW.Close()
 		_ = blockR.Close()
 		return finishUserNamespace(ctx, infoR, blockW, uid, gid)
 	})
+}
+
+// cmdExtraFiles places existing bwrap fds (info, block, and any other
+// ExtraFiles) before build-bind fds so the earlier numbers stay put.
+func cmdExtraFiles(extra, binds []*os.File) []*os.File {
+	out := make([]*os.File, 0, len(extra)+len(binds))
+	out = append(out, extra...)
+	out = append(out, binds...)
+	return out
 }
 
 // jailDrops is true when a root daemon has bubblewrap and must run the shell

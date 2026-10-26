@@ -188,6 +188,10 @@ func loggedAddr(out string) (string, bool) {
 }
 
 func TestStartupWarn(t *testing.T) {
+	const wantWarn = "local-grok-bots: WARN: the API is reachable beyond this machine without AUTH_TOKEN or AUTH_TOKENS_FILE; set AUTH_TOKEN, AUTH_TOKENS_FILE, or a loopback BIND_ADDR\n"
+	if bindWarn != wantWarn || !strings.Contains(bindWarn, "AUTH_TOKEN") || !strings.Contains(bindWarn, "AUTH_TOKENS_FILE") {
+		t.Fatalf("bindWarn %q", bindWarn)
+	}
 	t.Setenv("MANAGED_POLICY", "")
 	t.Setenv("BIND_ADDR", "")
 	t.Setenv("AUTH_TOKEN", "")

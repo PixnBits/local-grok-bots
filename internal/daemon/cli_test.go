@@ -479,6 +479,9 @@ func TestCLIShutdownMidTurnResumes(t *testing.T) {
 
 func newCLIApp(t *testing.T, dir, policyPath string) *App {
 	t.Helper()
+	if err := chmodDataDir(dir); err != nil {
+		t.Fatal(err)
+	}
 	cfg := config.Config{
 		DataDir: dir, BindAddr: "127.0.0.1:0",
 		OllamaURL: "http://127.0.0.1:9", Model: "test-model", Version: "0.1.0",

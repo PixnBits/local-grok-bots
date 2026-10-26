@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -142,7 +143,7 @@ func TestFileNamedDefaultWithoutAdminToken(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTokenFile(t, dir, "default:"+aliceTok+"\n", 0o600)
 	err := startTokens(t, dir, path, "")
-	if err == nil || !strings.Contains(err.Error(), "line 1: duplicate name") || strings.Contains(err.Error(), aliceTok) {
+	if err == nil || !strings.Contains(err.Error(), "line 1: name \"default\" is reserved") || strings.Contains(err.Error(), "duplicate name") || strings.Contains(err.Error(), aliceTok) {
 		t.Fatalf("err %v", err)
 	}
 }
@@ -166,7 +167,7 @@ func TestAuthTokensFileRejects(t *testing.T) {
 		{"non-ascii", "alice:" + strings.Repeat("d", 32) + "é\n", "", "line 1: invalid token", strings.Repeat("d", 32) + "é"},
 		{"duplicate name", "alice:" + aliceTok + "\nalice:" + bobTok + "\n", "", "line 2: duplicate name", aliceTok},
 		{"duplicate token", "alice:" + aliceTok + "\nbob:" + aliceTok + "\n", "", "line 2: duplicate token", aliceTok},
-		{"default name", "default:" + bobTok + "\n", aliceTok, "line 1: duplicate name", bobTok},
+		{"default name", "default:" + bobTok + "\n", aliceTok, "line 1: name \"default\" is reserved", bobTok},
 		{"default value", "alice:" + aliceTok + "\n", aliceTok, "line 1: duplicate token", aliceTok},
 	}
 	for _, tc := range checks {
@@ -360,7 +361,7 @@ func TestGeneratedTokenDuplicateIsRejected(t *testing.T) {
 	}
 	path = writeTokenFile(t, dir, "default:"+strings.Repeat("d", 32)+"\n", 0o600)
 	err = startWithPolicy(t, dir, path, "", policy)
-	if err == nil || !strings.Contains(err.Error(), "duplicate name") || strings.Contains(err.Error(), strings.Repeat("d", 32)) {
+	if err == nil || !strings.Contains(err.Error(), "name \"default\" is reserved") || strings.Contains(err.Error(), "duplicate name") || strings.Contains(err.Error(), strings.Repeat("d", 32)) {
 		t.Fatalf("name clash %v", err)
 	}
 }
@@ -386,6 +387,9 @@ func startTokens(t *testing.T, dir, tokensFile, authToken string) error {
 
 func startWithPolicy(t *testing.T, dir, tokensFile, authToken, policy string) error {
 	t.Helper()
+	if err := chmodDataDir(dir); err != nil {
+		t.Fatal(err)
+	}
 	cfg := config.Config{
 		DataDir:        dir,
 		BindAddr:       "127.0.0.1:0",
@@ -405,6 +409,9 @@ func startWithPolicy(t *testing.T, dir, tokensFile, authToken, policy string) er
 
 func openTokenApp(t *testing.T, dir, tokensFile, authToken, auditPath string) (*App, error) {
 	t.Helper()
+	if err := chmodDataDir(dir); err != nil {
+		t.Fatal(err)
+	}
 	cfg := config.Config{
 		DataDir:        dir,
 		BindAddr:       "127.0.0.1:0",
@@ -482,4 +489,388 @@ func takeStderr(t *testing.T) func() string {
 	}
 	t.Cleanup(func() { _ = take() })
 	return take
+}
+
+func TestAuthTokensFileHardLink(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTokenFile(t, dir, "alice:"+aliceTok+"\n", 0o600)
+	if err := os.Link(path, path+".link"); err != nil {
+		t.Fatal(err)
+	}
+	err := startTokens(t, dir, path, "")
+	if err == nil || !strings.Contains(err.Error(), "hard link") || strings.Contains(err.Error(), aliceTok) {
+		t.Fatalf("err %v", err)
+	}
+	st, statErr := os.Stat(path)
+	if statErr != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v %v", st, statErr)
+	}
+}
+
+func TestAuthTokensASCIITrim(t *testing.T) {
+	tok := strings.Repeat("z", 32)
+	t.Run("spaces tabs crlf", func(t *testing.T) {
+		dir := t.TempDir()
+		path := writeTokenFile(t, dir, " \talice\t: \t"+tok+" \t\r\n", 0o600)
+		app := newTokenApp(t, dir, path, "", "")
+		srv := httptest.NewServer(app.Handler())
+		t.Cleanup(srv.Close)
+		if res, _ := do(t, "GET", srv.URL+"/api/bots", nil, tok); res.StatusCode != 200 {
+			t.Fatalf("trimmed %d", res.StatusCode)
+		}
+	})
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"leading nbsp", "alice:\u00A0" + tok + "\n"},
+		{"trailing nbsp", "alice:" + tok + "\u00A0\n"},
+		{"em space", "alice:" + tok + "\u2003\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeTokenFile(t, dir, tc.body, 0o600)
+			err := startTokens(t, dir, path, "")
+			if err == nil || !strings.Contains(err.Error(), "invalid token") || strings.Contains(err.Error(), tok) {
+				t.Fatalf("err %v", err)
+			}
+		})
+	}
+}
+
+func TestAuthTokensReloadSwaps(t *testing.T) {
+	buf := captureStartup(t)
+	dir := t.TempDir()
+	auditPath := filepath.Join(dir, "audit.log")
+	path := writeTokenFile(t, dir, "alice:"+aliceTok+"\n", 0o600)
+	app := newTokenApp(t, dir, path, "", auditPath)
+	srv := httptest.NewServer(app.Handler())
+	t.Cleanup(srv.Close)
+	if res, _ := do(t, "GET", srv.URL+"/api/bots", nil, aliceTok); res.StatusCode != 200 {
+		t.Fatalf("before %d", res.StatusCode)
+	}
+	writeTokenFile(t, dir, "bob:"+bobTok+"\n", 0o600)
+	app.ReloadAuthTokens()
+	if res, _ := do(t, "GET", srv.URL+"/api/bots", nil, aliceTok); res.StatusCode != 401 {
+		t.Fatalf("old bearer %d", res.StatusCode)
+	}
+	if res, _ := do(t, "GET", srv.URL+"/api/bots", nil, bobTok); res.StatusCode != 200 {
+		t.Fatalf("new bearer %d", res.StatusCode)
+	}
+	res, cookie := loginCookie(t, srv.URL, aliceTok)
+	if res.StatusCode != 401 || cookie != nil {
+		t.Fatalf("old login %d cookie %+v", res.StatusCode, cookie)
+	}
+	res, cookie = loginCookie(t, srv.URL, bobTok)
+	if res.StatusCode != http.StatusSeeOther || cookie == nil || cookie.Value != bobTok {
+		t.Fatalf("new login %d cookie %+v", res.StatusCode, cookie)
+	}
+	secs := app.authSecrets()
+	joined := strings.Join(secs, "\n")
+	if strings.Contains(joined, aliceTok) || !strings.Contains(joined, bobTok) {
+		t.Fatalf("secrets %q", joined)
+	}
+	log := buf.String()
+	if !strings.Contains(log, "local-grok-bots: reloaded AUTH_TOKENS_FILE (1 tokens)") || strings.Contains(log, aliceTok) || strings.Contains(log, bobTok) {
+		t.Fatalf("log:\n%s", log)
+	}
+	raw, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if !strings.Contains(text, `"action":"auth_tokens_reloaded"`) || !strings.Contains(text, `"count":1`) || strings.Contains(text, aliceTok) || strings.Contains(text, bobTok) {
+		t.Fatalf("audit:\n%s", text)
+	}
+}
+
+func TestAuthTokensReloadKeepsOldOnFailure(t *testing.T) {
+	buf := captureStartup(t)
+	dir := t.TempDir()
+	path := writeTokenFile(t, dir, "alice:"+aliceTok+"\n", 0o600)
+	app := newTokenApp(t, dir, path, "", "")
+	srv := httptest.NewServer(app.Handler())
+	t.Cleanup(srv.Close)
+
+	t.Run("bad line", func(t *testing.T) {
+		bad := "not-a-pair-" + strings.Repeat("q", 16)
+		writeTokenFile(t, dir, bad+"\n", 0o600)
+		app.ReloadAuthTokens()
+		if res, _ := do(t, "GET", srv.URL+"/api/bots", nil, aliceTok); res.StatusCode != 200 {
+			t.Fatalf("kept %d", res.StatusCode)
+		}
+		log := buf.String()
+		if !strings.Contains(log, "local-grok-bots: WARN: AUTH_TOKENS_FILE reload failed; keeping the previous tokens:") || strings.Contains(log, aliceTok) || strings.Contains(log, bad) {
+			t.Fatalf("log:\n%s", log)
+		}
+	})
+	t.Run("empty", func(t *testing.T) {
+		writeTokenFile(t, dir, "", 0o600)
+		app.ReloadAuthTokens()
+		if res, _ := do(t, "GET", srv.URL+"/api/bots", nil, aliceTok); res.StatusCode != 200 {
+			t.Fatalf("empty kept %d", res.StatusCode)
+		}
+		if !strings.Contains(buf.String(), "local-grok-bots: WARN: AUTH_TOKENS_FILE reload failed; keeping the previous tokens:") {
+			t.Fatalf("log:\n%s", buf.String())
+		}
+	})
+	t.Run("hard link", func(t *testing.T) {
+		writeTokenFile(t, dir, "alice:"+aliceTok+"\n", 0o600)
+		if err := os.Link(path, filepath.Join(dir, "tokens-link")); err != nil && !os.IsExist(err) {
+			t.Fatal(err)
+		}
+		app.ReloadAuthTokens()
+		if res, _ := do(t, "GET", srv.URL+"/api/bots", nil, aliceTok); res.StatusCode != 200 {
+			t.Fatalf("link kept %d", res.StatusCode)
+		}
+		if !strings.Contains(buf.String(), "hard link") || strings.Contains(buf.String(), aliceTok) {
+			t.Fatalf("log:\n%s", buf.String())
+		}
+	})
+}
+
+func TestAuthTokensReloadFailureAudited(t *testing.T) {
+	buf := captureStartup(t)
+	dir := t.TempDir()
+	auditPath := filepath.Join(dir, "audit.log")
+	path := writeTokenFile(t, dir, "alice:"+aliceTok+"\n", 0o600)
+	app := newTokenApp(t, dir, path, "", auditPath)
+	bad := "not-a-pair-" + strings.Repeat("q", 16)
+	writeTokenFile(t, dir, bad+"\n", 0o600)
+	app.ReloadAuthTokens()
+
+	log := buf.String()
+	const warn = "local-grok-bots: WARN: AUTH_TOKENS_FILE reload failed; keeping the previous tokens:"
+	if !strings.Contains(log, warn) || !strings.Contains(log, "invalid line") || strings.Contains(log, aliceTok) || strings.Contains(log, bad) {
+		t.Fatalf("log:\n%s", log)
+	}
+	raw, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if strings.Contains(text, aliceTok) || strings.Contains(text, bad) || strings.Contains(text, "invalid line") || strings.Contains(text, "auth tokens:") {
+		t.Fatalf("audit leaked:\n%s", text)
+	}
+	var rows []map[string]any
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatalf("row %q: %v", line, err)
+		}
+		rows = append(rows, row)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows %d:\n%s", len(rows), text)
+	}
+	row := rows[0]
+	if len(row) != 3 || row["action"] != "auth_tokens_reload_failed" || row["reason"] != "parse" || row["ts"] == "" {
+		t.Fatalf("row %#v", row)
+	}
+	if _, ok := row["ts"].(string); !ok {
+		t.Fatalf("ts %#v", row["ts"])
+	}
+}
+
+func TestAuthTokensReloadReasons(t *testing.T) {
+	cases := []struct {
+		name   string
+		reason string
+		mutate func(t *testing.T, dir, path string)
+	}{
+		{name: "mode", reason: "mode", mutate: func(t *testing.T, dir, path string) {
+			writeTokenFile(t, dir, "alice:"+aliceTok+"\n", 0o644)
+		}},
+		{name: "nlink", reason: "nlink", mutate: func(t *testing.T, dir, path string) {
+			writeTokenFile(t, dir, "alice:"+aliceTok+"\n", 0o600)
+			if err := os.Link(path, filepath.Join(dir, "tokens-link")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "parse", reason: "parse", mutate: func(t *testing.T, dir, path string) {
+			writeTokenFile(t, dir, "not-a-pair-"+strings.Repeat("q", 16)+"\n", 0o600)
+		}},
+		{name: "empty", reason: "empty", mutate: func(t *testing.T, dir, path string) {
+			writeTokenFile(t, dir, "", 0o600)
+		}},
+		{name: "open", reason: "open", mutate: func(t *testing.T, dir, path string) {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			auditPath := filepath.Join(dir, "audit.log")
+			path := writeTokenFile(t, dir, "alice:"+aliceTok+"\n", 0o600)
+			app := newTokenApp(t, dir, path, "", auditPath)
+			tc.mutate(t, dir, path)
+			app.ReloadAuthTokens()
+			assertReloadReason(t, auditPath, path, tc.reason)
+		})
+	}
+}
+
+func assertReloadReason(t *testing.T, auditPath, tokensPath, reason string) {
+	t.Helper()
+	raw, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if strings.Contains(text, aliceTok) || strings.Contains(text, tokensPath) || strings.Contains(text, "invalid line") || strings.Contains(text, "auth tokens:") {
+		t.Fatalf("audit leaked:\n%s", text)
+	}
+	var rows []map[string]any
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatalf("row %q: %v", line, err)
+		}
+		rows = append(rows, row)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows %d:\n%s", len(rows), text)
+	}
+	row := rows[0]
+	if len(row) != 3 || row["action"] != "auth_tokens_reload_failed" || row["reason"] != reason || row["ts"] == "" {
+		t.Fatalf("row %#v", row)
+	}
+	if _, ok := row["ts"].(string); !ok {
+		t.Fatalf("ts %#v", row["ts"])
+	}
+}
+
+func TestAuthTokensReloadRace(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTokenFile(t, dir, "alice:"+aliceTok+"\n", 0o600)
+	app := newTokenApp(t, dir, path, "", "")
+	srv := httptest.NewServer(app.Handler())
+	t.Cleanup(srv.Close)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	bodies := []string{"alice:" + aliceTok + "\n", "bob:" + bobTok + "\n"}
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		i := 0
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			i++
+			next := path + ".next"
+			if err := os.WriteFile(next, []byte(bodies[i%2]), 0o600); err != nil {
+				return
+			}
+			if err := os.Chmod(next, 0o600); err != nil {
+				return
+			}
+			if err := os.Rename(next, path); err != nil {
+				return
+			}
+			app.ReloadAuthTokens()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_ = app.authSecrets()
+			_ = app.tokensConfigured()
+			_ = app.configuredTokens()
+			for _, tok := range []string{aliceTok, bobTok} {
+				res, _ := do(t, "GET", srv.URL+"/api/bots", nil, tok)
+				if res.StatusCode != 200 && res.StatusCode != 401 {
+					t.Errorf("status %d", res.StatusCode)
+					return
+				}
+			}
+		}
+	}()
+	time.Sleep(200 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+	writeTokenFile(t, dir, "bob:"+bobTok+"\n", 0o600)
+	app.ReloadAuthTokens()
+	if res, _ := do(t, "GET", srv.URL+"/api/bots", nil, bobTok); res.StatusCode != 200 {
+		t.Fatalf("bob %d", res.StatusCode)
+	}
+	if res, _ := do(t, "GET", srv.URL+"/api/bots", nil, aliceTok); res.StatusCode != 401 {
+		t.Fatalf("alice %d", res.StatusCode)
+	}
+}
+
+func TestAuthTokensSymlinkedParent(t *testing.T) {
+	body := "alice:" + aliceTok + "\n"
+	t.Run("into workspace", func(t *testing.T) {
+		dir := t.TempDir()
+		ws := filepath.Join(dir, "workspace")
+		if err := os.MkdirAll(ws, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(t.TempDir(), "via")
+		if err := os.Symlink(ws, link); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(link, "tokens")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		err := startTokens(t, dir, path, "")
+		if err == nil || !strings.Contains(err.Error(), "AUTH_TOKENS_FILE") || strings.Contains(err.Error(), aliceTok) {
+			t.Fatalf("err %v", err)
+		}
+	})
+	t.Run("outside", func(t *testing.T) {
+		dir := t.TempDir()
+		real := t.TempDir()
+		link := filepath.Join(t.TempDir(), "via")
+		if err := os.Symlink(real, link); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(link, "tokens")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		app := newTokenApp(t, dir, path, "", "")
+		raw, err := filepath.Abs(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw = filepath.Clean(raw)
+		resolved, err := filepath.EvalSymlinks(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resolved = filepath.Clean(resolved)
+		if raw == resolved {
+			t.Fatalf("symlink parent %s resolved to itself", raw)
+		}
+		secrets := app.daemonSecrets()
+		for _, p := range []string{raw, resolved} {
+			if !coiListed(secrets, p) {
+				t.Fatalf("secrets %v lack %s", secrets, p)
+			}
+		}
+	})
 }

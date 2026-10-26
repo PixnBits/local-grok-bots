@@ -25,7 +25,7 @@ const usage = `local-grok-bots is a local daemon for a personal bot roster.
   SANDBOX_BUILD_BINDS   unset
 
 A policy.toml bind overrides BIND_ADDR.
-AUTH_TOKENS_FILE is a file of name:token lines and is read at startup.
+AUTH_TOKENS_FILE is a file of name:token lines. It is read at startup. SIGHUP reloads it when set, and is otherwise ignored (logged).
 `
 
 func main() {
@@ -39,6 +39,9 @@ func main() {
 	if sandbox.HandleArgs(os.Args[1:]) {
 		return
 	}
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
 	config.ReexecIfNeeded()
 	cfg := config.FromEnv()
 	app, err := daemon.New(cfg, nil)
@@ -48,6 +51,7 @@ func main() {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	go daemon.WatchSIGHUP(ctx, hup, cfg.AuthTokensFile, app.ReloadAuthTokens, nil)
 	if err := app.Run(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "local-grok-bots:", err)
 		os.Exit(1)

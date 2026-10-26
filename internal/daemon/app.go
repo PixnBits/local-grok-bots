@@ -64,9 +64,10 @@ type App struct {
 	// The value is the bot and run the token was issued for.
 	lgbMu   sync.Mutex
 	lgbLive map[string]lgbCred
-	// accessTokens are the named tokens from AUTH_TOKENS_FILE.
+	// authTokens is the named set from AUTH_TOKENS_FILE.
 	// cfg.AuthToken, when set, is the additional name "default".
-	accessTokens []namedToken
+	// Reload replaces the pointer; readers load it.
+	authTokens atomic.Pointer[authTokenSet]
 	// protectByBot is the path deny list written for the bot's current turn.
 	// The broker will not use a credential home that is absent from it.
 	protectMu    sync.Mutex
@@ -153,6 +154,12 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	if pol.HasOllamaModel {
 		cfg.Model = pol.OllamaModel
 	}
+	// Every start, including an existing admin token, AUTH_TOKEN, and
+	// Ollama-only. ensureAdminToken returns before this check when a token
+	// is already present.
+	if err := prepareAdminDir(cfg.DataDir); err != nil {
+		return nil, err
+	}
 	tok, tokPath, err := ensureAdminToken(cfg.DataDir, cfg.AuthToken, pol.UsesCLI())
 	if err != nil {
 		return nil, err
@@ -161,11 +168,11 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		cfg.AuthToken = tok
 		fmt.Fprintf(os.Stderr, "local-grok-bots: a CLI backend is enabled, so the API requires a token; it is in %s. Open /login?token=<token> once per browser.\n", tokPath)
 	}
-	if err := checkAuthTokensLocation(cfg.AuthTokensFile, cfg.Workspace(), cfg.DataDir); err != nil {
+	fileTokens, err := readAuthTokenSet(cfg, cfg.AuthToken)
+	if err != nil {
 		return nil, err
 	}
-	fileTokens, err := loadAuthTokens(cfg.AuthTokensFile, cfg.AuthToken)
-	if err != nil {
+	if err := checkPathOverlaps(cfg, pol); err != nil {
 		return nil, err
 	}
 	logw := logOut
@@ -201,23 +208,25 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	a := &App{
-		cfg:          cfg,
-		logw:         logw,
-		st:           st,
-		model:        m,
-		ws:           cfg.Workspace(),
-		bus:          NewBus(),
-		policy:       pol,
-		audit:        aud,
-		ctx:          ctx,
-		cancel:       cancel,
-		loops:        map[string]*loopState{},
-		resume:       map[string]resumeHold{},
-		pending:      map[string][]model.Message{},
-		activity:     map[string]time.Time{},
-		permTokens:   map[string]permBind{},
-		permBase:     httpBase(cfg.BindAddr),
-		accessTokens: fileTokens,
+		cfg:        cfg,
+		logw:       logw,
+		st:         st,
+		model:      m,
+		ws:         cfg.Workspace(),
+		bus:        NewBus(),
+		policy:     pol,
+		audit:      aud,
+		ctx:        ctx,
+		cancel:     cancel,
+		loops:      map[string]*loopState{},
+		resume:     map[string]resumeHold{},
+		pending:    map[string][]model.Message{},
+		activity:   map[string]time.Time{},
+		permTokens: map[string]permBind{},
+		permBase:   httpBase(cfg.BindAddr),
+	}
+	if len(fileTokens) > 0 {
+		a.authTokens.Store(&authTokenSet{toks: fileTokens})
 	}
 	a.perm = permission.New(permission.Options{
 		Publish: func(runID, event string, payload any) {
@@ -389,6 +398,40 @@ func (a *App) fireDue() {
 
 func (a *App) log(botID, kind string, detail any) {
 	_ = a.st.AddLog(botID, kind, detail)
+	if kind == "sandbox_block" {
+		a.auditSandboxBlock(botID, detail)
+	}
+}
+
+// auditSandboxBlock mirrors a sandbox_block row into the audit log when
+// audit is enabled. detail is the path text already logged, never file bytes.
+func (a *App) auditSandboxBlock(botID string, detail any) {
+	if a == nil || a.audit == nil || !a.audit.Enabled() {
+		return
+	}
+	rec := map[string]any{"action": "sandbox_block"}
+	if botID != "" {
+		rec["bot_id"] = botID
+	}
+	if d := sandboxBlockDetail(detail); d != "" {
+		rec["detail"] = d
+	}
+	a.audit.Write(rec)
+}
+
+func sandboxBlockDetail(detail any) string {
+	switch v := detail.(type) {
+	case string:
+		return v
+	case map[string]any:
+		if s, ok := v["detail"].(string); ok && s != "" {
+			return s
+		}
+		if s, ok := v["path"].(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // kick starts a run if the bot is idle and has pending messages.

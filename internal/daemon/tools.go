@@ -494,6 +494,7 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			NetAllow:        current.NetAllow,
 			SSHAllow:        current.SSHAllow,
 			BuildBinds:      a.cfg.BuildBinds,
+			Protect:         a.daemonSecrets(),
 			SSHKey:          a.sshKeyPath(),
 			GitHubSock:      ghSock,
 			GitHubRepos:     ghRepos,

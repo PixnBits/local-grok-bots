@@ -57,6 +57,8 @@ func TestHelpExitsBeforeStartup(t *testing.T) {
 				"AUTH_TOKEN", "unset",
 				"AUTH_TOKENS_FILE",
 				"name:token",
+				"SIGHUP",
+				"ignored",
 				"SANDBOX_BUILD_BINDS",
 			} {
 				if !strings.Contains(out, needle) {
