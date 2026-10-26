@@ -80,33 +80,36 @@ func readAdminToken(path string) (string, bool, error) {
 	return tok, true, nil
 }
 
-// prepareAdminDir refuses a DATA_DIR that is missing the ownership and mode
-// a token file needs. It creates the directory only when it does not exist.
+// prepareAdminDir requires DATA_DIR to be a real directory owned by the
+// effective uid and not group or other writable. A missing path is created
+// mode 0700 and is not chmodded when it already exists. New calls this on
+// every start, before any token is read. ensureAdminToken calls it again
+// before creating a token.
 func prepareAdminDir(dataDir string) error {
 	var st unix.Stat_t
 	err := unix.Lstat(dataDir, &st)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("admin token: %s: %w", dataDir, err)
+			return fmt.Errorf("DATA_DIR %s: %w", dataDir, err)
 		}
 		if err := os.MkdirAll(dataDir, 0o700); err != nil {
-			return fmt.Errorf("admin token: %s: %w", dataDir, err)
+			return fmt.Errorf("DATA_DIR %s: %w", dataDir, err)
 		}
 		if err := unix.Lstat(dataDir, &st); err != nil {
-			return fmt.Errorf("admin token: %s: %w", dataDir, err)
+			return fmt.Errorf("DATA_DIR %s: %w", dataDir, err)
 		}
 	}
 	if st.Mode&unix.S_IFMT == unix.S_IFLNK {
-		return fmt.Errorf("admin token: %s is a symlink", dataDir)
+		return fmt.Errorf("DATA_DIR %s is a symlink", dataDir)
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
-		return fmt.Errorf("admin token: %s is not a directory", dataDir)
+		return fmt.Errorf("DATA_DIR %s is not a directory", dataDir)
 	}
 	if int(st.Uid) != os.Geteuid() {
-		return fmt.Errorf("admin token: %s owner mismatch", dataDir)
+		return fmt.Errorf("DATA_DIR %s owner mismatch", dataDir)
 	}
 	if st.Mode&0o022 != 0 {
-		return fmt.Errorf("admin token: %s is group or other writable", dataDir)
+		return fmt.Errorf("DATA_DIR %s is group or other writable", dataDir)
 	}
 	return nil
 }

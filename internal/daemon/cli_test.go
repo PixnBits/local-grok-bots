@@ -479,8 +479,7 @@ func TestCLIShutdownMidTurnResumes(t *testing.T) {
 
 func newCLIApp(t *testing.T, dir, policyPath string) *App {
 	t.Helper()
-	// t.TempDir is 0775 when umask is 0002. Token generation refuses a group-writable DATA_DIR.
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := chmodDataDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Config{

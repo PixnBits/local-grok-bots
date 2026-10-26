@@ -40,7 +40,7 @@ func TestLiveCLISmoke(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := chmodDataDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	app, err := New(config.Config{
@@ -106,7 +106,7 @@ func TestLiveClaudeStreamControl(t *testing.T) {
 		t.Skip("set LGB_LIVE_CLI=1 to send one live stream-control prompt")
 	}
 	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := chmodDataDir(dir); err != nil {
 		t.Fatal(err)
 	}
 	app, err := New(config.Config{

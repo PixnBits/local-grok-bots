@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/PixnBits/local-grok-bots/internal/config"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
 
 func TestBuildBindOverlapsSecret(t *testing.T) {
@@ -216,6 +217,112 @@ func TestAuthTokensFileInsideBuildBind(t *testing.T) {
 	})
 }
 
+func TestLinkedDataDirBuildBinds(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "data")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if ents, err := os.ReadDir(real); err != nil || len(ents) != 0 {
+		t.Fatalf("real dir %v %v", ents, err)
+	}
+	check := func(t *testing.T, bind string) error {
+		t.Helper()
+		return checkPathOverlaps(config.Config{
+			DataDir:    link,
+			BuildBinds: []string{bind},
+		}, policy.Policy{})
+	}
+	t.Run("resolved data dir", func(t *testing.T) {
+		err := check(t, real)
+		if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), real) {
+			t.Fatalf("err %v", err)
+		}
+	})
+	t.Run("sub of nonexistent secret", func(t *testing.T) {
+		// cli does not exist. The bind is a child of that secret after the
+		// symlink ancestor is resolved.
+		bind := filepath.Join(real, "cli", "child")
+		err := check(t, bind)
+		if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), bind) {
+			t.Fatalf("err %v", err)
+		}
+	})
+	t.Run("unrelated bind", func(t *testing.T) {
+		if err := check(t, t.TempDir()); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestPathFormsResolvesMissingAncestor(t *testing.T) {
+	data := t.TempDir()
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "via")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(link, "nested", "policy.toml")
+	if _, err := os.Lstat(missing); !os.IsNotExist(err) {
+		t.Fatalf("missing path %v", err)
+	}
+	cfg := config.Config{DataDir: data, PolicyPath: missing}
+	cfg.BuildBinds = []string{filepath.Join(real, "nested", "policy.toml")}
+	err := checkPathOverlaps(cfg, policy.Policy{})
+	if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), cfg.BuildBinds[0]) {
+		t.Fatalf("resolved secret %v", err)
+	}
+	cfg.BuildBinds = []string{filepath.Join(real, "nested", "policy.toml", "child")}
+	err = checkPathOverlaps(cfg, policy.Policy{})
+	if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") {
+		t.Fatalf("child of missing secret %v", err)
+	}
+	cfg.BuildBinds = []string{t.TempDir()}
+	if err := checkPathOverlaps(cfg, policy.Policy{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCredentialHomeUnderDataDirCLI(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("BIND_ADDR", "")
+	t.Setenv("AUTH_TOKEN", "")
+	t.Run("under cli is allowed", func(t *testing.T) {
+		dir := t.TempDir()
+		home := filepath.Join(dir, "cli", "bot", "home")
+		if err := overlapStart(t, config.Config{
+			DataDir:    dir,
+			PolicyPath: writeHomePolicy(t, dir, home),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("equals data dir", func(t *testing.T) {
+		dir := t.TempDir()
+		err := overlapStart(t, config.Config{
+			DataDir:    dir,
+			PolicyPath: writeHomePolicy(t, dir, dir),
+		})
+		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), dir) {
+			t.Fatalf("err %v", err)
+		}
+	})
+	t.Run("contains data dir", func(t *testing.T) {
+		parent := t.TempDir()
+		dir := filepath.Join(parent, "data")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		err := overlapStart(t, config.Config{
+			DataDir:    dir,
+			PolicyPath: writeHomePolicy(t, dir, parent),
+		})
+		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), parent) {
+			t.Fatalf("err %v", err)
+		}
+	})
+}
+
 func writeHomePolicy(t *testing.T, dir, home string) string {
 	t.Helper()
 	path := filepath.Join(dir, "policy.toml")
@@ -240,6 +347,9 @@ func overlapStart(t *testing.T, cfg config.Config) error {
 
 func overlapOpen(t *testing.T, cfg config.Config) (*App, error) {
 	t.Helper()
+	if err := chmodDataDir(cfg.DataDir); err != nil {
+		t.Fatal(err)
+	}
 	if cfg.BindAddr == "" {
 		cfg.BindAddr = "127.0.0.1:0"
 	}

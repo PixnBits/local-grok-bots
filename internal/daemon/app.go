@@ -154,6 +154,12 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	if pol.HasOllamaModel {
 		cfg.Model = pol.OllamaModel
 	}
+	// Every start, including an existing admin token, AUTH_TOKEN, and
+	// Ollama-only. ensureAdminToken returns before this check when a token
+	// is already present.
+	if err := prepareAdminDir(cfg.DataDir); err != nil {
+		return nil, err
+	}
 	tok, tokPath, err := ensureAdminToken(cfg.DataDir, cfg.AuthToken, pol.UsesCLI())
 	if err != nil {
 		return nil, err

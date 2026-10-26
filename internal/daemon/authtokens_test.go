@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -386,6 +387,9 @@ func startTokens(t *testing.T, dir, tokensFile, authToken string) error {
 
 func startWithPolicy(t *testing.T, dir, tokensFile, authToken, policy string) error {
 	t.Helper()
+	if err := chmodDataDir(dir); err != nil {
+		t.Fatal(err)
+	}
 	cfg := config.Config{
 		DataDir:        dir,
 		BindAddr:       "127.0.0.1:0",
@@ -405,6 +409,9 @@ func startWithPolicy(t *testing.T, dir, tokensFile, authToken, policy string) er
 
 func openTokenApp(t *testing.T, dir, tokensFile, authToken, auditPath string) (*App, error) {
 	t.Helper()
+	if err := chmodDataDir(dir); err != nil {
+		t.Fatal(err)
+	}
 	cfg := config.Config{
 		DataDir:        dir,
 		BindAddr:       "127.0.0.1:0",
@@ -620,6 +627,52 @@ func TestAuthTokensReloadKeepsOldOnFailure(t *testing.T) {
 			t.Fatalf("log:\n%s", buf.String())
 		}
 	})
+}
+
+func TestAuthTokensReloadFailureAudited(t *testing.T) {
+	buf := captureStartup(t)
+	dir := t.TempDir()
+	auditPath := filepath.Join(dir, "audit.log")
+	path := writeTokenFile(t, dir, "alice:"+aliceTok+"\n", 0o600)
+	app := newTokenApp(t, dir, path, "", auditPath)
+	bad := "not-a-pair-" + strings.Repeat("q", 16)
+	writeTokenFile(t, dir, bad+"\n", 0o600)
+	app.ReloadAuthTokens()
+
+	log := buf.String()
+	const warn = "local-grok-bots: WARN: AUTH_TOKENS_FILE reload failed; keeping the previous tokens:"
+	if !strings.Contains(log, warn) || !strings.Contains(log, "invalid line") || strings.Contains(log, aliceTok) || strings.Contains(log, bad) {
+		t.Fatalf("log:\n%s", log)
+	}
+	raw, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(raw)
+	if strings.Contains(text, aliceTok) || strings.Contains(text, bad) || strings.Contains(text, "invalid line") || strings.Contains(text, "auth tokens:") {
+		t.Fatalf("audit leaked:\n%s", text)
+	}
+	var rows []map[string]any
+	for _, line := range strings.Split(text, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var row map[string]any
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatalf("row %q: %v", line, err)
+		}
+		rows = append(rows, row)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows %d:\n%s", len(rows), text)
+	}
+	row := rows[0]
+	if len(row) != 2 || row["action"] != "auth_tokens_reload_failed" || row["ts"] == "" {
+		t.Fatalf("row %#v", row)
+	}
+	if _, ok := row["ts"].(string); !ok {
+		t.Fatalf("ts %#v", row["ts"])
+	}
 }
 
 func TestAuthTokensReloadRace(t *testing.T) {

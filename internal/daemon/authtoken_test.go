@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/config"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 	"golang.org/x/sys/unix"
 )
@@ -362,6 +363,108 @@ func TestAdminTokenDataDirRefused(t *testing.T) {
 		}
 		if _, statErr := os.Lstat(filepath.Join(real, adminTokenFile)); !os.IsNotExist(statErr) {
 			t.Fatalf("wrote through DATA_DIR symlink: %v", statErr)
+		}
+	})
+}
+
+func TestDataDirModeCheckedOnNew(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("BIND_ADDR", "")
+	t.Setenv("AUTH_TOKEN", "")
+	t.Setenv("AUTH_TOKENS_FILE", "")
+
+	start := func(t *testing.T, dir string, cli bool, token string) error {
+		t.Helper()
+		cfg := config.Config{
+			DataDir:   dir,
+			BindAddr:  "127.0.0.1:0",
+			OllamaURL: "http://127.0.0.1:9",
+			Model:     "test-model",
+			Version:   "0.1.0",
+			AuthToken: token,
+		}
+		if cli {
+			cfg.PolicyPath = writeCLIPolicy(t, dir)
+		}
+		app, err := New(cfg, nil)
+		if app != nil {
+			app.Shutdown()
+		}
+		return err
+	}
+	assertLoose := func(t *testing.T, dir string, mode os.FileMode, err error, secret string) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), dir) || !strings.Contains(err.Error(), "writable") || (secret != "" && strings.Contains(err.Error(), secret)) {
+			t.Fatalf("err %v", err)
+		}
+		st, statErr := os.Lstat(dir)
+		if statErr != nil || st.Mode().Perm() != mode {
+			t.Fatalf("mode %v %v", st.Mode(), statErr)
+		}
+	}
+
+	tok := strings.Repeat("a", 64)
+	for _, tc := range []struct {
+		name string
+		mode os.FileMode
+	}{
+		{"0777 existing token", 0o777},
+		{"0775 existing token", 0o775},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeExact(t, filepath.Join(dir, adminTokenFile), []byte(tok+"\n"), 0o600)
+			if err := os.Chmod(dir, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			err := start(t, dir, true, "")
+			assertLoose(t, dir, tc.mode, err, tok)
+			path := filepath.Join(dir, adminTokenFile)
+			st, statErr := os.Lstat(path)
+			got, _ := os.ReadFile(path)
+			if statErr != nil || st.Mode().Perm() != 0o600 || string(got) != tok+"\n" {
+				t.Fatalf("token %v %q %v", st.Mode(), got, statErr)
+			}
+		})
+	}
+	t.Run("0777 auth token", func(t *testing.T) {
+		envTok := strings.Repeat("p", 32)
+		t.Setenv("AUTH_TOKEN", envTok)
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		err := start(t, dir, false, envTok)
+		assertLoose(t, dir, 0o777, err, envTok)
+		if _, statErr := os.Lstat(filepath.Join(dir, adminTokenFile)); !os.IsNotExist(statErr) {
+			t.Fatalf("admin token created: %v", statErr)
+		}
+	})
+	t.Run("0777 ollama", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		err := start(t, dir, false, "")
+		assertLoose(t, dir, 0o777, err, "")
+		if _, statErr := os.Lstat(filepath.Join(dir, adminTokenFile)); !os.IsNotExist(statErr) {
+			t.Fatalf("admin token created: %v", statErr)
+		}
+	})
+	t.Run("0700 starts", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := start(t, dir, false, ""); err != nil {
+			t.Fatal(err)
+		}
+		if _, statErr := os.Lstat(filepath.Join(dir, adminTokenFile)); !os.IsNotExist(statErr) {
+			t.Fatalf("ollama wrote a token: %v", statErr)
+		}
+		st, err := os.Lstat(dir)
+		if err != nil || st.Mode().Perm() != 0o700 {
+			t.Fatalf("mode %v %v", st.Mode(), err)
 		}
 	})
 }

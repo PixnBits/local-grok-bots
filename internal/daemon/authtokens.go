@@ -339,6 +339,9 @@ func (a *App) ReloadAuthTokens() {
 			err = errors.New("auth tokens: AUTH_TOKENS_FILE has no tokens")
 		}
 		a.writeStartup("local-grok-bots: WARN: AUTH_TOKENS_FILE reload failed; keeping the previous tokens: %s\n", err)
+		if a.audit != nil && a.audit.Enabled() {
+			a.audit.Write(map[string]any{"action": "auth_tokens_reload_failed"})
+		}
 		return
 	}
 	a.authTokens.Store(&authTokenSet{toks: append([]namedToken(nil), toks...)})
