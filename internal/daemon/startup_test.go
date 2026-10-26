@@ -282,9 +282,25 @@ func TestStartupWarn(t *testing.T) {
 		if err := os.Chmod(path, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		_, out := open(t, "192.168.1.5:9", "", "", path)
-		if out != bindWarn {
-			t.Fatalf("log:\n%s", out)
+		data := filepath.Join(dir, "data")
+		cfg := config.Config{
+			DataDir:        data,
+			BindAddr:       "192.168.1.5:9",
+			OllamaURL:      "http://127.0.0.1:9",
+			Model:          "test-model",
+			Version:        "0.1.0",
+			AuthTokensFile: path,
+		}
+		buf := captureStartup(t)
+		app, err := New(cfg, fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+			return model.ChatResponse{}, nil
+		}})
+		if app != nil {
+			app.Shutdown()
+		}
+		out := buf.String()
+		if err == nil || !strings.Contains(err.Error(), "AUTH_TOKENS_FILE") || strings.Contains(err.Error(), "# none") || out == bindWarn || strings.Contains(out, "WARN:") {
+			t.Fatalf("err %v log:\n%s", err, out)
 		}
 	})
 }

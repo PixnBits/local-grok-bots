@@ -1076,10 +1076,11 @@ func botGrants(bot store.Bot) clisession.Grants {
 // daemonSecrets are paths no CLI tool or shell may read: the admin token,
 // the database, policy.toml, DATA_DIR/cli (MCP tokens and CLI state),
 // DATA_DIR/coi (staged jail homes and the proxy socket), DATA_DIR/cli-proxy
-// and DATA_DIR/cli-egress (the per-run unix sockets), and each tools.cli
-// credential_home from the policy read for this call. The workspace is not
-// included. Those data directories are created so Grok, which only denies
-// paths that exist, still binds them.
+// and DATA_DIR/cli-egress (the per-run unix sockets), AUTH_TOKENS_FILE when
+// set (the cleaned absolute path and, when it differs, the symlink target),
+// and each tools.cli credential_home from the policy read for this call.
+// The workspace is not included. Those data directories are created so Grok,
+// which only denies paths that exist, still binds them.
 func (a *App) daemonSecrets() []string {
 	pol := a.policy
 	if fresh, err := a.policyNow(); err == nil && (strings.TrimSpace(a.cfg.PolicyPath) == "" || fresh.Loaded) {
@@ -1122,6 +1123,13 @@ func (a *App) secretsFrom(pol policy.Policy) []string {
 		}
 		seen[home] = true
 		out = append(out, home)
+	}
+	for _, p := range authTokensPaths(a.cfg.AuthTokensFile) {
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
 	}
 	return out
 }

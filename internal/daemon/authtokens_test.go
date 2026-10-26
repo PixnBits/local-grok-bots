@@ -10,7 +10,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/config"
 )
@@ -121,25 +123,27 @@ func TestNamedTokenRemovedOnRestart(t *testing.T) {
 	}
 }
 
-func TestEmptyTokenFileLeavesAPIOpen(t *testing.T) {
-	dir := t.TempDir()
-	path := writeTokenFile(t, dir, "# none\n\n", 0o600)
-	app := newTokenApp(t, dir, path, "", "")
-	srv := httptest.NewServer(app.Handler())
-	t.Cleanup(srv.Close)
-	if res, _ := do(t, "GET", srv.URL+"/api/bots", nil, ""); res.StatusCode != 200 {
-		t.Fatalf("empty file %d", res.StatusCode)
+func TestAuthTokensFileEmptyRefuses(t *testing.T) {
+	for _, body := range []string{"", "# none\n\n", "\n\n  \n"} {
+		dir := t.TempDir()
+		path := writeTokenFile(t, dir, body, 0o600)
+		err := startTokens(t, dir, path, "")
+		if err == nil || !strings.Contains(err.Error(), "AUTH_TOKENS_FILE") || strings.Contains(err.Error(), "# none") {
+			t.Fatalf("body %q err %v", body, err)
+		}
+		err = startTokens(t, dir, path, aliceTok)
+		if err == nil || !strings.Contains(err.Error(), "AUTH_TOKENS_FILE") || strings.Contains(err.Error(), aliceTok) {
+			t.Fatalf("with AUTH_TOKEN body %q err %v", body, err)
+		}
 	}
 }
 
 func TestFileNamedDefaultWithoutAdminToken(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTokenFile(t, dir, "default:"+aliceTok+"\n", 0o600)
-	app := newTokenApp(t, dir, path, "", "")
-	srv := httptest.NewServer(app.Handler())
-	t.Cleanup(srv.Close)
-	if res, _ := do(t, "GET", srv.URL+"/api/bots", nil, aliceTok); res.StatusCode != 200 {
-		t.Fatalf("default name %d", res.StatusCode)
+	err := startTokens(t, dir, path, "")
+	if err == nil || !strings.Contains(err.Error(), "line 1: duplicate name") || strings.Contains(err.Error(), aliceTok) {
+		t.Fatalf("err %v", err)
 	}
 }
 
@@ -156,6 +160,10 @@ func TestAuthTokensFileRejects(t *testing.T) {
 		{"bad name", "# c\nbad name:" + aliceTok + "\n", "", "line 2", aliceTok},
 		{"short token", "alice:" + strings.Repeat("a", 31) + "\n", "", "line 1", strings.Repeat("a", 31)},
 		{"token space", "alice:" + aliceTok + " trailing\n", "", "line 1", aliceTok},
+		{"nul", "alice:" + strings.Repeat("a", 31) + "\x00b\n", "", "line 1: invalid token", strings.Repeat("a", 31) + "\x00b"},
+		{"esc", "alice:" + strings.Repeat("b", 32) + "\x1b\n", "", "line 1: invalid token", strings.Repeat("b", 32) + "\x1b"},
+		{"del", "alice:" + strings.Repeat("c", 32) + "\x7f\n", "", "line 1: invalid token", strings.Repeat("c", 32) + "\x7f"},
+		{"non-ascii", "alice:" + strings.Repeat("d", 32) + "é\n", "", "line 1: invalid token", strings.Repeat("d", 32) + "é"},
 		{"duplicate name", "alice:" + aliceTok + "\nalice:" + bobTok + "\n", "", "line 2: duplicate name", aliceTok},
 		{"duplicate token", "alice:" + aliceTok + "\nbob:" + aliceTok + "\n", "", "line 2: duplicate token", aliceTok},
 		{"default name", "default:" + bobTok + "\n", aliceTok, "line 1: duplicate name", bobTok},
@@ -250,6 +258,92 @@ func TestAuthTokensFileRejects(t *testing.T) {
 	if logged := stderr(); strings.Contains(logged, aliceTok) || strings.Contains(logged, bobTok) {
 		t.Fatal("stderr includes a token")
 	}
+}
+
+func TestPrintableASCIITokenAccepted(t *testing.T) {
+	tok := strings.Repeat("!~", 16)
+	if len(tok) != 32 {
+		t.Fatalf("len %d", len(tok))
+	}
+	dir := t.TempDir()
+	path := writeTokenFile(t, dir, "alice:"+tok+"\n", 0o600)
+	app := newTokenApp(t, dir, path, "", "")
+	srv := httptest.NewServer(app.Handler())
+	t.Cleanup(srv.Close)
+	if res, _ := do(t, "GET", srv.URL+"/api/bots", nil, tok); res.StatusCode != 200 {
+		t.Fatalf("printable %d", res.StatusCode)
+	}
+}
+
+func TestAuthTokensFileFIFO(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tokens")
+	if err := syscall.Mkfifo(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := readAuthTokensFile(path)
+		errCh <- err
+	}()
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "regular") {
+			t.Fatalf("err %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		w, werr := os.OpenFile(path, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+		if werr == nil {
+			w.Close()
+		}
+		t.Fatal("readAuthTokensFile blocked on a FIFO")
+	}
+}
+
+func TestAuthTokensFileInsideWorkspace(t *testing.T) {
+	body := "alice:" + aliceTok + "\n"
+	write := func(t *testing.T, path string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refuse := func(t *testing.T, dir, path string) {
+		t.Helper()
+		err := startTokens(t, dir, path, "")
+		if err == nil || !strings.Contains(err.Error(), "AUTH_TOKENS_FILE") || strings.Contains(err.Error(), aliceTok) {
+			t.Fatalf("err %v", err)
+		}
+	}
+	t.Run("workspace", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "workspace", "tokens")
+		write(t, path)
+		refuse(t, dir, path)
+	})
+	t.Run("symlink target", func(t *testing.T) {
+		dir := t.TempDir()
+		outside := t.TempDir()
+		target := filepath.Join(dir, "workspace", "tokens")
+		write(t, target)
+		link := filepath.Join(outside, "link")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		refuse(t, dir, link)
+	})
+	t.Run("cli home", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "cli", "b1", "home", "tokens")
+		write(t, path)
+		refuse(t, dir, path)
+	})
 }
 
 func TestGeneratedTokenDuplicateIsRejected(t *testing.T) {

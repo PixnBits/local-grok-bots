@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
-	"unicode"
+
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -29,8 +30,8 @@ type namedToken struct {
 var authTokenName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 
 // loadAuthTokens reads AUTH_TOKENS_FILE. An empty path means no file.
-// defaultToken, when set, occupies the name "default" and its value.
-// The file is not modified.
+// The name "default" is reserved. defaultToken, when set, also occupies
+// that value. A file that yields no tokens is an error. The file is not modified.
 func loadAuthTokens(path, defaultToken string) ([]namedToken, error) {
 	if path == "" {
 		return nil, nil
@@ -39,15 +40,24 @@ func loadAuthTokens(path, defaultToken string) ([]namedToken, error) {
 	if err != nil {
 		return nil, err
 	}
-	return parseAuthTokens(string(b), defaultToken)
+	toks, err := parseAuthTokens(string(b), defaultToken)
+	if err != nil {
+		return nil, err
+	}
+	if len(toks) == 0 {
+		return nil, errors.New("auth tokens: AUTH_TOKENS_FILE has no tokens")
+	}
+	return toks, nil
 }
 
 // readAuthTokensFile opens path without following a symlink and refuses
-// anything that is not a small, owner-only regular file.
+// anything that is not a small, owner-only regular file. O_NONBLOCK makes
+// a FIFO return instead of waiting for a writer. The flag is cleared after
+// fstat shows a regular file.
 func readAuthTokensFile(path string) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		if errors.Is(err, syscall.ELOOP) {
+		if errors.Is(err, unix.ELOOP) {
 			return nil, errors.New("auth tokens: symlink")
 		}
 		if lst, lerr := os.Lstat(path); lerr == nil && lst.Mode()&os.ModeSymlink != 0 {
@@ -55,24 +65,38 @@ func readAuthTokensFile(path string) ([]byte, error) {
 		}
 		return nil, fmt.Errorf("auth tokens: %w", err)
 	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		unix.Close(fd)
 		return nil, fmt.Errorf("auth tokens: %w", err)
 	}
-	if !st.Mode().IsRegular() {
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
+		unix.Close(fd)
 		return nil, errors.New("auth tokens: not a regular file")
 	}
-	if st.Mode().Perm()&0o077 != 0 {
+	if st.Mode&0o077 != 0 {
+		unix.Close(fd)
 		return nil, errors.New("auth tokens: mode allows group or other access")
 	}
-	sys, ok := st.Sys().(*syscall.Stat_t)
-	if !ok || int(sys.Uid) != os.Geteuid() {
+	if int(st.Uid) != os.Geteuid() {
+		unix.Close(fd)
 		return nil, errors.New("auth tokens: owner mismatch")
 	}
-	if st.Size() > authTokensMax {
+	if st.Size > int64(authTokensMax) {
+		unix.Close(fd)
 		return nil, errors.New("auth tokens: file exceeds 64 KiB")
 	}
+	fl, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
+	if err != nil {
+		unix.Close(fd)
+		return nil, fmt.Errorf("auth tokens: %w", err)
+	}
+	if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFL, fl&^unix.O_NONBLOCK); err != nil {
+		unix.Close(fd)
+		return nil, fmt.Errorf("auth tokens: %w", err)
+	}
+	f := os.NewFile(uintptr(fd), path)
+	defer f.Close()
 	b, err := io.ReadAll(io.LimitReader(f, authTokensMax+1))
 	if err != nil {
 		return nil, fmt.Errorf("auth tokens: %w", err)
@@ -83,11 +107,92 @@ func readAuthTokensFile(path string) ([]byte, error) {
 	return b, nil
 }
 
+// authTokensPaths is the cleaned absolute path of AUTH_TOKENS_FILE and, when
+// it differs, the cleaned symlink target. An empty path or a path that cannot
+// be made absolute yields nothing.
+func authTokensPaths(path string) []string {
+	if path == "" {
+		return nil
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil
+	}
+	abs = filepath.Clean(abs)
+	out := []string{abs}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return out
+	}
+	resolved = filepath.Clean(resolved)
+	if resolved != abs {
+		out = append(out, resolved)
+	}
+	return out
+}
+
+// checkAuthTokensLocation refuses an AUTH_TOKENS_FILE whose path or symlink
+// target sits in the workspace or in DATA_DIR/cli, where a bot can read its
+// own home and CLI state. Both roots are known from config.
+func checkAuthTokensLocation(path, workspace, dataDir string) error {
+	if path == "" {
+		return nil
+	}
+	roots, err := botVisibleDirs(workspace, dataDir)
+	if err != nil {
+		return err
+	}
+	for _, p := range authTokensPaths(path) {
+		for _, root := range roots {
+			if pathInside(root, p) {
+				return errors.New("auth tokens: AUTH_TOKENS_FILE is inside the workspace or a bot home")
+			}
+		}
+	}
+	return nil
+}
+
+func botVisibleDirs(workspace, dataDir string) ([]string, error) {
+	data, err := filepath.Abs(dataDir)
+	if err != nil {
+		return nil, fmt.Errorf("auth tokens: %w", err)
+	}
+	ws, err := filepath.Abs(workspace)
+	if err != nil {
+		return nil, fmt.Errorf("auth tokens: %w", err)
+	}
+	var roots []string
+	for _, root := range []string{filepath.Clean(ws), filepath.Join(filepath.Clean(data), "cli")} {
+		roots = append(roots, root)
+		resolved, err := filepath.EvalSymlinks(root)
+		if err != nil {
+			continue
+		}
+		resolved = filepath.Clean(resolved)
+		if resolved != root {
+			roots = append(roots, resolved)
+		}
+	}
+	return roots, nil
+}
+
+func pathInside(root, path string) bool {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	if root == "" || path == "" || root == "." || path == "." {
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
 func parseAuthTokens(text, defaultToken string) ([]namedToken, error) {
-	seenName := map[string]struct{}{}
+	seenName := map[string]struct{}{defaultTokenName: {}}
 	seenVal := map[string]struct{}{}
 	if defaultToken != "" {
-		seenName[defaultTokenName] = struct{}{}
 		seenVal[defaultToken] = struct{}{}
 	}
 	var out []namedToken
@@ -107,7 +212,7 @@ func parseAuthTokens(text, defaultToken string) ([]namedToken, error) {
 		if !authTokenName.MatchString(name) {
 			return nil, fmt.Errorf("auth tokens: line %d: invalid name", lineNo)
 		}
-		if len(val) < 32 || strings.IndexFunc(val, unicode.IsSpace) >= 0 {
+		if !printableToken(val) {
 			return nil, fmt.Errorf("auth tokens: line %d: invalid token", lineNo)
 		}
 		if _, dup := seenName[name]; dup {
@@ -121,6 +226,19 @@ func parseAuthTokens(text, defaultToken string) ([]namedToken, error) {
 		out = append(out, namedToken{name: name, val: val})
 	}
 	return out, nil
+}
+
+// printableToken accepts at least 32 bytes of printable ASCII, excluding space.
+func printableToken(val string) bool {
+	if len(val) < 32 {
+		return false
+	}
+	for i := 0; i < len(val); i++ {
+		if val[i] < 0x21 || val[i] > 0x7E {
+			return false
+		}
+	}
+	return true
 }
 
 // matchNamedToken compares presented with every token. It hashes both sides

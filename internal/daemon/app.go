@@ -161,6 +161,9 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		cfg.AuthToken = tok
 		fmt.Fprintf(os.Stderr, "local-grok-bots: a CLI backend is enabled, so the API requires a token; it is in %s. Open /login?token=<token> once per browser.\n", tokPath)
 	}
+	if err := checkAuthTokensLocation(cfg.AuthTokensFile, cfg.Workspace(), cfg.DataDir); err != nil {
+		return nil, err
+	}
 	fileTokens, err := loadAuthTokens(cfg.AuthTokensFile, cfg.AuthToken)
 	if err != nil {
 		return nil, err
@@ -325,7 +328,7 @@ func (a *App) writeStartup(format string, args ...any) {
 
 // bindWarn is the one startup line for a non-loopback bind when neither
 // AUTH_TOKEN, the generated admin token, nor AUTH_TOKENS_FILE supplies a token.
-const bindWarn = "local-grok-bots: WARN: the API is reachable beyond this machine without AUTH_TOKEN; set AUTH_TOKEN or a loopback BIND_ADDR\n"
+const bindWarn = "local-grok-bots: WARN: the API is reachable beyond this machine without AUTH_TOKEN or AUTH_TOKENS_FILE; set AUTH_TOKEN, AUTH_TOKENS_FILE, or a loopback BIND_ADDR\n"
 
 // loopbackBind reports whether addr's host is 127.0.0.0/8, ::1, or localhost.
 // An empty host is not loopback.
