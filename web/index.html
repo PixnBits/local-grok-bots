@@ -429,16 +429,17 @@ window.addEventListener("storage", function (ev) {
   .thread-id { min-width: 0; flex: 1; }
   /* Bot state: the header chip opens a slide-over (bottom sheet on mobile). */
   .state-chip {
-    flex: none; display: inline-flex; align-items: center; gap: 4px;
+    flex: none; display: inline-flex; align-items: center; gap: 10px;
+    height: 32px; min-height: 32px; box-sizing: border-box;
     border: 1px solid var(--border); background: var(--surface); color: var(--text);
-    border-radius: 99px; padding: 4px 10px 4px 12px; font-size: 13px; cursor: pointer; white-space: nowrap;
-    box-shadow: var(--e1); min-height: 32px;
+    border-radius: 99px; padding: 0 8px 0 12px; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap;
   }
-  .state-chip::after { content: "›"; color: var(--muted); font-size: 15px; line-height: 1; margin-left: 2px; }
-  .state-chip:hover { border-color: var(--accent); background: var(--accent-soft); }
-  .state-chip.zero { color: var(--muted); opacity: .75; }
-  .state-chip.warn { border-color: var(--attention); background: var(--attention-soft); color: var(--attention-text); }
-  .state-chip[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent-text); border-color: var(--accent); }
+  .state-chip .chip-seg { display: inline-flex; align-items: center; gap: 4px; }
+  .state-chip .chip-seg.warn { color: var(--attention-text); }
+  .state-chip svg { display: block; flex: none; }
+  .state-chip:hover { background: var(--surface-2); }
+  .state-chip.zero { color: var(--muted); }
+  .state-chip[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent-text); border-color: transparent; }
   .state-chip[hidden] { display: none; }
   .state-backdrop {
     position: fixed; inset: 0; background: var(--scrim); z-index: 40;
@@ -497,8 +498,16 @@ window.addEventListener("storage", function (ev) {
   .st-tag.ok { color: var(--success-text); border-color: var(--success); }
   .st-tag.bad { color: var(--danger-text); border-color: var(--danger); }
   .st-empty { color: var(--muted); font-size: 13px; margin: 2px 0; }
-  .thread-id h2 { margin: 0; font-family: var(--font); font-size: 20px; }
-  .thread-id .role { color: var(--muted); font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .thread-id h2 {
+    margin: 0; font-family: var(--font); font-size: 17px; font-weight: 650; line-height: 22px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .thread-sub { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); font-size: 12px; line-height: 16px; }
+  .thread-sub .dot { width: 8px; height: 8px; box-shadow: none; }
+  .thread-sub .dot.running { background: var(--status-running); box-shadow: 0 0 0 3px var(--accent-soft); }
+  .thread-sub .dot.idle { background: var(--status-idle); }
+  .thread-sub .dot.paused { background: var(--status-paused); }
+  .thread-id .role { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .menu { position: relative; flex: none; }
   .menu-pop {
     position: absolute; right: 0; top: calc(100% + 6px); z-index: 6;
@@ -508,6 +517,8 @@ window.addEventListener("storage", function (ev) {
   }
   .menu-pop[hidden] { display: none !important; }
   .menu-pop button { text-align: left; background: transparent; border: 0; border-radius: 8px; min-height: 36px; font-size: 13px; }
+  .menu-pop button svg { flex: none; width: 18px; height: 18px; color: var(--text-2); }
+  .menu-pop button[hidden] { display: none !important; }
   .menu-pop button:hover { background: var(--surface-2); }
   .menu-pop button[role="menuitem"], .menu-pop button[role="menuitemcheckbox"] {
     display: flex; align-items: center; gap: 8px; width: 100%;
@@ -533,25 +544,33 @@ window.addEventListener("storage", function (ev) {
   .toast button { height: 28px; min-height: 28px; padding: 0 10px; font-size: 12px; border-radius: 8px; }
   .composer[hidden], #menu-btn[hidden] { display: none !important; }
   .msgs { flex: 1; min-height: 0; overflow: auto; padding: 16px var(--thread-pad); display: flex; flex-direction: column; gap: 10px; }
-  .bubble { max-width: min(78ch, 100%); padding: 10px 12px; border-radius: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
-  .bubble.user { background: var(--accent-soft); align-self: flex-end; border-bottom-right-radius: 4px; }
-  .bubble.bot { background: var(--surface); border: 1px solid var(--border); align-self: flex-start; border-bottom-left-radius: 4px; }
-  .bubble.system { background: transparent; color: var(--muted); font-size: 13px; align-self: center; text-align: center; }
+  .bubble { max-width: min(78%, 640px); padding: 10px 14px; border-radius: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .bubble.user { background: var(--user-bubble); color: var(--user-bubble-text); align-self: flex-end; border-bottom-right-radius: 6px; }
+  .bubble.user.is-queued { background: var(--accent-soft); color: var(--text); border: 1px dashed var(--accent); }
+  .bubble.bot { background: var(--bot-bubble); border: 0; align-self: flex-start; border-bottom-left-radius: 6px; color: var(--text); }
+  .bubble.system, .sys { background: var(--surface-2); color: var(--muted); font-size: 13px; align-self: center; text-align: center; border-radius: 999px; padding: 6px 12px; }
+  .sys { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; }
+  .sys.stopped { color: var(--text-2); }
+  .queued-cap { align-self: flex-end; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); padding: 0 4px; }
+  .day-line { align-self: center; font-size: 12px; color: var(--muted); }
+  .caret { display: inline-block; width: 7px; height: 15px; margin-left: 2px; background: currentColor; vertical-align: text-bottom; }
+  .bubble.user a, .bubble.user code { color: inherit; }
+  .bubble.user code { background: rgba(255,255,255,.18); }
   .bubble .md { white-space: normal; }
   .md > :first-child { margin-top: 0; }
   .md > :last-child { margin-bottom: 0; }
   .md p, .md ul, .md ol, .md blockquote { margin: 0 0 8px; }
-  .md ul, .md ol { padding-left: 22px; }
+  .md ul, .md ol { padding-left: 20px; }
   .md h3, .md h4, .md h5, .md h6 { margin: 10px 0 6px; font-size: 1em; }
   .md h3 { font-size: 1.1em; }
-  .md code { font-family: var(--mono); font-size: 0.92em; background: var(--code-inline); padding: 1px 4px; border-radius: 4px; }
-  .md .code { position: relative; margin: 0 0 8px; background: var(--code-bg); color: var(--code-text); border-radius: 8px; }
+  .md code { font-family: var(--mono); font-size: 0.92em; background: var(--code-inline); padding: 1px 4px; border-radius: 5px; }
+  .md .code { position: relative; margin: 0 0 8px; background: var(--code-bg); color: var(--code-text); border-radius: 10px; display: flex; flex-wrap: wrap; align-items: center; }
   .md .code-lang { display: block; padding: 4px 10px 0; font-family: var(--mono); font-size: 11px; color: var(--code-muted); }
   .md pre { margin: 0; padding: 8px 10px; overflow-x: auto; white-space: pre; tab-size: 4; font-family: var(--mono); font-size: 13px; line-height: 1.45; }
   .md pre code { background: none; padding: 0; color: inherit; font-size: inherit; white-space: pre; }
   .md .table-wrap { overflow-x: auto; margin: 0 0 8px; }
   .md table { border-collapse: collapse; font-size: 13px; }
-  .md th, .md td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; vertical-align: top; }
+  .md th, .md td { border: 1px solid var(--border-strong); padding: 4px 8px; text-align: left; vertical-align: top; }
   .md th { background: var(--surface-3); font-weight: 600; }
   .md tbody tr:nth-child(even) td { background: var(--surface-2); }
   .md blockquote { border-left: 3px solid var(--border); padding-left: 10px; color: var(--muted); }
@@ -564,32 +583,66 @@ window.addEventListener("storage", function (ev) {
   }
   .copy-btn.done { opacity: 1; }
   .md .code { padding-top: 0; }
+  .md .code .code-lang { flex: 1; padding: 6px 10px; font-size: 12px; }
   .md .code .code-copy {
-    position: absolute; top: 4px; right: 4px; background: var(--code-inline); color: var(--code-text); border: 1px solid var(--code-muted);
+    position: static; margin: 4px 6px 4px auto; opacity: 1;
+    background: var(--code-inline); color: var(--code-text); border: 1px solid var(--code-muted);
   }
-  .md .code:hover .code-copy, .code-copy:focus-visible { opacity: 1; }
+  .md .code pre { flex: 1 0 100%; }
+  .msg-group { display: flex; flex-direction: column; gap: 4px; max-width: min(78%, 640px); }
+  .msg-group.user { align-self: flex-end; align-items: flex-end; }
+  .msg-group.bot { align-self: flex-start; align-items: flex-start; }
+  .msg-group .bubble { max-width: 100%; }
+  .msg-meta { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); min-height: 18px; }
   .msg-copy {
-    position: absolute; top: 4px; right: 6px; background: var(--surface); color: var(--muted); border: 1px solid var(--border);
+    position: static; background: transparent; color: var(--muted); border: 0; padding: 0 4px;
   }
-  .bubble:hover > .msg-copy, .msg-copy:focus-visible { opacity: 1; }
+  .msg-group .msg-copy { opacity: 0; }
+  .msg-group:hover .msg-copy, .msg-group .msg-copy:focus-visible, .msg-group .msg-copy.done { opacity: 1; }
   /* Touch screens have no hover: keep the buttons visible but quiet. */
   @media (hover: none) {
     .copy-btn { opacity: .7; }
   }
-  .tools { margin: 0 0 6px; font-size: 12px; color: var(--muted); white-space: normal; }
-  .tools summary { cursor: pointer; }
-  .tools .tool { margin-top: 6px; white-space: pre-wrap; max-height: 16em; overflow: auto; }
-  .tools .tool-perm { font-family: var(--mono); }
-  .tools .tool-perm.denied { color: var(--text); }
+  .tsum-wrap { align-self: flex-start; max-width: min(78%, 640px); display: flex; flex-direction: column; gap: 6px; }
+  .tsum {
+    display: inline-flex; align-items: center; gap: 8px; height: 28px; min-height: 28px;
+    padding: 0 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface);
+    color: var(--text); font-size: 13px; font-weight: 400;
+    max-width: 100%; box-sizing: border-box; white-space: nowrap;
+  }
+  .tsum .n { font-weight: 650; }
+  .tsum svg, .tsum .n { flex: none; }
+  .tsum .names { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .tsum .denied { color: var(--danger-text); }
+  .tsum-panel {
+    border: 1px solid var(--border); border-radius: 14px; padding: 8px 10px; background: var(--surface);
+    font-size: 13px; display: grid; gap: 8px;
+  }
+  .tsum-panel[hidden] { display: none !important; }
+  .tsum-panel .narr { font-style: italic; color: var(--text-2); }
+  .tsum-panel .tool { margin: 0; white-space: pre-wrap; max-height: 16em; overflow: auto; background: transparent; padding: 0; }
+  .tsum-panel .tool-perm { font-family: var(--mono); display: flex; align-items: flex-start; gap: 6px; }
+  .tsum-panel .tool-perm.denied { color: var(--danger-text); }
   .tool-text { margin-top: 6px; color: var(--text, inherit); font-size: 13px; padding-left: 8px; border-left: 2px solid var(--border); }
   .tool-result { color: var(--muted); margin-top: 2px; }
-  .who { font-size: 11px; color: var(--muted); margin-bottom: 4px; max-width: 100%; }
+  .card-record {
+    display: none; align-self: flex-start; min-height: 32px; align-items: center; gap: 8px;
+    background: var(--surface-2); border-radius: 999px; padding: 4px 12px; font-size: 13px; color: var(--text-2);
+  }
+  .card-record.show { display: inline-flex; }
   .working {
     display: flex; align-items: center; gap: 8px; align-self: flex-start;
-    padding: 10px 12px; color: var(--status-running); font-size: 13px;
-    border: 1px dashed var(--border); border-radius: 14px; border-bottom-left-radius: 4px;
+    padding: 10px 14px; color: var(--text-2); font-size: 13px;
+    background: var(--bot-bubble); border: 0; border-radius: 18px; border-bottom-left-radius: 6px;
   }
   .working[hidden] { display: none !important; }
+  .dots { display: inline-flex; align-items: center; gap: 4px; }
+  .dots i {
+    width: 6px; height: 6px; border-radius: 99px; background: var(--status-running); flex: none;
+    animation: pulse 1s ease-in-out infinite;
+  }
+  .working.is-waiting .dots i { background: var(--attention); }
+  .working.is-stopping .dots i { background: var(--muted); animation: none; }
   .pulse {
     width: 8px; height: 8px; border-radius: 99px; background: var(--status-running); flex: none;
     animation: pulse 1s ease-in-out infinite;
@@ -598,25 +651,51 @@ window.addEventListener("storage", function (ev) {
   /* The live run sits inside the message list; its bubbles and tool lines
      are laid out as list items, followed by the working indicator. */
   .live { display: contents; }
-  .live .tool { align-self: flex-start; max-width: min(78ch, 100%); }
-  .tool {
-    font-family: var(--mono); font-size: 12px; background: var(--surface-2); border-radius: 8px; padding: 6px 8px;
+  .live .tool, .live-tool { align-self: flex-start; max-width: min(78%, 640px); }
+  .tool, .live-tool {
+    font-family: var(--mono); font-size: 12px; color: var(--muted); background: transparent; border-radius: 0; padding: 0;
     overflow-wrap: anywhere;
   }
   .perm-card {
-    align-self: flex-start; max-width: min(78ch, 100%);
-    background: var(--surface); border: 1px solid var(--border); border-radius: 14px;
-    border-bottom-left-radius: 4px; padding: 10px 12px; display: grid; gap: 8px;
+    align-self: flex-start; max-width: min(640px, 100%); width: min(640px, 100%);
+    background: var(--surface); border: 1.5px solid var(--attention); border-radius: 14px;
+    box-shadow: var(--e2); padding: 0; display: flex; flex-direction: column; gap: 0; position: relative;
   }
-  .perm-card .perm-tool { font-weight: 600; }
-  .perm-card .perm-args {
-    margin: 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap;
-    overflow-wrap: anywhere; background: var(--surface-2); border-radius: 8px; padding: 6px 8px;
+  .perm-card .card-top { display: flex; gap: 10px; padding: 14px 16px 0; align-items: flex-start; }
+  .perm-card .card-tile {
+    width: 32px; height: 32px; border-radius: 10px; flex: none;
+    display: grid; place-items: center; background: var(--attention-soft); color: var(--attention-text);
+  }
+  .perm-card .card-main { flex: 1; min-width: 0; display: grid; gap: 2px; }
+  .perm-card .card-eyebrow { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--attention-text); }
+  .perm-card .perm-tool { font-size: 15px; font-weight: 650; line-height: 22px; }
+  .perm-card .card-meta { margin-left: auto; display: grid; justify-items: end; gap: 4px; color: var(--attention-text); font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 650; }
+  .perm-card .card-bar { width: 64px; height: 4px; border-radius: 99px; background: var(--surface-3); overflow: hidden; }
+  .perm-card .card-bar i { display: block; height: 100%; width: 100%; background: var(--attention); }
+  .perm-card .card-body { display: grid; gap: 10px; padding: 10px 16px 12px; }
+  .perm-card .perm-args, .perm-card .perm-plan, .perm-card .card-pre {
+    margin: 0; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap;
+    overflow-wrap: anywhere; background: var(--surface-2); border-radius: 10px; padding: 8px 10px;
     max-height: 12em; overflow: auto;
   }
-  .perm-card .perm-actions { display: flex; gap: 8px; flex-wrap: wrap; }
-  .perm-card .perm-count, .perm-card .perm-outcome, .perm-card .perm-err { font-size: 12px; color: var(--muted); }
-  .perm-card .perm-err { color: var(--danger-text); }
+  .perm-card .kv { display: grid; grid-template-columns: 72px 1fr; gap: 6px; font-size: 13px; }
+  .perm-card .kv-k { color: var(--muted); }
+  .perm-card .kv-v { font-family: var(--mono); overflow-wrap: anywhere; }
+  .perm-card .card-note { display: flex; gap: 6px; align-items: flex-start; font-size: 12px; color: var(--muted); }
+  .perm-card .perm-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 12px 16px 14px; border-top: 1px solid var(--border); }
+  .perm-card .perm-actions .deny { margin-left: auto; background: transparent; color: var(--danger-text); border: 1px solid var(--danger); }
+  .perm-card .perm-count { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  .perm-card .perm-outcome { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); }
+  .perm-card .perm-err, .perm-card .card-err { font-size: 12px; color: var(--danger-text); padding: 0 16px 8px; }
+  .perm-card .is-loading { position: relative; color: transparent; }
+  .perm-card .is-loading::after {
+    content: ""; position: absolute; width: 14px; height: 14px; border-radius: 50%;
+    border: 2px solid currentColor; border-right-color: transparent; left: 50%; top: 50%; margin: -7px 0 0 -7px;
+    color: var(--text);
+  }
+  .perm-card.settled { border: 0; box-shadow: none; background: transparent; padding: 0; width: auto; max-width: 100%; }
+  .perm-card.settled > :not(.card-record) { display: none !important; }
+  .perm-card.settled .card-record { display: inline-flex; }
   .perm-card .perm-header {
     justify-self: start; font-size: 11px; letter-spacing: .04em; text-transform: uppercase;
     background: var(--accent-soft); color: var(--accent-text); border-radius: 99px; padding: 2px 8px;
@@ -630,20 +709,57 @@ window.addEventListener("storage", function (ev) {
     margin: 0; white-space: pre-wrap; overflow-wrap: anywhere;
     background: var(--surface-2); border-radius: 8px; padding: 6px 8px;
   }
-  .perm-card.settled { opacity: .8; }
-  .note { margin: 0 var(--thread-pad) 8px; flex: none; color: var(--danger-text); background: var(--danger-soft); border-radius: 10px; padding: 8px 10px; font-size: 13px; }
-  .note.continue {
-    display: flex; align-items: center; justify-content: space-between; gap: 8px;
-    color: var(--accent-text); background: var(--accent-soft);
+  .perm-card .card-plan { margin: 0; padding-left: 20px; }
+  .note {
+    margin: 0 var(--thread-pad) 8px; flex: none; display: flex; align-items: center; gap: 8px;
+    border-radius: 14px; padding: 10px 10px 10px 14px; font-size: 13px;
+    color: var(--danger-text); background: var(--danger-soft);
   }
-  .note.continue button { flex: none; }
+  .note.quiet { color: var(--text-2); background: var(--surface-2); }
+  .note.continue { color: var(--text); background: var(--accent-soft); }
+  .note .note-text { flex: 1; min-width: 0; }
+  .note button.small { flex: none; height: 28px; min-height: 28px; padding: 0 10px; font-size: 12px; border-radius: 8px; }
+  .note button.secondary { background: var(--surface); border: 1px solid var(--border-strong); color: var(--text); }
   .note[hidden] { display: none !important; }
-  .composer { display: flex; gap: 8px; padding: 12px var(--thread-pad); border-top: 1px solid var(--border); align-items: flex-end; flex: none; }
-  .composer textarea { min-height: 44px; max-height: 40vh; height: 44px; resize: none; overflow-y: hidden; }
+  .composer-wrap { flex: none; width: 100%; padding: 8px var(--thread-pad) 16px; }
+  .composer {
+    display: flex; gap: 8px; align-items: flex-end; flex: none;
+    padding: 6px 6px 6px 16px; border-radius: 24px; background: var(--surface);
+    border: 1px solid var(--border-control); box-shadow: var(--e1);
+  }
+  .composer:focus-within { border-color: var(--focus); box-shadow: 0 0 0 3px var(--accent-soft), var(--e1); }
+  .composer textarea {
+    flex: 1; min-width: 0; min-height: 36px; max-height: 40vh; height: 36px;
+    resize: none; overflow-y: hidden; border: 0; background: transparent;
+    box-shadow: none; padding: 7px 0; border-radius: 0;
+  }
+  .composer textarea:focus-visible { outline: 2px solid transparent; outline-offset: 0; box-shadow: none; }
+  .composer-slot { display: flex; align-items: center; gap: 8px; flex: none; }
+  .composer-hint { margin: 8px 0 0; text-align: center; font-size: 12px; color: var(--muted); }
+  .composer-hint[hidden] { display: none !important; }
+  #send-btn, .stop-btn {
+    width: 36px; height: 36px; min-width: 36px; min-height: 36px; padding: 0; border: 0; border-radius: 99px;
+    display: inline-grid; place-items: center; position: relative;
+  }
+  #send-btn { background: var(--accent); color: var(--on-accent); }
+  #send-btn.is-empty { background: var(--surface-3); color: var(--muted); }
+  .stop-btn { background: var(--stop-fill); color: var(--on-stop); }
+  .stop-btn:hover { opacity: .86; }
+  .stop-btn[hidden] { display: none !important; }
+  .stop-btn.is-stopping { opacity: .6; }
+  .stop-btn .stop-spin { display: none; width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--on-stop); border-right-color: transparent; }
+  .stop-btn.is-stopping .stop-sq { display: none; }
+  .stop-btn.is-stopping .stop-spin { display: block; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .stop-btn .tip {
+    display: none; position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+    background: var(--text); color: var(--bg); font-size: 12px; line-height: 16px; padding: 4px 8px; border-radius: 6px; white-space: nowrap;
+  }
+  .stop-btn:hover .tip, .stop-btn:focus-visible .tip { display: block; }
+  .sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
   .routine { display: grid; gap: 4px; padding: 8px 0; border-top: 1px solid var(--border); }
   .routine .meta { color: var(--muted); font-size: 12px; }
   .perm-list { display: grid; gap: 8px; }
-  .perm-card { border: 1px solid var(--border); border-radius: 12px; padding: 10px; display: grid; gap: 6px; }
   .perm-card code { font-family: var(--mono); font-size: 12px; word-break: break-all; }
   .risk { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; border-radius: 99px; padding: 2px 8px; width: max-content; }
   .risk.low { background: var(--success-soft); color: var(--success-text); }
@@ -656,6 +772,8 @@ window.addEventListener("storage", function (ev) {
   .event .meta { display: flex; gap: 8px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
   .event .kind { font-family: var(--mono); color: var(--text); }
   .event pre { margin: 6px 0 0; font-family: var(--mono); font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .roster-error { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .roster-error button.secondary { height: 28px; min-height: 28px; padding: 0 10px; font-size: 12px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border-strong); color: var(--text); }
   .empty { color: var(--muted); padding: 8px 2px; }
   .err { color: var(--danger-text); font-size: 13px; min-height: 1em; }
   .auth {
@@ -681,6 +799,7 @@ window.addEventListener("storage", function (ev) {
     /* Theme radios grow to a 44px target. The segment's height follows the buttons. */
     #theme-seg { height: auto; align-items: stretch; }
     #theme-seg button { height: 44px; min-height: 44px; }
+    .composer-hint { display: none; }
     .profile-layout { display: flex; flex-direction: column; overflow: auto; justify-content: flex-start; }
     .profile-nav, .profile-col { overflow: visible; min-height: auto; flex: none; }
     /* The roster footer is 56px and full width below 980px. Keep Undo on screen. */
@@ -707,14 +826,33 @@ window.addEventListener("storage", function (ev) {
     main { padding: 0; }
     .thread { --thread-pad: 12px; }
     .panel { border-left: 0; border-right: 0; border-radius: 0; }
-    .bubble { max-width: 85%; }
+    .bubble, .msg-group { max-width: 85%; }
     .perm-card .perm-actions > button { flex: 1 1 100%; }
-    button:not(.copy-btn):not(.swatch):not(.shape-btn):not(.bot):not([role="radio"]), .state-chip { min-height: 44px; }
+    .perm-card .perm-actions .deny { margin-left: 0; }
+    button:not(.copy-btn):not(.swatch):not(.shape-btn):not(.bot):not([role="radio"]):not(.state-chip):not(.stop-btn):not(#send-btn):not(.tsum), .icon-btn, #menu-btn { min-height: 44px; }
+    .state-chip { height: 32px; min-height: 32px; gap: 6px; padding: 0 8px; }
+    .state-chip svg { width: 14px; height: 14px; }
+    .state-chip .chip-chev { display: none; }
+    .composer-hint { display: none; }
+    .composer-wrap { padding: 6px 10px 10px; }
+    /* 44px hit, 36px visual face, so a thumb cannot hit the neighbour. */
+    .stop-btn, #send-btn { width: 44px; height: 44px; min-width: 44px; min-height: 44px; background: transparent; }
+    .stop-btn::before, #send-btn::before {
+      content: ""; position: absolute; width: 36px; height: 36px; border-radius: 99px;
+    }
+    .stop-btn { color: var(--on-stop); }
+    .stop-btn::before { background: var(--stop-fill); }
+    #send-btn { color: var(--on-accent); }
+    #send-btn::before { background: var(--accent); }
+    #send-btn.is-empty { color: var(--muted); }
+    #send-btn.is-empty::before { background: var(--surface-3); }
+    .stop-btn svg, #send-btn svg, .stop-btn .stop-spin { position: relative; z-index: 1; }
+    .stop-btn .tip { display: none !important; }
     .sheet-close, .solo-back, .thread-back { min-width: 44px; }
   }
   @media (prefers-reduced-motion: reduce) {
     .state-sheet, .state-backdrop, .toast, .skel-mark, .skel-line { transition: none; animation: none; }
-    .pulse { animation: none; }
+    .pulse, .dots i, .caret, .stop-spin, .perm-card .is-loading::after { animation: none; }
     #bot-list.is-stale,
     #bot-list.is-stale * { transition: none; }
   }
@@ -737,9 +875,9 @@ window.addEventListener("storage", function (ev) {
               <div class="menu-sep" role="separator"></div>
               <div class="mlabel" id="appearance-label">Appearance</div>
               <div class="seg" id="theme-seg" role="radiogroup" aria-label="Appearance" aria-labelledby="appearance-label">
-                <button type="button" role="radio" data-theme="system" aria-checked="false">System</button>
-                <button type="button" role="radio" data-theme="light" aria-checked="false">Light</button>
-                <button type="button" role="radio" data-theme="dark" aria-checked="false">Dark</button>
+                <button type="button" role="radio" data-theme="system" aria-checked="false" tabindex="0">System</button>
+                <button type="button" role="radio" data-theme="light" aria-checked="false" tabindex="-1">Light</button>
+                <button type="button" role="radio" data-theme="dark" aria-checked="false" tabindex="-1">Dark</button>
               </div>
             </div>
           </div>
@@ -758,29 +896,43 @@ window.addEventListener("storage", function (ev) {
           <span class="mark" id="thread-mark" hidden aria-hidden="true"></span>
           <div class="thread-id">
             <h2 id="thread-name">No bot selected</h2>
-            <div class="role" id="thread-label"></div>
+            <div class="thread-sub" id="thread-sub">
+              <i class="dot" id="thread-dot" hidden aria-hidden="true"></i>
+              <span class="role" id="thread-label"></span>
+            </div>
           </div>
-          <button type="button" class="state-chip" id="state-chip" hidden aria-label="Bot state" aria-haspopup="dialog" aria-expanded="false" aria-controls="state-sheet" title="Bot state: timers, memory, tools, runs"></button>
+          <button type="button" class="state-chip" id="state-chip" hidden aria-label="Bot state" aria-haspopup="dialog" aria-expanded="false" aria-controls="state-sheet" title="Bot state"></button>
           <div class="menu">
-            <button type="button" id="menu-btn" hidden aria-haspopup="menu" aria-expanded="false" aria-controls="bot-menu" aria-label="Bot menu">⋯</button>
+            <button type="button" class="icon-btn" id="menu-btn" hidden aria-haspopup="menu" aria-expanded="false" aria-controls="bot-menu" aria-label="Bot menu"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><circle cx="6" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18" cy="12" r="1.6" fill="currentColor"/></svg></button>
             <div class="menu-pop" id="bot-menu" hidden role="menu">
-              <button type="button" data-act="profile" role="menuitem">View profile</button>
-              <button type="button" data-act="state" role="menuitem">Bot state</button>
-              <button type="button" data-act="pin" role="menuitem" id="menu-pin">Pin</button>
-              <button type="button" data-act="hide" role="menuitem" id="menu-hide">Hide</button>
-              <button type="button" data-act="duplicate" role="menuitem">Duplicate</button>
-              <button type="button" data-act="archive" role="menuitem" id="menu-archive">Archive</button>
+              <button type="button" data-act="stop" role="menuitem" id="menu-stop" hidden><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor"/></svg><span>Stop run</span></button>
+              <button type="button" data-act="profile" role="menuitem"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><circle cx="12" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 19c1.5-3 3.5-4.5 7-4.5S17.5 16 19 19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>View profile</span></button>
+              <button type="button" data-act="state" role="menuitem"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 8v5l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>Bot state</span></button>
+              <button type="button" data-act="log" role="menuitem" id="menu-log-bot"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M8 7h11M8 12h11M8 17h11M5 7h.01M5 12h.01M5 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span id="menu-log-label">Log</span></button>
+              <div class="menu-sep" role="separator"></div>
+              <button type="button" data-act="pin" role="menuitem" id="menu-pin"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M9 4h6l-1 6 3 3v1H7v-1l3-3zM12 14v6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span id="menu-pin-label">Pin</span></button>
+              <button type="button" data-act="hide" role="menuitem" id="menu-hide"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M3 3l18 18M10.6 6.1A9.7 9.7 0 0 1 12 6c5 0 8.5 4.5 9.5 6a17 17 0 0 1-3 3.5M6.5 7.6A16 16 0 0 0 2.5 12c1 1.5 4.5 6 9.5 6a9 9 0 0 0 4-.9" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span id="menu-hide-label">Hide</span></button>
+              <button type="button" data-act="duplicate" role="menuitem"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><rect x="8" y="8" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 15V5h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span>Duplicate</span></button>
+              <div class="menu-sep" role="separator"></div>
+              <button type="button" data-act="archive" role="menuitem" id="menu-archive"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M4 7h16v3H4zM6 10v8h12v-8M10 14h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg><span id="menu-archive-label">Archive</span></button>
             </div>
           </div>
         </div>
         <div class="thread-col">
-        <div class="msgs" id="msgs"><p class="empty">Choose a bot to read its thread.</p><div class="live" id="live"></div><div class="working" id="working" hidden aria-live="polite"><span class="pulse" aria-hidden="true"></span><span id="working-text">working</span></div></div>
+        <div class="msgs" id="msgs"><p class="empty">Choose a bot to read its thread.</p><div class="live" id="live"></div><div class="working" id="working" hidden><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span id="working-text">Working</span></div></div>
         <button type="button" class="new-pill" id="new-pill" hidden>New messages ↓</button>
         <div class="note" id="run-note" hidden></div>
+        <div id="a11y-status" class="sr" aria-live="polite"></div>
+        <div class="composer-wrap">
         <form class="composer" id="composer" hidden>
-          <textarea id="composer-input" placeholder="Message… Enter to send, Shift+Enter for a new line"></textarea>
-          <button class="primary" type="submit" id="send-btn">Send</button>
+          <textarea id="composer-input" rows="1" placeholder="Message" aria-label="Message"></textarea>
+          <div class="composer-slot">
+            <button type="button" class="stop-btn" id="stop-btn" hidden aria-label="Stop run"><svg class="stop-sq" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><rect x="7" y="7" width="10" height="10" rx="1" fill="currentColor"/></svg><span class="stop-spin" aria-hidden="true"></span><span class="tip">Stop · Esc</span></button>
+            <button class="primary is-empty" type="submit" id="send-btn" aria-label="Send"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M12 19V5M6 11l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          </div>
         </form>
+        <p class="composer-hint" id="composer-hint" hidden></p>
+        </div>
         </div>
       </div>
     </section>
@@ -944,7 +1096,17 @@ const state = {
   everFailed: false,
   backoff: 1000,
   version: "",
-  toastTimer: 0
+  toastTimer: 0,
+  queuedIds: [],
+  queuedDuringRun: "",
+  userStops: {},
+  cardRecords: [],
+  localPartials: [],
+  stop: null,
+  liveTool: "",
+  stopNote: "",
+  stopTimer: 0,
+  dismissedRunError: ""
 };
 const $ = (s, r=document) => r.querySelector(s);
 function syncThemeControl(mode) {
@@ -952,6 +1114,7 @@ function syncThemeControl(mode) {
   document.querySelectorAll("#theme-seg [role='radio']").forEach((btn) => {
     const on = btn.getAttribute("data-theme") === m;
     btn.setAttribute("aria-checked", on ? "true" : "false");
+    btn.tabIndex = on ? 0 : -1;
   });
 }
 window.syncThemeControl = syncThemeControl;
@@ -1107,12 +1270,32 @@ function eyeOffIcon() {
   return svg;
 }
 function currentBot() { return state.bots.find(b => b.id === state.botId) || null; }
+function syncSendEmpty() {
+  const input = $("#composer-input");
+  const send = $("#send-btn");
+  if (!send || !input) return;
+  send.classList.toggle("is-empty", !String(input.value || "").trim());
+}
 function syncComposer() {
   const on = !!(state.botId && currentBot());
   const form = $("#composer");
   const menuBtn = $("#menu-btn");
   if (form) form.hidden = !on;
   if (menuBtn) menuBtn.hidden = !on;
+  const hint = $("#composer-hint");
+  const running = !!(state.stop && (state.stop.phase === "running" || state.stop.phase === "stopping"));
+  if (hint) {
+    hint.hidden = !on;
+    hint.textContent = (typeof composerHint === "function") ? composerHint(running) : "";
+  }
+  const input = $("#composer-input");
+  if (input) {
+    const b = currentBot();
+    const narrow = window.matchMedia && window.matchMedia("(max-width: 540px)").matches;
+    input.placeholder = (typeof composerPlaceholder === "function") ? composerPlaceholder(b && b.name, !!narrow) : "Message";
+  }
+  syncSendEmpty();
+  if (typeof syncStopButton === "function") syncStopButton();
 }
 // roster-logic:begin
 function rosterListMode(loaded, everFailed, conn) {
@@ -1174,6 +1357,7 @@ function rosterSignature(inputs) {
 }
 function rosterFocusKey(kind, botId) {
   if (kind === "back") return "back";
+  if (kind === "retry") return "retry";
   if (kind !== "bot" && kind !== "unarchive") return "";
   if (botId == null || botId === "") return "";
   return kind + ":" + botId;
@@ -1186,6 +1370,7 @@ function rosterFocusMatch(key, kind, botId) {
 let rosterSig = null;
 function rosterFocusKeyFromEl(el) {
   if (!el || !el.classList) return "";
+  if (el.id === "retry-now" || el.classList.contains("retry-now")) return rosterFocusKey("retry", "");
   if (el.classList.contains("roster-back")) return rosterFocusKey("back", "");
   if (el.classList.contains("unarchive")) return rosterFocusKey("unarchive", el.getAttribute("data-bot-id") || "");
   if (el.classList.contains("bot")) return rosterFocusKey("bot", el.getAttribute("data-bot-id") || "");
@@ -1196,13 +1381,22 @@ function restoreRosterFocus(list, key) {
   const buttons = list.querySelectorAll("button");
   for (const el of buttons) {
     let kind = "";
-    if (el.classList.contains("roster-back")) kind = "back";
+    if (el.id === "retry-now" || el.classList.contains("retry-now")) kind = "retry";
+    else if (el.classList.contains("roster-back")) kind = "back";
     else if (el.classList.contains("unarchive")) kind = "unarchive";
     else if (el.classList.contains("bot")) kind = "bot";
     else continue;
-    if (!rosterFocusMatch(key, kind, el.getAttribute("data-bot-id") || "")) continue;
+    const botId = kind === "retry" ? "" : (el.getAttribute("data-bot-id") || "");
+    if (!rosterFocusMatch(key, kind, botId)) continue;
     if (typeof el.focus === "function") el.focus({ preventScroll: true });
     return;
+  }
+  if (key === rosterFocusKey("retry", "")) {
+    const h = document.querySelector("#view-bots h1");
+    if (h && h.offsetParent !== null) {
+      if (!h.hasAttribute("tabindex")) h.setAttribute("tabindex", "-1");
+      h.focus({ preventScroll: true });
+    }
   }
 }
 function syncRosterMenus(live, archived) {
@@ -1260,6 +1454,7 @@ function renderBots() {
   if (sig === rosterSig) {
     syncLogBots();
     syncComposer();
+    if (typeof syncRetryButton === "function") syncRetryButton();
     return;
   }
   let focusKey = "";
@@ -1286,7 +1481,19 @@ function renderBots() {
     commit();
     return;
   }
-  if (mode === "error") list.append(el("p", "roster-error", ROSTER_ERROR_NOTE));
+  if (mode === "error") {
+    const note = el("p", "roster-error", ROSTER_ERROR_NOTE);
+    const retry = el("button", "secondary small retry-now", "Retry now");
+    retry.type = "button";
+    retry.id = "retry-now";
+    retry.addEventListener("click", () => {
+      if (retry.getAttribute("aria-disabled") === "true") return;
+      if (typeof retryDaemonNow === "function") retryDaemonNow();
+    });
+    note.append(retry);
+    list.append(note);
+    if (typeof syncRetryButton === "function") syncRetryButton();
+  }
   if (mode === "error" && !state.botsLoaded) {
     commit();
     return;
@@ -1371,6 +1578,10 @@ async function loadBots() {
     const cur = fresh.find(x => x.id === state.botId);
     if (cur && cur.status !== "running") cur.status = "running";
   }
+  if (state.stop && state.stop.phase === "stopped" && state.botId) {
+    const cur = fresh.find(x => x.id === state.botId);
+    if (cur && !cur.active_run_id && cur.status === "running") cur.status = "idle";
+  }
   state.bots = fresh;
   state.botsLoaded = true;
   renderBots();
@@ -1383,56 +1594,92 @@ async function loadBots() {
     else if (b.pending_permissions > 0 && state.streaming) loadPendingPermissions(state.streaming).catch(() => {});
   }
 }
+function setMenuText(id, text) {
+  const n = $("#" + id);
+  if (n) n.textContent = text;
+}
+function paintNote(kind, text, actions) {
+  const note = $("#run-note");
+  if (!note) return;
+  note.hidden = false;
+  note.className = "note" + (kind ? " " + kind : "");
+  note.replaceChildren();
+  if (text) note.append(el("span", "note-text", text));
+  for (const a of actions || []) note.append(a);
+}
+function paintFailedNote(text) {
+  if (state.dismissedRunError && state.dismissedRunError === text) {
+    const note = $("#run-note");
+    if (note) note.hidden = true;
+    return;
+  }
+  const open = el("button", "small", "Open in Log");
+  open.type = "button";
+  open.addEventListener("click", () => openLog(true));
+  const dismiss = el("button", "small", "×");
+  dismiss.type = "button";
+  dismiss.setAttribute("aria-label", "Dismiss");
+  dismiss.addEventListener("click", () => {
+    state.dismissedRunError = text;
+    const note = $("#run-note");
+    if (note) note.hidden = true;
+  });
+  paintNote("", text, [open, dismiss]);
+}
+function paintStopFailedNote() {
+  const again = el("button", "secondary small", "Try again");
+  again.type = "button";
+  again.addEventListener("click", () => { if (typeof requestStop === "function") requestStop(); });
+  paintNote("", (typeof STOP_FAILED_NOTE === "string") ? STOP_FAILED_NOTE : "Couldn't stop the run. The daemon didn't respond.", [again]);
+}
 function paintHeader(b) {
   syncComposer();
   $("#thread-name").textContent = b.name;
   paintMark($("#thread-mark"), b.mark);
   $("#thread-mark").hidden = false;
   setTitle();
-  $("#thread-label").textContent = b.label || "";
-  $("#menu-pin").textContent = b.pinned ? "Unpin" : "Pin";
-  $("#menu-hide").textContent = b.hidden ? "Unhide" : "Hide";
-  $("#menu-archive").textContent = b.archived ? "Unarchive" : "Archive";
+  if (typeof paintSubline === "function") paintSubline(b);
+  else $("#thread-label").textContent = b.label || "";
+  setMenuText("menu-pin-label", b.pinned ? "Unpin" : "Pin");
+  setMenuText("menu-hide-label", b.hidden ? "Unhide" : "Hide");
+  setMenuText("menu-archive-label", b.archived ? "Unarchive" : "Archive");
+  setMenuText("menu-log-label", "Log for " + (b.name || "bot"));
   const note = $("#run-note");
+  const running = !!(state.streaming || b.status === "running" || (state.stop && (state.stop.phase === "running" || state.stop.phase === "stopping")));
+  if (state.stopNote === "failed" && running) {
+    paintStopFailedNote();
+    return;
+  }
   if (b.archived) {
-    note.hidden = false;
-    note.className = "note continue";
-    note.replaceChildren(document.createTextNode("Archived. Routines are paused and new messages wait until it is restored. "));
-    const btn = el("button", "primary", "Unarchive");
+    const btn = el("button", "secondary small", "Unarchive");
     btn.type = "button";
     btn.addEventListener("click", () => setArchived(b.id, false));
-    note.append(btn);
+    paintNote("quiet", "Archived. Routines are paused and new messages wait until it is restored.", [btn]);
     return;
   }
   const offer = !state.streaming && b.status !== "running" && b.last_run_error === "tool round limit" && b.continue_run_id;
   if (offer) {
-    note.hidden = false;
-    note.className = "note continue";
-    note.replaceChildren(document.createTextNode("Stopped after 8 tool rounds. "));
-    const btn = el("button", "primary", "Continue");
+    const btn = el("button", "primary small", "Continue");
     btn.type = "button";
     const runId = b.continue_run_id;
     btn.addEventListener("click", () => continueRun(runId));
-    note.append(btn);
+    paintNote("continue", "Stopped after 8 tool rounds. Continue picks up the same work for 8 more.", [btn]);
     return;
   }
-  note.className = "note";
   if (!state.streaming && b.status !== "running" && b.last_run_status === "stopped") {
-    note.hidden = false;
-    note.textContent = "Stopped after denial";
+    paintNote("quiet", "Stopped after denial.");
   } else if (!state.streaming && b.status !== "running" && b.last_run_status === "error" && b.last_run_error) {
-    note.hidden = false;
-    note.textContent = "Run failed: " + b.last_run_error;
-  } else if (!state.streaming) {
+    paintFailedNote("Run failed: " + b.last_run_error);
+  } else if (!state.streaming && state.stopNote !== "failed") {
     note.hidden = true;
     note.replaceChildren();
   }
 }
 function showRunError(text) {
-  const note = $("#run-note");
-  note.className = "note";
-  note.hidden = false;
-  note.textContent = text;
+  const t = text == null ? "" : String(text);
+  if (t.indexOf("Run failed:") === 0) { paintFailedNote(t); return; }
+  if (t === "Stopped after denial" || t === "Stopped after denial.") { paintNote("quiet", "Stopped after denial."); return; }
+  paintNote("", t);
 }
 function menuTriggers() { return document.querySelectorAll("[aria-controls='bot-menu']"); }
 function closeMenu() {
@@ -1577,6 +1824,9 @@ function goHome(push = true) {
   $("#thread-mark").hidden = true;
   $("#thread-label").textContent = "";
   $("#run-note").hidden = true;
+  const homeDot = $("#thread-dot");
+  if (homeDot) homeDot.hidden = true;
+  if (typeof resetThreadRun === "function") resetThreadRun();
   state.messages = [];
   $("#msgs").replaceChildren(el("p", "empty", "Choose a bot to read its thread."), $("#live"), $("#working"));
   syncComposer();
@@ -1593,7 +1843,14 @@ window.addEventListener("popstate", () => {
   revealLevel(parseLevel(location.pathname, location.hash, base(), history.state));
 });
 async function openBot(id, push = true) {
-  if (state.botId !== id) { stopStream(); state.loadedFor = null; closeState(); state.botState = null; paintStateChip(); }
+  if (state.botId !== id) {
+    stopStream();
+    state.loadedFor = null;
+    closeState();
+    state.botState = null;
+    paintStateChip();
+    if (typeof resetThreadRun === "function") resetThreadRun();
+  }
   state.botId = id;
   if (push) commitLevel({ view: "chat", bot: id }, "push");
   closeMenu();
@@ -1615,6 +1872,9 @@ async function refreshBot() {
   if (!state.botId) return null;
   const b = await api("/api/bots/" + state.botId);
   if (state.streaming && b.status !== "running") b.status = "running";
+  // FinishRun lands before the loop marks the bot idle. A user stop with no
+  // active run should not flash the row back to running.
+  if (state.stop && state.stop.phase === "stopped" && !b.active_run_id && b.status === "running") b.status = "idle";
   const i = state.bots.findIndex(x => x.id === b.id);
   if (i >= 0) state.bots[i] = b;
   else state.bots.push(b);
@@ -1665,7 +1925,7 @@ function copyButton(cls, label, getText) {
     b.textContent = ok ? "Copied" : "Copy failed";
     b.classList.add("done");
     clearTimeout(b._t);
-    b._t = setTimeout(() => { b.textContent = "Copy"; b.classList.remove("done"); }, 1200);
+    b._t = setTimeout(() => { b.textContent = "Copy"; b.classList.remove("done"); }, 1500);
   });
   return b;
 }
@@ -1702,33 +1962,57 @@ function hasToolRecords(recs) {
 }
 // permline:end
 function toolSummary(recs) {
-  const d = el("details", "tools");
   const calls = recs.filter(r => (r.kind || "call") === "call");
   const perms = recs.filter(r => r.kind === "permission");
   const names = [...new Set(calls.map(r => r.name))];
-  let label = calls.length + (calls.length === 1 ? " tool call" : " tool calls") + (names.length ? ": " + names.join(", ") : "");
+  const denied = perms.filter(r => !r.ok).length;
+  const wrap = el("div", "tsum-wrap");
+  const btn = el("button", "tsum");
+  btn.type = "button";
+  btn.setAttribute("aria-expanded", "false");
+  const n = el("span", "n", calls.length + (calls.length === 1 ? " tool call" : " tool calls"));
+  btn.append(chipIcon("wrench", 14), n);
+  if (names.length) btn.append(el("span", "names", names.join(", ")));
   if (perms.length) {
-    const denied = perms.filter(r => !r.ok).length;
-    label += " · " + perms.length + (perms.length === 1 ? " permission" : " permissions") + (denied ? " (" + denied + " denied)" : "");
+    const word = perms.length + (perms.length === 1 ? " permission" : " permissions");
+    const extra = denied ? " (" + denied + " denied)" : " (allowed)";
+    btn.append(el("span", denied ? "denied" : "", " · " + word + extra));
   }
-  d.append(el("summary", null, label));
+  btn.append(chipIcon("chev", 14));
+  const panel = el("div", "tsum-panel");
+  panel.hidden = true;
   // Records arrive in order: each round's pre-tool text, then its calls,
   // with permission decisions where the CLI asked.
   for (const r of recs) {
     if (r.kind === "text") {
-      d.append(renderMarkdown(r.result_or_error, el("div", "md tool-text")));
+      const narr = el("div", "narr");
+      renderMarkdown(r.result_or_error, narr);
+      panel.append(narr);
       continue;
     }
     if (r.kind === "permission") {
-      d.append(el("div", "tool tool-perm" + (r.ok ? "" : " denied"), permissionLine(r)));
+      const row = el("div", "tool tool-perm" + (r.ok ? "" : " denied"));
+      row.append(permIcon(!!r.ok), document.createTextNode(permissionLine(r)));
+      panel.append(row);
       continue;
     }
     const call = el("div", "tool");
-    call.append(el("div", null, r.name + " " + JSON.stringify(r.arguments || {})));
-    call.append(el("div", "tool-result", toolVerdict(r.ok, r.result_or_error, r.status) + ": " + (r.result_or_error || "")));
-    d.append(call);
+    let args = r.arguments;
+    if (typeof args === "string") { try { args = JSON.parse(args); } catch (e) { args = {}; } }
+    const mark = r.ok === false ? "✗ " : "✓ ";
+    call.append(el("div", null, mark + (r.name || "tool") + " " + JSON.stringify(args || {})));
+    let result = r.result_or_error || "";
+    let clipped = false;
+    if (result.length > 400) { result = result.slice(0, 400); clipped = true; }
+    call.append(el("div", "tool-result", toolVerdict(r.ok, r.result_or_error, r.status) + ": " + result + (clipped ? " (clipped)" : "")));
+    panel.append(call);
   }
-  return d;
+  btn.addEventListener("click", () => {
+    panel.hidden = !panel.hidden;
+    btn.setAttribute("aria-expanded", panel.hidden ? "false" : "true");
+  });
+  wrap.append(btn, panel);
+  return wrap;
 }
 // Markdown to DOM for message bubbles. Presentation only: the stored text is
 // unchanged. Every piece of text goes in through textContent, so raw HTML in
@@ -1910,32 +2194,188 @@ function renderMarkdown(text, target) {
 // renderMessages rebuilds the list. mode "bottom" lands at the newest
 // message; "prepend" keeps the visible messages where they were after older
 // ones are added above; "keep" leaves the scroll offset alone.
+function dayLabel(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const now = new Date();
+  const day = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((day(now) - day(d)) / 86400000);
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Yesterday";
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return months[d.getMonth()] + " " + d.getDate();
+}
+function msgCopyButton(getText) {
+  const b = el("button", "copy-btn msg-copy");
+  b.type = "button";
+  b.title = "Copy message text";
+  b.setAttribute("aria-label", "Copy message text");
+  const paint = () => { b.replaceChildren(chipIcon("copy", 14)); };
+  paint();
+  b.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    const ok = await copyText(getText());
+    b.textContent = ok ? "Copied" : "Copy failed";
+    b.classList.add("done");
+    clearTimeout(b._t);
+    b._t = setTimeout(() => {
+      b.classList.remove("done");
+      paint();
+      b.setAttribute("aria-label", "Copy message text");
+    }, 1500);
+  });
+  return b;
+}
+function recordPill(kind, toolLabel, timeLabel, duration) {
+  const row = el("div", "card-record show");
+  const text = cardRecordText({ kind: kind, toolLabel: toolLabel, timeLabel: timeLabel || "", duration: duration || "" });
+  if (kind === "cancelled") row.append(stopCircleIcon());
+  row.append(document.createTextNode(text));
+  return row;
+}
+function renderRunRecords(parent, runId) {
+  const merged = mergeRunRecords((state.tools && state.tools[runId]) || [], state.cardRecords || [], runId, state.botId);
+  for (const rec of merged) {
+    parent.append(recordPill(rec.kind, rec.toolLabel, rec.timeLabel, rec.duration));
+  }
+}
+// Cards for a run that renderRunRecords did not draw. That call already merged
+// the run's local cards, so a rendered run is skipped whole.
+function renderPendingRunRecords(box, renderedRuns) {
+  const done = renderedRuns || {};
+  const runs = [];
+  const listed = {};
+  for (const c of state.cardRecords || []) {
+    if (!c || c.botId !== state.botId) continue;
+    const id = c.runId || "";
+    if (done[id] || listed[id]) continue;
+    listed[id] = true;
+    runs.push(id);
+  }
+  for (const id of runs) {
+    const extra = mergeRunRecords([], state.cardRecords || [], id, state.botId);
+    for (const rec of extra) {
+      box.append(recordPill(rec.kind, rec.toolLabel, rec.timeLabel, rec.duration));
+    }
+  }
+}
+function stoppedPill(info) {
+  const line = el("div", "sys stopped");
+  line.append(stopCircleIcon(), document.createTextNode(stoppedNoticeText(true, !!info.queued, info.time || "")));
+  return line;
+}
+function stopInfoFor(runId) {
+  const info = state.userStops && state.userStops[runId];
+  if (!info || info.botId !== state.botId) return null;
+  return info;
+}
 function renderMessages(mode = "bottom") {
   const box = $("#msgs");
   const prevH = box.scrollHeight, prevTop = box.scrollTop;
   const live = $("#live"), working = $("#working");
   box.replaceChildren();
-  if (!state.messages.length && working.hidden) {
+  const showing = partialsToShow(state.messages, state.localPartials, state.botId);
+  const keepPartial = new Set(showing);
+  state.localPartials = (state.localPartials || []).filter(p => p && (p.botId !== state.botId || keepPartial.has(p)));
+  if (!state.messages.length && working.hidden && !showing.length) {
     box.append(el("p", "empty", "No messages yet. The composer stays available while a run is in progress."));
   }
-  const shownTools = new Set();
-  for (const m of state.messages) {
-    const bubble = el("div", "bubble " + (m.role || "system"));
-    const who = whoText(m);
-    if (who) bubble.append(el("span", "who", who));
-    if ((m.role === "bot" || m.role === "system") && m.run_id && !shownTools.has(m.run_id) && hasToolRecords(state.tools[m.run_id])) {
-      shownTools.add(m.run_id);
-      bubble.append(toolSummary(state.tools[m.run_id]));
+  const partialAt = {};
+  for (const p of showing) {
+    let at = state.messages.length;
+    const id = p && p.runId != null && p.runId !== "" ? String(p.runId) : "";
+    if (id) {
+      for (let i = 0; i < state.messages.length; i++) {
+        const row = state.messages[i];
+        const rowId = row && row.run_id != null && row.run_id !== "" ? String(row.run_id) : "";
+        if (rowId === id) { at = i; break; }
+      }
     }
-    if (m.role === "user" || m.role === "bot") {
-      bubble.append(renderMarkdown(m.content, el("div", "md")));
-      // Copies the stored text, not the rendered page.
-      const raw = m.content || "";
-      bubble.append(copyButton("msg-copy", "Copy message text", () => raw));
-    }
-    else bubble.append(document.createTextNode(m.content || ""));
-    box.append(bubble);
+    if (!partialAt[at]) partialAt[at] = [];
+    partialAt[at].push(p);
   }
+  const appendPartial = (p) => {
+    const bubble = el("div", "bubble bot");
+    bubble.append(renderMarkdown(p.content, el("div", "md")));
+    box.append(bubble);
+  };
+  const shownTools = new Set();
+  const drawnStops = {};
+  const renderedRuns = {};
+  let lastDay = "";
+  for (let mi = 0; mi < state.messages.length; mi++) {
+    const m = state.messages[mi];
+    const day = m.created_at ? dayLabel(m.created_at) : "";
+    if (day && day !== lastDay) {
+      lastDay = day;
+      box.append(el("div", "day-line", day));
+    }
+    for (const p of partialAt[mi] || []) appendPartial(p);
+    // A reload has no userStops entry. The saved cancel notice is still the
+    // stop line; "Stopped by you" only while this session pressed Stop.
+    if (m.role === "system" && m.content === "Notice: Run cancelled.") {
+      const info = stopInfoFor(m.run_id);
+      if (info) {
+        box.append(stoppedPill(info));
+      } else {
+        const line = el("div", "sys stopped");
+        line.append(stopCircleIcon(), document.createTextNode(stoppedNoticeText(false, false, clockLabel(m.created_at))));
+        box.append(line);
+      }
+      drawnStops[m.run_id] = true;
+      if (m.run_id && !shownTools.has(m.run_id) && hasToolRecords(state.tools[m.run_id])) {
+        shownTools.add(m.run_id);
+        box.append(toolSummary(state.tools[m.run_id]));
+        renderRunRecords(box, m.run_id);
+        renderedRuns[m.run_id] = true;
+      }
+      continue;
+    }
+    const queued = m.role === "user" && (state.queuedIds || []).indexOf(String(m.id)) >= 0;
+    if (m.role === "user" || m.role === "bot") {
+      const group = el("div", "msg-group " + m.role);
+      const bubble = el("div", "bubble " + m.role + (queued ? " is-queued" : ""));
+      bubble.append(renderMarkdown(m.content, el("div", "md")));
+      group.append(bubble);
+      if (m.role === "bot" && m.run_id && !shownTools.has(m.run_id) && hasToolRecords(state.tools[m.run_id])) {
+        shownTools.add(m.run_id);
+        group.append(toolSummary(state.tools[m.run_id]));
+        renderRunRecords(group, m.run_id);
+        renderedRuns[m.run_id] = true;
+      }
+      const meta = el("div", "msg-meta");
+      const time = clockLabel(m.created_at);
+      const who = m.role === "bot" ? ((currentBot() && currentBot().name) || "Bot") : "";
+      meta.append(document.createTextNode(who && time ? who + " · " + time : (who || time)));
+      const raw = m.content || "";
+      meta.append(msgCopyButton(() => raw));
+      group.append(meta);
+      if (queued) {
+        const cap = el("div", "queued-cap");
+        cap.append(chipIcon("clock", 12), document.createTextNode(" " + QUEUED_CAPTION));
+        group.append(cap);
+      }
+      box.append(group);
+    } else {
+      const bubble = el("div", "bubble system");
+      if (whoText(m)) bubble.append(el("span", "who", whoText(m)));
+      bubble.append(document.createTextNode(m.content || ""));
+      box.append(bubble);
+      if (m.run_id && !shownTools.has(m.run_id) && hasToolRecords(state.tools[m.run_id])) {
+        shownTools.add(m.run_id);
+        box.append(toolSummary(state.tools[m.run_id]));
+        renderRunRecords(box, m.run_id);
+        renderedRuns[m.run_id] = true;
+      }
+    }
+  }
+  for (const p of partialAt[state.messages.length] || []) appendPartial(p);
+  for (const runId in (state.userStops || {})) {
+    if (drawnStops[runId]) continue;
+    const info = stopInfoFor(runId);
+    if (info) box.append(stoppedPill(info));
+  }
+  renderPendingRunRecords(box, renderedRuns);
   // The live run and the working indicator sit where the next reply will appear.
   box.append(live, working);
   if (mode === "prepend") box.scrollTop = prevTop + (box.scrollHeight - prevH);
@@ -1955,17 +2395,25 @@ async function loadThread(mode = "auto") {
   if (state.botId !== id) return;
   const page = data.messages || [];
   const fresh = state.loadedFor !== id;
+  const prevMessages = state.messages.slice();
   const lastBefore = state.messages.length ? state.messages[state.messages.length - 1].id : null;
   state.loadedFor = id;
   if (fresh || !page.length) {
     state.messages = page;
     state.tools = data.tools || {};
     state.hasMore = !!data.has_more;
+    // A freshly opened thread is history. Queued styling is never restored.
+    if (fresh) { state.queuedIds = []; state.queuedDuringRun = ""; }
   } else {
     const first = page[0].created_at;
     state.messages = state.messages.filter(m => m.created_at < first).concat(page);
     state.tools = Object.assign({}, state.tools, data.tools || {});
     if (state.messages.length === page.length) state.hasMore = !!data.has_more;
+    if (queuedClearOnThread(prevMessages, state.messages, state.queuedIds, state.queuedDuringRun) && shouldClearQueued("stored-reply")) {
+      state.queuedIds = [];
+      state.queuedDuringRun = "";
+      if (state.stop) state.stop = reduceStop(state.stop, { type: "unqueue" });
+    }
   }
   const grew = !fresh && page.length && state.messages[state.messages.length - 1].id !== lastBefore;
   renderMessages(fresh ? "bottom" : mode === "auto" ? (state.pinned ? "bottom" : "keep") : mode);
@@ -2025,12 +2473,31 @@ new MutationObserver((muts) => {
   b.scrollTop = b.scrollHeight;
 }).observe($("#msgs"), {childList: true, subtree: true, characterData: true});
 new ResizeObserver(() => { if (state.pinned) { const b = $("#msgs"); b.scrollTop = b.scrollHeight; } }).observe($("#msgs"));
+function pendingApproval() {
+  for (const rec of permCards.values()) {
+    if (rec && !rec.settled) return true;
+  }
+  return false;
+}
+function workPhase() {
+  if (state.stop && state.stop.phase === "stopping") return "stopping";
+  if (pendingApproval()) return "waiting";
+  return "working";
+}
 function setWorking(on, text) {
   const w = $("#working");
+  if (!w) return;
   const box = $("#msgs");
-  w.hidden = !on;
-  if (on) {
-    $("#working-text").textContent = text || "working";
+  if (text && text !== "working" && text !== "Working") state.liveTool = text;
+  const phase = workPhase();
+  const keep = phase === "stopping";
+  w.hidden = !on && !keep;
+  const label = workingIndicatorText(phase, phase === "stopping" ? "" : (state.liveTool || ""));
+  const node = $("#working-text");
+  if (node) node.textContent = label;
+  w.classList.toggle("is-waiting", phase === "waiting");
+  w.classList.toggle("is-stopping", phase === "stopping");
+  if (!w.hidden) {
     const empty = box.querySelector(":scope > p.empty");
     if (empty) empty.remove();
     if (w.parentNode !== box || box.lastElementChild !== w) box.append($("#live"), w);
@@ -2070,10 +2537,34 @@ $("#menu-log").addEventListener("click", () => {
   else openLog(true);
 });
 $("#composer").addEventListener("submit", (e) => { e.preventDefault(); send(); });
+$("#stop-btn").addEventListener("click", () => {
+  const btn = $("#stop-btn");
+  if (!btn || btn.getAttribute("aria-disabled") === "true") return;
+  requestStop();
+});
 // Enter sends; Shift+Enter (or Enter while an IME is composing) inserts a
 // newline. The box grows with its content up to 40% of the viewport.
 $("#composer-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); return; }
+  if (e.key !== "Escape") return;
+  const input = $("#composer-input");
+  const touch = window.matchMedia && window.matchMedia("(hover: none)").matches;
+  const menuOpen = ($("#bot-menu") && !$("#bot-menu").hidden) || ($("#roster-menu") && !$("#roster-menu").hidden);
+  const sheetOpen = (typeof stateOpen === "function" && stateOpen()) || (typeof createOpen === "function" && createOpen());
+  let dialogOpen = false;
+  if (typeof permCards !== "undefined") {
+    for (const rec of permCards.values()) if (rec && !rec.settled) dialogOpen = true;
+  }
+  const stop = !touch && escStopsRun({
+    key: "Escape",
+    empty: !String(input && input.value || "").trim(),
+    inComposer: true,
+    runActive: !!(state.stop && state.stop.phase === "running"),
+    menuOpen: !!menuOpen,
+    sheetOpen: !!sheetOpen,
+    dialogOpen: dialogOpen
+  });
+  if (stop) { e.preventDefault(); requestStop(); }
 });
 function fitComposer() {
   const t = $("#composer-input");
@@ -2082,18 +2573,28 @@ function fitComposer() {
   t.style.height = Math.min(t.scrollHeight + 2, max) + "px";
   t.style.overflowY = t.scrollHeight + 2 > max ? "auto" : "hidden";
 }
-$("#composer-input").addEventListener("input", fitComposer);
+$("#composer-input").addEventListener("input", () => { fitComposer(); syncSendEmpty(); });
 async function send() {
   const input = $("#composer-input");
   const content = input.value.trim();
   if (!content || !state.botId) return;
+  const runningBefore = !!(state.streaming || (currentBot() && currentBot().status === "running") || (state.stop && (state.stop.phase === "running" || state.stop.phase === "stopping")));
+  const duringRun = state.streaming || (state.stop && state.stop.runId) || "";
   input.value = "";
   fitComposer();
-  $("#run-note").hidden = true;
+  syncSendEmpty();
+  if (state.stopNote !== "failed") $("#run-note").hidden = true;
   try {
     const data = await api("/api/bots/" + state.botId + "/thread/messages", {
       method: "POST", body: JSON.stringify({content})
     });
+    if (runningBefore && data && data.message && data.message.id != null) {
+      state.queuedIds = state.queuedIds || [];
+      const qid = String(data.message.id);
+      if (state.queuedIds.indexOf(qid) < 0) state.queuedIds.push(qid);
+      if (!state.queuedDuringRun) state.queuedDuringRun = duringRun;
+      if (state.stop) state.stop = reduceStop(state.stop, { type: "queue" });
+    }
     // Sending is a jump to the bottom, wherever the reader was.
     await loadThread("bottom");
     if (data.run_id) {
@@ -2137,58 +2638,175 @@ function clearPermissionCards() {
   permCards.clear();
 }
 
+function mmss(left) {
+  const s = Math.max(0, left | 0);
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return m + ":" + (r < 10 ? "0" : "") + r;
+}
+function addKV(parent, k, v) {
+  const row = el("div", "kv");
+  row.append(el("span", "kv-k", k), el("span", "kv-v", v == null ? "" : String(v)));
+  parent.append(row);
+}
+function fillCardBody(body, payload) {
+  const tool = payload && payload.tool ? String(payload.tool) : "";
+  const args = payload && payload.arguments && typeof payload.arguments === "object" ? payload.arguments : {};
+  if (payload && payload.kind === "question") return;
+  if (tool === "ExitPlanMode" && typeof args.plan === "string") {
+    const plan = el("pre", "perm-plan sr");
+    plan.textContent = args.plan;
+    body.append(plan);
+    const lines = args.plan.split(/\n+/).map(s => s.replace(/^\s*\d+[.)]\s*/, "").trim()).filter(Boolean);
+    const ol = el("ol", "card-plan");
+    (lines.length ? lines : [args.plan]).forEach(line => ol.append(el("li", null, line)));
+    body.append(ol);
+  }
+  if (tool === "git_push") {
+    addKV(body, "Branch", args.branch || "");
+    addKV(body, "Remote", args.remote || "");
+    let commits = args.commits == null ? "" : (typeof args.commits === "string" ? args.commits : permissionArgsText(args.commits));
+    if (commits.length > 4000) commits = commits.slice(0, 4000);
+    const pre = el("pre", "card-pre");
+    pre.textContent = commits;
+    body.append(pre);
+    body.append(el("div", "card-note", "Every push asks. Session approval does not apply. Default branch, force and tags are refused before this card."));
+  } else if (tool === "create_pr") {
+    const head = args.head == null ? "" : String(args.head);
+    const baseName = args.base == null ? "" : String(args.base);
+    addKV(body, "Branches", head + " → " + baseName);
+    addKV(body, "Title", args.title == null ? "" : String(args.title));
+    addKV(body, "Draft", args.draft ? "yes" : "no");
+    let bodyText = args.body == null ? "" : String(args.body);
+    const clipped = bodyText.length > 2000;
+    if (clipped) bodyText = bodyText.slice(0, 2000);
+    const pre = el("pre", "card-pre");
+    pre.textContent = bodyText;
+    body.append(pre);
+    if (clipped) body.append(el("div", "card-note", "Body preview · clipped at 2,000 characters"));
+    body.append(el("div", "card-note", "Every pull request asks. Nothing is sent to GitHub until you allow it."));
+  } else if (tool === "Bash") {
+    body.append(el("div", "card-note", "Denied automatically when the timer runs out."));
+  }
+  const argsPre = el("pre", "perm-args");
+  argsPre.textContent = permissionArgsText(payload ? payload.arguments : "");
+  if (tool === "git_push" || tool === "create_pr") argsPre.className = "perm-args sr";
+  body.append(argsPre);
+}
 function showPermissionRequest(payload, runId) {
   const id = payload && payload.id ? String(payload.id) : "";
   if (!id || permCards.has(id)) return permCards.get(id) || null;
   const run = (payload && payload.run_id) || runId || "";
   const card = el("div", "perm-card");
   card.dataset.id = id;
+  const toolName = payload && payload.tool == null ? "" : String(payload && payload.tool != null ? payload.tool : "");
+  let botName = "";
+  if (typeof currentBot === "function") {
+    const b = currentBot();
+    if (b && b.name) botName = String(b.name);
+  }
+  const top = el("div", "card-top");
+  const tile = el("span", "card-tile");
+  const glyph = el("span", null, payload && payload.kind === "question" ? "?" : "!");
+  tile.append(glyph);
+  const main = el("div", "card-main");
+  if (typeof cardEyebrow === "function") {
+    const eye = cardEyebrow(payload, botName);
+    if (eye) main.append(el("div", "card-eyebrow", eye));
+  }
   const tool = el("div", "perm-tool");
-  tool.textContent = payload.tool == null ? "" : String(payload.tool);
+  const titleText = (typeof cardTitle === "function") ? cardTitle(payload) : toolName;
+  tool.textContent = titleText;
+  if (toolName && String(titleText).indexOf(toolName) < 0) {
+    const raw = el("span", "sr");
+    raw.textContent = toolName;
+    tool.append(raw);
+  }
+  if (typeof tool.id === "string" || typeof document !== "undefined") tool.id = "perm-title-" + id;
+  main.append(tool);
+  const meta = el("div", "card-meta");
+  const digits = el("div", "card-digits");
+  const bar = el("div", "card-bar");
+  const barI = el("i");
+  bar.append(barI);
+  meta.append(digits, bar);
+  top.append(tile, main, meta);
+  const body = el("div", "card-body");
   const count = el("div", "perm-count");
   const outcome = el("div", "perm-outcome");
   const errLine = el("div", "perm-err");
   const actions = el("div", "perm-actions");
+  const record = el("div", "card-record");
+  const announceEl = el("div", "sr");
+  if (typeof announceEl.setAttribute === "function") announceEl.setAttribute("aria-live", "polite");
   const inputs = [];
   let groups = [];
-  card.append(tool);
+  if (typeof card.setAttribute === "function") {
+    card.setAttribute("role", "alertdialog");
+    if (tool.id) card.setAttribute("aria-labelledby", tool.id);
+  }
   if (payload && payload.kind === "question") {
-    groups = appendQuestions(card, payload, inputs);
+    groups = appendQuestions(body, payload, inputs);
     const submit = el("button", "primary", "Submit");
     submit.type = "button";
     const skip = el("button", null, "Skip");
     skip.type = "button";
-    submit.addEventListener("click", () => submitQuestion(id, run));
-    skip.addEventListener("click", () => postPermission(id, run, "deny"));
+    submit.addEventListener("click", () => {
+      if (submit.classList && typeof submit.classList.add === "function") submit.classList.add("is-loading");
+      submitQuestion(id, run);
+    });
+    skip.addEventListener("click", () => {
+      if (skip.classList && typeof skip.classList.add === "function") skip.classList.add("is-loading");
+      postPermission(id, run, "deny");
+    });
     actions.append(submit, skip);
   } else {
-    if (payload && payload.tool === "ExitPlanMode" && payload.arguments && typeof payload.arguments.plan === "string") {
-      const plan = el("pre", "perm-plan");
-      plan.textContent = payload.arguments.plan;
-      card.append(plan);
-    }
-    const args = el("pre", "perm-args");
-    args.textContent = permissionArgsText(payload.arguments);
+    fillCardBody(body, payload);
     const allow = el("button", "primary", "Allow once");
     allow.type = "button";
-    const deny = el("button", null, "Deny");
+    const deny = el("button", "deny", "Deny");
     deny.type = "button";
-    actions.append(allow, deny);
+    allow.addEventListener("click", () => {
+      if (allow.classList && typeof allow.classList.add === "function") allow.classList.add("is-loading");
+      postPermission(id, run, "allow_once");
+    });
+    deny.addEventListener("click", () => {
+      if (deny.classList && typeof deny.classList.add === "function") deny.classList.add("is-loading");
+      postPermission(id, run, "deny");
+    });
+    actions.append(allow);
     if (payload.session_allowed) {
       const sess = el("button", null, "Allow for session");
       sess.type = "button";
-      sess.addEventListener("click", () => postPermission(id, run, "allow_session"));
+      sess.addEventListener("click", () => {
+        if (sess.classList && typeof sess.classList.add === "function") sess.classList.add("is-loading");
+        postPermission(id, run, "allow_session");
+      });
       actions.append(sess);
     }
-    allow.addEventListener("click", () => postPermission(id, run, "allow_once"));
-    deny.addEventListener("click", () => postPermission(id, run, "deny"));
-    card.append(args);
+    actions.append(deny);
+    if (typeof document !== "undefined" && typeof allow.focus === "function") {
+      let typing = false;
+      try {
+        const field = document.getElementById && document.getElementById("composer-input");
+        typing = !!(document.activeElement && field && document.activeElement === field);
+      } catch (e) { typing = false; }
+      if (!typing) allow.focus();
+    }
   }
-  card.append(count, actions, outcome, errLine);
+  card.append(top, body, count, actions, outcome, errLine, record, announceEl);
   const live = $("#live");
   if (live) live.append(card);
+  if (typeof card.scrollIntoView === "function") {
+    try { card.scrollIntoView({ block: "nearest" }); } catch (e) {}
+  }
   const deadline = Date.parse(payload.deadline || "");
-  const rec = {card, count, actions, outcome, errLine, inputs, groups, timer: 0, expire: 0, settled: false, server: false, pending: false};
+  const rec = {
+    card, count, actions, outcome, errLine, inputs, groups, record, digits, barI, announceEl,
+    timer: 0, expire: 0, settled: false, server: false, pending: false,
+    tool: toolName, args: payload && payload.arguments, runId: run, reqId: id,
+    prevLeft: null, initialLeft: null
+  };
   permCards.set(id, rec);
   const paint = (maySettle) => {
     const cur = permCards.get(id);
@@ -2199,11 +2817,22 @@ function showPermissionRequest(payload, runId) {
     }
     const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
     cur.count.textContent = left >= 60 ? Math.floor(left / 60) + "m " + (left % 60) + "s" : left + "s";
+    if (cur.initialLeft == null) cur.initialLeft = left;
+    if (cur.digits) cur.digits.textContent = mmss(left);
+    const total = cur.initialLeft > 0 ? cur.initialLeft : left;
+    if (cur.barI && cur.barI.style) {
+      const pct = total > 0 ? Math.max(0, Math.min(100, (left / total) * 100)) : 0;
+      cur.barI.style.width = pct + "%";
+    }
+    const spoken = (typeof countdownAnnounce === "function") ? countdownAnnounce(cur.prevLeft, left) : "";
+    cur.prevLeft = left;
+    if (spoken && cur.announceEl) cur.announceEl.textContent = spoken;
     if (maySettle && left <= 0) settlePermission(id, "deny", "timeout", false);
   };
   paint(false);
   rec.timer = setInterval(() => paint(true), 250);
   if (!Number.isNaN(deadline)) rec.expire = setTimeout(() => paint(true), Math.max(0, deadline - Date.now()));
+  if (typeof setWorking === "function" && typeof state !== "undefined" && state.streaming) setWorking(true);
   return rec;
 }
 
@@ -2313,6 +2942,16 @@ function setPermDisabled(rec, disabled) {
   if (rec.inputs) for (const n of rec.inputs) n.disabled = disabled;
 }
 
+function fillCardRecord(rec, decision, source) {
+  if (!rec || !rec.record) return;
+  const kind = (typeof recordKind === "function") ? recordKind(decision, source) : "";
+  const toolLabel = (typeof toolCallLabel === "function") ? toolCallLabel(rec.tool, rec.args) : (rec.tool || "");
+  const timeLabel = (typeof clockLabel === "function") ? clockLabel(new Date()) : "";
+  const duration = (typeof durationLabel === "function") ? durationLabel(rec.initialLeft || 0) : "";
+  const text = (typeof cardRecordText === "function") ? cardRecordText({ kind: kind, toolLabel: toolLabel, timeLabel: timeLabel, duration: duration }) : "";
+  rec.record.textContent = text;
+  if (kind && typeof rememberCardRecord === "function") rememberCardRecord(rec, kind, toolLabel, timeLabel, duration);
+}
 function settlePermission(id, decision, source, fromServer) {
   const rec = permCards.get(id);
   if (!rec) return;
@@ -2325,6 +2964,8 @@ function settlePermission(id, decision, source, fromServer) {
   rec.card.classList.add("settled");
   setPermDisabled(rec, true);
   rec.outcome.textContent = (decision || "deny") + " (" + (source || "") + ")";
+  fillCardRecord(rec, decision, source);
+  if (typeof setWorking === "function") setWorking(!!(typeof state !== "undefined" && state.streaming));
 }
 
 function showPermissionDecision(payload) {
@@ -2359,11 +3000,163 @@ async function postPermission(id, runId, decision, extra) {
     rec.pending = false;
     if (!rec.settled) {
       setPermDisabled(rec, false);
-      rec.errLine.textContent = err && err.message ? err.message : "request failed";
+      rec.errLine.textContent = "Couldn't send your answer. The daemon didn't respond. Try again.";
+      if (rec.actions && rec.actions.querySelectorAll) {
+        rec.actions.querySelectorAll("button").forEach((b) => {
+          if (b.classList && typeof b.classList.remove === "function") b.classList.remove("is-loading");
+        });
+      }
     }
   }
 }
 // perm:end
+function announce(text) {
+  const n = $("#a11y-status");
+  if (n) n.textContent = text || "";
+}
+function paintSubline(b) {
+  const label = $("#thread-label");
+  const dot = $("#thread-dot");
+  if (!b) {
+    if (label) label.textContent = "";
+    if (dot) dot.hidden = true;
+    return;
+  }
+  const phase = state.stop && state.stop.phase;
+  const live = phase !== "stopped" && !!(state.streaming || b.status === "running" || phase === "running" || phase === "stopping");
+  const word = b.archived ? "paused" : live ? "running" : (b.status === "paused" ? "paused" : "idle");
+  if (label) label.textContent = threadSubline(word, word === "running" ? state.liveTool : "", b.label || "");
+  if (dot) {
+    dot.hidden = false;
+    dot.className = "dot " + (word === "running" ? "running" : word === "paused" ? "paused" : "idle");
+  }
+}
+function syncStopButton() {
+  const btn = $("#stop-btn");
+  const menuStop = $("#menu-stop");
+  const phase = state.stop && state.stop.phase;
+  const show = phase === "running" || phase === "stopping";
+  if (btn) {
+    btn.hidden = !show;
+    const stopping = phase === "stopping";
+    btn.classList.toggle("is-stopping", stopping);
+    if (stopping) {
+      btn.setAttribute("aria-disabled", "true");
+      btn.setAttribute("aria-label", "Stopping…");
+    } else {
+      btn.removeAttribute("aria-disabled");
+      btn.setAttribute("aria-label", "Stop run");
+    }
+  }
+  if (menuStop) menuStop.hidden = !show;
+}
+function armStopTimer() {
+  clearTimeout(state.stopTimer);
+  state.stopTimer = 0;
+  if (!state.stop || state.stop.phase !== "stopping") return;
+  const since = state.stop.since || Date.now();
+  const wait = Math.max(0, STOP_TIMEOUT_MS - (Date.now() - since));
+  state.stopTimer = setTimeout(() => {
+    if (!state.stop || state.stop.phase !== "stopping") return;
+    applyStop(reduceStop(state.stop, { type: "tick", now: Date.now() }));
+  }, wait);
+}
+function applyStop(next) {
+  state.stop = next || freshStop();
+  clearTimeout(state.stopTimer);
+  state.stopTimer = 0;
+  if (state.stop.phase === "stopping") armStopTimer();
+  if (state.stop.note === "stop-failed") state.stopNote = "failed";
+  else if (state.stop.phase !== "running") state.stopNote = "";
+  syncStopButton();
+  syncComposer();
+  const b = typeof currentBot === "function" ? currentBot() : null;
+  if (b && typeof paintHeader === "function") paintHeader(b);
+  else if (typeof paintSubline === "function") paintSubline(b);
+  if (state.stop.phase === "stopping" || (state.streaming && state.stop.phase === "running")) setWorking(!!state.streaming || state.stop.phase === "stopping");
+}
+function resetThreadRun() {
+  clearTimeout(state.stopTimer);
+  state.stopTimer = 0;
+  state.stop = freshStop();
+  state.queuedIds = [];
+  state.queuedDuringRun = "";
+  state.liveTool = "";
+  state.stopNote = "";
+  state.cardRecords = [];
+  state.userStops = {};
+  state.localPartials = [];
+  state.dismissedRunError = "";
+  syncStopButton();
+}
+function rememberCardRecord(rec, kind, toolLabel, timeLabel, duration) {
+  if (!rec || !kind) return;
+  const runId = rec.runId || state.streaming || "";
+  const key = (rec.tool || "") + "|" + kind + "|" + (rec.reqId || "");
+  state.cardRecords = (state.cardRecords || []).filter(c => c.key !== key);
+  state.cardRecords.push({
+    key: key, runId: runId, botId: state.botId, kind: kind,
+    toolLabel: toolLabel, timeLabel: timeLabel, duration: duration
+  });
+}
+function settleStoppedCards() {
+  if (typeof permCards === "undefined") return;
+  for (const id of [...permCards.keys()]) {
+    const rec = permCards.get(id);
+    if (!rec || rec.settled) continue;
+    settlePermission(id, "deny", "cancel", false);
+  }
+}
+// After Stop from the button or the ⋯ item, the control hides under focus
+// and the browser drops focus on body. Put it back on the composer unless
+// the user has already moved to some other control.
+function focusComposerAfterStop() {
+  const active = document.activeElement;
+  const stopBtn = $("#stop-btn");
+  const menuStop = $("#menu-stop");
+  if (active && active !== document.body && active !== stopBtn && active !== menuStop) return;
+  const input = $("#composer-input");
+  if (input && typeof input.focus === "function") input.focus({ preventScroll: true });
+}
+function rememberPartial(runId, text) {
+  const content = String(text || "");
+  if (!content || !runId) return;
+  state.localPartials = (state.localPartials || []).filter(p => p.runId !== runId);
+  state.localPartials.push({ runId: runId, botId: state.botId, content: content });
+}
+async function requestStop() {
+  if (!state.botId || !state.stop || state.stop.phase !== "running" || !state.stop.runId) return;
+  const runId = state.stop.runId;
+  const queued = !!(state.queuedIds && state.queuedIds.length);
+  applyStop(reduceStop(state.stop, { type: "press", now: Date.now(), runId: runId, queued: queued }));
+  focusComposerAfterStop();
+  announce("Stopping run");
+  setWorking(true);
+  let data = null;
+  try {
+    data = await api("/api/bots/" + state.botId + "/runs/" + encodeURIComponent(runId) + "/cancel", { method: "POST" });
+  } catch (err) {
+    if (state.stop && state.stop.phase === "stopping" && state.stop.runId === runId) {
+      applyStop(reduceStop(state.stop, { type: "cancel-error" }));
+    }
+    return;
+  }
+  if (!state.stop || state.stop.phase !== "stopping" || state.stop.runId !== runId) return;
+  const status = data && data.status != null ? String(data.status) : "";
+  const streamEnded = state.streaming !== runId;
+  applyStop(reduceStop(state.stop, { type: "cancel-result", status: status, streamEnded: streamEnded }));
+}
+// placeCaret keeps the streaming caret at the end of the last text block.
+function placeCaret(bubble, text) {
+  // renderMarkdown replaces the text's children, so keep our own reference.
+  if (!bubble) return;
+  if (!bubble.lgbCaret && bubble.querySelector) bubble.lgbCaret = bubble.querySelector(".caret");
+  const caret = bubble.lgbCaret;
+  if (!caret || !text) return;
+  let tgt = text;
+  while (tgt.lastElementChild && /^(P|LI|UL|OL|BLOCKQUOTE|H[1-6])$/.test(tgt.lastElementChild.tagName)) tgt = tgt.lastElementChild;
+  if (caret.parentNode !== tgt || tgt.lastChild !== caret) tgt.append(caret);
+}
 function stopStream() {
   clearPermissionCards();
   if (state.streamCtl) { state.streamCtl.abort(); state.streamCtl = null; }
@@ -2383,10 +3176,19 @@ async function loadPendingPermissions(runId) {
 }
 async function follow(runId) {
   if (!runId || state.streaming === runId) return;
+  // A run this client already stopped must not be subscribed again: the
+  // daemon's synthesized "done" has no status and would clear the stopped line.
+  const priorStop = state.userStops && state.userStops[runId];
+  if (priorStop && priorStop.botId === state.botId) return;
   stopStream();
   state.streaming = runId;
+  state.stop = reduceStop(state.stop || freshStop(), { type: "run", runId: runId });
+  syncComposer();
+  state.liveTool = "";
+  syncStopButton();
   if (noteRunStarted(state.bots, state.botId)) renderBots();
-  setWorking(true, "working");
+  setWorking(true);
+  paintSubline(currentBot());
   const ctl = new AbortController();
   state.streamCtl = ctl;
   const live = $("#live");
@@ -2397,9 +3199,17 @@ async function follow(runId) {
   const newBubble = () => {
     acc = "";
     bubble = el("div", "bubble bot");
-    bubble.append(el("span", "who", (currentBot() && currentBot().name) || "Bot"));
     text = el("div", "md");
-    bubble.append(text);
+    const caret = el("span", "caret");
+    caret.setAttribute("aria-hidden", "true");
+    bubble.append(text, caret);
+  };
+  const closeBubble = () => {
+    if (bubble && bubble.querySelector) {
+      const caret = bubble.querySelector(".caret");
+      if (caret) caret.remove();
+    }
+    bubble = null;
   };
   try {
     const headers = {};
@@ -2429,30 +3239,80 @@ async function follow(runId) {
         try { payload = JSON.parse(data); } catch { continue; }
         if (event === "status") {
           if (noteRunStarted(state.bots, state.botId)) renderBots();
-          setWorking(true, payload.text || payload.state || "working");
+          const tool = payload.text || payload.state || "";
+          if (tool && tool !== "working" && tool !== "running") state.liveTool = tool;
+          if (!state.stop || state.stop.phase !== "stopping") setWorking(true);
+          paintSubline(currentBot());
         } else if (event === "token") {
-          if (!bubble) newBubble();
+          if (!bubble) {
+            if ((state.queuedIds || []).length && shouldClearQueued("new-bot-token")) {
+              state.queuedIds = [];
+              state.queuedDuringRun = "";
+              if (state.stop) state.stop = reduceStop(state.stop, { type: "unqueue" });
+            }
+            newBubble();
+          }
           acc += payload.text || "";
           renderMarkdown(acc, text);
+          placeCaret(bubble, text);
           if (!bubble.parentNode) live.append(bubble);
         } else if (event === "tool_call") {
-          bubble = null;
-          live.append(el("div", "tool", "tool " + (payload.name || "") + " " + JSON.stringify(payload.arguments || {})));
+          closeBubble();
+          state.liveTool = payload.name || state.liveTool;
+          const line = el("div", "live-tool");
+          line.dataset.name = payload.name || "";
+          line.textContent = liveToolLine(payload.name, payload.arguments, null);
+          live.append(line);
+          if (!state.stop || state.stop.phase !== "stopping") setWorking(true);
+          paintSubline(currentBot());
         } else if (event === "tool_result") {
-          const mark = toolVerdict(payload.ok, payload.result_or_error, payload.status);
-          live.append(el("div", "tool", (payload.name || "tool") + " " + mark + ": " + (payload.result_or_error || "")));
+          const lines = live.querySelectorAll ? live.querySelectorAll(".live-tool") : [];
+          let line = null;
+          for (let i = lines.length - 1; i >= 0; i--) {
+            if (!payload.name || lines[i].dataset.name === payload.name) { line = lines[i]; break; }
+          }
+          const textLine = liveToolLine(payload.name, payload.arguments, payload.ok);
+          if (line) line.textContent = textLine;
+          else live.append(el("div", "live-tool", textLine));
         } else if (event === "permission_request") {
+          if (payload && payload.tool) state.liveTool = payload.tool;
           showPermissionRequest(payload, runId);
+          if (!state.stop || state.stop.phase !== "stopping") setWorking(true);
+          paintSubline(currentBot());
         } else if (event === "permission_decision") {
           showPermissionDecision(payload);
+          if (!state.stop || state.stop.phase !== "stopping") setWorking(!!state.streaming);
         } else if (event === "done" || event === "error") {
+          const status = event === "error" ? "error" : (payload.status || "");
+          const prevPhase = state.stop ? state.stop.phase : "";
+          applyStop(reduceStop(state.stop || freshStop(), { type: "stream-done", status: status }));
+          if (prevPhase === "stopping" && state.stop.phase === "stopped") {
+            state.userStops[runId] = {
+              botId: state.botId,
+              queued: !!(state.queuedIds && state.queuedIds.length),
+              time: clockLabel(new Date())
+            };
+            announce("Run stopped");
+            settleStoppedCards();
+            if (bubble && acc) rememberPartial(runId, acc);
+            const bot = currentBot();
+            if (bot) {
+              if (bot.status === "running") bot.status = "idle";
+              bot.pending_permissions = 0;
+            }
+          }
           setWorking(false);
-          if (event === "done" && payload.status === "stopped") {
-            showRunError("Stopped after denial");
-          } else if (event === "error" && payload.error !== "tool round limit") {
-            showRunError("Run failed: " + (payload.error || "unknown error"));
+          if (state.stop.phase !== "stopped") {
+            if (event === "done" && payload.status === "stopped") showRunError("Stopped after denial.");
+            else if (event === "error" && payload.error !== "tool round limit") showRunError("Run failed: " + (payload.error || "unknown error"));
           }
           stopStream();
+          if (state.stop && state.stop.phase === "stopped") {
+            const note = $("#run-note");
+            if (note) { note.hidden = true; note.replaceChildren(); }
+            renderBots();
+            paintSubline(currentBot());
+          }
           await loadThread();
           await refreshBot();
           loadState().catch(() => {});
@@ -2495,7 +3355,9 @@ $("#bot-menu").addEventListener("click", async (e) => {
   const act = btn.dataset.act;
   const b = currentBot();
   try {
-    if (act === "profile") { await openProfile(state.botId); }
+    if (act === "stop") { await requestStop(); }
+    else if (act === "log") { openLog(true); }
+    else if (act === "profile") { await openProfile(state.botId); }
     else if (act === "state") { await openState(btn); }
     else if (act === "pin") {
       await api("/api/bots/" + state.botId, {method:"PATCH", body: JSON.stringify({pinned: !(b && b.pinned)})});
@@ -2512,10 +3374,35 @@ $("#bot-menu").addEventListener("click", async (e) => {
 });
 // Archive keeps the bot, its thread, and its routines (paused). The main UI
 // has no delete; DELETE /api/bots/{id} stays in the API.
+function rosterRowIds() {
+  const ids = [];
+  document.querySelectorAll("#bot-list button.bot").forEach((b) => {
+    const bid = b.getAttribute("data-bot-id") || "";
+    if (bid) ids.push(bid);
+  });
+  return ids;
+}
+function focusRosterTarget(target) {
+  if (!target || target.kind !== "row") {
+    const h = document.querySelector("#view-bots h1");
+    if (h) { h.tabIndex = -1; if (typeof h.focus === "function") h.focus(); }
+    return;
+  }
+  const rows = document.querySelectorAll("#bot-list button.bot");
+  for (const row of rows) {
+    if ((row.getAttribute("data-bot-id") || "") === target.id) {
+      if (typeof row.focus === "function") row.focus();
+      return;
+    }
+  }
+  const h = document.querySelector("#view-bots h1");
+  if (h) { h.tabIndex = -1; if (typeof h.focus === "function") h.focus(); }
+}
 async function setArchived(id, archived, opts) {
   const existing = state.bots.find(x => x.id === id);
   const name = (existing && existing.name) || "bot";
   const prev = { view: state.view, botId: state.botId, showArchived: state.showArchived };
+  const idsBefore = rosterRowIds();
   await api("/api/bots/" + id, {method:"PATCH", body: JSON.stringify({archived: !!archived})});
   await loadBots();
   if (archived) {
@@ -2523,6 +3410,7 @@ async function setArchived(id, archived, opts) {
     goHome();
     renderBots();
     showArchiveToast(id, name, prev);
+    focusRosterTarget(archiveFocusTarget(isWide(), idsBefore, id));
     return;
   }
   dismissToast();
@@ -2539,6 +3427,7 @@ async function setArchived(id, archived, opts) {
     return;
   }
   renderBots();
+  focusRosterTarget(archiveFocusTarget(isWide(), idsBefore, id));
   if (state.botId === id) await refreshBot();
 }
 async function duplicateBot(id) {
@@ -2994,19 +3883,104 @@ async function loadState() {
   paintStateChip();
   if (stateOpen()) renderState(stateBox(), s);
 }
+function chipIcon(kind, size) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  const px = String(size || 16);
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", px);
+  svg.setAttribute("height", px);
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  const add = (tag, attrs) => {
+    const n = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const k in attrs) n.setAttribute(k, attrs[k]);
+    svg.append(n);
+  };
+  const stroke = { fill: "none", stroke: "currentColor", "stroke-width": "2", "stroke-linecap": "round", "stroke-linejoin": "round" };
+  if (kind === "clock") {
+    add("circle", { cx: "12", cy: "12", r: "8", fill: "none", stroke: "currentColor", "stroke-width": "2" });
+    add("path", Object.assign({ d: "M12 8v5l3 2" }, stroke));
+  } else if (kind === "note") {
+    add("path", Object.assign({ d: "M7 4h8l4 4v12H7z" }, stroke));
+    add("path", Object.assign({ d: "M15 4v4h4M9 12h6M9 16h4" }, stroke));
+  } else if (kind === "warn") {
+    add("path", Object.assign({ d: "M12 4l9 16H3z" }, stroke));
+    add("path", Object.assign({ d: "M12 10v4M12 17h.01" }, stroke));
+  } else if (kind === "chev") {
+    add("path", Object.assign({ d: "M9 6l6 6-6 6" }, stroke));
+  } else if (kind === "wrench") {
+    add("path", Object.assign({ d: "M14.5 6.5a3.5 3.5 0 0 0-4.9 4.9L4 17l3 3 5.6-5.6a3.5 3.5 0 0 0 4.9-4.9L15 12l-3-3z" }, stroke));
+  } else if (kind === "copy") {
+    add("rect", { x: "8", y: "8", width: "11", height: "11", rx: "2", fill: "none", stroke: "currentColor", "stroke-width": "2" });
+    add("path", Object.assign({ d: "M5 15V5h10" }, stroke));
+  }
+  return svg;
+}
+function permIcon(allowed) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", "14");
+  svg.setAttribute("height", "14");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  p.setAttribute("fill", "none");
+  p.setAttribute("stroke", "currentColor");
+  p.setAttribute("stroke-width", "2");
+  p.setAttribute("stroke-linecap", "round");
+  p.setAttribute("stroke-linejoin", "round");
+  p.setAttribute("d", allowed ? "M5 12.5l4.5 4.5L19 7.5" : "M7 7l10 10M17 7L7 17");
+  svg.append(p);
+  return svg;
+}
+function stopCircleIcon() {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", "14");
+  svg.setAttribute("height", "14");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  const c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+  c.setAttribute("cx", "12");
+  c.setAttribute("cy", "12");
+  c.setAttribute("r", "8");
+  c.setAttribute("fill", "none");
+  c.setAttribute("stroke", "currentColor");
+  c.setAttribute("stroke-width", "2");
+  const r = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  r.setAttribute("x", "9");
+  r.setAttribute("y", "9");
+  r.setAttribute("width", "6");
+  r.setAttribute("height", "6");
+  r.setAttribute("rx", "1");
+  r.setAttribute("fill", "currentColor");
+  svg.append(c, r);
+  return svg;
+}
 function paintStateChip() {
   const chip = $("#state-chip");
+  if (!chip) return;
   chip.hidden = !state.botId;
   const s = state.botState;
   const on = s ? s.timers.filter(t => t.enabled).length : 0;
   const notes = s ? s.memory.length : 0;
-  const warn = !!(s && s.warnings && s.warnings.length);
-  chip.textContent = "⏱ " + on + " · 🧠 " + notes + (warn ? " · ⚠" : "");
-  chip.classList.toggle("zero", !on && !notes && !warn);
-  chip.classList.toggle("warn", warn);
-  const desc = on + " active timer" + (on === 1 ? "" : "s") + ", " + notes + " memory note" + (notes === 1 ? "" : "s") + (warn ? ", warnings" : "");
-  chip.title = "Bot state: " + desc;
-  chip.setAttribute("aria-label", "Bot state (" + desc + ")");
+  const warns = s && s.warnings ? s.warnings.length : 0;
+  const name = stateChipName(on, notes, warns);
+  chip.setAttribute("aria-label", name);
+  chip.title = name;
+  chip.classList.toggle("zero", !on && !notes && !warns);
+  chip.classList.toggle("warn", warns > 0);
+  chip.replaceChildren();
+  const seg = (kind, n, warn) => {
+    const g = el("span", "chip-seg" + (warn ? " warn" : ""));
+    g.append(chipIcon(kind, 16), document.createTextNode(String(n)));
+    return g;
+  };
+  chip.append(seg("clock", on, false), seg("note", notes, false));
+  if (warns > 0) chip.append(seg("warn", warns, true));
+  const chev = chipIcon("chev", 14);
+  chev.classList.add("chip-chev");
+  chip.append(chev);
 }
 let stateReturnFocus = null;
 let stateHideToken = 0;
@@ -3417,6 +4391,502 @@ function noteRunStarted(bots, id) {
   return true;
 }
 // runstate:end
+// thread-logic:begin
+// Pure helpers for the thread, Stop control, cards, roster focus, theme keys,
+// and the unreachable retry. No DOM here so node tests can run this section.
+const STOP_TIMEOUT_MS = 10000;
+const QUEUED_CAPTION = "Queued · the bot reads this before its next step";
+const STOP_FAILED_NOTE = "Couldn't stop the run. The daemon didn't respond.";
+const HINT_IDLE = "Enter to send · Shift+Enter for a new line · the bot reads follow-ups while it works";
+const HINT_RUNNING = "Enter to send · Esc to stop · the bot reads follow-ups while it works";
+
+function freshStop() {
+  return { phase: "idle", pressed: false, runId: "", queued: false, since: 0, line: "", note: "", normalEnd: false };
+}
+
+// Stop phases: idle -> running -> stopping -> stopped.
+// A cancel error or the 10s tick returns to running with note "stop-failed".
+// A cancel result whose status is already finished (not "cancelled") is a
+// normal end: no stopped line. The stopped line is emitted only from a
+// stream-done of status "cancelled" while this client is in stopping
+// (the user pressed Stop). A later stream-done does not emit it again.
+function reduceStop(state, event) {
+  const s = state || freshStop();
+  const ev = event || {};
+  const type = ev.type || "";
+  const next = {
+    phase: s.phase || "idle",
+    pressed: !!s.pressed,
+    runId: s.runId || "",
+    queued: !!s.queued,
+    since: typeof s.since === "number" ? s.since : 0,
+    line: "",
+    note: "",
+    normalEnd: false
+  };
+  // Once the user-stop line is emitted, only a new run or an explicit idle
+  // leaves it. Later done/error/tick events must not draw the line again.
+  if ((s.phase === "stopped") && type !== "idle" && type !== "run") {
+    next.phase = "stopped";
+    next.line = s.line || "";
+    next.pressed = !!s.pressed;
+    next.queued = !!s.queued;
+    return next;
+  }
+  if (type === "run") {
+    if (next.phase === "stopping" && ev.runId && ev.runId === next.runId) return next;
+    next.phase = "running";
+    next.pressed = false;
+    next.runId = ev.runId || next.runId;
+    next.since = 0;
+    return next;
+  }
+  if (type === "queue") { next.queued = true; return next; }
+  if (type === "unqueue") { next.queued = false; return next; }
+  if (type === "press") {
+    if (next.phase !== "running") return next;
+    next.phase = "stopping";
+    next.pressed = true;
+    next.since = typeof ev.now === "number" ? ev.now : 0;
+    if (ev.runId) next.runId = ev.runId;
+    if (ev.queued != null) next.queued = !!ev.queued;
+    return next;
+  }
+  if (type === "tick") {
+    if (next.phase !== "stopping") return next;
+    const now = typeof ev.now === "number" ? ev.now : 0;
+    if (now - next.since >= STOP_TIMEOUT_MS) {
+      next.phase = "running";
+      next.pressed = false;
+      next.since = 0;
+      next.note = "stop-failed";
+    }
+    return next;
+  }
+  if (type === "cancel-error") {
+    if (next.phase !== "stopping") return next;
+    next.phase = "running";
+    next.pressed = false;
+    next.since = 0;
+    next.note = "stop-failed";
+    return next;
+  }
+  if (type === "cancel-result") {
+    if (next.phase !== "stopping") return next;
+    const status = ev.status == null ? "" : String(ev.status);
+    if (status === "cancelled") {
+      if (ev.streamEnded) {
+        next.phase = "idle";
+        next.pressed = false;
+        next.runId = "";
+        next.since = 0;
+        next.normalEnd = true;
+      }
+      return next;
+    }
+    if (status && status !== "running") {
+      next.phase = "idle";
+      next.pressed = false;
+      next.runId = "";
+      next.since = 0;
+      next.normalEnd = true;
+      return next;
+    }
+    next.phase = "running";
+    next.pressed = false;
+    next.since = 0;
+    next.note = "stop-failed";
+    return next;
+  }
+  if (type === "stream-done") {
+    const status = ev.status == null ? "" : String(ev.status);
+    if (next.phase === "stopped") {
+      next.line = s.line || "";
+      return next;
+    }
+    if (next.phase === "stopping" && next.pressed && status === "cancelled") {
+      next.phase = "stopped";
+      next.line = next.queued ? "queued" : "time";
+      next.since = 0;
+      return next;
+    }
+    next.phase = "idle";
+    next.pressed = false;
+    next.runId = "";
+    next.since = 0;
+    next.normalEnd = true;
+    return next;
+  }
+  if (type === "idle") return freshStop();
+  return next;
+}
+
+function stoppedLineText(queued, timeLabel) {
+  if (queued) return "Stopped by you · your queued message starts the next run";
+  return "Stopped by you · " + (timeLabel || "");
+}
+
+// Live Stop keeps the "by you" line, including the queued copy. A saved
+// "Notice: Run cancelled." has no session stop, so it is the neutral line.
+function stoppedNoticeText(isUserStop, queued, timeLabel) {
+  if (isUserStop) return stoppedLineText(!!queued, timeLabel || "");
+  const time = timeLabel ? String(timeLabel) : "";
+  return time ? "Run stopped · " + time : "Run stopped";
+}
+
+function clockLabel(date) {
+  const d = date instanceof Date ? date : new Date(date);
+  if (isNaN(d.getTime())) return "";
+  let h = d.getHours();
+  const m = d.getMinutes();
+  const ap = h >= 12 ? "PM" : "AM";
+  h = h % 12;
+  if (h === 0) h = 12;
+  return h + ":" + (m < 10 ? "0" : "") + m + " " + ap;
+}
+
+function durationLabel(seconds) {
+  const s = Math.max(0, Math.round(Number(seconds) || 0));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return m + ":" + (r < 10 ? "0" : "") + r;
+}
+
+// Queued styling is client-side. It clears on the first token of a new bot
+// bubble, or when a stored bot reply arrives after the queued message.
+// Run end, done, error, and Stop do not clear it. Loaded history never sets it.
+function shouldClearQueued(reason) {
+  return reason === "new-bot-token" || reason === "stored-reply";
+}
+
+function queuedClearOnThread(prev, next, queuedIds, duringRun) {
+  const ids = queuedIds || [];
+  if (!ids.length) return false;
+  const want = {};
+  for (let i = 0; i < ids.length; i++) want[String(ids[i])] = true;
+  let earliest = null;
+  const messages = next || [];
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (!m || !want[String(m.id)]) continue;
+    const t = Date.parse(m.created_at || "");
+    if (!isNaN(t) && (earliest == null || t < earliest)) earliest = t;
+  }
+  if (earliest == null) return false;
+  const seen = {};
+  const before = prev || [];
+  for (let i = 0; i < before.length; i++) if (before[i] && before[i].id != null) seen[String(before[i].id)] = true;
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (!m || m.role !== "bot" || seen[String(m.id)]) continue;
+    const t = Date.parse(m.created_at || "");
+    if (isNaN(t) || t < earliest) continue;
+    // The reply saved for the run that was already going is not the next bubble.
+    if (duringRun && String(m.run_id || "") === String(duringRun)) continue;
+    return true;
+  }
+  return false;
+}
+
+// Esc stops only from an empty composer, and only when no menu, sheet, or
+// card dialog is open. Text in the field, or focus outside the composer, does nothing.
+function escStopsRun(input) {
+  const o = input || {};
+  if (o.key !== "Escape") return false;
+  if (!o.runActive) return false;
+  if (!o.empty) return false;
+  if (o.menuOpen || o.sheetOpen || o.dialogOpen) return false;
+  if (!o.inComposer) return false;
+  return true;
+}
+
+function workingIndicatorText(phase, tool) {
+  const name = tool ? String(tool) : "";
+  if (phase === "stopping") return "Stopping…";
+  if (phase === "waiting") return name ? "Waiting for your approval · " + name : "Waiting for your approval";
+  return name ? "Working · " + name : "Working";
+}
+
+function threadSubline(status, tool, label) {
+  const word = status ? String(status) : "idle";
+  const parts = [word];
+  if (word === "running" && tool) parts.push(String(tool));
+  if (label) parts.push(String(label));
+  return parts.join(" · ");
+}
+
+function stateChipName(timers, memory, warnings) {
+  const t = Math.max(0, Number(timers) || 0);
+  const m = Math.max(0, Number(memory) || 0);
+  const w = Math.max(0, Number(warnings) || 0);
+  let name = "Bot state: " + t + (t === 1 ? " timer" : " timers") + ", " + m + " memory " + (m === 1 ? "entry" : "entries");
+  if (w > 0) name += ", " + w + (w === 1 ? " warning" : " warnings");
+  return name;
+}
+
+function composerHint(running) {
+  return running ? HINT_RUNNING : HINT_IDLE;
+}
+
+function composerPlaceholder(name, narrow) {
+  if (narrow) return "Message";
+  const n = name ? String(name) : "";
+  return n ? "Message " + n : "Message";
+}
+
+function liveToolLine(name, args, ok) {
+  const mark = ok === false ? "✗" : ok === true ? "✓" : "…";
+  let arg = "";
+  const a = args && typeof args === "object" ? args : null;
+  if (a) {
+    if (typeof a.command === "string" && a.command) arg = a.command;
+    else if (typeof a.file_path === "string" && a.file_path) arg = a.file_path;
+    else if (typeof a.path === "string" && a.path) arg = a.path;
+    else {
+      try { arg = JSON.stringify(a); } catch (e) { arg = ""; }
+    }
+  }
+  if (arg.length > 160) arg = arg.slice(0, 157) + "…";
+  return mark + " " + (name || "tool") + (arg ? " · " + arg : "");
+}
+
+function toolSummaryLabel(callCount, names, permCount, deniedCount) {
+  const n = Number(callCount) || 0;
+  const p = Number(permCount) || 0;
+  const d = Number(deniedCount) || 0;
+  let label = n + (n === 1 ? " tool call" : " tool calls");
+  const list = Array.isArray(names) ? names.filter(Boolean) : [];
+  if (list.length) label += " " + list.join(", ");
+  if (p) {
+    const word = p === 1 ? " permission" : " permissions";
+    label += " · " + p + word + (d ? " (" + d + " denied)" : " (allowed)");
+  }
+  return label;
+}
+
+function toolCallLabel(tool, args) {
+  const name = tool == null || tool === "" ? "tool" : String(tool);
+  const a = args && typeof args === "object" ? args : {};
+  let arg = "";
+  if (typeof a.command === "string" && a.command) arg = a.command;
+  else if (typeof a.repo === "string" && a.repo) arg = a.repo;
+  else if (typeof a.file_path === "string" && a.file_path) arg = a.file_path;
+  else if (typeof a.path === "string" && a.path) arg = a.path;
+  else if (typeof a.url === "string" && a.url) arg = a.url;
+  if (arg.length > 80) arg = arg.slice(0, 77) + "…";
+  if (name === "git_push" || name === "create_pr") return arg ? name + " " + arg : name;
+  return arg ? name + "(" + arg + ")" : name;
+}
+
+function cardEyebrow(payload, botName) {
+  const p = payload || {};
+  const tool = p.tool == null ? "" : String(p.tool);
+  if (p.kind === "question") return "QUESTION FROM " + (botName ? String(botName) : "BOT");
+  if (tool === "git_push") return "APPROVAL REQUIRED · GIT_PUSH";
+  if (tool === "create_pr") return "APPROVAL REQUIRED · CREATE_PR";
+  if (tool === "ExitPlanMode") return "PERMISSION NEEDED · EXITPLANMODE";
+  return "PERMISSION NEEDED";
+}
+
+function cardTitle(payload) {
+  const p = payload || {};
+  const tool = p.tool == null ? "" : String(p.tool);
+  const args = p.arguments && typeof p.arguments === "object" ? p.arguments : {};
+  if (p.kind === "question") return "Answer a question";
+  if (tool === "Bash") return "Run a shell command (Bash)";
+  if (tool === "git_push") {
+    const repo = args.repo ? String(args.repo) : "the remote";
+    return "Push commits to " + repo;
+  }
+  if (tool === "create_pr") return "Open a pull request" + (args.title ? ": " + String(args.title) : "");
+  if (tool === "ExitPlanMode") return "Approve the plan (ExitPlanMode)";
+  return "Allow " + tool;
+}
+
+function cardRecordText(input) {
+  const o = input || {};
+  const tool = o.toolLabel == null ? "" : String(o.toolLabel);
+  const time = o.timeLabel == null ? "" : String(o.timeLabel);
+  const dur = o.duration == null ? "" : String(o.duration);
+  const kind = o.kind || "";
+  if (kind === "allow_once") return "Allowed once · `" + tool + "` · " + time;
+  if (kind === "allow_session") return "Allowed for session · `" + tool + "` · " + time;
+  if (kind === "deny") return "Denied · `" + tool + "` · by you";
+  if (kind === "expired") {
+    return dur ? "Expired · denied after " + dur + " · `" + tool + "`" : "Expired · denied · `" + tool + "`";
+  }
+  if (kind === "cancelled") return "Cancelled · run stopped by you · `" + tool + "`";
+  return "";
+}
+
+function recordKind(decision, source) {
+  const src = source || "";
+  const dec = decision || "";
+  if (src === "cancel") return "cancelled";
+  if (src === "timeout") return "expired";
+  if (dec === "allow_session") return "allow_session";
+  if (dec === "allow_once" || dec === "allow") return "allow_once";
+  if (dec === "deny") return "deny";
+  return "";
+}
+
+// Pairing key for one run, one kind, and one tool label. A later run does not
+// pair with an earlier one. Identical decisions in the same run stay separate;
+// the key only matches a local card to a single server row.
+function runRecordKey(runId, kind, toolLabel) {
+  return String(runId || "") + "|" + String(kind || "") + "|" + String(toolLabel || "");
+}
+
+function permRecordFields(rec) {
+  let d = {};
+  const raw = rec && rec.result_or_error;
+  if (raw && typeof raw === "object") d = raw;
+  else {
+    try { d = JSON.parse(raw || "{}") || {}; } catch (e) { d = {}; }
+  }
+  if (!d || typeof d !== "object") d = {};
+  let args = rec && rec.arguments;
+  if (typeof args === "string") {
+    try { args = JSON.parse(args); } catch (e) { args = {}; }
+  }
+  if (!args || typeof args !== "object") args = {};
+  return {
+    kind: recordKind(d.decision, d.source),
+    toolLabel: toolCallLabel(rec && rec.name, args)
+  };
+}
+
+// Every valid server permission is one record, in created_at order. Equal
+// times keep input order. Each server row absorbs at most one local card with
+// the same key, in card order; that card may fill an empty duration. The
+// countdown lives only on the card. Unmatched local cards follow, once each.
+function mergeRunRecords(serverRecs, cardRecords, runId, botId) {
+  const out = [];
+  const open = {};
+  const recs = Array.isArray(serverRecs) ? serverRecs : [];
+  const order = [];
+  for (let i = 0; i < recs.length; i++) order.push(i);
+  order.sort(function (i, j) {
+    const ta = Date.parse(recs[i] && recs[i].created_at || "") || 0;
+    const tb = Date.parse(recs[j] && recs[j].created_at || "") || 0;
+    if (ta !== tb) return ta - tb;
+    return i - j;
+  });
+  for (let n = 0; n < order.length; n++) {
+    const r = recs[order[n]];
+    if (!r || r.kind !== "permission") continue;
+    const fields = permRecordFields(r);
+    if (!fields.kind) continue;
+    const key = runRecordKey(runId, fields.kind, fields.toolLabel);
+    if (!Object.prototype.hasOwnProperty.call(open, key)) open[key] = [];
+    open[key].push(out.length);
+    out.push({
+      kind: fields.kind,
+      toolLabel: fields.toolLabel,
+      timeLabel: clockLabel(r.created_at),
+      duration: ""
+    });
+  }
+  const extra = [];
+  const cards = Array.isArray(cardRecords) ? cardRecords : [];
+  for (let i = 0; i < cards.length; i++) {
+    const c = cards[i];
+    if (!c || c.runId !== runId || c.botId !== botId || !c.kind) continue;
+    const key = runRecordKey(c.runId || runId, c.kind, c.toolLabel);
+    const slots = open[key];
+    if (slots && slots.length) {
+      const cur = out[slots.shift()];
+      if (cur && !cur.duration && c.duration) cur.duration = String(c.duration);
+      continue;
+    }
+    extra.push({
+      kind: c.kind,
+      toolLabel: c.toolLabel || "",
+      timeLabel: c.timeLabel || "",
+      duration: c.duration || ""
+    });
+  }
+  for (let i = 0; i < extra.length; i++) out.push(extra[i]);
+  return out;
+}
+
+// A saved bot reply drops its local partial by run id. Trimmed text is only
+// a fallback when that reply has no run id (the daemon trims trailing
+// whitespace, so the strings do not match). One entry per run; the last
+// unsaved copy wins.
+function partialAlreadyStored(messages, partial) {
+  const runId = partial && partial.runId != null && partial.runId !== "" ? String(partial.runId) : "";
+  const text = String(partial && partial.content || "").trim();
+  const list = Array.isArray(messages) ? messages : [];
+  for (let i = 0; i < list.length; i++) {
+    const m = list[i];
+    if (!m || m.role !== "bot") continue;
+    const mid = m.run_id != null && m.run_id !== "" ? String(m.run_id) : "";
+    if (runId && mid === runId) return true;
+    if (!mid && text && String(m.content || "").trim() === text) return true;
+  }
+  return false;
+}
+
+function partialsToShow(messages, partials, botId) {
+  const list = Array.isArray(partials) ? partials : [];
+  const byRun = {};
+  const order = [];
+  for (let i = 0; i < list.length; i++) {
+    const p = list[i];
+    if (!p || !p.content || p.botId !== botId) continue;
+    if (partialAlreadyStored(messages, p)) continue;
+    const id = p.runId == null ? "" : String(p.runId);
+    if (!Object.prototype.hasOwnProperty.call(byRun, id)) order.push(id);
+    byRun[id] = p;
+  }
+  const out = [];
+  for (let i = 0; i < order.length; i++) out.push(byRun[order[i]]);
+  return out;
+}
+
+// Announce only when the remaining whole seconds first land on 60 or 10.
+function countdownAnnounce(prev, left) {
+  if (typeof left !== "number" || !isFinite(left)) return "";
+  if (left === 60 && prev !== 60) return "1 minute remaining";
+  if (left === 10 && prev !== 10) return "10 seconds remaining";
+  return "";
+}
+
+// After a row leaves the roster: the next row, else the previous, else the
+// Bots heading. On a narrow screen the heading is always the target.
+function archiveFocusTarget(wide, ids, removedId) {
+  if (!wide) return { kind: "heading" };
+  const list = Array.isArray(ids) ? ids : [];
+  const i = list.indexOf(removedId);
+  if (i >= 0 && i + 1 < list.length) return { kind: "row", id: list[i + 1] };
+  if (i >= 0 && i - 1 >= 0) return { kind: "row", id: list[i - 1] };
+  return { kind: "heading" };
+}
+
+// Left/Right and Home/End move and select a radio (wrap). Up/Down are not
+// handled here: the radiogroup sits inside the roster menu, and Up/Down keep
+// moving between menu items. The caller leaves the group on those keys.
+function themeRadioKey(key, index, count) {
+  const n = count | 0;
+  if (n <= 0) return null;
+  let i = typeof index === "number" ? index : -1;
+  if (i < 0 || i >= n) i = 0;
+  if (key === "ArrowRight") return { index: (i + 1) % n, select: true };
+  if (key === "ArrowLeft") return { index: (i - 1 + n) % n, select: true };
+  if (key === "Home") return { index: 0, select: true };
+  if (key === "End") return { index: n - 1, select: true };
+  if (key === "ArrowUp" || key === "ArrowDown") return { menu: key };
+  return null;
+}
+
+// Immediate retry only when the daemon is unreachable and a refresh is not
+// already in flight. Hidden, blur, and offline do not retry.
+function retryTrigger(kind, unreachable, busy) {
+  if (!unreachable || busy) return false;
+  return kind === "visible" || kind === "focus" || kind === "online" || kind === "click";
+}
+// thread-logic:end
 // roster-keys:begin
 function rosterRowMove(key, rows, active) {
   const list = rows || [];
@@ -3569,11 +5039,29 @@ $("#roster-menu").addEventListener("keydown", (e) => {
     if (btn) btn.focus();
     return;
   }
-  const items = [...pop.querySelectorAll("button")].filter(b => !b.hidden && !b.disabled);
-  const act = menuKeyAction(e.key, items, items.indexOf(document.activeElement));
-  if (act && act.move != null && items[act.move]) {
+  const seg = $("#theme-seg");
+  const radios = seg ? [...seg.querySelectorAll("[role='radio']")] : [];
+  const inSeg = !!(seg && seg.contains(document.activeElement));
+  // Left/Right and Home/End change the theme radio. Up/Down keep moving
+  // between menu items; the radiogroup is one stop in that list.
+  if (inSeg && (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "Home" || e.key === "End")) {
+    const move = themeRadioKey(e.key, radios.indexOf(document.activeElement), radios.length);
+    if (move && move.select && radios[move.index]) {
+      e.preventDefault();
+      radios.forEach((b, i) => { b.tabIndex = i === move.index ? 0 : -1; });
+      radios[move.index].focus();
+      setThemeMode(radios[move.index].getAttribute("data-theme"));
+    }
+    return;
+  }
+  const before = [...pop.querySelectorAll("button")].filter(b => !b.hidden && !b.disabled && !(seg && seg.contains(b)));
+  const checked = radios.find(b => b.getAttribute("aria-checked") === "true") || radios[0];
+  const entries = checked ? before.concat([checked]) : before;
+  const idx = inSeg ? entries.length - 1 : entries.indexOf(document.activeElement);
+  const act = menuKeyAction(e.key, entries, idx);
+  if (act && act.move != null && entries[act.move]) {
     e.preventDefault();
-    items[act.move].focus();
+    entries[act.move].focus();
   }
 });
 $("#roster-menu").addEventListener("focusout", (e) => {
@@ -3644,9 +5132,39 @@ async function bootFromURL() {
     await revealLevel(level);
   }
 }
+function daemonUnreachable() {
+  return state.conn === "down" || (state.conn === "retrying" && !!state.everFailed);
+}
+function syncRetryButton() {
+  const btn = $("#retry-now");
+  if (!btn) return;
+  if (daemonBusy) {
+    btn.textContent = "Retrying…";
+    btn.setAttribute("aria-disabled", "true");
+  } else {
+    btn.textContent = "Retry now";
+    btn.removeAttribute("aria-disabled");
+  }
+}
+function retryDaemonNow() {
+  if (!retryTrigger("click", daemonUnreachable(), daemonBusy)) return;
+  clearTimeout(daemonTimer);
+  refreshDaemon();
+}
+function retryIfTrigger(kind) {
+  if (!retryTrigger(kind, daemonUnreachable(), daemonBusy)) return;
+  clearTimeout(daemonTimer);
+  refreshDaemon();
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") retryIfTrigger("visible");
+});
+window.addEventListener("focus", () => retryIfTrigger("focus"));
+window.addEventListener("online", () => retryIfTrigger("online"));
 async function refreshDaemon() {
   if (daemonBusy) return;
   daemonBusy = true;
+  syncRetryButton();
   try {
     const h = await api("/api/health");
     state.version = (h && h.version) || "";
@@ -3674,8 +5192,10 @@ async function refreshDaemon() {
     }
   } finally {
     daemonBusy = false;
+    syncRetryButton();
   }
 }
+state.stop = freshStop();
 ensureHistory();
 paintHealth();
 renderBots();
