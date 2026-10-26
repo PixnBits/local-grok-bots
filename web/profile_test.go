@@ -30,6 +30,12 @@ func TestProfileStatic(t *testing.T) {
 		`An empty GitHub list allows no repositories. It does not inherit the policy list. It can only narrow the policy ceiling.`,
 		`// profile-logic:begin`,
 		`// profile-logic:end`,
+		`function focusProfileHeading`,
+		`announce("Saved")`,
+		`rescueFocus(() => $("#routine-new").focus())`,
+		`state.saveErrorChip && !badChipMessage()`,
+		`["profile-name", "profile-label", "profile-model"].forEach`,
+		`.toggle::before { content: ""; position: absolute; inset: -10px -2px; }`,
 	} {
 		if !strings.Contains(src, s) {
 			t.Errorf("index.html missing %q", s)
