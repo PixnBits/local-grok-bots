@@ -65,6 +65,9 @@ func TestThreadStatic(t *testing.T) {
 		"function archiveFocusTarget",
 		"function themeRadioKey",
 		"function retryTrigger",
+		"function stoppedNoticeText(",
+		"function renderPendingRunRecords(",
+		"Run stopped · ",
 		"// thread-logic:begin",
 		"// thread-logic:end",
 	} {
@@ -144,7 +147,7 @@ vm.runInContext(snippet + "\n" + [
   "threadSubline", "stateChipName", "composerHint", "composerPlaceholder",
   "cardEyebrow", "cardTitle", "cardRecordText", "recordKind", "countdownAnnounce",
   "archiveFocusTarget", "themeRadioKey", "retryTrigger", "toolCallLabel",
-  "partialsToShow", "mergeRunRecords", "runRecordKey",
+  "partialsToShow", "mergeRunRecords", "runRecordKey", "stoppedNoticeText",
   "STOP_TIMEOUT_MS", "QUEUED_CAPTION", "STOP_FAILED_NOTE", "HINT_IDLE", "HINT_RUNNING"
 ].map(function (n) { return "this." + n + "=" + n + ";"; }).join("\n"), ctx);
 const cases = [];
@@ -362,6 +365,267 @@ const pushGot = ctx.mergeRunRecords(
   "r", "b"
 );
 check("merge-push", pushGot.length === 1 && pushGot[0].toolLabel === "git_push owner/name" && pushGot[0].kind === "allow_once");
+function bashLs(at) {
+  return serverPerm("Bash", {command: "ls -la recipes/"}, "allow_once", "ui", at || "2020-01-01T00:00:10Z");
+}
+function lsCard(time, dur) {
+  return {runId: "r1", botId: "b", kind: "allow_once", toolLabel: "Bash(ls -la recipes/)", timeLabel: time, duration: dur || ""};
+}
+const sameTwice = ctx.mergeRunRecords([bashLs(), bashLs()], [], "r1", "b");
+check("merge-same-twice", sameTwice.length === 2 && sameTwice[0].kind === "allow_once" && sameTwice[0].toolLabel === "Bash(ls -la recipes/)" && sameTwice[1].kind === "allow_once" && sameTwice[1].toolLabel === "Bash(ls -la recipes/)");
+const twoLocals = [lsCard("9:00 PM", "0:30"), lsCard("9:01 PM", "1:05")];
+const twoAndTwo = ctx.mergeRunRecords([bashLs("2020-06-01T00:00:00Z"), bashLs("2020-01-01T00:00:00Z")], twoLocals, "r1", "b");
+check("merge-two-and-two", twoAndTwo.length === 2 && twoAndTwo[0].timeLabel === ctx.clockLabel("2020-01-01T00:00:00Z") && twoAndTwo[0].duration === "0:30" && twoAndTwo[1].timeLabel === ctx.clockLabel("2020-06-01T00:00:00Z") && twoAndTwo[1].duration === "1:05");
+const twoAndOne = ctx.mergeRunRecords([bashLs("2020-01-01T00:00:10Z"), bashLs("2020-01-01T00:00:20Z")], [twoLocals[0]], "r1", "b");
+check("merge-two-and-one", twoAndOne.length === 2 && twoAndOne[0].duration === "0:30" && twoAndOne[1].duration === "");
+const oneAndTwo = ctx.mergeRunRecords([bashLs("2020-01-01T00:00:10Z")], twoLocals, "r1", "b");
+check("merge-one-and-two", oneAndTwo.length === 2 && oneAndTwo[0].duration === "0:30" && oneAndTwo[0].timeLabel === ctx.clockLabel("2020-01-01T00:00:10Z") && oneAndTwo[1].timeLabel === "9:01 PM" && oneAndTwo[1].duration === "1:05");
+const localTwice = ctx.mergeRunRecords([], twoLocals, "r1", "b");
+check("merge-local-twice", localTwice.length === 2 && localTwice[0].timeLabel === "9:00 PM" && localTwice[0].duration === "0:30" && localTwice[1].timeLabel === "9:01 PM" && localTwice[1].duration === "1:05");
+const allowDeny = ctx.mergeRunRecords([
+  serverPerm("Bash", {command: "rm -rf /tmp/x"}, "deny", "ui", "2020-01-01T00:00:20Z"),
+  serverPerm("Bash", {command: "git status"}, "allow_once", "ui", "2020-01-01T00:00:10Z")
+], [
+  {runId: "r1", botId: "b", kind: "allow_once", toolLabel: "Bash(git status)", timeLabel: "10:00 PM", duration: ""},
+  {runId: "r1", botId: "b", kind: "deny", toolLabel: "Bash(rm -rf /tmp/x)", timeLabel: "10:01 PM", duration: ""}
+], "r1", "b");
+check("merge-allow-deny", allowDeny.length === 2 && allowDeny[0].kind === "allow_once" && allowDeny[0].toolLabel === "Bash(git status)" && allowDeny[1].kind === "deny" && allowDeny[1].toolLabel === "Bash(rm -rf /tmp/x)");
+const runA = ctx.mergeRunRecords([bashLs()], [], "r1", "b");
+const runB = ctx.mergeRunRecords([bashLs()], [], "r2", "b");
+check("merge-two-runs", runA.length === 1 && runB.length === 1 && runA[0].toolLabel === "Bash(ls -la recipes/)" && runB[0].toolLabel === "Bash(ls -la recipes/)");
+const tied = ctx.mergeRunRecords([
+  serverPerm("Bash", {command: "pwd"}, "allow_once", "ui", "2020-01-01T00:00:10Z"),
+  serverPerm("Bash", {command: "ls"}, "allow_once", "ui", "2020-01-01T00:00:10Z")
+], [], "r1", "b");
+check("merge-stable", tied.length === 2 && tied[0].toolLabel === "Bash(pwd)" && tied[1].toolLabel === "Bash(ls)");
+const ordered = ctx.mergeRunRecords([
+  serverPerm("Bash", {command: "ls -la recipes/"}, "deny", "ui", "2020-01-02T00:00:00Z"),
+  serverPerm("Bash", {command: "ls -la recipes/"}, "allow_once", "ui", "2020-01-01T00:00:00Z")
+], [], "r1", "b");
+check("merge-order", ordered.length === 2 && ordered[0].kind === "allow_once" && ordered[0].timeLabel === ctx.clockLabel("2020-01-01T00:00:00Z") && ordered[1].kind === "deny" && ordered[1].timeLabel === ctx.clockLabel("2020-01-02T00:00:00Z"));
+const foreign = ctx.mergeRunRecords([bashLs()], [{runId: "r1", botId: "other", kind: "allow_once", toolLabel: "Bash(ls -la recipes/)", timeLabel: "x", duration: "9:99"}], "r1", "b");
+check("merge-other-bot", foreign.length === 1 && foreign[0].duration === "");
+check("notice-user", ctx.stoppedNoticeText(true, false, "10:41 PM") === "Stopped by you · 10:41 PM");
+check("notice-queued", ctx.stoppedNoticeText(true, true, "10:41 PM") === "Stopped by you · your queued message starts the next run");
+check("notice-server", ctx.stoppedNoticeText(false, false, "10:41 PM") === "Run stopped · 10:41 PM");
+check("notice-bare", ctx.stoppedNoticeText(false, false, "") === "Run stopped");
+console.log(JSON.stringify(cases));
+`
+	raw := runNode(t, node, script)
+	assertCases(t, raw)
+}
+
+// extractJSFunction returns the source of a top-level function, from its
+// "function name(" through the matching closing brace. Strings and comments
+// do not change the brace depth.
+func extractJSFunction(t *testing.T, src, name string) string {
+	t.Helper()
+	needle := "function " + name + "("
+	start := strings.Index(src, needle)
+	if start < 0 {
+		t.Fatalf("missing function %s", name)
+	}
+	end := jsFunctionEnd(t, src[start:], name)
+	return src[start : start+end]
+}
+
+func jsFunctionEnd(t *testing.T, src, name string) int {
+	t.Helper()
+	open := strings.Index(src, "{")
+	if open < 0 {
+		t.Fatalf("%s has no body", name)
+	}
+	depth := 0
+	for i := open; i < len(src); i++ {
+		c := src[i]
+		if c == '"' || c == '\'' || c == '`' {
+			i = skipJSString(src, i)
+			continue
+		}
+		if c == '/' && i+1 < len(src) && src[i+1] == '/' {
+			for i < len(src) && src[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		if c == '/' && i+1 < len(src) && src[i+1] == '*' {
+			i += 2
+			for i+1 < len(src) && !(src[i] == '*' && src[i+1] == '/') {
+				i++
+			}
+			if i+1 < len(src) {
+				i++
+			}
+			continue
+		}
+		if c == '{' {
+			depth++
+			continue
+		}
+		if c == '}' {
+			depth--
+			if depth == 0 {
+				return i + 1
+			}
+		}
+	}
+	t.Fatalf("unclosed function %s", name)
+	return 0
+}
+
+func skipJSString(src string, i int) int {
+	q := src[i]
+	i++
+	for i < len(src) {
+		if src[i] == '\\' {
+			i += 2
+			continue
+		}
+		if src[i] == q {
+			return i
+		}
+		i++
+	}
+	return len(src) - 1
+}
+
+func TestThreadRecordRender(t *testing.T) {
+	src := string(IndexHTML)
+	renderFn := extractJSFunction(t, src, "renderRunRecords")
+	pendingFn := extractJSFunction(t, src, "renderPendingRunRecords")
+	messagesFn := extractJSFunction(t, src, "renderMessages")
+	if !strings.Contains(renderFn, "mergeRunRecords(") {
+		t.Error("renderRunRecords does not call mergeRunRecords")
+	}
+	if strings.Contains(renderFn, "seen[") || strings.Contains(renderFn, "seenRecords") {
+		t.Error("renderRunRecords still drops identical records")
+	}
+	if !strings.Contains(pendingFn, "mergeRunRecords(") {
+		t.Error("renderPendingRunRecords does not call mergeRunRecords")
+	}
+	if strings.Contains(pendingFn, "seen[") {
+		t.Error("renderPendingRunRecords still drops identical records")
+	}
+	if strings.Contains(messagesFn, "seenRecords") || strings.Contains(messagesFn, "seen[") {
+		t.Error("renderMessages still drops identical records")
+	}
+	noticeAt := strings.Index(messagesFn, `Notice: Run cancelled.`)
+	if noticeAt < 0 {
+		t.Fatal("renderMessages missing cancel notice")
+	}
+	condAt := strings.LastIndex(messagesFn[:noticeAt], "if (")
+	if condAt < 0 || strings.Contains(messagesFn[condAt:noticeAt], "stopInfoFor") {
+		t.Error("cancel notice still requires a live user stop")
+	}
+	rest := messagesFn[noticeAt:]
+	branchEnd := strings.Index(rest, "continue;")
+	if branchEnd < 0 {
+		t.Fatal("cancel notice falls through")
+	}
+	branch := rest[:branchEnd]
+	for _, s := range []string{
+		"stoppedNoticeText(",
+		`el("div", "sys stopped")`,
+		"stoppedPill(",
+		"drawnStops[m.run_id] = true",
+		"hasToolRecords(",
+		"renderRunRecords(",
+		"renderedRuns[",
+	} {
+		if !strings.Contains(branch, s) {
+			t.Errorf("cancel notice branch missing %q", s)
+		}
+	}
+	if strings.Contains(branch, "bubble system") {
+		t.Error("cancel notice still renders a raw system bubble")
+	}
+	if strings.Index(messagesFn, `el("div", "bubble system")`) < noticeAt {
+		t.Error("raw system bubble precedes the cancel notice")
+	}
+
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("node not installed")
+	}
+	logic, err := json.Marshal(between(t, src, "// thread-logic:begin", "// thread-logic:end"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fns, err := json.Marshal(renderFn + "\n" + pendingFn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `const vm = require("vm");
+const logic = ` + string(logic) + `;
+const fns = ` + string(fns) + `;
+const ctx = {
+  state: {tools: {}, cardRecords: [], botId: "b"},
+  recordPill: function (kind, label, time, dur) {
+    return {kind: kind, label: label, time: time || "", dur: dur || ""};
+  }
+};
+vm.createContext(ctx);
+vm.runInContext(logic + "\n" + fns + "\nthis.renderRunRecords = renderRunRecords;\nthis.renderPendingRunRecords = renderPendingRunRecords;", ctx);
+const cases = [];
+function check(name, ok) { cases.push({name: name, ok: !!ok}); }
+function parent() {
+  return {children: [], append: function (x) { this.children.push(x); }};
+}
+function serverPerm(name, args, decision, source, at) {
+  return {
+    kind: "permission",
+    name: name,
+    arguments: args,
+    result_or_error: JSON.stringify({decision: decision, source: source}),
+    created_at: at
+  };
+}
+function ls(at) {
+  return serverPerm("Bash", {command: "ls -la recipes/"}, "allow_once", "ui", at || "2020-01-01T00:00:10Z");
+}
+ctx.state.tools = {r1: [ls(), ls()]};
+ctx.state.cardRecords = [];
+const same = parent();
+ctx.renderRunRecords(same, "r1");
+check("render-same-twice", same.children.length === 2 && same.children[0].kind === "allow_once" && same.children[0].label === "Bash(ls -la recipes/)" && same.children[1].kind === "allow_once" && same.children[1].label === "Bash(ls -la recipes/)");
+ctx.state.cardRecords = [
+  {runId: "r1", botId: "b", kind: "allow_once", toolLabel: "Bash(ls -la recipes/)", timeLabel: "9:00 PM", duration: "0:30"},
+  {runId: "r1", botId: "b", kind: "allow_once", toolLabel: "Bash(ls -la recipes/)", timeLabel: "9:01 PM", duration: "1:05"}
+];
+const paired = parent();
+ctx.renderRunRecords(paired, "r1");
+check("render-paired", paired.children.length === 2 && paired.children[0].dur === "0:30" && paired.children[1].dur === "1:05" && paired.children[0].label === "Bash(ls -la recipes/)");
+ctx.state.tools = {r1: [
+  serverPerm("Bash", {command: "rm -rf /tmp/x"}, "deny", "ui", "2020-01-01T00:00:20Z"),
+  serverPerm("Bash", {command: "git status"}, "allow_once", "ui", "2020-01-01T00:00:10Z")
+]};
+ctx.state.cardRecords = [
+  {runId: "r1", botId: "b", kind: "allow_once", toolLabel: "Bash(git status)", timeLabel: "10:00 PM", duration: ""},
+  {runId: "r1", botId: "b", kind: "deny", toolLabel: "Bash(rm -rf /tmp/x)", timeLabel: "10:01 PM", duration: ""}
+];
+const both = parent();
+ctx.renderRunRecords(both, "r1");
+check("render-allow-deny", both.children.length === 2 && both.children[0].kind === "allow_once" && both.children[0].label === "Bash(git status)" && both.children[1].kind === "deny" && both.children[1].label === "Bash(rm -rf /tmp/x)");
+const after = parent();
+ctx.renderPendingRunRecords(after, {r1: true});
+check("pending-after-render", after.children.length === 0);
+ctx.state.tools = {};
+ctx.state.cardRecords = [
+  {runId: "r9", botId: "b", kind: "allow_once", toolLabel: "Bash(ls -la recipes/)", timeLabel: "9:00 PM", duration: ""},
+  {runId: "r9", botId: "b", kind: "allow_once", toolLabel: "Bash(ls -la recipes/)", timeLabel: "9:01 PM", duration: ""}
+];
+const pending = parent();
+ctx.renderPendingRunRecords(pending, {});
+check("pending-two", pending.children.length === 2 && pending.children[0].time === "9:00 PM" && pending.children[1].time === "9:01 PM" && pending.children[0].label === "Bash(ls -la recipes/)" && pending.children[1].label === "Bash(ls -la recipes/)");
+const skipped = parent();
+ctx.renderPendingRunRecords(skipped, {r9: true});
+check("pending-rendered", skipped.children.length === 0);
+ctx.state.cardRecords = ctx.state.cardRecords.concat([
+  {runId: "r2", botId: "b", kind: "deny", toolLabel: "Bash(pwd)", timeLabel: "9:02 PM", duration: ""}
+]);
+const other = parent();
+ctx.renderPendingRunRecords(other, {r9: true});
+check("pending-other-run", other.children.length === 1 && other.children[0].kind === "deny" && other.children[0].label === "Bash(pwd)");
 console.log(JSON.stringify(cases));
 `
 	raw := runNode(t, node, script)

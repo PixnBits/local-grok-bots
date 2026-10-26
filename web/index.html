@@ -2234,19 +2234,34 @@ function recordPill(kind, toolLabel, timeLabel, duration) {
   return row;
 }
 function renderRunRecords(parent, runId) {
-  const seen = {};
   const merged = mergeRunRecords((state.tools && state.tools[runId]) || [], state.cardRecords || [], runId, state.botId);
   for (const rec of merged) {
-    const key = runRecordKey(runId, rec.kind, rec.toolLabel);
-    if (seen[key]) continue;
-    seen[key] = true;
     parent.append(recordPill(rec.kind, rec.toolLabel, rec.timeLabel, rec.duration));
   }
-  return seen;
+}
+// Cards for a run that renderRunRecords did not draw. That call already merged
+// the run's local cards, so a rendered run is skipped whole.
+function renderPendingRunRecords(box, renderedRuns) {
+  const done = renderedRuns || {};
+  const runs = [];
+  const listed = {};
+  for (const c of state.cardRecords || []) {
+    if (!c || c.botId !== state.botId) continue;
+    const id = c.runId || "";
+    if (done[id] || listed[id]) continue;
+    listed[id] = true;
+    runs.push(id);
+  }
+  for (const id of runs) {
+    const extra = mergeRunRecords([], state.cardRecords || [], id, state.botId);
+    for (const rec of extra) {
+      box.append(recordPill(rec.kind, rec.toolLabel, rec.timeLabel, rec.duration));
+    }
+  }
 }
 function stoppedPill(info) {
   const line = el("div", "sys stopped");
-  line.append(stopCircleIcon(), document.createTextNode(stoppedLineText(!!info.queued, info.time || "")));
+  line.append(stopCircleIcon(), document.createTextNode(stoppedNoticeText(true, !!info.queued, info.time || "")));
   return line;
 }
 function stopInfoFor(runId) {
@@ -2286,7 +2301,7 @@ function renderMessages(mode = "bottom") {
   };
   const shownTools = new Set();
   const drawnStops = {};
-  const seenRecords = {};
+  const renderedRuns = {};
   let lastDay = "";
   for (let mi = 0; mi < state.messages.length; mi++) {
     const m = state.messages[mi];
@@ -2296,9 +2311,24 @@ function renderMessages(mode = "bottom") {
       box.append(el("div", "day-line", day));
     }
     for (const p of partialAt[mi] || []) appendPartial(p);
-    if (m.role === "system" && m.content === "Notice: Run cancelled." && stopInfoFor(m.run_id)) {
-      box.append(stoppedPill(stopInfoFor(m.run_id)));
+    // A reload has no userStops entry. The saved cancel notice is still the
+    // stop line; "Stopped by you" only while this session pressed Stop.
+    if (m.role === "system" && m.content === "Notice: Run cancelled.") {
+      const info = stopInfoFor(m.run_id);
+      if (info) {
+        box.append(stoppedPill(info));
+      } else {
+        const line = el("div", "sys stopped");
+        line.append(stopCircleIcon(), document.createTextNode(stoppedNoticeText(false, false, clockLabel(m.created_at))));
+        box.append(line);
+      }
       drawnStops[m.run_id] = true;
+      if (m.run_id && !shownTools.has(m.run_id) && hasToolRecords(state.tools[m.run_id])) {
+        shownTools.add(m.run_id);
+        box.append(toolSummary(state.tools[m.run_id]));
+        renderRunRecords(box, m.run_id);
+        renderedRuns[m.run_id] = true;
+      }
       continue;
     }
     const queued = m.role === "user" && (state.queuedIds || []).indexOf(String(m.id)) >= 0;
@@ -2310,7 +2340,8 @@ function renderMessages(mode = "bottom") {
       if (m.role === "bot" && m.run_id && !shownTools.has(m.run_id) && hasToolRecords(state.tools[m.run_id])) {
         shownTools.add(m.run_id);
         group.append(toolSummary(state.tools[m.run_id]));
-        Object.assign(seenRecords, renderRunRecords(group, m.run_id));
+        renderRunRecords(group, m.run_id);
+        renderedRuns[m.run_id] = true;
       }
       const meta = el("div", "msg-meta");
       const time = clockLabel(m.created_at);
@@ -2333,7 +2364,8 @@ function renderMessages(mode = "bottom") {
       if (m.run_id && !shownTools.has(m.run_id) && hasToolRecords(state.tools[m.run_id])) {
         shownTools.add(m.run_id);
         box.append(toolSummary(state.tools[m.run_id]));
-        Object.assign(seenRecords, renderRunRecords(box, m.run_id));
+        renderRunRecords(box, m.run_id);
+        renderedRuns[m.run_id] = true;
       }
     }
   }
@@ -2343,24 +2375,7 @@ function renderMessages(mode = "bottom") {
     const info = stopInfoFor(runId);
     if (info) box.append(stoppedPill(info));
   }
-  const pendingRuns = [];
-  const pendingSeen = {};
-  for (const c of state.cardRecords || []) {
-    if (!c || c.botId !== state.botId) continue;
-    const id = c.runId || "";
-    if (pendingSeen[id]) continue;
-    pendingSeen[id] = true;
-    pendingRuns.push(id);
-  }
-  for (const id of pendingRuns) {
-    const extra = mergeRunRecords([], state.cardRecords || [], id, state.botId);
-    for (const rec of extra) {
-      const key = runRecordKey(id, rec.kind, rec.toolLabel);
-      if (seenRecords[key]) continue;
-      seenRecords[key] = true;
-      box.append(recordPill(rec.kind, rec.toolLabel, rec.timeLabel, rec.duration));
-    }
-  }
+  renderPendingRunRecords(box, renderedRuns);
   // The live run and the working indicator sit where the next reply will appear.
   box.append(live, working);
   if (mode === "prepend") box.scrollTop = prevTop + (box.scrollHeight - prevH);
@@ -4511,6 +4526,14 @@ function stoppedLineText(queued, timeLabel) {
   return "Stopped by you · " + (timeLabel || "");
 }
 
+// Live Stop keeps the "by you" line, including the queued copy. A saved
+// "Notice: Run cancelled." has no session stop, so it is the neutral line.
+function stoppedNoticeText(isUserStop, queued, timeLabel) {
+  if (isUserStop) return stoppedLineText(!!queued, timeLabel || "");
+  const time = timeLabel ? String(timeLabel) : "";
+  return time ? "Run stopped · " + time : "Run stopped";
+}
+
 function clockLabel(date) {
   const d = date instanceof Date ? date : new Date(date);
   if (isNaN(d.getTime())) return "";
@@ -4707,9 +4730,9 @@ function recordKind(decision, source) {
   return "";
 }
 
-// One pill per run, kind, and tool. The run id is part of the key so a later
-// run does not collapse into an earlier one, and a local card matches the
-// server record of the same decision.
+// Pairing key for one run, one kind, and one tool label. A later run does not
+// pair with an earlier one. Identical decisions in the same run stay separate;
+// the key only matches a local card to a single server row.
 function runRecordKey(runId, kind, toolLabel) {
   return String(runId || "") + "|" + String(kind || "") + "|" + String(toolLabel || "");
 }
@@ -4733,26 +4756,30 @@ function permRecordFields(rec) {
   };
 }
 
-// Server rows first, by created_at. A local card with the same key is the
-// same decision and is not repeated; its duration fills an empty server one
-// (the countdown lives only on the card). Local-only rows follow.
+// Every valid server permission is one record, in created_at order. Equal
+// times keep input order. Each server row absorbs at most one local card with
+// the same key, in card order; that card may fill an empty duration. The
+// countdown lives only on the card. Unmatched local cards follow, once each.
 function mergeRunRecords(serverRecs, cardRecords, runId, botId) {
   const out = [];
-  const seen = {};
-  const recs = Array.isArray(serverRecs) ? serverRecs.slice() : [];
-  recs.sort(function (a, b) {
-    const ta = Date.parse(a && a.created_at || "") || 0;
-    const tb = Date.parse(b && b.created_at || "") || 0;
-    return ta - tb;
+  const open = {};
+  const recs = Array.isArray(serverRecs) ? serverRecs : [];
+  const order = [];
+  for (let i = 0; i < recs.length; i++) order.push(i);
+  order.sort(function (i, j) {
+    const ta = Date.parse(recs[i] && recs[i].created_at || "") || 0;
+    const tb = Date.parse(recs[j] && recs[j].created_at || "") || 0;
+    if (ta !== tb) return ta - tb;
+    return i - j;
   });
-  for (let i = 0; i < recs.length; i++) {
-    const r = recs[i];
+  for (let n = 0; n < order.length; n++) {
+    const r = recs[order[n]];
     if (!r || r.kind !== "permission") continue;
     const fields = permRecordFields(r);
     if (!fields.kind) continue;
     const key = runRecordKey(runId, fields.kind, fields.toolLabel);
-    if (Object.prototype.hasOwnProperty.call(seen, key)) continue;
-    seen[key] = out.length;
+    if (!Object.prototype.hasOwnProperty.call(open, key)) open[key] = [];
+    open[key].push(out.length);
     out.push({
       kind: fields.kind,
       toolLabel: fields.toolLabel,
@@ -4760,24 +4787,26 @@ function mergeRunRecords(serverRecs, cardRecords, runId, botId) {
       duration: ""
     });
   }
+  const extra = [];
   const cards = Array.isArray(cardRecords) ? cardRecords : [];
   for (let i = 0; i < cards.length; i++) {
     const c = cards[i];
     if (!c || c.runId !== runId || c.botId !== botId || !c.kind) continue;
     const key = runRecordKey(c.runId || runId, c.kind, c.toolLabel);
-    if (Object.prototype.hasOwnProperty.call(seen, key)) {
-      const cur = out[seen[key]];
+    const slots = open[key];
+    if (slots && slots.length) {
+      const cur = out[slots.shift()];
       if (cur && !cur.duration && c.duration) cur.duration = String(c.duration);
       continue;
     }
-    seen[key] = out.length;
-    out.push({
+    extra.push({
       kind: c.kind,
       toolLabel: c.toolLabel || "",
       timeLabel: c.timeLabel || "",
       duration: c.duration || ""
     });
   }
+  for (let i = 0; i < extra.length; i++) out.push(extra[i]);
   return out;
 }
 
