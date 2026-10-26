@@ -42,6 +42,7 @@ func TestRosterStatic(t *testing.T) {
 		`"Every bot is hidden."`,
 		`"No archived bots."`,
 		`el("p", "roster-error", ROSTER_ERROR_NOTE)`,
+		"  $(\"#thread-label\").textContent = \"\";\n  $(\"#run-note\").hidden = true;",
 		`Can't reach the daemon. Retrying…`,
 		"reconnecting…",
 		"daemon unreachable",

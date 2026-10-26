@@ -1429,6 +1429,7 @@ function goHome(push = true) {
   $("#thread-name").textContent = "No bot selected";
   $("#thread-mark").hidden = true;
   $("#thread-label").textContent = "";
+  $("#run-note").hidden = true;
   state.messages = [];
   $("#msgs").replaceChildren(el("p", "empty", "Choose a bot to read its thread."), $("#live"), $("#working"));
   syncComposer();
