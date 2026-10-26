@@ -4328,6 +4328,7 @@ function syncServerToolsMode() {
   if (picks) picks.classList.toggle("is-off", !on);
   for (const box of document.querySelectorAll('#server-tools-picks input[name="server-tool"]')) box.disabled = !on;
 }
+const SERVER_TOOL_NAMES = ["web_search", "x_search"];
 function paintServerTools(selected) {
   const box = $("#server-tools-picks");
   if (!box) return;
