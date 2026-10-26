@@ -4203,7 +4203,7 @@ function paintChips(kind) {
     const x = el("button", "chip-x", "×");
     x.type = "button";
     x.setAttribute("aria-label", "Remove " + item.value);
-    x.addEventListener("click", () => removeChipAt(kind, i));
+    x.addEventListener("click", () => { removeChipAt(kind, i); input.focus(); });
     chip.append(x);
     box.insertBefore(chip, input);
   }
