@@ -361,20 +361,20 @@ window.addEventListener("storage", function (ev) {
   .swatch { box-shadow: inset 0 0 0 1px var(--border-strong); }
   .colours { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
   #color-picker { display: contents; }
-  .color-custom { font-size: 13px; color: var(--muted); }
+  .color-custom { font-size: 13px; color: var(--muted); white-space: nowrap; }
+  .color-custom-row { display: inline-flex; align-items: center; gap: 8px; }
   #color-custom { width: 32px; height: 32px; padding: 0; border: 1px solid var(--border); border-radius: 8px; background: none; }
-  /* At 390px, eight 32px presets leave no room for the custom swatch.
-     The label takes the line above; the input shares the preset grid. */
+  /* At 390px the presets fill one grid. Label and swatch sit on the next row. */
   @media (max-width: 540px) {
-    .colours {
+    .colours { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+    #color-picker {
       display: grid;
-      grid-template-columns: repeat(9, minmax(0, 1fr));
+      grid-template-columns: repeat(8, minmax(0, 1fr));
       gap: 6px 4px;
-      align-items: center;
     }
+    #color-picker:has(.swatch:nth-child(9)) { grid-template-columns: repeat(9, minmax(0, 1fr)); }
     .colours:has(.swatch:nth-child(9)) { grid-template-columns: repeat(10, minmax(0, 1fr)); }
-    .color-custom { order: -1; grid-column: 1 / -1; }
-    #color-custom { width: 100%; height: auto; aspect-ratio: 1; min-width: 0; }
+    .color-custom-row { display: flex; }
     .colours .swatch { width: 100%; height: auto; aspect-ratio: 1; min-width: 0; border-radius: 99px; }
   }
   .mark-advisory { margin: 0; color: var(--attention-text); font-size: 12px; line-height: 16px; }
@@ -414,7 +414,15 @@ window.addEventListener("storage", function (ev) {
   .fld input:focus, .fld textarea:focus, .fld select:focus, .chips:focus-within {
     border-color: var(--focus); box-shadow: 0 0 0 3px var(--accent-soft);
   }
-  .fld.is-dirty, .sec.is-dirty { box-shadow: inset 3px 0 0 var(--accent); border-radius: 4px; }
+  .fld input.is-dirty, .fld textarea.is-dirty, .chips.is-dirty,
+  .mark-block.is-dirty, #server-tools.is-dirty, .grant.is-dirty {
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  .mark-block.is-dirty, #server-tools.is-dirty, .grant.is-dirty { padding-left: 8px; }
+  .fld input.is-dirty:focus, .fld textarea.is-dirty:focus, .chips.is-dirty:focus-within {
+    border-color: var(--focus);
+    box-shadow: inset 3px 0 0 var(--accent), 0 0 0 3px var(--accent-soft);
+  }
   .fld.is-error input, .fld.is-error textarea, .chips.is-error { border-color: var(--danger); }
   .help { margin: 0; font-size: 12px; line-height: 16px; color: var(--muted); display: flex; gap: 6px; align-items: flex-start; }
   .help.is-error { color: var(--danger-text); }
@@ -475,7 +483,8 @@ window.addEventListener("storage", function (ev) {
   .routine-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .routine-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .routine-row.is-paused .routine-name { color: var(--text-2); }
-  .routine-meta { font-size: 12px; color: var(--muted); }
+  .routine-meta { display: flex; flex-wrap: wrap; align-items: baseline; font-size: 12px; color: var(--muted); }
+  .routine-meta .meta-chunk { white-space: nowrap; }
   .routine-prompt { font-size: 13px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .sched-chip {
     flex: none; display: inline-flex; align-items: center; height: 22px; padding: 0 8px;
@@ -498,9 +507,13 @@ window.addEventListener("storage", function (ev) {
   .linkrow span { display: block; font-size: 12px; color: var(--muted); font-weight: 400; }
   .linkrow svg { margin-left: auto; flex: none; color: var(--muted); }
   #profile-form { display: grid; gap: 16px; margin: 0; }
-  #profile-log { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 10px; }
+  #profile-log {
+    display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 10px; flex: none;
+    border: 0; background: transparent; color: var(--text-2);
+  }
+  #profile-log:hover { background: var(--surface-2); color: var(--text); }
   #profile-log svg { flex: none; }
-  .access-crumb { color: var(--muted); font-size: 13px; font-weight: 400; flex: none; white-space: nowrap; }
+  .access-crumb { color: var(--muted); font-size: 13px; font-weight: 400; flex: none; white-space: nowrap; min-width: 0; }
   .access-crumb[hidden], #perm-draft[hidden], #perm-editor[hidden], #perm-rules[hidden], #perm-suggestions[hidden], #perm-sug-head[hidden], #routine-live[hidden], #routine-draft[hidden], #routine-err[hidden] { display: none !important; }
   .routine-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 12px 0; border-top: 1px solid var(--border); }
   .routine-main { min-width: 0; display: grid; gap: 2px; }
@@ -509,6 +522,22 @@ window.addEventListener("storage", function (ev) {
     width: auto; max-width: none; align-self: stretch;
     background: transparent; border: 0; border-radius: 0; box-shadow: none;
     border-bottom: 1px solid var(--border); padding: 8px 0; gap: 6px;
+  }
+  #perm-rules.perm-list { gap: 0; }
+  .perm-rule {
+    display: flex; align-items: center; gap: 8px; min-width: 0;
+    min-height: 32px; padding: 4px 0; border-bottom: 1px solid var(--border);
+  }
+  .perm-rule .risk { flex: none; text-transform: none; letter-spacing: 0; font-weight: 650; }
+  .perm-rule .risk.ask { background: var(--attention-soft); color: var(--attention-text); border-color: transparent; }
+  .perm-rule .risk.deny { background: var(--danger-soft); color: var(--danger-text); border-color: transparent; }
+  .perm-rule code {
+    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-family: var(--mono); font-size: 12.5px;
+  }
+  #perm-rules button.small {
+    margin-left: auto; flex: none; border-color: transparent;
+    height: 28px; min-height: 28px; padding: 0 8px;
   }
   .help svg, .advisory svg, .aside svg { flex: none; }
   @media (max-width: 540px) {
@@ -524,6 +553,8 @@ window.addEventListener("storage", function (ev) {
   .savebar[hidden] { display: none !important; }
   .savebar .pip { width: 8px; height: 8px; border-radius: 99px; background: var(--accent); flex: none; }
   .save-copy { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+  .save-sub { color: var(--muted); font-weight: 400; font-size: 12px; line-height: 16px; }
+  .save-sub[hidden] { display: none !important; }
   .save-fields { color: var(--muted); font-weight: 400; }
   .save-fields.is-error { color: var(--danger-text); font-weight: 600; }
   .save-actions { display: flex; gap: 8px; flex: none; }
@@ -948,6 +979,7 @@ window.addEventListener("storage", function (ev) {
   .risk.medium { background: var(--attention-soft); color: var(--attention-text); }
   .risk.high { background: var(--danger-soft); color: var(--danger-text); }
   .risk.deny, .risk.ask { background: var(--surface); color: var(--muted); border: 1px solid var(--border); }
+  .risk.allow { background: var(--success-soft); color: var(--success-text); }
   .filters { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .log { flex: 1; overflow: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
   .event { padding: 8px 10px; border-bottom: 1px solid var(--border); }
@@ -1039,6 +1071,32 @@ window.addEventListener("storage", function (ev) {
     .stop-btn svg, #send-btn svg, .stop-btn .stop-spin { position: relative; z-index: 1; }
     .stop-btn .tip { display: none !important; }
     .sheet-close, .solo-back, .thread-back { min-width: 44px; }
+    #view-profile .solo-bar { overflow: hidden; min-width: 0; }
+    #view-profile .solo-id { overflow: hidden; }
+    #view-profile.is-access #profile-kicker { display: none !important; }
+    #view-profile.is-access .crumb-sep { display: none; }
+    #view-profile.is-access #profile-head-name { flex: 0 1 auto; max-width: 50%; min-width: 3.5rem; }
+    #view-profile.is-access .access-crumb {
+      flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    }
+    #profile-log {
+      width: 44px; height: 44px; min-width: 44px; min-height: 44px;
+      padding: 0; justify-content: center; gap: 0;
+    }
+    #profile-log .log-word { display: none; }
+    .savebar.is-draft { flex-wrap: nowrap; align-items: center; }
+    .savebar.is-draft .save-copy {
+      flex-direction: column; flex-wrap: nowrap; align-items: flex-start; gap: 0;
+    }
+    .savebar.is-draft #save-lead {
+      font-weight: 700; line-height: 18px; max-width: 100%;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .savebar.is-draft .save-sub:not([hidden]) {
+      display: block; width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .savebar.is-draft .save-actions { margin-left: 0; flex: none; }
+    .savebar.is-draft .save-actions button { white-space: nowrap; }
   }
   @media (prefers-reduced-motion: reduce) {
     .state-sheet, .state-backdrop, .toast, .skel-mark, .skel-line { transition: none; animation: none; }
@@ -1136,9 +1194,9 @@ window.addEventListener("storage", function (ev) {
           <span id="profile-kicker" class="solo-kicker">Profile</span>
           <span class="draft-chip" id="draft-chip" hidden>Draft</span>
           <span class="draft-sub" id="draft-sub" hidden>Not created yet</span>
-          <span class="access-crumb" id="access-crumb" hidden>› Permissions &amp; access</span>
+          <span class="access-crumb" id="access-crumb" hidden><span class="crumb-sep">› </span>Permissions &amp; access</span>
         </h2>
-        <button type="button" class="ghost" id="profile-log"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M8 7h11M8 12h11M8 17h11M5 7h.01M5 12h.01M5 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Log</button>
+        <button type="button" class="ghost" id="profile-log" aria-label="Log"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M8 7h11M8 12h11M8 17h11M5 7h.01M5 12h.01M5 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg><span class="log-word">Log</span></button>
         <div class="menu">
           <button type="button" class="icon-btn" id="profile-menu" aria-haspopup="menu" aria-expanded="false" aria-controls="bot-menu" aria-label="Bot menu"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><circle cx="6" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18" cy="12" r="1.6" fill="currentColor"/></svg></button>
         </div>
@@ -1163,14 +1221,16 @@ window.addEventListener("storage", function (ev) {
                 <div class="sec-h"><h2>Identity</h2></div>
                 <div class="fld" id="fld-mark">
                   <span class="lbl">Mark</span>
-                  <div class="mark-block">
+                  <div class="mark-block" id="mark-block">
                     <div class="mark-preview" id="mark-preview"></div>
                     <div>
                       <div class="shapes" id="shape-picker" role="group" aria-label="Mark shape"></div>
                       <div class="colours" role="group" aria-label="Mark colour">
                         <div class="swatches" id="color-picker"></div>
-                        <label class="color-custom" for="color-custom">Custom colour</label>
-                        <input type="color" id="color-custom" value="#4C77DD">
+                        <div class="color-custom-row">
+                          <label class="color-custom" for="color-custom">Custom colour</label>
+                          <input type="color" id="color-custom" value="#4C77DD" aria-label="Custom colour">
+                        </div>
                       </div>
                     </div>
                   </div>
@@ -1202,7 +1262,7 @@ window.addEventListener("storage", function (ev) {
                 </div>
                 <label class="fld" id="fld-model">
                   <span class="lbl">Model override</span>
-                  <input id="profile-model" autocomplete="off">
+                  <input id="profile-model" placeholder="Daemon default" autocomplete="off">
                   <p class="help" id="help-model">Leave blank to use the daemon default.</p>
                   <p class="help changed" hidden>Changed</p>
                 </label>
@@ -1335,6 +1395,7 @@ window.addEventListener("storage", function (ev) {
                   <h2>Permission rules</h2>
                   <span class="aside ok"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path d="M20 6L9 17l-5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Rules save immediately</span>
                 </div>
+                <p class="help" id="perm-rules-help">Ask and deny rules only narrow what a managed allow would permit.</p>
                 <p class="info-box" id="perm-draft" hidden>Rules can be added once the bot is created.</p>
                 <div id="perm-rules" class="perm-list"></div>
                 <div class="routine" id="perm-editor">
@@ -1361,7 +1422,7 @@ window.addEventListener("storage", function (ev) {
       </div>
       <div class="savebar" id="savebar" hidden>
         <span class="pip" aria-hidden="true"></span>
-        <span class="save-copy"><span id="save-lead">Unsaved changes</span><span id="save-fields" class="save-fields"></span></span>
+        <span class="save-copy"><span id="save-lead">Unsaved changes</span><span id="save-sub" class="save-sub" hidden>Not created until you press Create</span><span id="save-fields" class="save-fields"></span></span>
         <span class="save-actions">
           <button type="button" class="ghost" id="save-discard">Discard</button>
           <button type="button" class="primary" id="save-go"><span class="btn-label" id="save-go-label">Save changes</span><span class="btn-spin" aria-hidden="true"></span></button>
@@ -1580,6 +1641,7 @@ function setView(name) {
   }
   if (name === "log" && enter) loadLog();
   if (shouldFocusDrill(prev, name, wide)) focusDrillView(name, wide, (sel) => $(sel));
+  if (name === "profile") bindProfileSpy();
 }
 $("#log-toggle").addEventListener("click", () => {
   if (state.view === "log") navBack();
@@ -4021,8 +4083,7 @@ function routineMeta(timer, nowMs) {
   if (!t.enabled) return "Paused · turn on to schedule";
   const next = t.next_fire_at ? routineWhen(t.next_fire_at, nowMs) : "";
   const rel = t.next_fire_at ? routineRelative(t.next_fire_at, nowMs) : "";
-  let last = t.last_fire_at ? routineWhen(t.last_fire_at, nowMs) : "";
-  last = last.replace(/ MST$/, "");
+  const last = t.last_fire_at ? routineWhen(t.last_fire_at, nowMs) : "";
   const bits = [];
   if (next) bits.push("Next: " + next);
   if (rel) bits.push(rel);
@@ -4246,16 +4307,46 @@ function profileDirty() {
 function changeCountLabel(n) {
   return n === 1 ? "1 change" : n + " changes";
 }
+const DIRTY_CONTROLS = {
+  "Name": "profile-name",
+  "Label": "profile-label",
+  "Description": "profile-description",
+  "Model override": "profile-model",
+  "Mark": "mark-block",
+  "Network allowlist": "chips-net",
+  "SSH allowlist": "chips-ssh",
+  "GitHub repositories": "chips-github",
+  "Server tools": "server-tools"
+};
+function changedNote(node) {
+  if (!node) return null;
+  if (node.classList.contains("changed")) return node;
+  return node.querySelector(":scope > .changed");
+}
 function paintFieldMarks(labels) {
+  document.querySelectorAll(".is-dirty").forEach(n => n.classList.remove("is-dirty"));
+  for (const pair of DIRTY_FIELDS) {
+    const ch = changedNote(document.getElementById(pair[1]));
+    if (ch) ch.hidden = true;
+  }
+  if (state.draft) return;
   const set = new Set(labels || []);
   for (const pair of DIRTY_FIELDS) {
-    const node = document.getElementById(pair[1]);
-    if (!node) continue;
-    const on = set.has(pair[0]);
-    const box = node.classList.contains("changed") ? node.closest(".sec") : node;
-    if (box) box.classList.toggle("is-dirty", on);
-    const ch = node.classList.contains("changed") ? node : node.querySelector(":scope > .changed");
-    if (ch) ch.hidden = !on;
+    const ch = changedNote(document.getElementById(pair[1]));
+    if (ch) ch.hidden = !set.has(pair[0]);
+  }
+  for (const label in DIRTY_CONTROLS) {
+    if (!set.has(label)) continue;
+    const ctl = document.getElementById(DIRTY_CONTROLS[label]);
+    if (ctl) ctl.classList.add("is-dirty");
+  }
+  if (!set.has("Grants") || !state.profileBase) return;
+  const base = new Set(state.profileBase.grants || []);
+  const cur = new Set(readGrants());
+  for (const g of GRANT_ORDER) {
+    if (base.has(g) === cur.has(g)) continue;
+    const row = document.getElementById("grant-" + g);
+    if (row) row.classList.add("is-dirty");
   }
 }
 function paintSaveBar() {
@@ -4265,14 +4356,17 @@ function paintSaveBar() {
   const draft = !!state.draft;
   const show = state.view === "profile" && (draft || labels.length > 0);
   bar.hidden = !show;
+  bar.classList.toggle("is-draft", draft);
   const phone = window.matchMedia("(max-width: 540px)").matches;
   const lead = $("#save-lead");
+  const sub = $("#save-sub");
   const fields = $("#save-fields");
   const go = $("#save-go-label");
   if (lead) {
-    if (draft) lead.textContent = "New bot · nothing is created until you press Create";
+    if (draft) lead.textContent = phone ? "New bot" : "New bot · nothing is created until you press Create";
     else lead.textContent = phone ? changeCountLabel(labels.length) : "Unsaved changes";
   }
+  if (sub) sub.hidden = !(draft && phone);
   if (go) go.textContent = draft ? "Create bot" : (phone ? "Save" : "Save changes");
   if (fields) {
     if (state.saveError) {
@@ -4469,27 +4563,96 @@ function setProfilePane(pane) {
   const navMain = $("#profile-nav-main");
   const navAccess = $("#profile-nav-access");
   const layout = document.querySelector(".profile-layout");
+  const view = $("#view-profile");
   if (main) main.hidden = access;
   if (sub) sub.hidden = !access;
   if (navMain) navMain.hidden = access;
   if (navAccess) navAccess.hidden = !access;
   if (layout) layout.classList.toggle("is-access", access);
+  if (view) view.classList.toggle("is-access", access);
   syncProfileChrome();
   resetScrollTops(document.querySelectorAll(".profile-layout, .profile-col"));
+  bindProfileSpy();
+}
+function profileScroller() {
+  return isWide() ? $("#profile-col") : document.querySelector(".profile-layout");
+}
+function profileNav() {
+  return state.profilePane === "access" ? $("#profile-nav-access") : $("#profile-nav-main");
+}
+function profileSectionNodes() {
+  const nav = profileNav();
+  if (!nav) return [];
+  const out = [];
+  nav.querySelectorAll("[data-sec]").forEach(b => {
+    const n = document.getElementById(b.getAttribute("data-sec"));
+    if (n) out.push(n);
+  });
+  return out;
+}
+function setProfileNavCurrent(id) {
+  const nav = profileNav();
+  if (!nav) return;
+  nav.querySelectorAll("[data-sec]").forEach(b => {
+    if (id && b.getAttribute("data-sec") === id) b.setAttribute("aria-current", "true");
+    else b.removeAttribute("aria-current");
+  });
+}
+function nearestProfileSection() {
+  const scroller = profileScroller();
+  const sections = profileSectionNodes();
+  if (!scroller || !sections.length || scroller.clientHeight <= 0) return "";
+  const overflow = scroller.scrollHeight - scroller.clientHeight;
+  if (overflow > 2 && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= 2) {
+    return sections[sections.length - 1].id || "";
+  }
+  const edge = scroller.getBoundingClientRect().top + 16;
+  let current = sections[0].id || "";
+  for (const sec of sections) {
+    if (sec.getBoundingClientRect().top <= edge + 1) current = sec.id || current;
+  }
+  return current;
+}
+function syncProfileNav() {
+  const id = nearestProfileSection();
+  if (id) setProfileNavCurrent(id);
+}
+function onProfileColumnScroll() {
+  syncProfileNav();
+}
+let profileSpy = null;
+let profileScrollEl = null;
+function bindProfileSpy() {
+  const scroller = profileScroller();
+  if (profileSpy) { profileSpy.disconnect(); profileSpy = null; }
+  if (profileScrollEl && profileScrollEl !== scroller) {
+    profileScrollEl.removeEventListener("scroll", onProfileColumnScroll);
+    profileScrollEl = null;
+  }
+  const sections = profileSectionNodes();
+  if (scroller && typeof IntersectionObserver === "function") {
+    profileSpy = new IntersectionObserver(() => { syncProfileNav(); }, {
+      root: scroller,
+      rootMargin: "-8px 0px -60% 0px",
+      threshold: [0, 0.01, 0.1, 0.25, 0.5, 1]
+    });
+    for (const sec of sections) profileSpy.observe(sec);
+  }
+  if (scroller && profileScrollEl !== scroller) {
+    scroller.addEventListener("scroll", onProfileColumnScroll, { passive: true });
+    profileScrollEl = scroller;
+  }
+  syncProfileNav();
 }
 function scrollProfileTo(id) {
   const target = document.getElementById(id);
   if (!target) return;
-  const scroller = isWide() ? $("#profile-col") : document.querySelector(".profile-layout");
+  const scroller = profileScroller();
   if (!scroller) return;
   const top = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
-  scroller.scrollTo({ top: Math.max(0, top - 8), behavior: "auto" });
-  const nav = state.profilePane === "access" ? $("#profile-nav-access") : $("#profile-nav-main");
-  if (!nav) return;
-  nav.querySelectorAll("[data-sec]").forEach(b => {
-    if (b.getAttribute("data-sec") === id) b.setAttribute("aria-current", "true");
-    else b.removeAttribute("aria-current");
-  });
+  const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  scroller.scrollTo({ top: Math.max(0, top - 8), behavior: reduce ? "auto" : "smooth" });
+  setProfileNavCurrent(id);
 }
 function applyBotFields(b) {
   const bot = b || {};
@@ -4856,6 +5019,17 @@ function resetScrollTops(nodes) {
 }
 // scroll:end
 
+function fillRoutineMeta(node, text) {
+  if (!node) return;
+  node.replaceChildren();
+  const parts = String(text || "").split(" · ");
+  for (let i = 0; i < parts.length; i++) {
+    const chunk = el("span", "meta-chunk");
+    chunk.append(document.createTextNode(parts[i]));
+    if (i < parts.length - 1) chunk.append(el("span", "meta-sep", " · "));
+    node.append(chunk);
+  }
+}
 async function loadRoutines() {
   const box = $("#routines");
   if (!box) return;
@@ -4872,7 +5046,9 @@ async function loadRoutines() {
     top.append(el("span", "routine-name", name));
     top.append(el("span", "sched-chip", scheduleLabel(t.schedule || "")));
     main.append(top);
-    main.append(el("div", "routine-meta", routineMeta(t, now)));
+    const meta = el("div", "routine-meta");
+    fillRoutineMeta(meta, routineMeta(t, now));
+    main.append(meta);
     if (t.prompt) main.append(el("div", "routine-prompt", t.prompt));
     const toggle = el("button", "toggle");
     toggle.type = "button";
@@ -4982,6 +5158,8 @@ for (const kind of CHIP_KINDS) {
 document.querySelectorAll("#profile-nav-main [data-sec], #profile-nav-access [data-sec]").forEach(b => {
   b.addEventListener("click", () => scrollProfileTo(b.getAttribute("data-sec")));
 });
+bindProfileSpy();
+window.addEventListener("resize", () => { if (state.view === "profile") bindProfileSpy(); });
 $("#nav-access").addEventListener("click", () => setProfilePane("access"));
 $("#open-access").addEventListener("click", () => setProfilePane("access"));
 $("#routine-new").addEventListener("click", () => openRoutineForm(null));
@@ -5031,15 +5209,10 @@ async function loadPermPanel() {
   const list = (rules && rules.rules) || [];
   if (!list.length) rulesBox.append(el("p", "empty", "No durable rules."));
   for (const rule of list) {
-    const card = el("div", "perm-card");
-    const head = el("div", "row");
-    head.append(riskBadge(rule.risk, rule.effect));
-    head.append(el("strong", null, rule.effect));
-    card.append(head);
-    card.append(el("code", null, rule.pattern));
-    if (rule.warning) card.append(el("div", "meta", rule.warning));
-    if (rule.match_form) card.append(el("div", "meta", "Matches: " + rule.match_form));
-    if (rule.reason) card.append(el("div", "meta", rule.reason));
+    const row = el("div", "perm-rule");
+    const effect = rule.effect || "allow";
+    row.append(el("span", "risk " + effect, effect));
+    row.append(el("code", null, rule.pattern || ""));
     const revoke = el("button", "ghost small", "Revoke");
     revoke.type = "button";
     revoke.addEventListener("click", async () => {
@@ -5049,8 +5222,8 @@ async function loadPermPanel() {
         await loadPermPanel();
       } catch (err) { showPermErr(err); }
     });
-    card.append(revoke);
-    rulesBox.append(card);
+    row.append(revoke);
+    rulesBox.append(row);
   }
   const sug = await api("/api/bots/" + state.botId + "/permission-suggestions");
   const pending = (sug && sug.suggestions) || [];

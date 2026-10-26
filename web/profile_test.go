@@ -16,16 +16,31 @@ func TestProfileStatic(t *testing.T) {
 		`>Draft</span>`,
 		`Not created yet`,
 		`New bot · nothing is created until you press Create`,
+		`Not created until you press Create`,
 		`Create bot`,
 		`Discard unsaved changes?`,
 		`Routine changes save immediately`,
 		`showStatusToast("Saved")`,
+		`placeholder="Daemon default"`,
+		`Leave blank to use the daemon default.`,
+		`Ask and deny rules only narrow what a managed allow would permit.`,
+		`box-shadow: inset 3px 0 0 var(--accent), 0 0 0 3px var(--accent-soft)`,
+		`aria-label="Log"`,
+		`function bindProfileSpy`,
 		`An empty GitHub list allows no repositories. It does not inherit the policy list. It can only narrow the policy ceiling.`,
 		`// profile-logic:begin`,
 		`// profile-logic:end`,
 	} {
 		if !strings.Contains(src, s) {
 			t.Errorf("index.html missing %q", s)
+		}
+	}
+	for _, s := range []string{
+		`last = last.replace(/ MST$/, "");`,
+		`.fld.is-dirty, .sec.is-dirty`,
+	} {
+		if strings.Contains(src, s) {
+			t.Errorf("index.html still has %q", s)
 		}
 	}
 }
@@ -134,7 +149,7 @@ check("meta-line", ctx.routineMeta({
   enabled: true,
   next_fire_at: sun,
   last_fire_at: "2026-10-23T14:00:00Z"
-}, friday), "Next: Sun 7:00 AM MST · in 46h · Last: today 7:00 AM");
+}, friday), "Next: Sun 7:00 AM MST · in 46h · Last: today 7:00 AM MST");
 check("preview-day", ctx.routinePreview("every 1d", Date.parse("2026-10-24T14:00:00Z")), "Runs every 1 day, first run Sun Oct 25 7:00 AM MST");
 check("preview-min", ctx.routinePreview("every 30m", Date.parse("2026-10-25T13:30:00Z")), "Runs every 30 min, first run Sun Oct 25 7:00 AM MST");
 check("when-bad", ctx.routineWhen("not-a-date", sameDay), "");
@@ -150,4 +165,100 @@ func jsonString(s string) string {
 		panic(err)
 	}
 	return string(b)
+}
+
+func sliceFrom(t *testing.T, src, begin, end string) string {
+	t.Helper()
+	i := strings.Index(src, begin)
+	j := strings.Index(src, end)
+	if i < 0 || j <= i {
+		t.Fatalf("slice %s .. %s missing", begin, end)
+	}
+	return src[i:j]
+}
+
+// openProfile must apply a bot without throwing. Commit 440a10a dropped
+// SERVER_TOOL_NAMES and paintServerTools threw ReferenceError inside openProfile.
+func TestProfileOpenAppliesFields(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("node not installed")
+	}
+	src := string(IndexHTML)
+	tools := sliceFrom(t, src, "const SERVER_TOOL_NAMES", "async function duplicateBot")
+	apply := sliceFrom(t, src, "function applyBotFields", "function blankDraftFields")
+	open := sliceFrom(t, src, "async function openProfile", "// scroll:begin")
+	script := `class N {
+  constructor(tag){this.tag=tag;this.kids=[];this.className="";this.attrs={};this.value="";this.checked=false;this.name="";this.type="";}
+  append(...k){this.kids.push(...k)}
+  replaceChildren(){this.kids=[]}
+  addEventListener(){}
+  set textContent(v){this._text=v==null?"":String(v)}
+  get textContent(){return this._text||""}
+}
+const el=(tag,cls,text)=>{const n=new N(tag); if(cls) n.className=cls; if(text!=null) n.textContent=text; return n};
+const picks={kids:[], replaceChildren(){this.kids=[]}, append(n){this.kids.push(n)}, classList:{toggle(){}}};
+const fields={};
+function field(id){return fields[id]||(fields[id]={value:"",style:{},textContent:""})}
+function $(s){
+  if(s==="#server-tools-picks") return picks;
+  if(s==="#profile-name") return field("name");
+  if(s==="#profile-label") return field("label");
+  if(s==="#profile-description") return field("description");
+  if(s==="#profile-model") return field("model");
+  if(s==="#profile-err") return field("err");
+  return field(s);
+}
+const document={
+  createElement(){return new N("input")},
+  createTextNode(t){return {text:String(t)}},
+  querySelectorAll(){return []}
+};
+const COLORS=["#4C77DD"];
+let navBypass=false;
+const state={view:"bots",draft:false,botId:null,bots:[],profileBase:null,profileLoad:0,saveError:"",mark:{shape:"circle",color:"#4C77DD"}};
+function noop(){}
+const setGrants=noop, setChipList=noop, setServerMode=noop, paintWarnings=noop, paintMarkPicker=noop, syncProfileHeadingName=noop, syncServerToolsMode=noop, paintDirty=noop;
+const setProfilePane=noop, profileDirty=()=>false, confirmLeave=noop, closeMenu=noop, closeState=noop, closeRoutineForm=noop;
+const readProfile=()=>({name:field("name").value});
+const loadRoutines=async()=>{};
+const showRoutineErr=noop, loadPermPanel=async()=>{}, showPermErr=noop, commitLevel=noop, setView=noop, setTitle=noop, focusPane=noop, resetScrollTops=noop;
+const api=async()=>({
+  id:"bot-1", name:"Ada", label:"Notes", description:"Keeps notes", model:"grok-3",
+  mark:{shape:"hex", color:"#218C57"}, grants:["net"],
+  net_allow:["docs.example.org"], ssh_allow:[], github_allow:["example-org/notes-site"],
+  server_tools:["web_search"], warnings:[]
+});
+` + tools + "\n" + apply + "\n" + open + `
+function toolState(){
+  const out=[];
+  for (const label of picks.kids) {
+    let value="", checked=false;
+    (function walk(n){
+      if(!n) return;
+      if(n.tag==="input") { value=n.value; checked=!!n.checked; }
+      (n.kids||[]).forEach(walk);
+    })(label);
+    out.push(value+":"+checked);
+  }
+  return out;
+}
+(async()=>{
+  await openProfile("bot-1");
+  const opened={name:field("name").value, label:field("label").value, model:field("model").value, tools:toolState()};
+  applyBotFields({name:"Bea", server_tools:null, mark:{shape:"circle", color:"#4C77DD"}});
+  const afterNull=toolState();
+  const cases=[
+    {name:"open-name", ok:opened.name==="Ada" && opened.label==="Notes"},
+    {name:"open-model", ok:opened.model==="grok-3"},
+    {name:"open-bot", ok:state.botId==="bot-1" && state.draft===false},
+    {name:"tools-order", ok:JSON.stringify(opened.tools)===JSON.stringify(["web_search:true","x_search:false"])},
+    {name:"tools-null", ok:JSON.stringify(afterNull)===JSON.stringify(["web_search:false","x_search:false"])},
+    {name:"const-pinned", ok:JSON.stringify(SERVER_TOOL_NAMES)===JSON.stringify(["web_search","x_search"])}
+  ];
+  console.log(JSON.stringify(cases));
+})().catch(e=>{console.error(e&&e.stack||String(e)); process.exit(1);});
+`
+	raw := runNode(t, node, script)
+	assertCases(t, raw)
 }
