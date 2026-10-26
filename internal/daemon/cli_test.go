@@ -479,6 +479,10 @@ func TestCLIShutdownMidTurnResumes(t *testing.T) {
 
 func newCLIApp(t *testing.T, dir, policyPath string) *App {
 	t.Helper()
+	// t.TempDir is 0775 when umask is 0002. Token generation refuses a group-writable DATA_DIR.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	cfg := config.Config{
 		DataDir: dir, BindAddr: "127.0.0.1:0",
 		OllamaURL: "http://127.0.0.1:9", Model: "test-model", Version: "0.1.0",

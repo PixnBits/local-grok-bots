@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/PixnBits/local-grok-bots/internal/config"
 	"golang.org/x/sys/unix"
 )
 
@@ -28,6 +29,14 @@ type namedToken struct {
 }
 
 var authTokenName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// asciiSpace is the only whitespace trimmed from token files.
+// A Unicode space stays in the value and fails the printable-ASCII check.
+const asciiSpace = " \t\r\n"
+
+func trimASCIISpace(s string) string {
+	return strings.Trim(s, asciiSpace)
+}
 
 // loadAuthTokens reads AUTH_TOKENS_FILE. An empty path means no file.
 // The name "default" is reserved. defaultToken, when set, also occupies
@@ -51,60 +60,87 @@ func loadAuthTokens(path, defaultToken string) ([]namedToken, error) {
 }
 
 // readAuthTokensFile opens path without following a symlink and refuses
-// anything that is not a small, owner-only regular file. O_NONBLOCK makes
-// a FIFO return instead of waiting for a writer. The flag is cleared after
-// fstat shows a regular file.
+// anything that is not a small, owner-only, single-link regular file.
+// O_NONBLOCK makes a FIFO return instead of waiting for a writer. The flag
+// is cleared after fstat shows a regular file.
 func readAuthTokensFile(path string) ([]byte, error) {
+	b, err := readProtectedFile(path, authTokensMax, "auth tokens", "auth tokens: file exceeds 64 KiB")
+	if err != nil && errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("auth tokens: %w", err)
+	}
+	return b, err
+}
+
+// readProtectedFile opens path with O_NOFOLLOW and refuses a symlink, a
+// non-regular file, group or other permission bits, an owner other than the
+// effective uid, a link count other than 1, or a file larger than max.
+// tooBig, when set, is the error for an over-size file. A missing file
+// returns the open error unchanged so callers can use os.ErrNotExist.
+func readProtectedFile(path string, max int64, kind, tooBig string) ([]byte, error) {
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		if errors.Is(err, unix.ELOOP) {
-			return nil, errors.New("auth tokens: symlink")
+			return nil, fmt.Errorf("%s: symlink", kind)
 		}
 		if lst, lerr := os.Lstat(path); lerr == nil && lst.Mode()&os.ModeSymlink != 0 {
-			return nil, errors.New("auth tokens: symlink")
+			return nil, fmt.Errorf("%s: symlink", kind)
 		}
-		return nil, fmt.Errorf("auth tokens: %w", err)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%s: %w", kind, err)
 	}
 	var st unix.Stat_t
 	if err := unix.Fstat(fd, &st); err != nil {
 		unix.Close(fd)
-		return nil, fmt.Errorf("auth tokens: %w", err)
+		return nil, fmt.Errorf("%s: %w", kind, err)
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		unix.Close(fd)
-		return nil, errors.New("auth tokens: not a regular file")
+		return nil, fmt.Errorf("%s: not a regular file", kind)
 	}
 	if st.Mode&0o077 != 0 {
 		unix.Close(fd)
-		return nil, errors.New("auth tokens: mode allows group or other access")
+		return nil, fmt.Errorf("%s: mode allows group or other access", kind)
 	}
 	if int(st.Uid) != os.Geteuid() {
 		unix.Close(fd)
-		return nil, errors.New("auth tokens: owner mismatch")
+		return nil, fmt.Errorf("%s: owner mismatch", kind)
 	}
-	if st.Size > int64(authTokensMax) {
+	if st.Nlink != 1 {
 		unix.Close(fd)
-		return nil, errors.New("auth tokens: file exceeds 64 KiB")
+		return nil, fmt.Errorf("%s: hard link", kind)
+	}
+	if st.Size > max {
+		unix.Close(fd)
+		return nil, oversizeError(kind, path, max, tooBig)
 	}
 	fl, err := unix.FcntlInt(uintptr(fd), unix.F_GETFL, 0)
 	if err != nil {
 		unix.Close(fd)
-		return nil, fmt.Errorf("auth tokens: %w", err)
+		return nil, fmt.Errorf("%s: %w", kind, err)
 	}
 	if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFL, fl&^unix.O_NONBLOCK); err != nil {
 		unix.Close(fd)
-		return nil, fmt.Errorf("auth tokens: %w", err)
+		return nil, fmt.Errorf("%s: %w", kind, err)
 	}
 	f := os.NewFile(uintptr(fd), path)
 	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, authTokensMax+1))
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
 	if err != nil {
-		return nil, fmt.Errorf("auth tokens: %w", err)
+		return nil, fmt.Errorf("%s: %w", kind, err)
 	}
-	if int64(len(b)) > authTokensMax {
-		return nil, errors.New("auth tokens: file exceeds 64 KiB")
+	if int64(len(b)) > max {
+		return nil, oversizeError(kind, path, max, tooBig)
 	}
 	return b, nil
+}
+
+func oversizeError(kind, path string, max int64, tooBig string) error {
+	if tooBig != "" {
+		return errors.New(tooBig)
+	}
+	return fmt.Errorf("%s: %s exceeds %d bytes", kind, path, max)
 }
 
 // authTokensPaths is the cleaned absolute path of AUTH_TOKENS_FILE and, when
@@ -199,7 +235,7 @@ func parseAuthTokens(text, defaultToken string) ([]namedToken, error) {
 	lineNo := 0
 	for _, line := range strings.Split(text, "\n") {
 		lineNo++
-		line = strings.TrimSpace(line)
+		line = trimASCIISpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -207,8 +243,8 @@ func parseAuthTokens(text, defaultToken string) ([]namedToken, error) {
 		if !ok {
 			return nil, fmt.Errorf("auth tokens: line %d: invalid line", lineNo)
 		}
-		name = strings.TrimSpace(name)
-		val = strings.TrimSpace(val)
+		name = trimASCIISpace(name)
+		val = trimASCIISpace(val)
 		if !authTokenName.MatchString(name) {
 			return nil, fmt.Errorf("auth tokens: line %d: invalid name", lineNo)
 		}
@@ -258,6 +294,23 @@ func matchNamedToken(presented string, tokens []namedToken) (string, bool) {
 	return name, matched == 1
 }
 
+// authTokenSet is the named tokens from one successful AUTH_TOKENS_FILE read.
+// The slice is not mutated after it is published.
+type authTokenSet struct {
+	toks []namedToken
+}
+
+func (a *App) fileTokens() []namedToken {
+	if a == nil {
+		return nil
+	}
+	snap := a.authTokens.Load()
+	if snap == nil {
+		return nil
+	}
+	return snap.toks
+}
+
 func (a *App) configuredTokens() []namedToken {
 	if a == nil {
 		return nil
@@ -266,12 +319,46 @@ func (a *App) configuredTokens() []namedToken {
 	if a.cfg.AuthToken != "" {
 		out = append(out, namedToken{name: defaultTokenName, val: a.cfg.AuthToken})
 	}
-	out = append(out, a.accessTokens...)
+	out = append(out, a.fileTokens()...)
 	return out
 }
 
 func (a *App) tokensConfigured() bool {
-	return a != nil && (a.cfg.AuthToken != "" || len(a.accessTokens) > 0)
+	return a != nil && (a.cfg.AuthToken != "" || len(a.fileTokens()) > 0)
+}
+
+// ReloadAuthTokens re-reads AUTH_TOKENS_FILE and swaps the set on success.
+// A failure keeps the previous set. An unset path does nothing.
+func (a *App) ReloadAuthTokens() {
+	if a == nil || strings.TrimSpace(a.cfg.AuthTokensFile) == "" {
+		return
+	}
+	toks, err := readAuthTokenSet(a.cfg, a.cfg.AuthToken)
+	if err != nil || len(toks) == 0 {
+		if err == nil {
+			err = errors.New("auth tokens: AUTH_TOKENS_FILE has no tokens")
+		}
+		a.writeStartup("local-grok-bots: WARN: AUTH_TOKENS_FILE reload failed; keeping the previous tokens: %s\n", err)
+		return
+	}
+	a.authTokens.Store(&authTokenSet{toks: append([]namedToken(nil), toks...)})
+	a.writeStartup("local-grok-bots: reloaded AUTH_TOKENS_FILE (%d tokens)\n", len(toks))
+	if a.audit != nil && a.audit.Enabled() {
+		a.audit.Write(map[string]any{"action": "auth_tokens_reloaded", "count": len(toks)})
+	}
+}
+
+// readAuthTokenSet runs the startup checks for AUTH_TOKENS_FILE: location,
+// overlap with SANDBOX_BUILD_BINDS, then the hardened read and parse.
+// An empty path yields no tokens. A file that yields none is an error.
+func readAuthTokenSet(cfg config.Config, defaultToken string) ([]namedToken, error) {
+	if err := checkAuthTokensLocation(cfg.AuthTokensFile, cfg.Workspace(), cfg.DataDir); err != nil {
+		return nil, err
+	}
+	if err := checkAuthTokensBinds(cfg.AuthTokensFile, cfg.BuildBinds); err != nil {
+		return nil, err
+	}
+	return loadAuthTokens(cfg.AuthTokensFile, defaultToken)
 }
 
 // authSecrets are token values that must not appear in a child environment.

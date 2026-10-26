@@ -27,13 +27,20 @@ func (a *App) policyNow() (policy.Policy, error) {
 	if a == nil {
 		return policy.Policy{}, errors.New("policy is not available")
 	}
-	return policy.Load(policy.Options{
+	pol, err := policy.Load(policy.Options{
 		Path:           a.cfg.PolicyPath,
 		ManagedPath:    os.Getenv("MANAGED_POLICY"),
 		EnvBind:        os.Getenv("BIND_ADDR"),
 		EnvOllamaURL:   os.Getenv("OLLAMA_URL"),
 		EnvOllamaModel: os.Getenv("OLLAMA_MODEL"),
 	})
+	if err != nil {
+		return pol, err
+	}
+	if err := checkPathOverlaps(a.cfg, pol); err != nil {
+		return policy.Policy{}, err
+	}
+	return pol, nil
 }
 
 func coiName(args []string) string {

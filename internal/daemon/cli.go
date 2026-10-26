@@ -19,6 +19,7 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/coi"
+	"github.com/PixnBits/local-grok-bots/internal/config"
 	"github.com/PixnBits/local-grok-bots/internal/dlp"
 	"github.com/PixnBits/local-grok-bots/internal/id"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
@@ -1094,21 +1095,31 @@ func (a *App) secretsFrom(pol policy.Policy) []string {
 	if err != nil {
 		return nil
 	}
-	var dirs []string
 	for _, name := range []string{"cli", "coi", "cli-proxy", "cli-egress"} {
 		d := filepath.Join(dir, name)
 		_ = os.MkdirAll(d, 0o700)
 		_ = os.Chmod(d, 0o700)
-		dirs = append(dirs, d)
 	}
+	return secretPaths(a.cfg, pol, true)
+}
+
+// secretPaths lists daemon secret paths. includeHomes adds each tools.cli
+// credential_home. The directories are not created here.
+func secretPaths(cfg config.Config, pol policy.Policy, includeHomes bool) []string {
+	dir, err := filepath.Abs(cfg.DataDir)
+	if err != nil {
+		return nil
+	}
+	dir = filepath.Clean(dir)
 	out := []string{
 		filepath.Join(dir, adminTokenFile),
 		filepath.Join(dir, "state.db"), filepath.Join(dir, "state.db-wal"), filepath.Join(dir, "state.db-shm"),
 	}
-	out = append(out, dirs...)
-	if p := strings.TrimSpace(a.cfg.PolicyPath); p != "" {
-		abs, err := filepath.Abs(p)
-		if err == nil {
+	for _, name := range []string{"cli", "coi", "cli-proxy", "cli-egress"} {
+		out = append(out, filepath.Join(dir, name))
+	}
+	if p := strings.TrimSpace(cfg.PolicyPath); p != "" {
+		if abs, err := filepath.Abs(p); err == nil {
 			out = append(out, abs)
 		}
 	}
@@ -1116,15 +1127,17 @@ func (a *App) secretsFrom(pol policy.Policy) []string {
 	for _, p := range out {
 		seen[filepath.Clean(p)] = true
 	}
-	for _, tool := range pol.CLITools {
-		home := filepath.Clean(strings.TrimSpace(tool.CredentialHome))
-		if home == "" || home == "." || !filepath.IsAbs(home) || seen[home] {
-			continue
+	if includeHomes {
+		for _, tool := range pol.CLITools {
+			home := filepath.Clean(strings.TrimSpace(tool.CredentialHome))
+			if home == "" || home == "." || !filepath.IsAbs(home) || seen[home] {
+				continue
+			}
+			seen[home] = true
+			out = append(out, home)
 		}
-		seen[home] = true
-		out = append(out, home)
 	}
-	for _, p := range authTokensPaths(a.cfg.AuthTokensFile) {
+	for _, p := range authTokensPaths(cfg.AuthTokensFile) {
 		if seen[p] {
 			continue
 		}
