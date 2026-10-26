@@ -23,8 +23,14 @@ const usage = `local-grok-bots is a local daemon for a personal bot roster.
   AUTH_TOKEN            unset
   AUTH_TOKENS_FILE      unset
   SANDBOX_BUILD_BINDS   unset
+  TLS_CERT              unset
+  TLS_KEY               unset
+  TLS_SELF_SIGNED       unset (1 generates a cert)
+  WHISPER_BIN           unset
+  WHISPER_MODEL         unset
+  PERM_CALLBACK_ADDR    127.0.0.1:0
 
-A policy.toml bind overrides BIND_ADDR.
+A policy.toml bind overrides BIND_ADDR. Policy [daemon] tls_* overrides TLS_CERT, TLS_KEY, and TLS_SELF_SIGNED. Policy [voice] overrides WHISPER_BIN and WHISPER_MODEL. Policy perm_callback_addr overrides PERM_CALLBACK_ADDR.
 AUTH_TOKENS_FILE is a file of name:token lines. It is read at startup. SIGHUP reloads it when set, and is otherwise ignored (logged). The protected-path snapshot is taken at startup. SIGHUP does not replace it. A successful token reload adds paths that were not already recorded.
 `
 

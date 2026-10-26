@@ -328,6 +328,7 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		if err != nil {
 			return "", err
 		}
+		a.notePermCallback()
 		return mustJSON(map[string]any{"id": created.ID, "name": created.Name}), nil
 	case "update_bot":
 		who := strArg(args, "id")

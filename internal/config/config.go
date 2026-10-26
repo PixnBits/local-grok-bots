@@ -22,6 +22,18 @@ type Config struct {
 	// PolicyPath is the policy.toml to load. Empty skips the file and keeps
 	// built-in defaults. The daemon sets this to "policy.toml" unless POLICY_PATH is set.
 	PolicyPath string
+	// TLSCert and TLSKey are a pair. TLSSelfSigned generates a cert under DATA_DIR/tls.
+	// Policy [daemon] tls_* replaces these.
+	TLSCert       string
+	TLSKey        string
+	TLSSelfSigned bool
+	// WhisperBin and WhisperModel are the local whisper-cli and model.
+	// Both empty leaves speech recognition unconfigured. Policy [voice] replaces these.
+	WhisperBin   string
+	WhisperModel string
+	// PermCallbackAddr is the loopback plain-HTTP permission callback.
+	// Empty means 127.0.0.1:0. Policy replaces this.
+	PermCallbackAddr string
 }
 
 func FromEnv() Config {
@@ -34,15 +46,21 @@ func FromEnv() Config {
 		tokensFile = os.Getenv("AUTH_TOKENS_FILE")
 	}
 	return Config{
-		DataDir:        getenv("DATA_DIR", "./data"),
-		BindAddr:       getenv("BIND_ADDR", "127.0.0.1:8080"),
-		OllamaURL:      getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
-		Model:          getenv("OLLAMA_MODEL", "llama3.2"),
-		AuthToken:      tok,
-		AuthTokensFile: tokensFile,
-		Version:        Version,
-		BuildBinds:     splitList(os.Getenv("SANDBOX_BUILD_BINDS")),
-		PolicyPath:     getenv("POLICY_PATH", "policy.toml"),
+		DataDir:          getenv("DATA_DIR", "./data"),
+		BindAddr:         getenv("BIND_ADDR", "127.0.0.1:8080"),
+		OllamaURL:        getenv("OLLAMA_URL", "http://127.0.0.1:11434"),
+		Model:            getenv("OLLAMA_MODEL", "llama3.2"),
+		AuthToken:        tok,
+		AuthTokensFile:   tokensFile,
+		Version:          Version,
+		BuildBinds:       splitList(os.Getenv("SANDBOX_BUILD_BINDS")),
+		PolicyPath:       getenv("POLICY_PATH", "policy.toml"),
+		TLSCert:          os.Getenv("TLS_CERT"),
+		TLSKey:           os.Getenv("TLS_KEY"),
+		TLSSelfSigned:    os.Getenv("TLS_SELF_SIGNED") == "1",
+		WhisperBin:       os.Getenv("WHISPER_BIN"),
+		WhisperModel:     os.Getenv("WHISPER_MODEL"),
+		PermCallbackAddr: os.Getenv("PERM_CALLBACK_ADDR"),
 	}
 }
 

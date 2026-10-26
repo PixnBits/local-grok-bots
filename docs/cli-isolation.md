@@ -629,6 +629,63 @@ Without the token a CLI's shell can't call the API, including
 per-run MCP permission route, which only asks the broker. Ollama-only
 setups need no token unless `AUTH_TOKEN` is set.
 
+## Voice, TLS, and the permission callback
+
+`POST /api/stt` is local speech recognition. The request shape, status
+codes, and audit fields are in `docs/voice.md`. The transcript is not
+logged. Policy controls it, and policy beats the environment the same way
+`[ollama] host` beats `OLLAMA_URL`.
+
+```toml
+[voice]
+# Off unless set. A disabled POST /api/stt is 403 and still audited.
+enabled = false
+# Absolute paths. Both or neither. A missing file is 503, not another service.
+# bin = "/usr/local/bin/whisper-cli"
+# model = "/var/lib/local-grok-bots/models/ggml-base.en.bin"
+# Defaults: 240 seconds, 8 MiB, 60 requests per user per rolling hour.
+# Hard range: 1..86400, 1..67108864, 1..100000.
+# max_audio_seconds = 240
+# max_body_bytes = 8388608
+# max_requests_per_hour = 60
+
+[daemon]
+# Any one tls_* key replaces TLS_CERT, TLS_KEY, and TLS_SELF_SIGNED together.
+# tls_cert and tls_key are absolute and must be set as a pair.
+# tls_self_signed cannot be combined with that pair.
+# tls_self_signed = false
+# perm_callback_addr is a loopback IP and a port. localhost and wildcards fail.
+# perm_callback_addr = "127.0.0.1:0"
+
+[managed]
+# Only the managed file can set these. The same keys in policy.toml are
+# ignored after the range check. A [voice] value above the ceiling is lowered
+# and warned, for example:
+# voice.max_audio_seconds 600 lowered to managed max_voice_audio_seconds 30
+# max_voice_audio_seconds = 240
+# max_voice_body_bytes = 8388608
+# max_voice_requests_per_hour = 60
+```
+
+Unknown keys, a wrong type, zero, a negative number, or a number above the
+hard range make that file unparseable. The daemon fail-closes (CLI backends
+off) and does not apply the file. A managed TLS, whisper, or
+`perm_callback_addr` value that differs from a non-empty environment
+variable refuses startup under `conflict_policy = "refuse"`.
+
+HTTPS, when configured, is `ServeTLS` on the listener `bind` already chose.
+There is no second public listener. `TLS_SELF_SIGNED=1`, or
+`tls_self_signed = true`, writes `DATA_DIR/tls/cert.pem` and `key.pem` mode
+0600, owned by the daemon user.
+
+The permission callback is a separate plain-HTTP socket. It listens only
+when the effective backend is Claude, `claude_transport` is `mcp` (including
+an empty value, which is `mcp`), and at least one bot exists. Ollama, Grok,
+`stream_control`, and `none` do not open it. The bind is loopback only
+(`127.0.0.0/8` or `::1`), never `0.0.0.0`. Nothing else uses that socket.
+On a plain-HTTP daemon, MCP keeps the main listener's origin. On HTTPS, the
+MCP host base is the callback, and it is empty until that listener is up.
+
 ## Ollama run_shell on macOS
 
 On macOS, Ollama `run_shell` now runs under `/usr/bin/sandbox-exec` with a

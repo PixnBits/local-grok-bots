@@ -8,6 +8,20 @@
 # Bind address for the web portal. Loopback only by default.
 bind = "127.0.0.1:8787"
 
+# Optional HTTPS on that same listener. Any one of these keys replaces
+# TLS_CERT, TLS_KEY, and TLS_SELF_SIGNED as one setting. tls_cert and
+# tls_key are absolute paths and must be set together. tls_self_signed
+# writes DATA_DIR/tls/cert.pem and key.pem mode 0600 and cannot be combined
+# with a cert pair. See docs/voice.md.
+# tls_cert = "/var/lib/local-grok-bots/tls/cert.pem"
+# tls_key = "/var/lib/local-grok-bots/tls/key.pem"
+# tls_self_signed = false
+# Plain HTTP origin for the Claude MCP permission tool. Loopback IP and a
+# port only (127.0.0.1 or ::1). localhost, 0.0.0.0, and :: are rejected.
+# The socket is opened only when the backend is claude, claude_transport
+# is mcp, and at least one bot exists. Default 127.0.0.1:0.
+# perm_callback_addr = "127.0.0.1:0"
+
 # systemd unit should run as a non-root system user.
 # user = "local-grok-bots"
 
@@ -216,6 +230,23 @@ conflict_policy = "refuse"
 # Empty leaves it off.
 # audit_log = ""
 
+# [voice]
+# Local speech recognition for POST /api/stt. Off unless enabled = true.
+# A disabled request is 403 and is still audited. The transcript is not logged.
+# bin and model are absolute paths to a local whisper.cpp CLI and its model.
+# Both or neither. A missing file is 503. There is no remote fallback.
+# Defaults when enabled and the key is omitted: 240 seconds, 8388608 bytes,
+# 60 requests per user per rolling hour. Hard ranges are 1..86400,
+# 1..67108864, and 1..100000. Zero, negative, the wrong type, an unknown
+# key, or a value above the hard range fail-closes this file. A value above
+# a managed max_voice_* ceiling is lowered and warned. See docs/voice.md.
+# enabled = false
+# bin = "/usr/local/bin/whisper-cli"
+# model = "/var/lib/local-grok-bots/models/ggml-base.en.bin"
+# max_audio_seconds = 240
+# max_body_bytes = 8388608
+# max_requests_per_hour = 60
+
 [github]
 # Host path of a fine-grained PAT. The daemon reads it. It is not mounted
 # into a jail, not put in the environment, and not written to logs.
@@ -239,3 +270,9 @@ conflict_policy = "refuse"
 # Path where server-managed or MDM-delivered policy is read from.
 # Managed settings always override this file.
 # managed_path = "/etc/local-grok-bots/managed.json"
+# Voice ceilings. Only the managed file can set these. The same keys in
+# this file are ignored after a range check, with a warning. A bad value
+# (zero, negative, or above the hard range) fail-closes the file.
+# max_voice_audio_seconds = 240
+# max_voice_body_bytes = 8388608
+# max_voice_requests_per_hour = 60

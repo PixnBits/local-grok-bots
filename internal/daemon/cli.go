@@ -150,7 +150,8 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	cliDenySource := "cli"
 	eventTransport := ""
 	var cardDenied atomic.Bool
-	host := strings.TrimSpace(a.permBase) != ""
+	permOrigin := a.mcpHostBase()
+	host := strings.TrimSpace(permOrigin) != ""
 	switch {
 	case strings.EqualFold(backend, "grok"):
 		eventTransport = policy.TransportACP
@@ -190,7 +191,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	case a.policy.UIPrompts && host:
 		tok := a.registerPerm(bot.ID, runID, sessionID)
 		defer a.unregisterPerm(tok)
-		cfgPath, werr := a.writePermMCP(bot.ID, runID, a.permBase, tok)
+		cfgPath, werr := a.writePermMCP(bot.ID, runID, permOrigin, tok)
 		if werr != nil {
 			a.failCLI(bot.ID, runID, backend, werr)
 			return

@@ -56,9 +56,15 @@ type App struct {
 	perm   *permission.Broker
 	// permBase is the HTTP origin the CLI calls back, such as http://127.0.0.1:8787.
 	// Empty means there is no permission host. A headless prompt still fails closed.
-	permBase   string
-	permMu     sync.Mutex
-	permTokens map[string]permBind
+	// The permission callback listener does not replace this except when the
+	// main listener is TLS: then MCP uses permCallbackBase.
+	permBase         string
+	permSrv          *http.Server
+	permLn           net.Listener
+	permCallbackBase string
+	permCbMu         sync.Mutex
+	permMu           sync.Mutex
+	permTokens       map[string]permBind
 	// lgbLive holds per-run lgb tokens until that run's spool stops.
 	// They are not the admin token and cannot decide a permission card.
 	// The value is the bot and run the token was issued for.
@@ -129,6 +135,10 @@ type App struct {
 	activity     map[string]time.Time
 	closing      bool
 	wg           sync.WaitGroup
+
+	stt       STT
+	sttMu     sync.Mutex
+	voiceHits voiceGate
 }
 
 // logOut is copied onto each App as the startup writer. Nil means stderr.
@@ -136,11 +146,17 @@ var logOut io.Writer
 
 func New(cfg config.Config, m model.Client) (*App, error) {
 	pol, err := policy.Load(policy.Options{
-		Path:           cfg.PolicyPath,
-		ManagedPath:    os.Getenv("MANAGED_POLICY"),
-		EnvBind:        os.Getenv("BIND_ADDR"),
-		EnvOllamaURL:   os.Getenv("OLLAMA_URL"),
-		EnvOllamaModel: os.Getenv("OLLAMA_MODEL"),
+		Path:             cfg.PolicyPath,
+		ManagedPath:      os.Getenv("MANAGED_POLICY"),
+		EnvBind:          os.Getenv("BIND_ADDR"),
+		EnvOllamaURL:     os.Getenv("OLLAMA_URL"),
+		EnvOllamaModel:   os.Getenv("OLLAMA_MODEL"),
+		EnvTLSCert:       os.Getenv("TLS_CERT"),
+		EnvTLSKey:        os.Getenv("TLS_KEY"),
+		EnvTLSSelfSigned: os.Getenv("TLS_SELF_SIGNED"),
+		EnvWhisperBin:    os.Getenv("WHISPER_BIN"),
+		EnvWhisperModel:  os.Getenv("WHISPER_MODEL"),
+		EnvPermCallback:  os.Getenv("PERM_CALLBACK_ADDR"),
 	})
 	if err != nil {
 		return nil, err
@@ -159,6 +175,22 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	}
 	if pol.HasOllamaModel {
 		cfg.Model = pol.OllamaModel
+	}
+	if pol.HasTLS {
+		cfg.TLSCert = pol.TLSCert
+		cfg.TLSKey = pol.TLSKey
+		cfg.TLSSelfSigned = pol.TLSSelfSigned
+	}
+	if pol.HasWhisper {
+		cfg.WhisperBin = pol.WhisperBin
+		cfg.WhisperModel = pol.WhisperModel
+	}
+	if pol.HasPermCallback {
+		cfg.PermCallbackAddr = pol.PermCallbackAddr
+	}
+	stt, err := sttFromConfig(cfg.WhisperBin, cfg.WhisperModel)
+	if err != nil {
+		return nil, err
 	}
 	// Every start, including an existing admin token, AUTH_TOKEN, and
 	// Ollama-only. ensureAdminToken returns before this check when a token
@@ -230,6 +262,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		activity:   map[string]time.Time{},
 		permTokens: map[string]permBind{},
 		permBase:   httpBase(cfg.BindAddr),
+		stt:        stt,
 	}
 	if len(fileTokens) > 0 {
 		a.authTokens.Store(&authTokenSet{toks: fileTokens})
@@ -273,6 +306,10 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 			a.kick(b.ID)
 		}
 	}
+	if err := a.syncPermCallback(); err != nil {
+		a.Shutdown()
+		return nil, err
+	}
 	return a, nil
 }
 
@@ -291,6 +328,7 @@ func (a *App) Shutdown() {
 	a.rtMu.Unlock()
 	a.cancel()
 	a.wg.Wait()
+	a.stopPermCallback()
 	a.closeGrokProxy()
 	_ = a.st.FailRunning("shutdown")
 	_ = a.st.AddLog("", "daemon_stop", map[string]any{})
@@ -312,9 +350,15 @@ func (a *App) Run(ctx context.Context) error {
 		Handler:           a.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	cert, key, terr := a.tlsFiles()
+	if terr != nil {
+		_ = ln.Close()
+		a.Shutdown()
+		return terr
+	}
 	errCh := make(chan error, 1)
 	go func() {
-		err := srv.Serve(ln)
+		err := serveOnListener(srv, ln, cert, key)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
