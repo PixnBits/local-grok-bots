@@ -123,6 +123,7 @@ func TestThreadPolish(t *testing.T) {
 		`el("span", "timed-out", "Timed out")`,
 		`el("button", "secondary small", "Retry")`,
 		"if (b.continue_run_id) {\n      cont = el(\"button\", \"primary small\", \"Continue\");",
+		"retryTimeout(runId || timeoutRunId(b, state.messages, state.timeoutRunId))",
 		`tool !== "working" && tool !== "running" && tool !== "retrying"`,
 		`function focusAfterTimeoutNote()`,
 		`state.timeoutRunId = ""`,

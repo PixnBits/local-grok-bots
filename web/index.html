@@ -2107,7 +2107,7 @@ function paintHeader(b) {
       retry.disabled = true;
       if (cont) cont.disabled = true;
     };
-    retry.addEventListener("click", () => { disableBoth(); retryTimeout(runId); });
+    retry.addEventListener("click", () => { disableBoth(); retryTimeout(runId || timeoutRunId(b, state.messages, state.timeoutRunId)); });
     if (cont) {
       const id = b.continue_run_id;
       cont.addEventListener("click", () => { disableBoth(); continueRun(id); });
