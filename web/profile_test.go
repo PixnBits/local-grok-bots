@@ -34,6 +34,8 @@ func TestProfileStatic(t *testing.T) {
 		`announce("Saved")`,
 		`rescueFocus(() => $("#routine-new").focus())`,
 		`removeChipAt(kind, i); input.focus();`,
+		`.chips { gap: 16px 8px; }`,
+		`rescueFocus(() => $("#save-go").focus());`,
 		`state.saveErrorChip && !badChipMessage()`,
 		`["profile-name", "profile-label", "profile-model"].forEach`,
 		`.toggle::before { content: ""; position: absolute; inset: -10px -2px; }`,

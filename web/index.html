@@ -1107,7 +1107,7 @@ window.addEventListener("storage", function (ev) {
     .toggle::before { content: ""; position: absolute; inset: -10px -2px; }   /* 44×44 hit, 40×24 face */
     .chip-x { position: relative; }
     .chip-x::before { content: ""; position: absolute; inset: -12px; }      /* 44×44 hit, 20×20 face */
-    .chips { gap: 8px; }
+    .chips { gap: 16px 8px; }                                                /* 28px chips + 16 = 44px rows, so stacked × hit boxes never overlap */
     #server-tools-seg button, .builder .seg button { height: 44px; min-height: 44px; }
     .shape-btn { width: 44px; height: 44px; }
     #color-custom { width: 44px; height: 44px; }
@@ -4791,6 +4791,8 @@ async function saveProfile() {
   } catch (err) {
     state.saveError = (state.draft ? "Couldn't create the bot. The daemon said: " : "Couldn't save. The daemon said: ") + (err && err.message ? err.message : String(err || ""));
     paintSaveBar();
+    setSaving(false);
+    rescueFocus(() => $("#save-go").focus());
   } finally {
     setSaving(false);
   }
