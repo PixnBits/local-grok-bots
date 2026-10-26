@@ -585,9 +585,14 @@ func TestKeepAliveReachesFakeOllama(t *testing.T) {
 // timers synchronously and never moves time backwards.
 type fakeClock struct {
 	mu     sync.Mutex
+	advMu  sync.Mutex
 	now    time.Time
 	nextID int
 	timers []*fakeTimer
+	// latestFirst fires the newest timer when several share a deadline.
+	// The per-call cap is armed before the silence watchdog, so this is the
+	// tie where Chat sees the watchdog first.
+	latestFirst bool
 }
 
 type fakeTimer struct {
@@ -664,6 +669,8 @@ func (c *fakeClock) soonest() time.Duration {
 }
 
 func (c *fakeClock) Advance(d time.Duration) {
+	c.advMu.Lock()
+	defer c.advMu.Unlock()
 	end := c.Now().Add(d)
 	for {
 		c.mu.Lock()
@@ -672,7 +679,11 @@ func (c *fakeClock) Advance(d time.Duration) {
 			if t.stopped {
 				continue
 			}
-			if next == nil || t.at.Before(next.at) || (t.at.Equal(next.at) && t.id < next.id) {
+			if next == nil || t.at.Before(next.at) {
+				next = t
+				continue
+			}
+			if t.at.Equal(next.at) && ((c.latestFirst && t.id > next.id) || (!c.latestFirst && t.id < next.id)) {
 				next = t
 			}
 		}
@@ -773,8 +784,10 @@ func TestProdModelTimeoutAllowsSlowFirstToken(t *testing.T) {
 	bot := createBot(t, srv.URL, "Ada")
 	runID := postUser(t, srv.URL, bot.ID, "hi")
 	bot = waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool { return b.Status != "running" })
-	if armed.Load() < 2 {
-		t.Fatalf("clock timers armed %d, want the stall watchdog and the per-call cap", armed.Load())
+	// Inherited silence equals the cap, so it is not a second timer.
+	// A first token before that cap still succeeds.
+	if armed.Load() != 1 {
+		t.Fatalf("clock timers armed %d, want only the per-call cap", armed.Load())
 	}
 	if time.Duration(soon.Load()) < 10*time.Minute {
 		t.Fatalf("soonest timer %s, want >= 10m (explicit model_timeout)", time.Duration(soon.Load()))
@@ -927,4 +940,257 @@ func TestRetryWhileClosing(t *testing.T) {
 	waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool {
 		return b.Status != "running" && b.LastRunStatus == "done"
 	})
+}
+
+func ollamaPolicyApp(t *testing.T, body string, ol *model.Ollama) (*App, *httptest.Server, policy.Policy) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "policy.toml")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pol, err := policy.Load(policy.Options{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := newApp(t, "", ol)
+	app.rtMu.Lock()
+	app.policy = pol
+	app.rtMu.Unlock()
+	return app, serve(t, app), pol
+}
+
+func assertModelCapAudit(t *testing.T, base, limitValue string, requests int32) {
+	t.Helper()
+	if requests != 1 {
+		t.Fatalf("requests %d", requests)
+	}
+	if retryLogs(t, base) != 0 {
+		t.Fatalf("retries %d", retryLogs(t, base))
+	}
+	calls := logKind(t, base, "model_call")
+	if len(calls) != 1 {
+		t.Fatalf("model_call events %d", len(calls))
+	}
+	var call struct {
+		OK         bool   `json:"ok"`
+		Retry      bool   `json:"retry"`
+		Limit      string `json:"limit"`
+		LimitValue string `json:"limit_value"`
+	}
+	if err := json.Unmarshal(calls[0].Detail, &call); err != nil {
+		t.Fatal(err)
+	}
+	if call.OK || call.Retry || call.Limit != "model_timeout" || call.LimitValue != limitValue {
+		t.Fatalf("model_call ok=%v retry=%v limit=%s value=%s", call.OK, call.Retry, call.Limit, call.LimitValue)
+	}
+	events := logKind(t, base, "run_timed_out")
+	if len(events) != 1 {
+		t.Fatalf("run_timed_out events %d", len(events))
+	}
+	var timed struct {
+		Limit      string `json:"limit"`
+		LimitValue string `json:"limit_value"`
+	}
+	if err := json.Unmarshal(events[0].Detail, &timed); err != nil {
+		t.Fatal(err)
+	}
+	if timed.Limit != "model_timeout" || timed.LimitValue != limitValue {
+		t.Fatalf("run_timed_out limit=%s value=%s", timed.Limit, timed.LimitValue)
+	}
+}
+
+func streamResetCount(app *App, runID string) int {
+	hist, ch := app.bus.Subscribe(runID)
+	app.bus.Unsubscribe(runID, ch)
+	n := 0
+	for _, f := range hist {
+		if f.event == "stream_reset" {
+			n++
+		}
+	}
+	return n
+}
+
+func sawTokenText(app *App, runID, text string) bool {
+	hist, ch := app.bus.Subscribe(runID)
+	app.bus.Unsubscribe(runID, ch)
+	for _, f := range hist {
+		if f.event != "token" {
+			continue
+		}
+		var payload struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(f.data, &payload) == nil && payload.Text == text {
+			return true
+		}
+	}
+	return false
+}
+
+const prodSilenceTOML = "[ollama]\nmodel_timeout = \"10m\"\nrun_timeout = \"30m\"\n"
+
+func TestInheritedSilenceAtModelCapIsNotRetried(t *testing.T) {
+	// Prod shape, no silence keys. The model sends nothing past the 10m cap.
+	// The inherited silence limit equals that cap, so this is one model_timeout
+	// and not a retried first_output_timeout.
+	clk := newFakeClock()
+	clk.latestFirst = true
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// Stay open until the client aborts. Returning here would close the
+		// body and the call could look like a short success.
+		go clk.Advance(11 * time.Minute)
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+	ol := model.NewOllama(upstream.URL)
+	ol.SetClock(&model.Clock{Now: clk.Now, AfterFunc: clk.AfterFunc})
+	app, srv, pol := ollamaPolicyApp(t, prodSilenceTOML, ol)
+	if pol.EffectiveOllamaFirstOutputTimeout() != 10*time.Minute ||
+		pol.EffectiveOllamaStallTimeout() != 10*time.Minute ||
+		pol.EffectiveOllamaModelTimeout() != 10*time.Minute ||
+		pol.EffectiveOllamaRunTimeout() != 30*time.Minute {
+		t.Fatalf("resolved first=%s stall=%s model=%s run=%s",
+			pol.EffectiveOllamaFirstOutputTimeout(), pol.EffectiveOllamaStallTimeout(),
+			pol.EffectiveOllamaModelTimeout(), pol.EffectiveOllamaRunTimeout())
+	}
+	bot := createBot(t, srv.URL, "Ada")
+	runID := postUser(t, srv.URL, bot.ID, "hi")
+	bot = waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool { return b.Status != "running" })
+	const body = "The model call hit its 10m limit (model_timeout)."
+	if bot.LastRunStatus != "timeout" || bot.LastRunError != body {
+		t.Fatalf("status %s %q requests %d", bot.LastRunStatus, bot.LastRunError, requests.Load())
+	}
+	assertModelCapAudit(t, srv.URL, "10m", requests.Load())
+	if streamResetCount(app, runID) != 0 {
+		t.Fatal("stream_reset")
+	}
+	page := readThread(t, srv.URL, bot.ID)
+	if threadNotice(page) != "Notice: "+body {
+		t.Fatalf("notice %q", threadNotice(page))
+	}
+	if len(botReplies(page)) != 0 {
+		t.Fatalf("replies %#v", botReplies(page))
+	}
+}
+
+func TestInheritedStallAtModelCapKeepsPartial(t *testing.T) {
+	// Prod shape. Some content, then silence through the 10m cap.
+	// The inherited stall limit equals the cap, so the partial is kept
+	// as model_timeout and the call is not retried.
+	clk := newFakeClock()
+	clk.latestFirst = true
+	var requests atomic.Int32
+	release := make(chan struct{})
+	wrote := make(chan struct{})
+	var wroteOnce sync.Once
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		n := requests.Add(1)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		f, _ := w.(http.Flusher)
+		if f != nil {
+			f.Flush()
+		}
+		if n == 1 {
+			_, _ = io.WriteString(w, "{\"message\":{\"role\":\"assistant\",\"content\":\"Hello\"}}\n")
+			if f != nil {
+				f.Flush()
+			}
+			wroteOnce.Do(func() { close(wrote) })
+			select {
+			case <-release:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		go clk.Advance(11 * time.Minute)
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+	ol := model.NewOllama(upstream.URL)
+	ol.SetClock(&model.Clock{Now: clk.Now, AfterFunc: clk.AfterFunc})
+	app, srv, _ := ollamaPolicyApp(t, prodSilenceTOML, ol)
+	bot := createBot(t, srv.URL, "Ada")
+	runID := postUser(t, srv.URL, bot.ID, "hi")
+	select {
+	case <-wrote:
+	case <-time.After(5 * time.Second):
+		t.Fatal("model produced no chunk")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for !sawTokenText(app, runID, "Hello") {
+		if time.Now().After(deadline) {
+			t.Fatal("token not streamed")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(release)
+	bot = waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool { return b.Status != "running" })
+	const body = "The model call hit its 10m limit (model_timeout). The partial reply is kept above."
+	if bot.LastRunStatus != "timeout" || bot.LastRunError != body {
+		t.Fatalf("status %s %q requests %d", bot.LastRunStatus, bot.LastRunError, requests.Load())
+	}
+	assertModelCapAudit(t, srv.URL, "10m", requests.Load())
+	if streamResetCount(app, runID) != 0 {
+		t.Fatal("stream_reset")
+	}
+	page := readThread(t, srv.URL, bot.ID)
+	if threadNotice(page) != "Notice: "+body {
+		t.Fatalf("notice %q", threadNotice(page))
+	}
+	replies := botReplies(page)
+	if len(replies) != 1 || replies[0].Content != "Hello" || !replies[0].TimedOut {
+		t.Fatalf("replies %#v", replies)
+	}
+}
+
+func TestShortModelTimeoutWithoutSilenceKeys(t *testing.T) {
+	// Real clock. model_timeout 4s and no silence keys: one request, done
+	// before a retry could finish (under 8s).
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+	ol := model.NewOllama(upstream.URL)
+	app, srv, pol := ollamaPolicyApp(t, "[ollama]\nmodel_timeout = \"4s\"\n", ol)
+	if pol.EffectiveOllamaModelTimeout() != 4*time.Second ||
+		pol.EffectiveOllamaFirstOutputTimeout() != 4*time.Second ||
+		pol.EffectiveOllamaStallTimeout() != 4*time.Second {
+		t.Fatalf("resolved model=%s first=%s stall=%s",
+			pol.EffectiveOllamaModelTimeout(), pol.EffectiveOllamaFirstOutputTimeout(), pol.EffectiveOllamaStallTimeout())
+	}
+	bot := createBot(t, srv.URL, "Ada")
+	start := time.Now()
+	runID := postUser(t, srv.URL, bot.ID, "hi")
+	bot = waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool { return b.Status != "running" })
+	elapsed := time.Since(start)
+	const body = "The model call hit its 4s limit (model_timeout)."
+	if bot.LastRunStatus != "timeout" || bot.LastRunError != body {
+		t.Fatalf("status %s %q requests %d elapsed %s", bot.LastRunStatus, bot.LastRunError, requests.Load(), elapsed)
+	}
+	if elapsed >= 8*time.Second {
+		t.Fatalf("elapsed %s, want < 8s", elapsed)
+	}
+	assertModelCapAudit(t, srv.URL, "4s", requests.Load())
+	if streamResetCount(app, runID) != 0 {
+		t.Fatal("stream_reset")
+	}
 }

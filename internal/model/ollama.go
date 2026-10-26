@@ -95,7 +95,7 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest, onToken func(string)
 	httpReq.Header.Set("Content-Type", "application/json")
 	resp, err := o.HTTP.Do(httpReq)
 	if err != nil {
-		if te := w.timeout(""); te != nil {
+		if te := preferModelCap(ctx, started, w.timeout(""), w.snapshot(), clk.now); te != nil {
 			return ChatResponse{FirstOutput: te.FirstOutput}, te
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -157,7 +157,7 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest, onToken func(string)
 	out.ToolCalls = calls
 	out.FirstOutput = w.elapsedToFirst()
 	if err := sc.Err(); err != nil && !sawDone {
-		if te := w.timeout(partial); te != nil {
+		if te := preferModelCap(ctx, started, w.timeout(partial), w.snapshot(), clk.now); te != nil {
 			out.FirstOutput = te.FirstOutput
 			return out, te
 		}
@@ -169,11 +169,28 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest, onToken func(string)
 		}
 		return out, fmt.Errorf("ollama stream: %w", err)
 	}
-	if te := w.timeout(partial); te != nil && !sawDone {
+	if te := preferModelCap(ctx, started, w.timeout(partial), w.snapshot(), clk.now); te != nil && !sawDone {
 		out.FirstOutput = te.FirstOutput
 		return out, te
 	}
 	return out, nil
+}
+
+// preferModelCap keeps a silence timeout unless its limit is at or beyond
+// the caller's deadline. Those expire together. Chat checks the watchdog
+// before the deadline, and the deadline is the per-call cap, which is not
+// retried.
+func preferModelCap(ctx context.Context, started time.Time, te *TimeoutError, snap watchdogSnap, now func() time.Time) *TimeoutError {
+	if te == nil {
+		return nil
+	}
+	dl, ok := ctx.Deadline()
+	if !ok || te.After < dl.Sub(started) {
+		return te
+	}
+	mt := modelTimeout(ctx, started, snap, now)
+	mt.Partial = te.Partial
+	return mt
 }
 
 // chunkIsOutput reports a chunk that counts as model activity: content,

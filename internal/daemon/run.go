@@ -124,14 +124,27 @@ func (a *App) execute(botID, runID string) {
 			if a.finishOllamaCtx(bot, runID, ctx, msgs, "", retried, lastFirst) {
 				return
 			}
-			mctx, mcancel := a.modelCallContext(ctx, a.policy.EffectiveOllamaModelTimeout())
+			modelCap := a.policy.EffectiveOllamaModelTimeout()
+			firstLim := a.policy.EffectiveOllamaFirstOutputTimeout()
+			stallLim := a.policy.EffectiveOllamaStallTimeout()
+			// A silence limit at least as long as the per-call cap expires
+			// with that cap. Arming it would win the check in Chat and
+			// retry a timeout that is not retryable. Leave it off so only
+			// the cap fires, as model_timeout.
+			if modelCap > 0 && firstLim >= modelCap {
+				firstLim = 0
+			}
+			if modelCap > 0 && stallLim >= modelCap {
+				stallLim = 0
+			}
+			mctx, mcancel := a.modelCallContext(ctx, modelCap)
 			var roundText strings.Builder
 			callResp, err := a.model.Chat(mctx, model.ChatRequest{
 				Model:              modelName,
 				Messages:           msgs,
 				Tools:              toolDefs(),
-				FirstOutputTimeout: a.policy.EffectiveOllamaFirstOutputTimeout(),
-				StallTimeout:       a.policy.EffectiveOllamaStallTimeout(),
+				FirstOutputTimeout: firstLim,
+				StallTimeout:       stallLim,
 				KeepAlive:          a.policy.EffectiveOllamaKeepAlive(),
 			}, func(tok string) {
 				roundText.WriteString(tok)

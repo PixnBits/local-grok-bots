@@ -134,6 +134,8 @@ already set `model_timeout` and not the new keys therefore stays no stricter
 than that cap: a first token at 5m30s still succeeds when `model_timeout` is
 10m.
 
+A silence limit that is >= the per-call cap is not armed separately; the call ends as `model_timeout` and is not retried.
+
 A `first_output_timeout` or `stall_timeout` while the run is still alive and
 `stall_retries` remain is tried again, once by default, on the same messages.
 Tools run only after a complete response, so a failed call has not executed

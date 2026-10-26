@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -164,6 +165,121 @@ func TestModelTimeoutHardCap(t *testing.T) {
 	var te *TimeoutError
 	if !errors.As(err, &te) || te.Limit != "model_timeout" {
 		t.Fatalf("%v", err)
+	}
+}
+
+// deadlineParent reports a deadline and never cancels. The watchdog is the
+// only thing that ends the call, so a limit equal to that deadline is a tie
+// Chat would otherwise classify as first_output_timeout.
+type deadlineParent struct {
+	context.Context
+	at time.Time
+}
+
+func (d deadlineParent) Deadline() (time.Time, bool) { return d.at, true }
+
+func TestWatchdogTiePrefersModelTimeout(t *testing.T) {
+	const limit = 10 * time.Minute
+	clk := newTieClock()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		// Stay open until the client aborts so a clean EOF is not a success.
+		go clk.Advance(limit)
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	ol := NewOllama(srv.URL)
+	ol.SetClock(&Clock{Now: clk.Now, AfterFunc: clk.AfterFunc})
+	ctx := deadlineParent{Context: context.Background(), at: clk.Now().Add(limit)}
+	_, err := ol.Chat(ctx, ChatRequest{
+		Model:              "m",
+		FirstOutputTimeout: limit,
+		StallTimeout:       limit,
+	}, nil)
+	var te *TimeoutError
+	if !errors.As(err, &te) || te.Limit != "model_timeout" {
+		t.Fatalf("%v", err)
+	}
+}
+
+type tieClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	nextID int
+	timers []*tieTimer
+}
+
+type tieTimer struct {
+	id      int
+	at      time.Time
+	fn      func()
+	stopped bool
+	clock   *tieClock
+}
+
+func newTieClock() *tieClock {
+	return &tieClock{now: time.Now()}
+}
+
+func (c *tieClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *tieClock) AfterFunc(d time.Duration, fn func()) ClockTimer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if d < 0 {
+		d = 0
+	}
+	c.nextID++
+	t := &tieTimer{id: c.nextID, at: c.now.Add(d), fn: fn, clock: c}
+	c.timers = append(c.timers, t)
+	return t
+}
+
+func (t *tieTimer) Stop() bool {
+	t.clock.mu.Lock()
+	defer t.clock.mu.Unlock()
+	if t.stopped {
+		return false
+	}
+	t.stopped = true
+	return true
+}
+
+func (c *tieClock) Advance(d time.Duration) {
+	end := c.Now().Add(d)
+	for {
+		c.mu.Lock()
+		var next *tieTimer
+		for _, t := range c.timers {
+			if t.stopped {
+				continue
+			}
+			if next == nil || t.at.Before(next.at) || (t.at.Equal(next.at) && t.id < next.id) {
+				next = t
+			}
+		}
+		if next == nil || next.at.After(end) {
+			if c.now.Before(end) {
+				c.now = end
+			}
+			c.mu.Unlock()
+			return
+		}
+		c.now = next.at
+		next.stopped = true
+		fn := next.fn
+		c.mu.Unlock()
+		if fn != nil {
+			fn()
+		}
 	}
 }
 
