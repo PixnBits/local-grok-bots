@@ -35,11 +35,14 @@ model = "llama3.1"
 # Whole run (default 10m) is the backstop. first_output_timeout (default 5m)
 # is the wait for the first output chunk, including a cold load.
 # stall_timeout (default 2m) is the max gap between output chunks after that.
-# stall_retries (default 1, 0 disables, max 5) retries a stall or that first
-# wait once. model_timeout is an optional hard cap on one call; unset means
-# the effective run timeout. A file that still sets the old 3m default keeps
-# that cap and can drop the key. keep_alive (default "30m") is sent on every
-# chat: a Go duration, seconds, or -1. See docs/cli-isolation.md.
+# When model_timeout is set and first_output_timeout or stall_timeout is not,
+# each unset one defaults to that model_timeout (before managed ceilings) so
+# an existing cap does not get stricter. stall_retries (default 1, 0 disables,
+# max 5) retries a stall or that first wait once. model_timeout is an optional
+# hard cap on one call; unset means the effective run timeout, and the 5m / 2m
+# silence defaults stay. A file that still sets the old 3m default keeps that
+# cap and can drop the key. keep_alive (default "30m") is sent on every chat:
+# a Go duration, seconds, or -1. See docs/cli-isolation.md.
 # run_timeout = "10m"
 # first_output_timeout = "5m"
 # stall_timeout = "2m"

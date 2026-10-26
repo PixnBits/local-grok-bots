@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -577,4 +579,352 @@ func TestKeepAliveReachesFakeOllama(t *testing.T) {
 	if !strings.Contains(got, `"keep_alive":"30m"`) {
 		t.Fatalf("body %s", got)
 	}
+}
+
+// fakeClock is the stall watchdog and per-call cap clock. Advance fires due
+// timers synchronously and never moves time backwards.
+type fakeClock struct {
+	mu     sync.Mutex
+	now    time.Time
+	nextID int
+	timers []*fakeTimer
+}
+
+type fakeTimer struct {
+	id      int
+	at      time.Time
+	fn      func()
+	stopped bool
+	clock   *fakeClock
+}
+
+func newFakeClock() *fakeClock {
+	return &fakeClock{now: time.Now()}
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) AfterFunc(d time.Duration, fn func()) model.ClockTimer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if d < 0 {
+		d = 0
+	}
+	c.nextID++
+	t := &fakeTimer{id: c.nextID, at: c.now.Add(d), fn: fn, clock: c}
+	c.timers = append(c.timers, t)
+	return t
+}
+
+func (t *fakeTimer) Stop() bool {
+	t.clock.mu.Lock()
+	defer t.clock.mu.Unlock()
+	if t.stopped {
+		return false
+	}
+	t.stopped = true
+	return true
+}
+
+func (c *fakeClock) armedCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	n := 0
+	for _, t := range c.timers {
+		if !t.stopped {
+			n++
+		}
+	}
+	return n
+}
+
+func (c *fakeClock) soonest() time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var best time.Duration
+	ok := false
+	for _, t := range c.timers {
+		if t.stopped {
+			continue
+		}
+		d := t.at.Sub(c.now)
+		if !ok || d < best {
+			best = d
+			ok = true
+		}
+	}
+	if !ok {
+		return -1
+	}
+	return best
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	end := c.Now().Add(d)
+	for {
+		c.mu.Lock()
+		var next *fakeTimer
+		for _, t := range c.timers {
+			if t.stopped {
+				continue
+			}
+			if next == nil || t.at.Before(next.at) || (t.at.Equal(next.at) && t.id < next.id) {
+				next = t
+			}
+		}
+		if next == nil || next.at.After(end) {
+			if c.now.Before(end) {
+				c.now = end
+			}
+			c.mu.Unlock()
+			return
+		}
+		c.now = next.at
+		next.stopped = true
+		fn := next.fn
+		c.mu.Unlock()
+		if fn != nil {
+			fn()
+		}
+	}
+}
+
+func timedOutPartialBytes(t *testing.T, base string) int {
+	t.Helper()
+	events := logKind(t, base, "run_timed_out")
+	if len(events) != 1 {
+		t.Fatalf("run_timed_out events %d", len(events))
+	}
+	var d struct {
+		PartialBytes int `json:"partial_bytes"`
+	}
+	if err := json.Unmarshal(events[0].Detail, &d); err != nil {
+		t.Fatal(err)
+	}
+	return d.PartialBytes
+}
+
+func TestProdModelTimeoutAllowsSlowFirstToken(t *testing.T) {
+	// Prod shape from a parsed policy file: model_timeout 10m, run_timeout
+	// 30m, no silence keys. The old defaults (first_output 5m, stall 2m)
+	// cancel a first token at 5m30s, retry, and time out after a second
+	// request. The explicit model_timeout must keep that call alive.
+	// The fake clock is the watchdog's and the per-call cap's, so this does
+	// not wait out the real 5m30s.
+	clk := newFakeClock()
+	var requests atomic.Int32
+	var armed atomic.Int32
+	var soon atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		if requests.Add(1) == 1 {
+			armed.Store(int32(clk.armedCount()))
+			soon.Store(int64(clk.soonest()))
+		}
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		advanced := make(chan struct{})
+		go func() {
+			clk.Advance(5*time.Minute + 30*time.Second)
+			close(advanced)
+		}()
+		select {
+		case <-r.Context().Done():
+			return
+		case <-advanced:
+		}
+		if r.Context().Err() != nil {
+			return
+		}
+		_, _ = io.WriteString(w, "{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"done\":true}\n")
+	}))
+	defer upstream.Close()
+
+	path := filepath.Join(t.TempDir(), "policy.toml")
+	if err := os.WriteFile(path, []byte("[ollama]\nmodel_timeout = \"10m\"\nrun_timeout = \"30m\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pol, err := policy.Load(policy.Options{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pol.EffectiveOllamaFirstOutputTimeout() != 10*time.Minute ||
+		pol.EffectiveOllamaStallTimeout() != 10*time.Minute ||
+		pol.EffectiveOllamaModelTimeout() != 10*time.Minute ||
+		pol.EffectiveOllamaRunTimeout() != 30*time.Minute {
+		t.Fatalf("resolved first=%s stall=%s model=%s run=%s",
+			pol.EffectiveOllamaFirstOutputTimeout(), pol.EffectiveOllamaStallTimeout(),
+			pol.EffectiveOllamaModelTimeout(), pol.EffectiveOllamaRunTimeout())
+	}
+	ol := model.NewOllama(upstream.URL)
+	ol.SetClock(&model.Clock{Now: clk.Now, AfterFunc: clk.AfterFunc})
+	app := newApp(t, "", ol)
+	app.rtMu.Lock()
+	app.policy = pol
+	app.rtMu.Unlock()
+	srv := serve(t, app)
+	bot := createBot(t, srv.URL, "Ada")
+	runID := postUser(t, srv.URL, bot.ID, "hi")
+	bot = waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool { return b.Status != "running" })
+	if armed.Load() < 2 {
+		t.Fatalf("clock timers armed %d, want the stall watchdog and the per-call cap", armed.Load())
+	}
+	if time.Duration(soon.Load()) < 10*time.Minute {
+		t.Fatalf("soonest timer %s, want >= 10m (explicit model_timeout)", time.Duration(soon.Load()))
+	}
+	if bot.LastRunStatus != "done" || bot.LastRunError != "" {
+		t.Fatalf("status %s %q requests %d", bot.LastRunStatus, bot.LastRunError, requests.Load())
+	}
+	if requests.Load() != 1 || retryLogs(t, srv.URL) != 0 {
+		t.Fatalf("requests %d retries %d", requests.Load(), retryLogs(t, srv.URL))
+	}
+	if sawStreamReset(app, runID, "first_output_timeout") || sawStreamReset(app, runID, "stall_timeout") {
+		t.Fatal("stream_reset")
+	}
+	page := readThread(t, srv.URL, bot.ID)
+	replies := botReplies(page)
+	if len(replies) != 1 || replies[0].Content != "ok" || replies[0].TimedOut {
+		t.Fatalf("replies %#v", replies)
+	}
+}
+
+func TestStallRetryKeepsLongestPartial(t *testing.T) {
+	const kept = "Hello from the first attempt"
+	mdl := &seqModel{steps: []func(context.Context, model.ChatRequest, func(string)) (model.ChatResponse, error){
+		func(_ context.Context, _ model.ChatRequest, onToken func(string)) (model.ChatResponse, error) {
+			if onToken != nil {
+				onToken(kept)
+			}
+			return model.ChatResponse{}, &model.TimeoutError{Limit: "stall_timeout", After: time.Minute, GotOutput: true, Partial: kept}
+		},
+		func(context.Context, model.ChatRequest, func(string)) (model.ChatResponse, error) {
+			return model.ChatResponse{}, &model.TimeoutError{Limit: "stall_timeout", After: time.Minute}
+		},
+	}}
+	app := newApp(t, "", mdl)
+	srv := serve(t, app)
+	bot := createBot(t, srv.URL, "Ada")
+	runID := postUser(t, srv.URL, bot.ID, "hi")
+	bot = waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool {
+		return b.Status != "running" && b.LastRunStatus == "timeout"
+	})
+	const body = "No output from the model for 2m (stall_timeout). Retried once. The partial reply is kept above."
+	if bot.LastRunError != body {
+		t.Fatalf("error %q", bot.LastRunError)
+	}
+	if bot.ContinueRunID != runID {
+		t.Fatalf("continue %q", bot.ContinueRunID)
+	}
+	page := readThread(t, srv.URL, bot.ID)
+	if threadNotice(page) != "Notice: "+body {
+		t.Fatalf("notice %q", threadNotice(page))
+	}
+	replies := botReplies(page)
+	if len(replies) != 1 || replies[0].Content != kept || !replies[0].TimedOut {
+		t.Fatalf("replies %#v", replies)
+	}
+	if timedOutPartialBytes(t, srv.URL) != len(kept) {
+		t.Fatalf("partial_bytes %d", timedOutPartialBytes(t, srv.URL))
+	}
+	if !sawStreamReset(app, runID, "stall_timeout") {
+		t.Fatal("no stream_reset")
+	}
+	if len(mdl.snapshot()) != 2 {
+		t.Fatalf("calls %d", len(mdl.snapshot()))
+	}
+}
+
+func TestFirstOutputTimeoutWithoutPartialHasNoContinue(t *testing.T) {
+	mdl := &seqModel{steps: []func(context.Context, model.ChatRequest, func(string)) (model.ChatResponse, error){
+		func(context.Context, model.ChatRequest, func(string)) (model.ChatResponse, error) {
+			return model.ChatResponse{}, &model.TimeoutError{Limit: "first_output_timeout", After: 5 * time.Minute}
+		},
+		func(context.Context, model.ChatRequest, func(string)) (model.ChatResponse, error) {
+			return model.ChatResponse{}, &model.TimeoutError{Limit: "first_output_timeout", After: 5 * time.Minute}
+		},
+	}}
+	app := newApp(t, "", mdl)
+	srv := serve(t, app)
+	bot := createBot(t, srv.URL, "Ada")
+	runID := postUser(t, srv.URL, bot.ID, "hi")
+	bot = waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool {
+		return b.Status != "running" && b.LastRunStatus == "timeout"
+	})
+	const body = "The model sent no output within 5m (first_output_timeout). Retried once."
+	if bot.LastRunError != body || bot.ContinueRunID != "" {
+		t.Fatalf("status %s error %q continue %q", bot.LastRunStatus, bot.LastRunError, bot.ContinueRunID)
+	}
+	page := readThread(t, srv.URL, bot.ID)
+	if threadNotice(page) != "Notice: "+body {
+		t.Fatalf("notice %q", threadNotice(page))
+	}
+	if len(botReplies(page)) != 0 {
+		t.Fatalf("replies %#v", botReplies(page))
+	}
+	if timedOutPartialBytes(t, srv.URL) != 0 {
+		t.Fatalf("partial_bytes %d", timedOutPartialBytes(t, srv.URL))
+	}
+	waitRunReleased(t, app, bot.ID)
+	res, b := postContinue(t, srv.URL, bot.ID, runID)
+	if res.StatusCode != http.StatusNotFound || !strings.Contains(string(b), "not found") {
+		t.Fatalf("continue %d %s", res.StatusCode, b)
+	}
+}
+
+func TestRetryWhileClosing(t *testing.T) {
+	mdl := &seqModel{steps: []func(context.Context, model.ChatRequest, func(string)) (model.ChatResponse, error){
+		func(_ context.Context, _ model.ChatRequest, onToken func(string)) (model.ChatResponse, error) {
+			if onToken != nil {
+				onToken("Half")
+			}
+			return model.ChatResponse{}, &model.TimeoutError{Limit: "stall_timeout", After: time.Minute, GotOutput: true, Partial: "Half"}
+		},
+		func(_ context.Context, _ model.ChatRequest, onToken func(string)) (model.ChatResponse, error) {
+			if onToken != nil {
+				onToken("fresh")
+			}
+			return model.ChatResponse{Content: "fresh"}, nil
+		},
+	}}
+	app := newApp(t, "", mdl)
+	setPolicy(app, func(p *policy.Policy) {
+		p.OllamaStallRetries = 0
+		p.OllamaStallRetriesSet = true
+	})
+	srv := serve(t, app)
+	bot := createBot(t, srv.URL, "Ada")
+	runID := postUser(t, srv.URL, bot.ID, "hi")
+	waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool {
+		return b.Status != "running" && b.LastRunStatus == "timeout"
+	})
+	waitRunReleased(t, app, bot.ID)
+
+	app.rtMu.Lock()
+	app.closing = true
+	app.rtMu.Unlock()
+	res, b := postRetry(t, srv.URL, bot.ID, runID)
+	if res.StatusCode != http.StatusConflict || !strings.Contains(string(b), "shutting down") {
+		t.Fatalf("closing %d %s", res.StatusCode, b)
+	}
+	res, b = postRetry(t, srv.URL, bot.ID, "no-such-run")
+	if res.StatusCode != http.StatusConflict || !strings.Contains(string(b), "shutting down") {
+		t.Fatalf("unknown run while closing %d %s", res.StatusCode, b)
+	}
+	app.rtMu.Lock()
+	app.closing = false
+	app.rtMu.Unlock()
+	res, b = postRetry(t, srv.URL, bot.ID, runID)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("cleared %d %s", res.StatusCode, b)
+	}
+	waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool {
+		return b.Status != "running" && b.LastRunStatus == "done"
+	})
 }

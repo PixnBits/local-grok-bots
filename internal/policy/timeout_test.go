@@ -230,3 +230,181 @@ max_stall_retries = 0
 		t.Fatalf("ceiling 0 retries %d %v", p.EffectiveOllamaStallRetries(), err)
 	}
 }
+
+func assertOllamaTimes(t *testing.T, p Policy, first, stall, model, run time.Duration) {
+	t.Helper()
+	if p.EffectiveOllamaFirstOutputTimeout() != first ||
+		p.EffectiveOllamaStallTimeout() != stall ||
+		p.EffectiveOllamaModelTimeout() != model ||
+		p.EffectiveOllamaRunTimeout() != run {
+		t.Fatalf("first=%s stall=%s model=%s run=%s warnings=%v",
+			p.EffectiveOllamaFirstOutputTimeout(), p.EffectiveOllamaStallTimeout(),
+			p.EffectiveOllamaModelTimeout(), p.EffectiveOllamaRunTimeout(), p.Warnings)
+	}
+}
+
+func TestExplicitModelTimeoutIsNotStricter(t *testing.T) {
+	// Prod shape: an explicit model_timeout widens unset silence limits to
+	// that value. They used to fall through to 5m / 2m and cut calls the
+	// old cap allowed.
+	prod := writePol(t, "prod.toml", "[ollama]\nmodel_timeout = \"10m\"\nrun_timeout = \"30m\"\n")
+	p, err := Load(Options{Path: prod})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertOllamaTimes(t, p, 10*time.Minute, 10*time.Minute, 10*time.Minute, 30*time.Minute)
+
+	onlyStall := writePol(t, "stall.toml", "[ollama]\nmodel_timeout = \"10m\"\nstall_timeout = \"45s\"\nrun_timeout = \"30m\"\n")
+	p, err = Load(Options{Path: onlyStall})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertOllamaTimes(t, p, 10*time.Minute, 45*time.Second, 10*time.Minute, 30*time.Minute)
+
+	onlyFirst := writePol(t, "first.toml", "[ollama]\nmodel_timeout = \"10m\"\nfirst_output_timeout = \"90s\"\n")
+	p, err = Load(Options{Path: onlyFirst})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertOllamaTimes(t, p, 90*time.Second, 10*time.Minute, 10*time.Minute, 10*time.Minute)
+
+	local := writePol(t, "local.toml", "[daemon]\nbind = \"127.0.0.1:8787\"\n")
+	managed := writePol(t, "managed.toml", "[ollama]\nmodel_timeout = \"10m\"\nrun_timeout = \"30m\"\n")
+	p, err = Load(Options{Path: local, ManagedPath: managed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertOllamaTimes(t, p, 10*time.Minute, 10*time.Minute, 10*time.Minute, 30*time.Minute)
+
+	capped := writePol(t, "cap.toml", "[ollama]\nmax_first_output_timeout = \"4m\"\n")
+	p, err = Load(Options{Path: prod, ManagedPath: capped})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertOllamaTimes(t, p, 4*time.Minute, 10*time.Minute, 10*time.Minute, 30*time.Minute)
+	if strings.Contains(strings.Join(p.Warnings, "\n"), "lowered") {
+		t.Fatalf("inherited silence default was warned: %v", p.Warnings)
+	}
+
+	unset := writePol(t, "unset.toml", "[ollama]\nrun_timeout = \"12m\"\n")
+	p, err = Load(Options{Path: unset})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertOllamaTimes(t, p, 5*time.Minute, 2*time.Minute, 12*time.Minute, 12*time.Minute)
+}
+
+func TestTimeoutErrorsNameTheirKey(t *testing.T) {
+	cases := []struct{ body, want string }{
+		{"[ollama]\nstall_timeout = \"soon\"\n", "ollama.stall_timeout must be seconds or a Go duration"},
+		{"[ollama]\nrun_timeout = \"25h\"\n", "ollama.run_timeout exceeds 24h"},
+		{"[ollama]\nfirst_output_timeout = \"0s\"\n", "ollama.first_output_timeout must be positive"},
+		{"[ollama]\nmodel_timeout = 0\n", "ollama.model_timeout must be positive"},
+		{"[ollama]\nstall_timeout = \"0\"\n", "ollama.stall_timeout must be positive"},
+		{"[ollama]\nmodel_timeout = \"0s\"\n", "ollama.model_timeout must be positive"},
+		{"[cli]\nturn_timeout = \"0s\"\n", "cli.turn_timeout must be positive"},
+		{"[cli.permission]\nprompt_timeout = \"soon\"\n", "cli.permission.prompt_timeout must be seconds or a Go duration"},
+		{"[cli]\nmax_turn_timeout = \"25h\"\n", "cli.max_turn_timeout exceeds 24h"},
+	}
+	for _, c := range cases {
+		p, err := Load(Options{Path: writePol(t, "bad.toml", c.body)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.CLIPermitted {
+			t.Fatalf("accepted %q", c.body)
+		}
+		got := strings.Join(p.Warnings, "\n")
+		if !strings.Contains(got, c.want) {
+			t.Fatalf("body %q warning %q want %q", c.body, got, c.want)
+		}
+		if strings.Contains(got, ": turn_timeout") {
+			t.Fatalf("leaked turn_timeout name: %s", got)
+		}
+	}
+}
+
+func TestLocalValueAboveCeilingWarns(t *testing.T) {
+	local := writePol(t, "local.toml", `
+[ollama]
+run_timeout = "45m"
+model_timeout = "10m"
+first_output_timeout = "8m"
+stall_timeout = "5m"
+stall_retries = 4
+[cli]
+turn_timeout = "6h"
+[cli.permission]
+prompt_timeout = "30m"
+`)
+	managed := writePol(t, "managed.toml", `
+[ollama]
+max_run_timeout = "20m"
+max_model_timeout = "2m"
+max_first_output_timeout = "3m"
+max_stall_timeout = "1m"
+max_stall_retries = 1
+[cli]
+max_turn_timeout = "3h"
+[cli.permission]
+max_prompt_timeout = "5m"
+`)
+	p, err := Load(Options{Path: local, ManagedPath: managed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.EffectiveOllamaRunTimeout() != 20*time.Minute ||
+		p.EffectiveOllamaModelTimeout() != 2*time.Minute ||
+		p.EffectiveOllamaFirstOutputTimeout() != 3*time.Minute ||
+		p.EffectiveOllamaStallTimeout() != time.Minute ||
+		p.EffectiveOllamaStallRetries() != 1 ||
+		p.EffectiveTurnTimeout() != 3*time.Hour ||
+		p.EffectivePromptTimeout() != 5*time.Minute {
+		t.Fatalf("capped run=%s model=%s first=%s stall=%s retries=%d turn=%s prompt=%s",
+			p.EffectiveOllamaRunTimeout(), p.EffectiveOllamaModelTimeout(), p.EffectiveOllamaFirstOutputTimeout(),
+			p.EffectiveOllamaStallTimeout(), p.EffectiveOllamaStallRetries(), p.EffectiveTurnTimeout(), p.EffectivePromptTimeout())
+	}
+	warns := strings.Join(p.Warnings, "\n")
+	want := []string{
+		"ollama.run_timeout 45m lowered to managed max_run_timeout 20m",
+		"ollama.model_timeout 10m lowered to managed max_model_timeout 2m",
+		"ollama.first_output_timeout 8m lowered to managed max_first_output_timeout 3m",
+		"ollama.stall_timeout 5m lowered to managed max_stall_timeout 1m",
+		"ollama.stall_retries 4 lowered to managed max_stall_retries 1",
+		"cli.turn_timeout 6h lowered to managed max_turn_timeout 3h",
+		"cli.permission.prompt_timeout 30m lowered to managed max_prompt_timeout 5m",
+	}
+	for _, w := range want {
+		if !strings.Contains(warns, w) {
+			t.Fatalf("missing %q in %v", w, p.Warnings)
+		}
+	}
+	if strings.Count(warns, "lowered to managed") != len(want) {
+		t.Fatalf("warnings %v", p.Warnings)
+	}
+
+	// Inside or equal to the ceiling: no warning. A clamped default is not warned.
+	within := writePol(t, "within.toml", "[ollama]\nstall_timeout = \"30s\"\nstall_retries = 1\n")
+	p, err = Load(Options{Path: within, ManagedPath: writePol(t, "max.toml", "[ollama]\nmax_stall_timeout = \"2m\"\nmax_stall_retries = 3\n")})
+	if err != nil || p.EffectiveOllamaStallTimeout() != 30*time.Second || p.EffectiveOllamaStallRetries() != 1 {
+		t.Fatalf("within stall=%s retries=%d %v", p.EffectiveOllamaStallTimeout(), p.EffectiveOllamaStallRetries(), err)
+	}
+	if strings.Contains(strings.Join(p.Warnings, "\n"), "lowered") {
+		t.Fatalf("warned within ceiling: %v", p.Warnings)
+	}
+	equal := writePol(t, "equal.toml", "[ollama]\nstall_timeout = \"1m\"\n")
+	p, err = Load(Options{Path: equal, ManagedPath: writePol(t, "maxeq.toml", "[ollama]\nmax_stall_timeout = \"1m\"\n")})
+	if err != nil || p.EffectiveOllamaStallTimeout() != time.Minute {
+		t.Fatalf("equal %s %v", p.EffectiveOllamaStallTimeout(), err)
+	}
+	if strings.Contains(strings.Join(p.Warnings, "\n"), "lowered") {
+		t.Fatalf("warned equal ceiling: %v", p.Warnings)
+	}
+	p, err = Load(Options{ManagedPath: writePol(t, "defcap.toml", "[ollama]\nmax_run_timeout = \"1m\"\n")})
+	if err != nil || p.EffectiveOllamaRunTimeout() != time.Minute {
+		t.Fatalf("default capped %s %v", p.EffectiveOllamaRunTimeout(), err)
+	}
+	if strings.Contains(strings.Join(p.Warnings, "\n"), "lowered") {
+		t.Fatalf("warned a clamped default: %v", p.Warnings)
+	}
+}

@@ -122,6 +122,7 @@ func TestThreadPolish(t *testing.T) {
 		`event === "done" || event === "error" || event === "timeout"`,
 		`el("span", "timed-out", "Timed out")`,
 		`el("button", "secondary small", "Retry")`,
+		"if (b.continue_run_id) {\n      cont = el(\"button\", \"primary small\", \"Continue\");",
 		`tool !== "working" && tool !== "running" && tool !== "retrying"`,
 		`function focusAfterTimeoutNote()`,
 		`state.timeoutRunId = ""`,
@@ -424,6 +425,8 @@ const note = ctx.timeoutNoteActions({last_run_status:"timeout", last_run_error:"
 check("timeout-note", !!note && note.text.indexOf("stall_timeout") >= 0 && note.actions.join(",") === "Retry,Continue");
 const retryOnly = ctx.timeoutNoteActions({last_run_status:"timeout", last_run_error:"hit", status:"idle"}, false);
 check("timeout-note-retry-only", !!retryOnly && retryOnly.actions.join(",") === "Retry" && retryOnly.text === "hit");
+const noContinue = ctx.timeoutNoteActions({last_run_status:"timeout", last_run_error:"The model sent no output within 5m (first_output_timeout). Retried once.", continue_run_id:"", status:"idle"}, false);
+check("timeout-note-no-continue", !!noContinue && noContinue.actions.join(",") === "Retry" && noContinue.actions.indexOf("Continue") < 0);
 check("timeout-note-running", ctx.timeoutNoteActions({last_run_status:"timeout", status:"running"}, false) === null);
 check("timeout-note-streaming", ctx.timeoutNoteActions({last_run_status:"timeout", status:"idle"}, true) === null);
 check("timeout-note-other", ctx.timeoutNoteActions({last_run_status:"error", last_run_error:"x", status:"idle"}, false) === null);

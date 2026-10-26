@@ -114,6 +114,8 @@ func (a *App) execute(botID, runID string) {
 		var resp model.ChatResponse
 		parseContinue := false
 		attempt := 0
+		// bestPartial is the longest text streamed on this call, across retries.
+		bestPartial := ""
 		for {
 			attempt++
 			if attempt == 1 {
@@ -122,7 +124,7 @@ func (a *App) execute(botID, runID string) {
 			if a.finishOllamaCtx(bot, runID, ctx, msgs, "", retried, lastFirst) {
 				return
 			}
-			mctx, mcancel := context.WithTimeout(ctx, a.policy.EffectiveOllamaModelTimeout())
+			mctx, mcancel := a.modelCallContext(ctx, a.policy.EffectiveOllamaModelTimeout())
 			var roundText strings.Builder
 			callResp, err := a.model.Chat(mctx, model.ChatRequest{
 				Model:              modelName,
@@ -149,20 +151,26 @@ func (a *App) execute(botID, runID string) {
 			if strings.TrimSpace(partial) == "" && te != nil {
 				partial = te.Partial
 			}
+			bestPartial = longerPartial(bestPartial, partial)
+			if te != nil {
+				bestPartial = longerPartial(bestPartial, te.Partial)
+			}
 			// A dead run context wins over a typed stall: Stop, shutdown,
 			// and the run deadline are not retried.
 			if a.ctx.Err() != nil || ctx.Err() != nil {
 				limit, limitValue := "", ""
+				shown := partial
 				if a.ctx.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 					limit = "run_timeout"
 					limitValue = compactDuration(a.policy.EffectiveOllamaRunTimeout())
+					shown = bestPartial
 				}
 				errLogged := err
 				if errLogged == nil {
 					errLogged = ctx.Err()
 				}
 				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, errLogged, 0, limit, limitValue)
-				a.finishOllamaCtx(bot, runID, ctx, msgs, partial, retried, first)
+				a.finishOllamaCtx(bot, runID, ctx, msgs, shown, retried, first)
 				return
 			}
 			if te != nil && (te.Limit == "first_output_timeout" || te.Limit == "stall_timeout") {
@@ -175,12 +183,12 @@ func (a *App) execute(botID, runID string) {
 					a.bus.Publish(runID, "stream_reset", map[string]any{"run_id": runID, "reason": te.Limit})
 					continue
 				}
-				a.finishOllamaTimeout(bot, runID, msgs, te.Limit, partial, retried, first)
+				a.finishOllamaTimeout(bot, runID, msgs, te.Limit, bestPartial, retried, first)
 				return
 			}
 			if te != nil && te.Limit == "model_timeout" {
 				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, te, 0, "model_timeout", compactDuration(a.policy.EffectiveOllamaModelTimeout()))
-				a.finishOllamaTimeout(bot, runID, msgs, "model_timeout", partial, retried, first)
+				a.finishOllamaTimeout(bot, runID, msgs, "model_timeout", bestPartial, retried, first)
 				return
 			}
 			if err != nil {
@@ -362,21 +370,20 @@ func (a *App) finishOllamaCtx(bot store.Bot, runID string, ctx context.Context, 
 	return true
 }
 
-// finishOllamaTimeout keeps the partial reply, offers Continue, and ends
-// the run as timeout. errText on the run is the notice without "Notice: ".
+// finishOllamaTimeout keeps the longest partial reply and ends the run as
+// timeout. Continue is offered only when some text was kept. errText on the
+// run is the notice without "Notice: ".
 func (a *App) finishOllamaTimeout(bot store.Bot, runID string, msgs []model.Message, limit, partial string, retried int, first time.Duration) {
 	dur := a.limitDuration(limit)
 	kept := ""
 	if t := strings.TrimSpace(partial); t != "" {
 		kept = clip(t, maxReplyBytes)
 		a.persistBotText(bot.ID, runID, kept, true)
-	}
-	resume := append([]model.Message{}, msgs...)
-	if kept != "" {
+		resume := append([]model.Message{}, msgs...)
 		resume = append(resume, model.Message{Role: "assistant", Content: kept})
+		resume = append(resume, model.Message{Role: "user", Content: "Continue from where you stopped."})
+		a.holdResume(bot.ID, runID, resume)
 	}
-	resume = append(resume, model.Message{Role: "user", Content: "Continue from where you stopped."})
-	a.holdResume(bot.ID, runID, resume)
 	body := timeoutBody(limit, dur, retried, kept)
 	_, _ = a.finishRun(runID, "timeout", body)
 	a.bus.Publish(runID, "timeout", map[string]any{"run_id": runID, "error": body, "limit": limit})
@@ -388,6 +395,27 @@ func (a *App) finishOllamaTimeout(bot store.Bot, runID string, msgs []model.Mess
 		"retried":         retried > 0,
 		"partial_bytes":   len(kept),
 	})
+}
+
+// longerPartial keeps the longest trimmed text seen on this call.
+func longerPartial(best, next string) string {
+	next = strings.TrimSpace(next)
+	if next == "" || len(next) <= len(best) {
+		return best
+	}
+	return next
+}
+
+// modelCallContext is the per-call hard cap. An Ollama client with a test
+// clock applies that clock to the cap as well as to the stall watchdog.
+func (a *App) modelCallContext(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	if ol, ok := a.model.(*model.Ollama); ok && ol != nil {
+		return ol.TimeoutContext(parent, d)
+	}
+	if d <= 0 {
+		return context.WithCancel(parent)
+	}
+	return context.WithTimeout(parent, d)
 }
 
 func (a *App) limitDuration(limit string) time.Duration {

@@ -18,6 +18,9 @@ import (
 type Ollama struct {
 	BaseURL string
 	HTTP    *http.Client
+	// clk, when set via SetClock, replaces the process clock for the stall
+	// watchdog and for TimeoutContext. The zero value uses time.Now.
+	clk callClock
 }
 
 func NewOllama(base string) *Ollama {
@@ -80,8 +83,9 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest, onToken func(string)
 	// caller's hard cap. A parent deadline still cancels this request.
 	callCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	started := time.Now()
-	w := newWatchdog(cancel, started, req.FirstOutputTimeout, req.StallTimeout)
+	clk := o.activeClock()
+	started := clk.now()
+	w := newWatchdog(cancel, started, req.FirstOutputTimeout, req.StallTimeout, clk.afterFunc)
 	defer w.stop()
 
 	httpReq, err := http.NewRequestWithContext(callCtx, http.MethodPost, o.BaseURL+"/api/chat", bytes.NewReader(raw))
@@ -95,7 +99,7 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest, onToken func(string)
 			return ChatResponse{FirstOutput: te.FirstOutput}, te
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			te := modelTimeout(ctx, started, w.snapshot())
+			te := modelTimeout(ctx, started, w.snapshot(), clk.now)
 			return ChatResponse{FirstOutput: te.FirstOutput}, te
 		}
 		return ChatResponse{}, fmt.Errorf("ollama unreachable at %s: %w", o.BaseURL, err)
@@ -131,7 +135,7 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest, onToken func(string)
 			return ChatResponse{}, fmt.Errorf("ollama: %s", chunk.Error)
 		}
 		if chunkIsOutput(chunk) {
-			w.activity(time.Now())
+			w.activity(clk.now())
 		}
 		if chunk.Message.Content != "" {
 			content.WriteString(chunk.Message.Content)
@@ -158,7 +162,7 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest, onToken func(string)
 			return out, te
 		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			te := modelTimeout(ctx, started, w.snapshot())
+			te := modelTimeout(ctx, started, w.snapshot(), clk.now)
 			te.Partial = partial
 			out.FirstOutput = te.FirstOutput
 			return out, te
@@ -182,8 +186,11 @@ func chunkIsOutput(ch ollamaChunk) bool {
 	return len(ch.Message.ToolCalls) > 0
 }
 
-func modelTimeout(ctx context.Context, started time.Time, snap watchdogSnap) *TimeoutError {
-	after := time.Since(started)
+func modelTimeout(ctx context.Context, started time.Time, snap watchdogSnap, now func() time.Time) *TimeoutError {
+	if now == nil {
+		now = time.Now
+	}
+	after := now().Sub(started)
 	if dl, ok := ctx.Deadline(); ok {
 		if d := dl.Sub(started); d > 0 {
 			after = d
@@ -206,7 +213,8 @@ type watchdog struct {
 	started  time.Time
 	firstLim time.Duration
 	stallLim time.Duration
-	timer    *time.Timer
+	after    func(time.Duration, func()) ClockTimer
+	timer    ClockTimer
 	gen      int
 	got      bool
 	first    time.Duration
@@ -218,8 +226,11 @@ type watchdogSnap struct {
 	first time.Duration
 }
 
-func newWatchdog(cancel context.CancelFunc, started time.Time, first, stall time.Duration) *watchdog {
-	w := &watchdog{cancel: cancel, started: started, firstLim: first, stallLim: stall}
+func newWatchdog(cancel context.CancelFunc, started time.Time, first, stall time.Duration, after func(time.Duration, func()) ClockTimer) *watchdog {
+	if after == nil {
+		after = func(d time.Duration, f func()) ClockTimer { return time.AfterFunc(d, f) }
+	}
+	w := &watchdog{cancel: cancel, started: started, firstLim: first, stallLim: stall, after: after}
 	if first > 0 {
 		w.arm(first)
 	}
@@ -232,7 +243,7 @@ func (w *watchdog) arm(d time.Duration) {
 	if w.timer != nil {
 		w.timer.Stop()
 	}
-	w.timer = time.AfterFunc(d, func() { w.fire(gen) })
+	w.timer = w.after(d, func() { w.fire(gen) })
 }
 
 func (w *watchdog) fire(gen int) {
