@@ -221,7 +221,7 @@ window.addEventListener("storage", function (ev) {
   .roster-foot #health { flex: 1 0 100%; margin: 0; }
   .roster-foot .theme-switch { margin-right: auto; }
   .solo-bar { height: 64px; flex: none; width: 100%; display: flex; align-items: center; gap: 8px; padding: 0 12px 0 4px; border-bottom: 1px solid var(--border); background: var(--surface); }
-  .solo-id { min-width: 0; flex: 1; display: flex; align-items: baseline; gap: 8px; }
+  .solo-id { margin: 0; min-width: 0; flex: 1; display: flex; align-items: baseline; gap: 8px; font-family: inherit; font-size: inherit; font-weight: inherit; line-height: inherit; }
   .solo-id .name { min-width: 0; font-size: 17px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .solo-kicker { color: var(--muted); flex: none; font-size: 13px; }
   .solo-title { margin: 0; flex: 1; min-width: 0; font-family: var(--font); font-size: 17px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -672,10 +672,10 @@ window.addEventListener("storage", function (ev) {
       <header class="solo-bar">
         <button type="button" class="back solo-back" id="solo-back" aria-label="Back"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <span class="mark" id="profile-head-mark" aria-hidden="true"></span>
-        <div class="solo-id">
+        <h2 class="solo-id" id="profile-heading" tabindex="-1">
           <span class="name" id="profile-head-name">Profile</span>
           <span class="solo-kicker">Profile</span>
-        </div>
+        </h2>
         <button type="button" class="ghost" id="profile-log">Log</button>
         <div class="menu">
           <button type="button" id="profile-menu" aria-haspopup="menu" aria-expanded="false" aria-controls="bot-menu" aria-label="Bot menu">⋯</button>
@@ -861,7 +861,7 @@ function drillFocusTarget(name, wide) {
   if (wide) return null;
   if (name === "bots") return { sel: "#view-bots h1", tabindex: -1 };
   if (name === "chat") return { sel: "#thread-name", tabindex: -1 };
-  if (name === "profile") return { sel: "#profile-head-name", tabindex: -1 };
+  if (name === "profile") return { sel: "#profile-heading", tabindex: -1 };
   if (name === "log") return { sel: "#view-log h2.solo-title", tabindex: -1 };
   return null;
 }

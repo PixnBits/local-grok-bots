@@ -452,6 +452,45 @@ console.log(JSON.stringify(cases));
 	assertCases(t, raw)
 }
 
+func TestProfileSoloHeading(t *testing.T) {
+	src := string(IndexHTML)
+	start := strings.Index(src, `<section class="view" id="view-profile">`)
+	if start < 0 {
+		t.Fatal("profile view missing")
+	}
+	rest := src[start:]
+	end := strings.Index(rest, `<div class="profile-layout">`)
+	if end < 0 {
+		t.Fatal("profile layout missing")
+	}
+	bar := rest[:end]
+	hStart := strings.Index(bar, "<h2")
+	if hStart < 0 {
+		t.Fatal("profile solo bar missing h2")
+	}
+	openEnd := strings.Index(bar[hStart:], ">")
+	if openEnd < 0 {
+		t.Fatal("profile h2 tag unclosed")
+	}
+	open := bar[hStart : hStart+openEnd]
+	for _, s := range []string{`class="solo-id"`, `id="profile-heading"`, `tabindex="-1"`} {
+		if !strings.Contains(open, s) {
+			t.Errorf("profile heading %q missing %s", open, s)
+		}
+	}
+	close := strings.Index(bar[hStart:], "</h2>")
+	if close < 0 {
+		t.Fatal("profile h2 not closed")
+	}
+	inner := bar[hStart+openEnd : hStart+close]
+	if !strings.Contains(inner, `id="profile-head-name"`) {
+		t.Errorf("profile heading missing name: %s", inner)
+	}
+	if !strings.Contains(src, `if (name === "profile") return { sel: "#profile-heading", tabindex: -1 };`) {
+		t.Error(`drill focus target for profile must be "#profile-heading"`)
+	}
+}
+
 func TestProfileScrollAndDrillFocus(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -502,7 +541,7 @@ check("same-profile", ctx.shouldFocusDrill("profile", "profile", false) === fals
 const want = {
   bots: "#view-bots h1",
   chat: "#thread-name",
-  profile: "#profile-head-name",
+  profile: "#profile-heading",
   log: "#view-log h2.solo-title"
 };
 for (const name of Object.keys(want)) {
