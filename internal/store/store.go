@@ -289,7 +289,12 @@ type Message struct {
 	Content   string  `json:"content"`
 	RunID     *string `json:"run_id"`
 	CreatedAt string  `json:"created_at"`
+	// TimedOut is set when this bot reply is the partial kept after a timeout.
+	TimedOut bool `json:"timed_out,omitempty"`
 }
+
+// messageCols is the column list every message read scans, in order.
+const messageCols = `id, bot_id, thread, role, content, run_id, created_at, timed_out`
 
 type Timer struct {
 	ID         string  `json:"id"`
@@ -414,7 +419,8 @@ CREATE TABLE IF NOT EXISTS messages (
   role TEXT NOT NULL,
   content TEXT NOT NULL,
   run_id TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  timed_out INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(bot_id, thread, created_at, id);
 CREATE TABLE IF NOT EXISTS timers (
@@ -541,6 +547,7 @@ func (s *Store) evolve() error {
 		{"bots", "tool_hash", "TEXT"},
 		{"bots", "tool_snapshot", "TEXT"},
 		{"bots", "server_tools", "TEXT"},
+		{"messages", "timed_out", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, a := range adds {
 		ok, err := s.hasColumn(a.table, a.col)
@@ -1360,8 +1367,12 @@ func (s *Store) addMessage(m Message) (Message, error) {
 	if m.CreatedAt == "" {
 		m.CreatedAt = FormatTime(Now())
 	}
-	_, err := s.db.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at) VALUES(?,?,?,?,?,?,?)`,
-		m.ID, m.BotID, m.Thread, m.Role, m.Content, nullStr(m.RunID), m.CreatedAt)
+	timed := 0
+	if m.TimedOut {
+		timed = 1
+	}
+	_, err := s.db.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at, timed_out) VALUES(?,?,?,?,?,?,?,?)`,
+		m.ID, m.BotID, m.Thread, m.Role, m.Content, nullStr(m.RunID), m.CreatedAt, timed)
 	if err != nil {
 		return Message{}, err
 	}
@@ -1391,16 +1402,16 @@ func (s *Store) AddDMPair(fromID, toID, content, runID string) (sent Message, re
 		return Message{}, Message{}, err
 	}
 	notice := Message{ID: id.New(), BotID: toID, Thread: "user", Role: "system", Content: "Message from " + fromName, CreatedAt: FormatTime(Now())}
-	if _, err := tx.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at) VALUES(?,?,?,?,?,?,?)`,
-		sent.ID, sent.BotID, sent.Thread, sent.Role, sent.Content, run, sent.CreatedAt); err != nil {
+	if _, err := tx.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at, timed_out) VALUES(?,?,?,?,?,?,?,?)`,
+		sent.ID, sent.BotID, sent.Thread, sent.Role, sent.Content, run, sent.CreatedAt, 0); err != nil {
 		return Message{}, Message{}, err
 	}
-	if _, err := tx.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at) VALUES(?,?,?,?,?,?,?)`,
-		received.ID, received.BotID, received.Thread, received.Role, received.Content, nil, received.CreatedAt); err != nil {
+	if _, err := tx.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at, timed_out) VALUES(?,?,?,?,?,?,?,?)`,
+		received.ID, received.BotID, received.Thread, received.Role, received.Content, nil, received.CreatedAt, 0); err != nil {
 		return Message{}, Message{}, err
 	}
-	if _, err := tx.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at) VALUES(?,?,?,?,?,?,?)`,
-		notice.ID, notice.BotID, notice.Thread, notice.Role, notice.Content, nil, notice.CreatedAt); err != nil {
+	if _, err := tx.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at, timed_out) VALUES(?,?,?,?,?,?,?,?)`,
+		notice.ID, notice.BotID, notice.Thread, notice.Role, notice.Content, nil, notice.CreatedAt, 0); err != nil {
 		return Message{}, Message{}, err
 	}
 	if err := s.addLogTx(tx, fromID, "dm_sent", map[string]any{"message_id": sent.ID, "other_bot_id": toID}); err != nil {
@@ -1421,7 +1432,7 @@ func (s *Store) ListMessages(botID, thread, before string, limit int) ([]Message
 	if limit <= 0 {
 		limit = 50
 	}
-	q := `SELECT id, bot_id, thread, role, content, run_id, created_at FROM messages WHERE bot_id=? AND thread=?`
+	q := `SELECT ` + messageCols + ` FROM messages WHERE bot_id=? AND thread=?`
 	args := []any{botID, thread}
 	if before != "" {
 		q += ` AND (created_at < (SELECT created_at FROM messages WHERE id=?) OR (created_at = (SELECT created_at FROM messages WHERE id=?) AND id < ?))`
@@ -1458,13 +1469,15 @@ func (s *Store) ListMessages(botID, thread, before string, limit int) ([]Message
 func scanMessage(sc interface{ Scan(...any) error }) (Message, error) {
 	var m Message
 	var run sql.NullString
-	if err := sc.Scan(&m.ID, &m.BotID, &m.Thread, &m.Role, &m.Content, &run, &m.CreatedAt); err != nil {
+	var timed int
+	if err := sc.Scan(&m.ID, &m.BotID, &m.Thread, &m.Role, &m.Content, &run, &m.CreatedAt, &timed); err != nil {
 		return Message{}, err
 	}
 	if run.Valid {
 		s := run.String
 		m.RunID = &s
 	}
+	m.TimedOut = timed != 0
 	return m, nil
 }
 
@@ -1476,8 +1489,8 @@ func (s *Store) RecentContext(botID string, limit int) ([]Message, error) {
 	if limit <= 0 {
 		limit = 40
 	}
-	rows, err := s.db.Query(`SELECT id, bot_id, thread, role, content, run_id, created_at FROM (
-		SELECT id, bot_id, thread, role, content, run_id, created_at FROM messages WHERE bot_id=?
+	rows, err := s.db.Query(`SELECT `+messageCols+` FROM (
+		SELECT `+messageCols+` FROM messages WHERE bot_id=?
 		ORDER BY created_at DESC, id DESC LIMIT ?
 	) ORDER BY created_at ASC, id ASC`, botID, limit)
 	if err != nil {
@@ -1545,7 +1558,7 @@ func (s *Store) TurnInputs(botID, currentRunID string) ([]Message, error) {
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	q := `SELECT id, bot_id, thread, role, content, run_id, created_at FROM messages WHERE bot_id=? AND created_at<? AND ` + turnInput
+	q := `SELECT ` + messageCols + ` FROM messages WHERE bot_id=? AND created_at<? AND ` + turnInput
 	args := []any{botID, current}
 	if prev.Valid && prev.String != "" {
 		q += ` AND created_at>?`
@@ -1572,7 +1585,7 @@ func (s *Store) TurnInputs(botID, currentRunID string) ([]Message, error) {
 func (s *Store) TurnInputSince(botID, since string) ([]Message, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`SELECT id, bot_id, thread, role, content, run_id, created_at FROM messages
+	rows, err := s.db.Query(`SELECT `+messageCols+` FROM messages
 		WHERE bot_id=? AND created_at > ? AND `+turnInput+` ORDER BY created_at ASC, id ASC`, botID, since)
 	if err != nil {
 		return nil, err
@@ -1662,6 +1675,40 @@ func (s *Store) GetRun(id string) (Run, error) {
 		r.Error = &errText.String
 	}
 	return r, nil
+}
+
+// LatestRun is the bot's newest run. started_at is strictly increasing;
+// id breaks a tie.
+func (s *Store) LatestRun(botID string) (Run, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var r Run
+	var fin, errText sql.NullString
+	err := s.db.QueryRow(`SELECT id, bot_id, status, started_at, finished_at, error FROM runs WHERE bot_id=? ORDER BY started_at DESC, id DESC LIMIT 1`, botID).
+		Scan(&r.ID, &r.BotID, &r.Status, &r.StartedAt, &fin, &errText)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Run{}, ErrNotFound
+	}
+	if err != nil {
+		return Run{}, err
+	}
+	if fin.Valid {
+		r.FinishedAt = &fin.String
+	}
+	if errText.Valid {
+		r.Error = &errText.String
+	}
+	return r, nil
+}
+
+// DeleteRunOutput removes the bot reply and the run notice tied to runID
+// on the user thread. User messages have no run id and stay, so the same
+// turn can be answered again.
+func (s *Store) DeleteRunOutput(botID, runID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`DELETE FROM messages WHERE bot_id=? AND thread='user' AND role IN ('bot','system') AND run_id=?`, botID, runID)
+	return err
 }
 
 // OnceSchedule marks a one-shot timer. It fires at next_fire_at, then turns
@@ -2287,7 +2334,7 @@ func (s *Store) RecentRuns(botID string, limit int) ([]Run, error) {
 func (s *Store) LastToolNotice(botID string) (*Message, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	row := s.db.QueryRow(`SELECT id, bot_id, thread, role, content, run_id, created_at FROM messages
+	row := s.db.QueryRow(`SELECT `+messageCols+` FROM messages
 		WHERE bot_id=? AND role='system' AND content LIKE 'Notice: Tools %' ORDER BY created_at DESC, id DESC LIMIT 1`, botID)
 	m, err := scanMessage(row)
 	if errors.Is(err, sql.ErrNoRows) {

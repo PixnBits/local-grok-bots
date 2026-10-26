@@ -28,6 +28,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/bots/{id}/thread/stream", a.handleStream)
 	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/cancel", a.handleCancel)
 	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/continue", a.handleContinue)
+	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/retry", a.handleRetry)
 	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/permissions/{req_id}", a.handlePermissionDecision)
 	mux.HandleFunc("GET /api/bots/{id}/permissions", a.handlePendingPermissions)
 	mux.HandleFunc("GET /api/permissions", a.handleAllPendingPermissions)
@@ -634,9 +635,16 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 	if run.Status != "running" {
 		// Finished before any subscriber; synthesize the terminal event.
-		if run.Status == "done" || run.Status == "cancelled" {
+		switch run.Status {
+		case "done", "cancelled":
 			a.writeSSE(w, flusher, "done", map[string]any{"run_id": runID})
-		} else {
+		case "timeout":
+			errText := ""
+			if run.Error != nil {
+				errText = *run.Error
+			}
+			a.writeSSE(w, flusher, "timeout", map[string]any{"run_id": runID, "error": errText})
+		default:
 			errText := ""
 			if run.Error != nil {
 				errText = *run.Error
@@ -695,6 +703,15 @@ func (a *App) handleCancel(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleContinue(w http.ResponseWriter, r *http.Request) {
 	runID, code, err := a.continueRun(r.PathValue("id"), r.PathValue("run_id"))
+	if err != nil {
+		writeJSON(w, code, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"run_id": runID})
+}
+
+func (a *App) handleRetry(w http.ResponseWriter, r *http.Request) {
+	runID, code, err := a.retryRun(r.PathValue("id"), r.PathValue("run_id"))
 	if err != nil {
 		writeJSON(w, code, map[string]string{"error": err.Error()})
 		return

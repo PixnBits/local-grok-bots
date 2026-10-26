@@ -585,6 +585,80 @@ func (a *App) continueRun(botID, fromRun string) (string, int, error) {
 	return run.ID, http.StatusOK, nil
 }
 
+// retryRun starts a new run of the latest timed-out turn without the partial
+// reply or its notice. The user message stays, so the same turn is answered
+// again. The resume offer is dropped.
+func (a *App) retryRun(botID, fromRun string) (string, int, error) {
+	a.rtMu.Lock()
+	defer a.rtMu.Unlock()
+	if a.closing {
+		return "", http.StatusConflict, errors.New("shutting down")
+	}
+	bot, err := a.st.GetBot(botID)
+	if err != nil {
+		return "", http.StatusNotFound, errors.New("not found")
+	}
+	if bot.Status == "paused" {
+		return "", http.StatusConflict, errors.New("bot is paused")
+	}
+	if bot.Status == "running" {
+		return "", http.StatusConflict, errors.New("bot is running")
+	}
+	st := a.loops[botID]
+	if st != nil && st.running {
+		return "", http.StatusConflict, errors.New("bot is running")
+	}
+	run, err := a.st.GetRun(fromRun)
+	if err != nil || run.BotID != botID {
+		return "", http.StatusNotFound, errors.New("not found")
+	}
+	latest, err := a.st.LatestRun(botID)
+	if err != nil || latest.ID != fromRun {
+		return "", http.StatusNotFound, errors.New("not found")
+	}
+	if run.Status != "timeout" {
+		return "", http.StatusNotFound, errors.New("not found")
+	}
+	offer, hadOffer := a.resume[botID]
+	delete(a.resume, botID)
+	newRun, err := a.st.CreateRun(botID)
+	if err != nil {
+		if hadOffer {
+			a.resume[botID] = offer
+		}
+		return "", http.StatusInternalServerError, err
+	}
+	if err := a.st.SetStatus(botID, "running"); err != nil {
+		_, _ = a.st.FinishRun(newRun.ID, "error", err.Error())
+		if hadOffer {
+			a.resume[botID] = offer
+		}
+		return "", http.StatusInternalServerError, err
+	}
+	if err := a.st.DeleteRunOutput(botID, fromRun); err != nil {
+		_, _ = a.st.FinishRun(newRun.ID, "error", err.Error())
+		_ = a.st.SetStatus(botID, "idle")
+		if hadOffer {
+			a.resume[botID] = offer
+		}
+		return "", http.StatusInternalServerError, err
+	}
+	if st == nil {
+		st = &loopState{}
+		a.loops[botID] = st
+	}
+	st.running = true
+	st.runID = newRun.ID
+	st.again = false
+	st.released = make(chan struct{})
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		a.loop(botID, newRun.ID)
+	}()
+	return newRun.ID, http.StatusOK, nil
+}
+
 func (a *App) holdResume(botID, runID string, msgs []model.Message) {
 	a.rtMu.Lock()
 	defer a.rtMu.Unlock()

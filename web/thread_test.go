@@ -118,6 +118,21 @@ func TestThreadPolish(t *testing.T) {
 		"state.stop = reduceStop(state.stop || freshStop(), { type: \"run\", runId: runId });\n  syncComposer();",
 		// Leaving running or stopping restores the idle hint.
 		"syncStopButton();\n  syncComposer();",
+		`event === "stream_reset"`,
+		`event === "done" || event === "error" || event === "timeout"`,
+		`el("span", "timed-out", "Timed out")`,
+		`el("button", b.continue_run_id ? "secondary small" : "primary small", "Retry")`,
+		`paintNote("attention", timeoutOffer.text, actions)`,
+		`.note.attention { color: var(--text); background: var(--attention-soft); }`,
+		"if (b.continue_run_id) {\n      cont = el(\"button\", \"primary small\", \"Continue\");",
+		"retryTimeout(runId || timeoutRunId(b, state.messages, state.timeoutRunId))",
+		`tool !== "working" && tool !== "running" && tool !== "retrying"`,
+		`function focusAfterTimeoutNote()`,
+		`state.timeoutRunId = ""`,
+		`r.status === "error" || r.status === "timeout"`,
+		`"run_timed_out"`,
+		`node.tabIndex = -1`,
+		`if (event === "timeout") announce(timeoutAnnouncement(payload.error));`,
 	} {
 		if !strings.Contains(src, s) {
 			t.Errorf("missing %q", s)
@@ -148,6 +163,7 @@ vm.runInContext(snippet + "\n" + [
   "cardEyebrow", "cardTitle", "cardRecordText", "recordKind", "countdownAnnounce",
   "archiveFocusTarget", "themeRadioKey", "retryTrigger", "toolCallLabel",
   "partialsToShow", "mergeRunRecords", "runRecordKey", "stoppedNoticeText",
+  "timeoutNoteActions", "streamResetApplies", "timedOutTag", "timeoutRunId", "focusTargetAfterNote", "timeoutAnnouncement",
   "STOP_TIMEOUT_MS", "QUEUED_CAPTION", "STOP_FAILED_NOTE", "HINT_IDLE", "HINT_RUNNING"
 ].map(function (n) { return "this." + n + "=" + n + ";"; }).join("\n"), ctx);
 const cases = [];
@@ -409,6 +425,28 @@ check("notice-user", ctx.stoppedNoticeText(true, false, "10:41 PM") === "Stopped
 check("notice-queued", ctx.stoppedNoticeText(true, true, "10:41 PM") === "Stopped by you · your queued message starts the next run");
 check("notice-server", ctx.stoppedNoticeText(false, false, "10:41 PM") === "Run stopped · 10:41 PM");
 check("notice-bare", ctx.stoppedNoticeText(false, false, "") === "Run stopped");
+const note = ctx.timeoutNoteActions({last_run_status:"timeout", last_run_error:"No output from the model for 2m (stall_timeout).", continue_run_id:"r1", status:"idle"}, false);
+check("timeout-note", !!note && note.text.indexOf("stall_timeout") >= 0 && note.actions.join(",") === "Retry,Continue");
+const retryOnly = ctx.timeoutNoteActions({last_run_status:"timeout", last_run_error:"hit", status:"idle"}, false);
+check("timeout-note-retry-only", !!retryOnly && retryOnly.actions.join(",") === "Retry" && retryOnly.text === "hit");
+const noContinue = ctx.timeoutNoteActions({last_run_status:"timeout", last_run_error:"The model sent no output within 5m (first_output_timeout). Retried once.", continue_run_id:"", status:"idle"}, false);
+check("timeout-note-no-continue", !!noContinue && noContinue.actions.join(",") === "Retry" && noContinue.actions.indexOf("Continue") < 0);
+check("timeout-note-running", ctx.timeoutNoteActions({last_run_status:"timeout", status:"running"}, false) === null);
+check("timeout-note-streaming", ctx.timeoutNoteActions({last_run_status:"timeout", status:"idle"}, true) === null);
+check("timeout-note-other", ctx.timeoutNoteActions({last_run_status:"error", last_run_error:"x", status:"idle"}, false) === null);
+check("stream-reset-same", ctx.streamResetApplies("r1", "r1") === true);
+check("stream-reset-empty", ctx.streamResetApplies("", "r1") === true && ctx.streamResetApplies(null, "") === true);
+check("stream-reset-other", ctx.streamResetApplies("r2", "r1") === false);
+check("timed-out-tag", ctx.timedOutTag({role:"bot", timed_out:true}) === "Timed out");
+check("timed-out-tag-off", ctx.timedOutTag({role:"bot"}) === "" && ctx.timedOutTag({role:"user", timed_out:true}) === "");
+check("timeout-run-continue", ctx.timeoutRunId({continue_run_id:"c"}, [{run_id:"m"}], "mem") === "c");
+check("timeout-run-memory", ctx.timeoutRunId({}, [{run_id:"m"}], "mem") === "mem");
+check("timeout-run-message", ctx.timeoutRunId({}, [{run_id:"old"}, {run_id:"new"}], "") === "new");
+check("focus-composer", ctx.focusTargetAfterNote("BUTTON", true) === "composer-input" && ctx.focusTargetAfterNote("BODY", true) === "composer-input" && ctx.focusTargetAfterNote("", true) === "composer-input");
+check("focus-heading", ctx.focusTargetAfterNote("BODY", false) === "thread-name");
+check("focus-keep", ctx.focusTargetAfterNote("TEXTAREA", true) === "");
+check("timeout-announce", ctx.timeoutAnnouncement("No output from the model for 2m (stall_timeout). Retried once.") === "Run timed out. No output from the model for 2m (stall_timeout). Retried once.");
+check("timeout-announce-bare", ctx.timeoutAnnouncement("") === "Run timed out." && ctx.timeoutAnnouncement(null) === "Run timed out.");
 console.log(JSON.stringify(cases));
 `
 	raw := runNode(t, node, script)

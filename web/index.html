@@ -935,6 +935,7 @@ window.addEventListener("storage", function (ev) {
   }
   .note.quiet { color: var(--text-2); background: var(--surface-2); }
   .note.continue { color: var(--text); background: var(--accent-soft); }
+  .note.attention { color: var(--text); background: var(--attention-soft); }
   .note .note-text { flex: 1; min-width: 0; }
   .note button.small { flex: none; height: 28px; min-height: 28px; padding: 0 10px; font-size: 12px; border-radius: 8px; }
   .note button.secondary { background: var(--surface); border: 1px solid var(--border-strong); color: var(--text); }
@@ -1488,7 +1489,7 @@ window.addEventListener("storage", function (ev) {
 <template id="tpl-alert"><svg class="help-alert" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path d="M12 4l9 16H3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 10v4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M12 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></template>
 <template id="tpl-more"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><circle cx="6" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18" cy="12" r="1.6" fill="currentColor"/></svg></template>
 <script>
-const KINDS = ["user_message","bot_message","dm_sent","dm_received","tool_start","tool_end","bot_created","bot_updated","bot_deleted","timer_fired","timer_missed","model_call","run_input","run_started","run_finished","daemon_start","daemon_stop","grant_use","grant_denied","net_request","sandbox_block"];
+const KINDS = ["user_message","bot_message","dm_sent","dm_received","tool_start","tool_end","bot_created","bot_updated","bot_deleted","timer_fired","timer_missed","model_call","run_input","run_started","run_finished","run_timed_out","daemon_start","daemon_stop","grant_use","grant_denied","net_request","sandbox_block"];
 const SHAPES = ["circle","square","diamond","triangle","hex"];
 const COLORS = ["#4C77DD","#218C57","#A8700E","#D44E4A","#8B60ED","#10898E","#C65C2F","#787B8A"];
 const COLOR_NAMES = {"#4C77DD": "Blue", "#218C57": "Green", "#A8700E": "Gold", "#D44E4A": "Red", "#8B60ED": "Violet", "#10898E": "Teal", "#C65C2F": "Rust", "#787B8A": "Slate"};
@@ -2091,6 +2092,31 @@ function paintHeader(b) {
     paintNote("quiet", "Archived. Routines are paused and new messages wait until it is restored.", [btn]);
     return;
   }
+  const timeoutOffer = (typeof timeoutNoteActions === "function") ? timeoutNoteActions(b, !!state.streaming) : null;
+  if (timeoutOffer) {
+    const runId = (typeof timeoutRunId === "function") ? timeoutRunId(b, state.messages, state.timeoutRunId) : (b.continue_run_id || "");
+    // With a partial, Continue is primary. With none, Retry alone is primary.
+    const retry = el("button", b.continue_run_id ? "secondary small" : "primary small", "Retry");
+    retry.type = "button";
+    const actions = [retry];
+    let cont = null;
+    if (b.continue_run_id) {
+      cont = el("button", "primary small", "Continue");
+      cont.type = "button";
+      actions.push(cont);
+    }
+    const disableBoth = () => {
+      retry.disabled = true;
+      if (cont) cont.disabled = true;
+    };
+    retry.addEventListener("click", () => { disableBoth(); retryTimeout(runId || timeoutRunId(b, state.messages, state.timeoutRunId)); });
+    if (cont) {
+      const id = b.continue_run_id;
+      cont.addEventListener("click", () => { disableBoth(); continueRun(id); });
+    }
+    paintNote("attention", timeoutOffer.text, actions);
+    return;
+  }
   const offer = !state.streaming && b.status !== "running" && b.last_run_error === "tool round limit" && b.continue_run_id;
   if (offer) {
     const btn = el("button", "primary small", "Continue");
@@ -2321,6 +2347,7 @@ async function openBot(id, push = true) {
     state.loadedFor = null;
     closeState();
     state.botState = null;
+    state.timeoutRunId = "";
     paintStateChip();
     if (typeof resetThreadRun === "function") resetThreadRun();
   }
@@ -2820,6 +2847,7 @@ function renderMessages(mode = "bottom") {
       const time = clockLabel(m.created_at);
       const who = m.role === "bot" ? ((currentBot() && currentBot().name) || "Bot") : "";
       meta.append(document.createTextNode(who && time ? who + " · " + time : (who || time)));
+      if (m.role === "bot" && m.timed_out) meta.append(el("span", "timed-out", "Timed out"));
       const raw = m.content || "";
       meta.append(msgCopyButton(() => raw));
       group.append(meta);
@@ -3061,10 +3089,43 @@ async function send() {
     showRunError(err.message);
   }
 }
+function focusAfterTimeoutNote() {
+  const active = document.activeElement;
+  const tag = active && active.tagName ? active.tagName : "";
+  const input = $("#composer-input");
+  const usable = !!(input && !input.disabled && input.offsetParent !== null);
+  const id = (typeof focusTargetAfterNote === "function") ? focusTargetAfterNote(tag, usable) : (usable ? "composer-input" : "thread-name");
+  if (!id) return;
+  const node = document.getElementById(id);
+  if (!node || typeof node.focus !== "function") return;
+  if (id === "thread-name") node.tabIndex = -1;
+  node.focus({ preventScroll: true });
+}
+async function retryTimeout(runId) {
+  if (!state.botId || !runId || state.continuing) return;
+  state.continuing = true;
+  const note = $("#run-note");
+  if (note) { note.hidden = true; note.replaceChildren(); }
+  focusAfterTimeoutNote();
+  try {
+    const data = await api("/api/bots/" + state.botId + "/runs/" + encodeURIComponent(runId) + "/retry", {method: "POST"});
+    if (data && data.run_id) {
+      state.timeoutRunId = "";
+      if (noteRunStarted(state.bots, state.botId)) renderBots();
+      await follow(data.run_id);
+    }
+  } catch (err) {
+    showRunError(err.message);
+  } finally {
+    state.continuing = false;
+  }
+}
 async function continueRun(runId) {
   if (!state.botId || !runId || state.continuing) return;
   state.continuing = true;
-  $("#run-note").hidden = true;
+  const note = $("#run-note");
+  if (note) { note.hidden = true; note.replaceChildren(); }
+  focusAfterTimeoutNote();
   try {
     const data = await api("/api/bots/" + state.botId + "/runs/" + encodeURIComponent(runId) + "/continue", {method: "POST"});
     if (data.run_id) {
@@ -3696,9 +3757,16 @@ async function follow(runId) {
         if (event === "status") {
           if (noteRunStarted(state.bots, state.botId)) renderBots();
           const tool = payload.text || payload.state || "";
-          if (tool && tool !== "working" && tool !== "running") state.liveTool = tool;
+          if (tool && tool !== "working" && tool !== "running" && tool !== "retrying") state.liveTool = tool;
           if (!state.stop || state.stop.phase !== "stopping") setWorking(true);
           paintSubline(currentBot());
+        } else if (event === "stream_reset") {
+          if (typeof streamResetApplies !== "function" || streamResetApplies(payload.run_id, runId)) {
+            acc = "";
+            if (bubble && bubble.remove) bubble.remove();
+            bubble = null;
+            text = null;
+          }
         } else if (event === "token") {
           if (!bubble) {
             if ((state.queuedIds || []).length && shouldClearQueued("new-bot-token")) {
@@ -3738,8 +3806,10 @@ async function follow(runId) {
         } else if (event === "permission_decision") {
           showPermissionDecision(payload);
           if (!state.stop || state.stop.phase !== "stopping") setWorking(!!state.streaming);
-        } else if (event === "done" || event === "error") {
-          const status = event === "error" ? "error" : (payload.status || "");
+        } else if (event === "done" || event === "error" || event === "timeout") {
+          const status = event === "error" ? "error" : (event === "timeout" ? "timeout" : (payload.status || ""));
+          if (event === "timeout" && payload.run_id) state.timeoutRunId = String(payload.run_id);
+          if (event === "timeout") announce(timeoutAnnouncement(payload.error));
           const prevPhase = state.stop ? state.stop.phase : "";
           applyStop(reduceStop(state.stop || freshStop(), { type: "stream-done", status: status }));
           if (prevPhase === "stopping" && state.stop.phase === "stopped") {
@@ -5721,7 +5791,7 @@ function renderState(box, s) {
   if (!s.runs.length) rs.append(el("p", "st-empty", "No runs yet."));
   for (const r of s.runs) {
     const head = el("div");
-    const cls = r.status === "done" ? " ok" : (r.status === "error" ? " bad" : "");
+    const cls = r.status === "done" ? " ok" : (r.status === "error" || r.status === "timeout" ? " bad" : "");
     head.append(el("span", "st-tag" + cls, r.status), " " + phx(r.started_at, true));
     let dur = "";
     if (r.finished_at) dur = Math.max(0, Math.round((new Date(r.finished_at) - new Date(r.started_at)) / 1000)) + "s";
@@ -6424,6 +6494,58 @@ function themeRadioKey(key, index, count) {
 function retryTrigger(kind, unreachable, busy) {
   if (!unreachable || busy) return false;
   return kind === "visible" || kind === "focus" || kind === "online" || kind === "click";
+}
+
+// Timeout note actions. Null hides the note. Continue is only offered
+// while the daemon still holds continue_run_id.
+function timeoutNoteActions(bot, streaming) {
+  if (streaming || !bot || bot.status === "running") return null;
+  if (bot.last_run_status !== "timeout") return null;
+  const actions = ["Retry"];
+  if (bot.continue_run_id) actions.push("Continue");
+  return { text: bot.last_run_error || "", actions: actions };
+}
+
+// A stream_reset clears the live bubble unless it names a different run.
+function streamResetApplies(eventRunId, currentRunId) {
+  const a = eventRunId == null || eventRunId === "" ? "" : String(eventRunId);
+  const b = currentRunId == null || currentRunId === "" ? "" : String(currentRunId);
+  if (a && b && a !== b) return false;
+  return true;
+}
+
+// The docked timeout note is not a live region. The polite #a11y-status
+// region says the notice once, when the timeout event arrives.
+function timeoutAnnouncement(error) {
+  const t = error == null ? "" : String(error).trim();
+  return t ? "Run timed out. " + t : "Run timed out.";
+}
+
+function timedOutTag(message) {
+  if (!message || message.role !== "bot" || !message.timed_out) return "";
+  return "Timed out";
+}
+
+// Prefer the resume offer, then the run id from the timeout event, then
+// the newest message that still carries a run id.
+function timeoutRunId(bot, messages, remembered) {
+  if (bot && bot.continue_run_id) return String(bot.continue_run_id);
+  if (remembered) return String(remembered);
+  const list = Array.isArray(messages) ? messages : [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const m = list[i];
+    if (m && m.run_id) return String(m.run_id);
+  }
+  return "";
+}
+
+// After the timeout note is replaced, focus stays off body. An already
+// focused field is left alone. Otherwise the composer, or the thread heading.
+function focusTargetAfterNote(activeTag, composerUsable) {
+  const tag = String(activeTag || "").toUpperCase();
+  if (tag && tag !== "BODY" && tag !== "BUTTON") return "";
+  if (composerUsable) return "composer-input";
+  return "thread-name";
 }
 // thread-logic:end
 // roster-keys:begin

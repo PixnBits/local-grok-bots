@@ -53,6 +53,7 @@ Memory is notes the bot keeps. It is not a substitute for the log.
 | content | text | |
 | run_id | string, nullable | Set when a bot message or system note was produced by a run. |
 | created_at | timestamp | Order is by this, then by id. |
+| timed_out | bool | Present and true when this bot reply is the partial kept after a timeout. Omitted otherwise. |
 
 One primary user thread per bot. DMs are stored as messages on both sides. Both bots can list the exchange, and the log has both directions.
 
@@ -77,12 +78,12 @@ An inbound DM is also represented in the receiving bot’s user thread as a syst
 |---|---|---|
 | id | string (uuid) | Returned to the client as `run_id`. |
 | bot_id | string | |
-| status | enum | `running` \| `done` \| `error` \| `cancelled`. |
+| status | enum | `running` \| `done` \| `error` \| `cancelled` \| `timeout`. `timeout` is an Ollama stall, first-output wait, model cap, or run cap that was not retried. |
 | started_at | timestamp | |
 | finished_at | timestamp, nullable | |
-| error | text, nullable | Includes `tool round limit`, `daemon_restart`, `timed out`, `shutdown`. |
+| error | text, nullable | Includes `tool round limit`, `daemon_restart`, `timed out`, `shutdown`. For status `timeout` it is the human sentence without the `Notice: ` prefix, naming the limit and its value. |
 
-A run is capped at 8 model rounds. Hitting the cap finishes the run as `error` / `tool round limit` and writes `run_finished`. The daemon keeps that run's model transcript in memory, including tool results, and `GET /api/bots` and `GET /api/bots/{id}` include `continue_run_id` while the offer is held. `POST /api/bots/{id}/runs/{run_id}/continue` starts a new run on that transcript for another 8 rounds and returns `{run_id}`. The capped run stays `error`. The client does not send a transcript. A second continue while the bot is running is 409 and does not take the transcript. A missing offer is 404. A new user message, a timer or DM turn, or a daemon restart drops the offer. Hitting the cap again offers the new run.
+A run is capped at 8 model rounds. Hitting the cap finishes the run as `error` / `tool round limit` and writes `run_finished`. The daemon keeps that run's model transcript in memory, including tool results, and `GET /api/bots` and `GET /api/bots/{id}` include `continue_run_id` while the offer is held. `POST /api/bots/{id}/runs/{run_id}/continue` starts a new run on that transcript for another 8 rounds and returns `{run_id}`. The capped run stays `error`. The client does not send a transcript. A second continue while the bot is running is 409 and does not take the transcript. A missing offer is 404. A new user message, a timer or DM turn, or a daemon restart drops the offer. Hitting the cap again offers the new run. An Ollama run that ends `timeout` holds the same kind of offer: the transcript, the partial reply when there is one, and a short "Continue from where you stopped." nudge. `POST /api/bots/{id}/runs/{run_id}/retry` answers the same user turn again without that partial or its notice. It is allowed only when `run_id` is the bot's latest run, that run's status is `timeout`, and the bot is not running or paused (409 otherwise, 404 for an unknown bot, an unknown run, a run that is not the latest, or a run that is not `timeout`). It returns `{run_id}` and drops the resume offer.
 
 ### Log event
 
@@ -113,7 +114,8 @@ JSON over HTTP. One SSE stream for a live turn. All routes under `/api`.
 | POST | /api/bots/{id}/thread/messages | `{content}` | `{message, run_id}` immediately |
 | GET | /api/bots/{id}/thread/stream | `?run_id=` | SSE |
 | POST | /api/bots/{id}/runs/{run_id}/cancel | | `{status}` |
-| POST | /api/bots/{id}/runs/{run_id}/continue | | `{run_id}` for another 8 rounds on that capped transcript. 409 if the bot is running. 404 if there is no offer. |
+| POST | /api/bots/{id}/runs/{run_id}/continue | | `{run_id}` for another 8 rounds on that capped transcript, or on a timed-out transcript including the partial. 409 if the bot is running. 404 if there is no offer. |
+| POST | /api/bots/{id}/runs/{run_id}/retry | | `{run_id}` for a new run of the latest `timeout` turn, without that run's bot reply or notice. 409 if the bot is running, paused, or shutting down. 404 if the bot or run is unknown, the run is not the latest, or its status is not `timeout`. |
 | GET | /api/bots/{id}/memory | | `[{key, value, updated_at}]` |
 | POST | /api/bots/{id}/memory | `{key, value}` | memory row |
 | DELETE | /api/bots/{id}/memory/{key} | | 204 |
@@ -134,6 +136,8 @@ SSE events on the stream:
 - `tool_result` — `{name, ok, result_or_error}`
 - `done` — `{run_id}`
 - `error` — `{run_id, error}`
+- `timeout` — `{run_id, error, limit}` terminal, same as `done` and `error` for stream history. `error` is the sentence stored on the run.
+- `stream_reset` — `{run_id, reason}` not terminal. The page drops the live partial for that run. `reason` is `first_output_timeout` or `stall_timeout`.
 
 `POST .../messages` never blocks on the model. It persists the user message and returns. If a run starts, `run_id` is set. If the bot is already running, `run_id` may be null or may be the existing run; the message is still persisted and will be seen.
 
@@ -148,15 +152,15 @@ The file must live outside the workspace and any bot home (`DATA_DIR/workspace` 
 - `POST .../messages` always persists the user message, ordered, and returns.
 - If the bot is `idle`, the post starts a run and returns its `run_id`.
 - If the bot is `running`, the post returns the live `run_id` and the message is folded into that run: before each model call the run appends any turn input (user messages, scheduled prompts, inbound DMs) stored after what it has already read, records how far it has read in `runs.input_through`, and writes `run_input`. A message that lands after the run's last model call is not lost: the next run starts the moment the current one ends and consumes it. The page follows whichever run is active. Dropping the message or blocking the POST is not acceptable.
-- A run ends in exactly one of `done`, `error`, `cancelled`.
+- A run ends in exactly one of `done`, `error`, `cancelled`, `timeout`.
 - On daemon start, any run still marked `running` is marked `error` with reason `daemon_restart`. No resume of a half-finished Ollama model call. A CLI backend instead marks that run `interrupted`, keeps `session_id`, and the next user message or timer resumes with `--resume`.
 - Cancel sets the run to `cancelled` and stops further tool calls. Partial output already persisted stays.
 - Bot-to-bot DMs use the same queue on the receiving bot. The sender does not block waiting for a reply.
 - Order is preserved. Nothing is dropped.
 - A run that exceeds 8 model rounds ends `error` / `tool round limit`. The page can continue that transcript as a new run for another 8 rounds. A new message, another turn, or a restart drops the offer.
-- While a run is `running`, the stream emits `status` events so the page can show the working animation. The animation clears on `done` or `error`.
+- While a run is `running`, the stream emits `status` events so the page can show the working animation. The animation clears on `done`, `error`, or `timeout`.
 - Text the model sends in the same response as a tool call is streamed as tokens for that run and kept in that run's in-memory transcript. It is not written to the thread. The stored reply is the response that has no tool call.
-- A model response that fails because a tool call could not be parsed is diagnosed in that run's transcript and tried once more, when a round remains. The diagnosis is not written to the thread. A second parse failure ends the run as `error`. A parse failure on the last of the 8 rounds is that error and does not become `tool round limit`. Unreachable Ollama, an HTTP error, a stream failure, and a timeout are not retried.
+- A model response that fails because a tool call could not be parsed is diagnosed in that run's transcript and tried once more, when a round remains. The diagnosis is not written to the thread. A second parse failure ends the run as `error`. A parse failure on the last of the 8 rounds is that error and does not become `tool round limit`. Unreachable Ollama, an HTTP error, and a stream failure are not retried. A wait for the first output (`first_output_timeout`, default 5m) or a gap between output chunks (`stall_timeout`, default 2m) is retried once per run (`stall_retries`, 0 disables) while the run is still alive. Output is content, thinking, a tool call, or the final done chunk. Thinking is activity only. A hard `model_timeout` (unset means the effective `run_timeout`; it no longer defaults to 3m), the run deadline, Stop, and shutdown are not retried. A timeout that is not retried keeps the partial reply (`timed_out`) and ends the run as `timeout`.
 
 ## 4. Bot tool surface
 
@@ -208,7 +212,7 @@ Named grants (`net`, `git`, `ssh`, `build`) live on the bot. The profile and the
 
 Append-only. `kind` is a closed set:
 
-`user_message`, `bot_message`, `dm_sent`, `dm_received`, `tool_start`, `tool_end`, `bot_created`, `bot_updated`, `bot_deleted`, `timer_fired`, `timer_missed`, `model_call`, `run_input`, `run_started`, `run_finished`, `daemon_start`, `daemon_stop`, `grant_use`, `grant_denied`, `net_request`, `sandbox_block`, `jail_report`, `jail_report_truncated`, `cli_override` (CLI turns: workspace config files found, with `files`, `mode`, `action` ignore or refuse, and `blocked`; see `docs/cli-isolation.md`).
+`user_message`, `bot_message`, `dm_sent`, `dm_received`, `tool_start`, `tool_end`, `bot_created`, `bot_updated`, `bot_deleted`, `timer_fired`, `timer_missed`, `model_call`, `run_input`, `run_started`, `run_finished`, `run_timed_out`, `daemon_start`, `daemon_stop`, `grant_use`, `grant_denied`, `net_request`, `sandbox_block`, `jail_report`, `jail_report_truncated`, `cli_override` (CLI turns: workspace config files found, with `files`, `mode`, `action` ignore or refuse, and `blocked`; see `docs/cli-isolation.md`).
 
 A line the jail writes to its event file is `jail_report` with `untrusted: true` and `reported` set to the kind the line claimed. It is not audited as `sandbox_block`, `grant_use`, or `grant_denied`, and it does not start an approval. `jail_report_truncated` is the daemon's own event when that file exceeds 64 KiB or 64 lines (`dropped N`), or when the events directory cannot be read (`events unavailable`). Repeated untrusted notices in one turn are posted once, with a count. A dropped-line count is reported once per turn, on the first notice, or as one summary when that turn has no notice. `sandbox_block` detail is printable ASCII of at most 256 bytes. A trusted `grant_denied` for `net` or `ssh`, and a trusted `net_request`, are also written to the audit log when it is enabled. A `net_request` whose detail is `not allowlisted` is audited as `grant_denied` with grant `net`. Those rows are deduped per turn by action, grant, and host, with a `count` when the same key repeats. At most 64 such rows are written per turn. One further row, `audit_suppressed`, carries the number that was not written. The bot log stays one row per event.
 
@@ -218,8 +222,8 @@ A line the jail writes to its event file is `jail_report` with `untrusted: true`
 - tools: `name`, `arguments` (redacted), `ok`, `error`
 - bot changes: `fields` changed, `by` (`user` or bot id)
 - timers: `timer_id`, `scheduled_for`
-- model: `model`, `ok`, `error`, `tokens` if cheap to capture
-- runs: `run_id`, `status`, `error`
+- model: `model`, `ok`, `error`, `tokens` if cheap to capture. An Ollama call also records `attempt`, `retry`, and `first_output_ms`. A timeout also records `limit` and `limit_value`.
+- runs: `run_id`, `status`, `error`. `run_timed_out` records `run_id`, `limit`, `limit_value`, `first_output_ms`, `retried`, and `partial_bytes`.
 
 The chat transcript stays readable. The log is allowed to be denser. If it is not in the log, it did not happen. `GET /api/log` is newest-first.
 

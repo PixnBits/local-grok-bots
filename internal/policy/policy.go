@@ -62,16 +62,47 @@ type Policy struct {
 	// PromptTimeout is how long a UI answer may take. Zero means
 	// DefaultPromptTimeout.
 	PromptTimeout time.Duration
-	// OllamaRunTimeout bounds a whole Ollama run. OllamaModelTimeout bounds
-	// one model call inside it. Zero means the defaults.
-	OllamaRunTimeout   time.Duration
-	OllamaModelTimeout time.Duration
+	// OllamaRunTimeout bounds a whole Ollama run. Zero means the default.
+	// OllamaModelTimeout is an optional hard cap on one model call. Zero
+	// means the effective run timeout, still capped by max_model_timeout.
+	// When it is set and first-output or stall is not, each unset one
+	// defaults to this explicit value before its own ceiling.
+	OllamaRunTimeout         time.Duration
+	OllamaModelTimeout       time.Duration
+	OllamaFirstOutputTimeout time.Duration
+	OllamaStallTimeout       time.Duration
+	// OllamaStallRetriesSet is false when stall_retries was not set. Zero
+	// retries is a real setting and is distinct from the default.
+	OllamaStallRetries    int
+	OllamaStallRetriesSet bool
+	// local* is a value set in policy.toml. managed*Set means managed
+	// policy replaced that key. A ceiling warns only for a local value
+	// managed policy did not replace. Silence defaults use either set flag.
+	localRun, localModel, localFirst, localStall time.Duration
+	localTurn, localPrompt                       time.Duration
+	localRetries                                 int
+	localRunSet, localModelSet                   bool
+	localFirstSet, localStallSet                 bool
+	localTurnSet, localPromptSet                 bool
+	localRetriesSet                              bool
+	managedRunSet, managedModelSet               bool
+	managedFirstSet, managedStallSet             bool
+	managedTurnSet, managedPromptSet             bool
+	managedRetriesSet                            bool
+	// OllamaKeepAlive is a duration string or an integer number of seconds.
+	// Unset means DefaultOllamaKeepAlive.
+	OllamaKeepAlive    any
+	OllamaKeepAliveSet bool
 	// Max* are ceilings only managed policy sets. Zero means no ceiling.
 	// The effective timeout is min(setting or default, ceiling).
-	MaxTurnTimeout        time.Duration
-	MaxPromptTimeout      time.Duration
-	MaxOllamaRunTimeout   time.Duration
-	MaxOllamaModelTimeout time.Duration
+	MaxTurnTimeout              time.Duration
+	MaxPromptTimeout            time.Duration
+	MaxOllamaRunTimeout         time.Duration
+	MaxOllamaModelTimeout       time.Duration
+	MaxOllamaFirstOutputTimeout time.Duration
+	MaxOllamaStallTimeout       time.Duration
+	MaxOllamaStallRetries       int
+	MaxOllamaStallRetriesSet    bool
 	// AllowSessionGrants is true only when managed policy set it.
 	AllowSessionGrants bool
 	// ClaudeTransport is how Claude asks this daemon about a tool.
@@ -251,6 +282,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 		p.finishServerTools()
 		p.finishGitHub()
 		p.dropIncompleteCLI()
+		p.warnClampedCeilings()
 		return p, nil
 	}
 	body, err := readPolicy(path)
@@ -297,6 +329,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 	base.finishServerTools()
 	base.finishGitHub()
 	base.dropIncompleteCLI()
+	base.warnClampedCeilings()
 	return base, nil
 }
 
@@ -443,10 +476,15 @@ type Permission struct {
 
 // Default timeouts. Each one is a policy key; see docs/cli-isolation.md.
 const (
-	DefaultTurnTimeout        = 2 * time.Hour
-	DefaultPromptTimeout      = 10 * time.Minute
-	DefaultOllamaRunTimeout   = 10 * time.Minute
-	DefaultOllamaModelTimeout = 3 * time.Minute
+	DefaultTurnTimeout              = 2 * time.Hour
+	DefaultPromptTimeout            = 10 * time.Minute
+	DefaultOllamaRunTimeout         = 10 * time.Minute
+	DefaultOllamaFirstOutputTimeout = 5 * time.Minute
+	DefaultOllamaStallTimeout       = 2 * time.Minute
+	DefaultOllamaStallRetries       = 1
+	DefaultOllamaKeepAlive          = "30m"
+	// maxStallRetries is the fail-closed upper bound for stall_retries.
+	maxStallRetries = 5
 )
 
 func capped(v, def, ceiling time.Duration) time.Duration {
@@ -475,9 +513,73 @@ func (p Policy) EffectiveOllamaRunTimeout() time.Duration {
 	return capped(p.OllamaRunTimeout, DefaultOllamaRunTimeout, p.MaxOllamaRunTimeout)
 }
 
-// EffectiveOllamaModelTimeout bounds one Ollama model call.
+// EffectiveOllamaModelTimeout is the optional hard cap on one model call.
+// When model_timeout is unset, it equals the effective run timeout, then
+// the managed max_model_timeout ceiling.
 func (p Policy) EffectiveOllamaModelTimeout() time.Duration {
-	return capped(p.OllamaModelTimeout, DefaultOllamaModelTimeout, p.MaxOllamaModelTimeout)
+	v := p.OllamaModelTimeout
+	if v <= 0 {
+		v = p.EffectiveOllamaRunTimeout()
+	}
+	if p.MaxOllamaModelTimeout > 0 && v > p.MaxOllamaModelTimeout {
+		v = p.MaxOllamaModelTimeout
+	}
+	return v
+}
+
+// EffectiveOllamaFirstOutputTimeout is the wait for the first output chunk.
+// When model_timeout is set and this key is not, the wait is that explicit
+// model_timeout, before managed ceilings. A max_first_output_timeout still
+// caps the result. Otherwise the default is 5m.
+func (p Policy) EffectiveOllamaFirstOutputTimeout() time.Duration {
+	return p.effectiveSilence(p.OllamaFirstOutputTimeout, p.localFirstSet || p.managedFirstSet, DefaultOllamaFirstOutputTimeout, p.MaxOllamaFirstOutputTimeout)
+}
+
+// EffectiveOllamaStallTimeout is the max gap between output chunks.
+// An unset stall_timeout follows an explicit model_timeout the same way
+// first_output_timeout does. Otherwise the default is 2m.
+func (p Policy) EffectiveOllamaStallTimeout() time.Duration {
+	return p.effectiveSilence(p.OllamaStallTimeout, p.localStallSet || p.managedStallSet, DefaultOllamaStallTimeout, p.MaxOllamaStallTimeout)
+}
+
+// effectiveSilence uses an explicit key, else an explicit model_timeout,
+// else fallback, then applies ceiling. model_timeout's own ceiling is not
+// applied before it is copied: the silence ceiling is applied afterwards.
+func (p Policy) effectiveSilence(explicit time.Duration, set bool, fallback, ceiling time.Duration) time.Duration {
+	v := explicit
+	if !set || v <= 0 {
+		if (p.localModelSet || p.managedModelSet) && p.OllamaModelTimeout > 0 {
+			v = p.OllamaModelTimeout
+		} else {
+			v = fallback
+		}
+	}
+	if ceiling > 0 && v > ceiling {
+		v = ceiling
+	}
+	return v
+}
+
+// EffectiveOllamaStallRetries is how many stall or first-output failures
+// one run may retry. A managed max_stall_retries ceiling can only lower it.
+func (p Policy) EffectiveOllamaStallRetries() int {
+	n := DefaultOllamaStallRetries
+	if p.OllamaStallRetriesSet {
+		n = p.OllamaStallRetries
+	}
+	if p.MaxOllamaStallRetriesSet && n > p.MaxOllamaStallRetries {
+		n = p.MaxOllamaStallRetries
+	}
+	return n
+}
+
+// EffectiveOllamaKeepAlive is the keep_alive value sent on every chat.
+// A duration stays a string. An integer number of seconds stays an integer.
+func (p Policy) EffectiveOllamaKeepAlive() any {
+	if !p.OllamaKeepAliveSet || p.OllamaKeepAlive == nil || p.OllamaKeepAlive == "" {
+		return DefaultOllamaKeepAlive
+	}
+	return p.OllamaKeepAlive
 }
 
 // Permission returns tool-approval settings. A non-positive prompt timeout
@@ -1052,13 +1154,20 @@ type backendDoc struct {
 }
 
 type ollamaDoc struct {
-	Host            *string   `toml:"host" json:"host"`
-	Model           *string   `toml:"model" json:"model"`
-	Models          *[]string `toml:"models" json:"models"`
-	RunTimeout      flexText  `toml:"run_timeout" json:"run_timeout"`
-	ModelTimeout    flexText  `toml:"model_timeout" json:"model_timeout"`
-	MaxRunTimeout   flexText  `toml:"max_run_timeout" json:"max_run_timeout"`
-	MaxModelTimeout flexText  `toml:"max_model_timeout" json:"max_model_timeout"`
+	Host                  *string   `toml:"host" json:"host"`
+	Model                 *string   `toml:"model" json:"model"`
+	Models                *[]string `toml:"models" json:"models"`
+	RunTimeout            flexText  `toml:"run_timeout" json:"run_timeout"`
+	ModelTimeout          flexText  `toml:"model_timeout" json:"model_timeout"`
+	FirstOutputTimeout    flexText  `toml:"first_output_timeout" json:"first_output_timeout"`
+	StallTimeout          flexText  `toml:"stall_timeout" json:"stall_timeout"`
+	StallRetries          flexText  `toml:"stall_retries" json:"stall_retries"`
+	KeepAlive             flexText  `toml:"keep_alive" json:"keep_alive"`
+	MaxRunTimeout         flexText  `toml:"max_run_timeout" json:"max_run_timeout"`
+	MaxModelTimeout       flexText  `toml:"max_model_timeout" json:"max_model_timeout"`
+	MaxFirstOutputTimeout flexText  `toml:"max_first_output_timeout" json:"max_first_output_timeout"`
+	MaxStallTimeout       flexText  `toml:"max_stall_timeout" json:"max_stall_timeout"`
+	MaxStallRetries       flexText  `toml:"max_stall_retries" json:"max_stall_retries"`
 }
 
 type cliDoc struct {
@@ -1162,7 +1271,7 @@ func (f *flexText) UnmarshalJSON(b []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.UseNumber()
 	if err := dec.Decode(&n); err != nil {
-		return fmt.Errorf("turn_timeout must be a duration or a number of seconds")
+		return fmt.Errorf("must be a duration or a number of seconds")
 	}
 	f.Value = n.String()
 	return nil
@@ -1233,11 +1342,12 @@ func (p *Policy) apply(doc document, trusted bool) error {
 		p.Imminent = time.Duration(*doc.CLI.Imminent) * time.Minute
 	}
 	if doc.CLI.TurnTimeout.Set {
-		d, err := parseTurnTimeout(doc.CLI.TurnTimeout.Value)
+		d, err := parseTurnTimeout("cli.turn_timeout", doc.CLI.TurnTimeout.Value)
 		if err != nil {
 			return err
 		}
 		p.TurnTimeout = d
+		p.recordTimeout("cli.turn_timeout", d, trusted)
 	}
 	timeouts := []struct {
 		key     string
@@ -1247,8 +1357,12 @@ func (p *Policy) apply(doc document, trusted bool) error {
 	}{
 		{"ollama.run_timeout", doc.Ollama.RunTimeout, &p.OllamaRunTimeout, false},
 		{"ollama.model_timeout", doc.Ollama.ModelTimeout, &p.OllamaModelTimeout, false},
+		{"ollama.first_output_timeout", doc.Ollama.FirstOutputTimeout, &p.OllamaFirstOutputTimeout, false},
+		{"ollama.stall_timeout", doc.Ollama.StallTimeout, &p.OllamaStallTimeout, false},
 		{"ollama.max_run_timeout", doc.Ollama.MaxRunTimeout, &p.MaxOllamaRunTimeout, true},
 		{"ollama.max_model_timeout", doc.Ollama.MaxModelTimeout, &p.MaxOllamaModelTimeout, true},
+		{"ollama.max_first_output_timeout", doc.Ollama.MaxFirstOutputTimeout, &p.MaxOllamaFirstOutputTimeout, true},
+		{"ollama.max_stall_timeout", doc.Ollama.MaxStallTimeout, &p.MaxOllamaStallTimeout, true},
 		{"cli.max_turn_timeout", doc.CLI.MaxTurnTimeout, &p.MaxTurnTimeout, true},
 	}
 	if doc.CLI.Permission != nil {
@@ -1263,15 +1377,47 @@ func (p *Policy) apply(doc document, trusted bool) error {
 		if !t.f.Set {
 			continue
 		}
-		d, err := parseTurnTimeout(t.f.Value)
+		d, err := parseTurnTimeout(t.key, t.f.Value)
 		if err != nil {
-			return fmt.Errorf("%s: %w", t.key, err)
+			return err
 		}
 		if t.managed && !trusted {
 			p.Warnings = append(p.Warnings, t.key+" is ignored; only managed policy can set a timeout ceiling")
 			continue
 		}
 		*t.dst = d
+		if !t.managed {
+			p.recordTimeout(t.key, d, trusted)
+		}
+	}
+	if doc.Ollama.StallRetries.Set {
+		n, err := parseStallRetries(doc.Ollama.StallRetries.Value)
+		if err != nil {
+			return fmt.Errorf("ollama.stall_retries: %w", err)
+		}
+		p.OllamaStallRetries = n
+		p.OllamaStallRetriesSet = true
+		p.recordRetries(n, trusted)
+	}
+	if doc.Ollama.MaxStallRetries.Set {
+		n, err := parseStallRetries(doc.Ollama.MaxStallRetries.Value)
+		if err != nil {
+			return fmt.Errorf("ollama.max_stall_retries: %w", err)
+		}
+		if !trusted {
+			p.Warnings = append(p.Warnings, "ollama.max_stall_retries is ignored; only managed policy can set a timeout ceiling")
+		} else {
+			p.MaxOllamaStallRetries = n
+			p.MaxOllamaStallRetriesSet = true
+		}
+	}
+	if doc.Ollama.KeepAlive.Set {
+		v, err := parseKeepAlive(doc.Ollama.KeepAlive.Value)
+		if err != nil {
+			return fmt.Errorf("ollama.keep_alive: %w", err)
+		}
+		p.OllamaKeepAlive = v
+		p.OllamaKeepAliveSet = true
 	}
 	if doc.CLI.PermissionMode != nil {
 		p.setMode(*doc.CLI.PermissionMode, trusted)
@@ -1305,11 +1451,12 @@ func (p *Policy) apply(doc document, trusted bool) error {
 			p.UIPrompts = *perm.UIPrompts
 		}
 		if perm.PromptTimeout.Set {
-			d, err := parseTurnTimeout(perm.PromptTimeout.Value)
+			d, err := parseTurnTimeout("cli.permission.prompt_timeout", perm.PromptTimeout.Value)
 			if err != nil {
-				return fmt.Errorf("prompt_timeout: %w", err)
+				return err
 			}
 			p.PromptTimeout = d
+			p.recordTimeout("cli.permission.prompt_timeout", d, trusted)
 		}
 		if perm.AllowSessionGrants != nil {
 			if trusted {
@@ -1551,27 +1698,167 @@ func hex64(s string) bool {
 	return true
 }
 
-func parseTurnTimeout(s string) (time.Duration, error) {
+func parseStallRetries(s string) (int, error) {
+	s = strings.TrimSpace(s)
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || strconv.FormatInt(n, 10) != s {
+		return 0, fmt.Errorf("must be an integer from 0 to %d", maxStallRetries)
+	}
+	if n < 0 || n > maxStallRetries {
+		return 0, fmt.Errorf("must be an integer from 0 to %d", maxStallRetries)
+	}
+	return int(n), nil
+}
+
+// parseKeepAlive accepts the forms Ollama accepts: a Go duration, an integer
+// number of seconds, or -1. Durations stay strings. Integers stay integers.
+func parseKeepAlive(s string) (any, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, fmt.Errorf("must be -1, a number of seconds, or a Go duration")
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil && strconv.FormatInt(n, 10) == s {
+		if n < -1 {
+			return nil, fmt.Errorf("must be -1, a number of seconds, or a Go duration")
+		}
+		return n, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil || d < 0 {
+		return nil, fmt.Errorf("must be -1, a number of seconds, or a Go duration")
+	}
+	return s, nil
+}
+
+func parseTurnTimeout(key, s string) (time.Duration, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, nil
 	}
 	if n, err := strconv.Atoi(s); err == nil {
 		if n <= 0 {
-			return 0, fmt.Errorf("turn_timeout must be positive")
+			return 0, fmt.Errorf("%s must be positive", key)
 		}
 		d := time.Duration(n) * time.Second
 		if d > 24*time.Hour {
-			return 0, fmt.Errorf("turn_timeout exceeds 24h")
+			return 0, fmt.Errorf("%s exceeds 24h", key)
 		}
 		return d, nil
 	}
 	d, err := time.ParseDuration(s)
-	if err != nil || d <= 0 {
-		return 0, fmt.Errorf("turn_timeout must be seconds or a Go duration")
+	if err != nil {
+		return 0, fmt.Errorf("%s must be seconds or a Go duration", key)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%s must be positive", key)
 	}
 	if d > 24*time.Hour {
-		return 0, fmt.Errorf("turn_timeout exceeds 24h")
+		return 0, fmt.Errorf("%s exceeds 24h", key)
 	}
 	return d, nil
+}
+
+// recordTimeout remembers which file set a non-ceiling timeout.
+func (p *Policy) recordTimeout(key string, d time.Duration, trusted bool) {
+	if trusted {
+		switch key {
+		case "ollama.run_timeout":
+			p.managedRunSet = true
+		case "ollama.model_timeout":
+			p.managedModelSet = true
+		case "ollama.first_output_timeout":
+			p.managedFirstSet = true
+		case "ollama.stall_timeout":
+			p.managedStallSet = true
+		case "cli.turn_timeout":
+			p.managedTurnSet = true
+		case "cli.permission.prompt_timeout":
+			p.managedPromptSet = true
+		}
+		return
+	}
+	switch key {
+	case "ollama.run_timeout":
+		p.localRun, p.localRunSet = d, true
+	case "ollama.model_timeout":
+		p.localModel, p.localModelSet = d, true
+	case "ollama.first_output_timeout":
+		p.localFirst, p.localFirstSet = d, true
+	case "ollama.stall_timeout":
+		p.localStall, p.localStallSet = d, true
+	case "cli.turn_timeout":
+		p.localTurn, p.localTurnSet = d, true
+	case "cli.permission.prompt_timeout":
+		p.localPrompt, p.localPromptSet = d, true
+	}
+}
+
+func (p *Policy) recordRetries(n int, trusted bool) {
+	if trusted {
+		p.managedRetriesSet = true
+		return
+	}
+	p.localRetries = n
+	p.localRetriesSet = true
+}
+
+// warnClampedCeilings warns when a value set in policy.toml is above a
+// managed max_* ceiling. A value managed policy replaced is not warned.
+// A clamped built-in default is not warned: only an explicit local value is.
+func (p *Policy) warnClampedCeilings() {
+	type item struct {
+		localSet, managedSet bool
+		v, ceiling           time.Duration
+		key, maxKey          string
+	}
+	items := []item{
+		{p.localRunSet, p.managedRunSet, p.localRun, p.MaxOllamaRunTimeout, "ollama.run_timeout", "max_run_timeout"},
+		{p.localModelSet, p.managedModelSet, p.localModel, p.MaxOllamaModelTimeout, "ollama.model_timeout", "max_model_timeout"},
+		{p.localFirstSet, p.managedFirstSet, p.localFirst, p.MaxOllamaFirstOutputTimeout, "ollama.first_output_timeout", "max_first_output_timeout"},
+		{p.localStallSet, p.managedStallSet, p.localStall, p.MaxOllamaStallTimeout, "ollama.stall_timeout", "max_stall_timeout"},
+		{p.localTurnSet, p.managedTurnSet, p.localTurn, p.MaxTurnTimeout, "cli.turn_timeout", "max_turn_timeout"},
+		{p.localPromptSet, p.managedPromptSet, p.localPrompt, p.MaxPromptTimeout, "cli.permission.prompt_timeout", "max_prompt_timeout"},
+	}
+	for _, it := range items {
+		if !it.localSet || it.managedSet || it.ceiling <= 0 || it.v <= it.ceiling {
+			continue
+		}
+		p.Warnings = append(p.Warnings, fmt.Sprintf("%s %s lowered to managed %s %s", it.key, shortDuration(it.v), it.maxKey, shortDuration(it.ceiling)))
+	}
+	if p.localRetriesSet && !p.managedRetriesSet && p.MaxOllamaStallRetriesSet && p.localRetries > p.MaxOllamaStallRetries {
+		p.Warnings = append(p.Warnings, fmt.Sprintf("ollama.stall_retries %d lowered to managed max_stall_retries %d", p.localRetries, p.MaxOllamaStallRetries))
+	}
+}
+
+// shortDuration is the warning form: 5m, 1h30m, 45s.
+func shortDuration(d time.Duration) string {
+	if d < 0 {
+		d = -d
+	}
+	if d == 0 {
+		return "0s"
+	}
+	if d < time.Second {
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	}
+	d = d.Truncate(time.Second)
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	d -= m * time.Minute
+	s := d / time.Second
+	var b strings.Builder
+	if h > 0 {
+		fmt.Fprintf(&b, "%dh", h)
+	}
+	if m > 0 {
+		fmt.Fprintf(&b, "%dm", m)
+	}
+	if s > 0 {
+		fmt.Fprintf(&b, "%ds", s)
+	}
+	if b.Len() == 0 {
+		return "0s"
+	}
+	return b.String()
 }

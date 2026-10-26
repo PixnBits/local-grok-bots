@@ -60,8 +60,12 @@ Every limit on a run is a policy key. Precedence is the same as other keys:
 managed settings, then `policy.toml`, then the default. Managed policy can
 also set a ceiling (`max_*`); the effective value is the smaller of the
 setting (or default) and the ceiling. A `max_*` key in `policy.toml` is
-ignored with a warning. Values are seconds or a Go duration, at most 24h.
-A bad value fail-closes like any other parse error.
+ignored with a warning. A timeout or `stall_retries` set in `policy.toml`
+above its managed ceiling is lowered to that ceiling and warned, for example
+`ollama.stall_timeout 5m lowered to managed max_stall_timeout 1m`. A value
+already within the ceiling is not warned, and a clamped default is not
+warned. Values are seconds or a Go duration, positive, at most 24h. A bad
+value fail-closes like any other parse error. The error names that key.
 
 ```toml
 [cli]
@@ -82,13 +86,76 @@ prompt_timeout = "10m"
 # max_prompt_timeout = "30m"       # managed only
 
 [ollama]
-# Whole Ollama run, all tool rounds. Default 10m.
+# Whole Ollama run, all tool rounds. Default 10m. This is the backstop.
 run_timeout = "10m"
-# One model call inside a run. Default 3m.
-model_timeout = "3m"
+# Optional hard cap on one model call. Unset means the effective run
+# timeout, so only run_timeout bounds the call. An explicit value stays a
+# hard per-call cap (and is not retried). Configs that set the old 3m
+# default should drop the key unless that cap is still wanted.
+# model_timeout = "10m"
+# Max wait from sending the request until the first output chunk
+# (content, thinking, a tool call, or the final done line). Covers a cold
+# model load. Default 5m. When model_timeout is set and this key is not,
+# the default is that model_timeout (before max_* ceilings).
+first_output_timeout = "5m"
+# Max gap between those output chunks after the first. A slow steady
+# trickle is not a stall. Default 2m. When model_timeout is set and this
+# key is not, the default is that model_timeout (before max_* ceilings).
+stall_timeout = "2m"
+# How many times one run retries a first-output wait or a stall. Default 1.
+# 0 disables. The ceiling is 5. A model_timeout, a run_timeout, Stop, and
+# shutdown are not retried.
+stall_retries = 1
+# Ollama keep_alive on every /api/chat. A Go duration, an integer number of
+# seconds (0 unloads), or -1 (keep loaded). Default "30m".
+keep_alive = "30m"
 # max_run_timeout = "1h"           # managed only
 # max_model_timeout = "10m"        # managed only
+# max_first_output_timeout = "15m" # managed only
+# max_stall_timeout = "5m"         # managed only
+# max_stall_retries = 1            # managed only
 ```
+
+`run_timeout` bounds the whole run. `first_output_timeout` and
+`stall_timeout` bound one call by silence, not by wall clock: output is any
+streamed chunk with non-empty `message.content`, non-empty `message.thinking`
+(thinking counts as activity and is not copied into the reply), a tool call,
+or the final `done` chunk. A call that keeps producing those faster than
+`stall_timeout` runs until `run_timeout`, or until an explicit `model_timeout`.
+`model_timeout` no longer defaults to 3m. When it is unset, the effective
+model timeout equals the effective run timeout, still capped by managed
+`max_model_timeout`, and the silence defaults stay 5m and 2m. When
+`model_timeout` is set in `policy.toml` or in managed policy and
+`first_output_timeout` or `stall_timeout` is not set by either source, each
+unset one defaults to that explicit `model_timeout` before managed `max_*`
+ceilings. The ceilings still apply afterwards. An explicit
+`first_output_timeout` or `stall_timeout` is used as written. A file that
+already set `model_timeout` and not the new keys therefore stays no stricter
+than that cap: a first token at 5m30s still succeeds when `model_timeout` is
+10m.
+
+A silence limit that is >= the per-call cap is not armed separately; the call ends as `model_timeout` and is not retried.
+
+A `first_output_timeout` or `stall_timeout` while the run is still alive and
+`stall_retries` remain is tried again, once by default, on the same messages.
+Tools run only after a complete response, so a failed call has not executed
+any tool. The retry publishes `status` `retrying` and a `stream_reset` event
+so the page drops the live partial. The attempt is logged with `retry: true`.
+
+A timeout that is not retried (retries used up, `model_timeout`, or
+`run_timeout`) keeps the longest partial text seen across that call's
+attempts as the bot's reply, marked `timed_out`, and finishes the run as
+`timeout`. The thread notice names the limit and its value, and says when a
+partial is kept. The same sentence without the `Notice: ` prefix is
+`last_run_error`. The page offers Retry (the same user turn, without the
+partial or the notice: `POST /api/bots/{id}/runs/{run_id}/retry`) while that
+run is the latest timeout and the bot is idle. Continue (the transcript
+including the partial, the existing continue endpoint) is offered only when
+that timeout kept partial text, so `continue_run_id` is set. With no partial,
+`continue_run_id` stays unset and the page shows Retry only. Continue needs
+the in-memory offer; a restart drops it and Retry still works. Stop,
+shutdown, and a CLI `turn_timeout` are unchanged: a CLI turn still ends
+`error` / `turn_timeout`.
 
 Before this, a CLI turn also ran under a fixed 10-minute run deadline that
 was not configurable, and the idle kill counted only from the turn start, so
