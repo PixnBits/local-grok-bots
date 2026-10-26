@@ -106,6 +106,15 @@ func TestThreadPolish(t *testing.T) {
 		`.composer textarea:focus-visible { outline: 2px solid transparent; outline-offset: 0; box-shadow: none; }`,
 		// When Retry now goes away on recovery, focus lands on the Bots heading.
 		`if (key === rosterFocusKey("retry", "")) {`,
+		// Stop from the button (click, Space, Enter) or the ⋯ item returns
+		// focus to the composer. Esc in the composer already leaves it there.
+		`function focusComposerAfterStop()`,
+		`input.focus({ preventScroll: true })`,
+		`focusComposerAfterStop();`,
+		// follow switches the hint to the running copy as soon as the phase does.
+		"state.stop = reduceStop(state.stop || freshStop(), { type: \"run\", runId: runId });\n  syncComposer();",
+		// Leaving running or stopping restores the idle hint.
+		"syncStopButton();\n  syncComposer();",
 	} {
 		if !strings.Contains(src, s) {
 			t.Errorf("missing %q", s)
@@ -135,6 +144,7 @@ vm.runInContext(snippet + "\n" + [
   "threadSubline", "stateChipName", "composerHint", "composerPlaceholder",
   "cardEyebrow", "cardTitle", "cardRecordText", "recordKind", "countdownAnnounce",
   "archiveFocusTarget", "themeRadioKey", "retryTrigger", "toolCallLabel",
+  "partialsToShow", "mergeRunRecords", "runRecordKey",
   "STOP_TIMEOUT_MS", "QUEUED_CAPTION", "STOP_FAILED_NOTE", "HINT_IDLE", "HINT_RUNNING"
 ].map(function (n) { return "this." + n + "=" + n + ";"; }).join("\n"), ctx);
 const cases = [];
@@ -267,6 +277,91 @@ check("retry-ignore", ctx.retryTrigger("hidden", true, false) === false && ctx.r
 check("retry-busy", ctx.retryTrigger("visible", true, true) === false && ctx.retryTrigger("focus", false, false) === false && ctx.retryTrigger("online", true, true) === false);
 const stamp = ctx.clockLabel(new Date(2020, 0, 1, 22, 42, 0));
 check("clock", stamp === "10:42 PM");
+const savedThread = [
+  {id: "b1", role: "bot", run_id: "r1", content: "Step one: chop the onions."},
+  {id: "b2", role: "bot", run_id: "r2", content: "Step one: chop the onions."}
+];
+const stoppedPartials = [
+  {runId: "r1", botId: "b", content: "Step one: chop the onions. "},
+  {runId: "r2", botId: "b", content: "Step one: chop the onions.\n"}
+];
+check("partial-saved", ctx.partialsToShow(savedThread, stoppedPartials, "b").length === 0);
+const withCurrent = stoppedPartials.concat([
+  {runId: "r1", botId: "b", content: "Step one: chop the onions. "},
+  {runId: "r3", botId: "b", content: "Still cooking "},
+  {runId: "r3", botId: "b", content: "Still cooking more "}
+]);
+const shownPartial = ctx.partialsToShow(savedThread, withCurrent, "b");
+check("partial-current", shownPartial.length === 1 && shownPartial[0].runId === "r3" && shownPartial[0].content === "Still cooking more ");
+check("partial-other-bot", ctx.partialsToShow(savedThread, [{runId: "r3", botId: "other", content: "Still cooking "}], "b").length === 0);
+const trimOnly = ctx.partialsToShow(
+  [{role: "bot", content: "Step one: chop the onions."}],
+  [{runId: "r9", botId: "b", content: "Step one: chop the onions.\n"}],
+  "b"
+);
+check("partial-trim", trimOnly.length === 0);
+const trimOtherRun = ctx.partialsToShow(
+  [{role: "bot", run_id: "r8", content: "Step one: chop the onions."}],
+  [{runId: "r9", botId: "b", content: "Step one: chop the onions.\n"}],
+  "b"
+);
+check("partial-trim-run", trimOtherRun.length === 1 && trimOtherRun[0].runId === "r9");
+function bubbleCounts(messages, partials, botId) {
+  const counts = {};
+  (messages || []).forEach(function (m) {
+    if (!m || m.role !== "bot" || !m.run_id) return;
+    counts[m.run_id] = (counts[m.run_id] || 0) + 1;
+  });
+  ctx.partialsToShow(messages, partials, botId).forEach(function (p) {
+    counts[p.runId] = (counts[p.runId] || 0) + 1;
+  });
+  return counts;
+}
+const bubbles = bubbleCounts(savedThread, withCurrent, "b");
+check("partial-one-bubble", bubbles.r1 === 1 && bubbles.r2 === 1 && bubbles.r3 === 1 && Object.keys(bubbles).length === 3);
+function serverPerm(name, args, decision, source, at) {
+  return {
+    kind: "permission",
+    name: name,
+    arguments: args,
+    result_or_error: JSON.stringify({decision: decision, source: source}),
+    created_at: at
+  };
+}
+const dupServer = [
+  serverPerm("Bash", {command: "rm -rf /tmp/x"}, "deny", "ui", "2020-01-01T00:00:20Z"),
+  serverPerm("Bash", "{\"command\":\"git status\"}", "allow_once", "ui", "2020-01-01T00:00:10Z")
+];
+const dupCards = [
+  {runId: "r1", botId: "b", kind: "allow_once", toolLabel: "Bash(git status)", timeLabel: "10:00 PM", duration: ""},
+  {runId: "r1", botId: "b", kind: "deny", toolLabel: "Bash(rm -rf /tmp/x)", timeLabel: "10:01 PM", duration: ""},
+  {runId: "r1", botId: "b", kind: "allow_session", toolLabel: "Bash(ls)", timeLabel: "10:02 PM", duration: ""}
+];
+const merged = ctx.mergeRunRecords(dupServer, dupCards, "r1", "b");
+check("merge-dedupe", merged.length === 3 && merged[0].kind === "allow_once" && merged[0].toolLabel === "Bash(git status)" && merged[1].kind === "deny" && merged[1].toolLabel === "Bash(rm -rf /tmp/x)" && merged[2].kind === "allow_session" && merged[2].toolLabel === "Bash(ls)");
+check("merge-local-once", merged.filter(function (r) { return r.kind === "allow_session"; }).length === 1);
+const kindRows = [
+  ["allow_once", "ui", "allow_once", ""],
+  ["allow_session", "ui", "allow_session", ""],
+  ["deny", "ui", "deny", ""],
+  ["deny", "timeout", "expired", "5:00"],
+  ["deny", "cancel", "cancelled", ""]
+];
+kindRows.forEach(function (row, i) {
+  const label = "Bash(cmd " + i + ")";
+  const srv = [serverPerm("Bash", {command: "cmd " + i}, row[0], row[1], "2020-01-01T00:00:0" + i + "Z")];
+  const local = [{runId: "r", botId: "b", kind: row[2], toolLabel: label, timeLabel: "1:00 PM", duration: row[3]}];
+  const got = ctx.mergeRunRecords(srv, local, "r", "b");
+  check("merge-" + row[2], got.length === 1 && got[0].kind === row[2] && got[0].toolLabel === label && (got[0].duration || "") === row[3]);
+});
+check("record-key", ctx.runRecordKey("r1", "deny", "Bash(ls)") === "r1|deny|Bash(ls)" && ctx.runRecordKey("r1", "deny", "Bash(ls)") !== ctx.runRecordKey("r2", "deny", "Bash(ls)"));
+check("merge-other-run", ctx.mergeRunRecords([], [{runId: "r2", botId: "b", kind: "deny", toolLabel: "Bash(ls)", timeLabel: "", duration: ""}], "r1", "b").length === 0);
+const pushGot = ctx.mergeRunRecords(
+  [serverPerm("git_push", {repo: "owner/name", branch: "main"}, "allow_once", "ui", "2020-01-01T00:00:01Z")],
+  [{runId: "r", botId: "b", kind: "allow_once", toolLabel: "git_push owner/name", timeLabel: "", duration: ""}],
+  "r", "b"
+);
+check("merge-push", pushGot.length === 1 && pushGot[0].toolLabel === "git_push owner/name" && pushGot[0].kind === "allow_once");
 console.log(JSON.stringify(cases));
 `
 	raw := runNode(t, node, script)

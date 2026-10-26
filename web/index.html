@@ -2233,33 +2233,14 @@ function recordPill(kind, toolLabel, timeLabel, duration) {
   row.append(document.createTextNode(text));
   return row;
 }
-function parsePermDetail(r) {
-  let d = {};
-  try { d = JSON.parse((r && r.result_or_error) || "{}") || {}; } catch (e) { d = {}; }
-  let args = r && r.arguments;
-  if (typeof args === "string") { try { args = JSON.parse(args); } catch (e) { args = {}; } }
-  return { d: d, args: args && typeof args === "object" ? args : {} };
-}
 function renderRunRecords(parent, runId) {
   const seen = {};
-  const recs = (state.tools && state.tools[runId]) || [];
-  for (const r of recs) {
-    if (r.kind !== "permission") continue;
-    const parsed = parsePermDetail(r);
-    const kind = recordKind(parsed.d.decision, parsed.d.source);
-    if (!kind) continue;
-    const toolLabel = toolCallLabel(r.name, parsed.args);
-    const key = runId + "|" + kind + "|" + toolLabel;
+  const merged = mergeRunRecords((state.tools && state.tools[runId]) || [], state.cardRecords || [], runId, state.botId);
+  for (const rec of merged) {
+    const key = runRecordKey(runId, rec.kind, rec.toolLabel);
     if (seen[key]) continue;
     seen[key] = true;
-    parent.append(recordPill(kind, toolLabel, clockLabel(r.created_at), ""));
-  }
-  for (const c of state.cardRecords || []) {
-    if (c.runId !== runId || c.botId !== state.botId) continue;
-    const key = c.kind + "|" + c.toolLabel;
-    if (seen[key]) continue;
-    seen[key] = true;
-    parent.append(recordPill(c.kind, c.toolLabel, c.timeLabel, c.duration));
+    parent.append(recordPill(rec.kind, rec.toolLabel, rec.timeLabel, rec.duration));
   }
   return seen;
 }
@@ -2278,19 +2259,43 @@ function renderMessages(mode = "bottom") {
   const prevH = box.scrollHeight, prevTop = box.scrollTop;
   const live = $("#live"), working = $("#working");
   box.replaceChildren();
-  if (!state.messages.length && working.hidden && !(state.localPartials || []).some(p => p.botId === state.botId)) {
+  const showing = partialsToShow(state.messages, state.localPartials, state.botId);
+  const keepPartial = new Set(showing);
+  state.localPartials = (state.localPartials || []).filter(p => p && (p.botId !== state.botId || keepPartial.has(p)));
+  if (!state.messages.length && working.hidden && !showing.length) {
     box.append(el("p", "empty", "No messages yet. The composer stays available while a run is in progress."));
   }
+  const partialAt = {};
+  for (const p of showing) {
+    let at = state.messages.length;
+    const id = p && p.runId != null && p.runId !== "" ? String(p.runId) : "";
+    if (id) {
+      for (let i = 0; i < state.messages.length; i++) {
+        const row = state.messages[i];
+        const rowId = row && row.run_id != null && row.run_id !== "" ? String(row.run_id) : "";
+        if (rowId === id) { at = i; break; }
+      }
+    }
+    if (!partialAt[at]) partialAt[at] = [];
+    partialAt[at].push(p);
+  }
+  const appendPartial = (p) => {
+    const bubble = el("div", "bubble bot");
+    bubble.append(renderMarkdown(p.content, el("div", "md")));
+    box.append(bubble);
+  };
   const shownTools = new Set();
   const drawnStops = {};
   const seenRecords = {};
   let lastDay = "";
-  for (const m of state.messages) {
+  for (let mi = 0; mi < state.messages.length; mi++) {
+    const m = state.messages[mi];
     const day = m.created_at ? dayLabel(m.created_at) : "";
     if (day && day !== lastDay) {
       lastDay = day;
       box.append(el("div", "day-line", day));
     }
+    for (const p of partialAt[mi] || []) appendPartial(p);
     if (m.role === "system" && m.content === "Notice: Run cancelled." && stopInfoFor(m.run_id)) {
       box.append(stoppedPill(stopInfoFor(m.run_id)));
       drawnStops[m.run_id] = true;
@@ -2332,25 +2337,29 @@ function renderMessages(mode = "bottom") {
       }
     }
   }
+  for (const p of partialAt[state.messages.length] || []) appendPartial(p);
   for (const runId in (state.userStops || {})) {
     if (drawnStops[runId]) continue;
     const info = stopInfoFor(runId);
     if (info) box.append(stoppedPill(info));
   }
-  for (const p of state.localPartials || []) {
-    if (!p || p.botId !== state.botId || !p.content) continue;
-    const have = state.messages.some(m => m && m.role === "bot" && m.run_id === p.runId && (m.content || "") === p.content);
-    if (have) continue;
-    const bubble = el("div", "bubble bot");
-    bubble.append(renderMarkdown(p.content, el("div", "md")));
-    box.append(bubble);
-  }
+  const pendingRuns = [];
+  const pendingSeen = {};
   for (const c of state.cardRecords || []) {
     if (!c || c.botId !== state.botId) continue;
-    const key = (c.runId || "") + "|" + c.kind + "|" + c.toolLabel;
-    if (seenRecords[key]) continue;
-    seenRecords[key] = true;
-    box.append(recordPill(c.kind, c.toolLabel, c.timeLabel, c.duration));
+    const id = c.runId || "";
+    if (pendingSeen[id]) continue;
+    pendingSeen[id] = true;
+    pendingRuns.push(id);
+  }
+  for (const id of pendingRuns) {
+    const extra = mergeRunRecords([], state.cardRecords || [], id, state.botId);
+    for (const rec of extra) {
+      const key = runRecordKey(id, rec.kind, rec.toolLabel);
+      if (seenRecords[key]) continue;
+      seenRecords[key] = true;
+      box.append(recordPill(rec.kind, rec.toolLabel, rec.timeLabel, rec.duration));
+    }
   }
   // The live run and the working indicator sit where the next reply will appear.
   box.append(live, working);
@@ -3045,6 +3054,7 @@ function applyStop(next) {
   if (state.stop.note === "stop-failed") state.stopNote = "failed";
   else if (state.stop.phase !== "running") state.stopNote = "";
   syncStopButton();
+  syncComposer();
   const b = typeof currentBot === "function" ? currentBot() : null;
   if (b && typeof paintHeader === "function") paintHeader(b);
   else if (typeof paintSubline === "function") paintSubline(b);
@@ -3082,6 +3092,17 @@ function settleStoppedCards() {
     settlePermission(id, "deny", "cancel", false);
   }
 }
+// After Stop from the button or the ⋯ item, the control hides under focus
+// and the browser drops focus on body. Put it back on the composer unless
+// the user has already moved to some other control.
+function focusComposerAfterStop() {
+  const active = document.activeElement;
+  const stopBtn = $("#stop-btn");
+  const menuStop = $("#menu-stop");
+  if (active && active !== document.body && active !== stopBtn && active !== menuStop) return;
+  const input = $("#composer-input");
+  if (input && typeof input.focus === "function") input.focus({ preventScroll: true });
+}
 function rememberPartial(runId, text) {
   const content = String(text || "");
   if (!content || !runId) return;
@@ -3093,6 +3114,7 @@ async function requestStop() {
   const runId = state.stop.runId;
   const queued = !!(state.queuedIds && state.queuedIds.length);
   applyStop(reduceStop(state.stop, { type: "press", now: Date.now(), runId: runId, queued: queued }));
+  focusComposerAfterStop();
   announce("Stopping run");
   setWorking(true);
   let data = null;
@@ -3146,6 +3168,7 @@ async function follow(runId) {
   stopStream();
   state.streaming = runId;
   state.stop = reduceStop(state.stop || freshStop(), { type: "run", runId: runId });
+  syncComposer();
   state.liveTool = "";
   syncStopButton();
   if (noteRunStarted(state.bots, state.botId)) renderBots();
@@ -4682,6 +4705,115 @@ function recordKind(decision, source) {
   if (dec === "allow_once" || dec === "allow") return "allow_once";
   if (dec === "deny") return "deny";
   return "";
+}
+
+// One pill per run, kind, and tool. The run id is part of the key so a later
+// run does not collapse into an earlier one, and a local card matches the
+// server record of the same decision.
+function runRecordKey(runId, kind, toolLabel) {
+  return String(runId || "") + "|" + String(kind || "") + "|" + String(toolLabel || "");
+}
+
+function permRecordFields(rec) {
+  let d = {};
+  const raw = rec && rec.result_or_error;
+  if (raw && typeof raw === "object") d = raw;
+  else {
+    try { d = JSON.parse(raw || "{}") || {}; } catch (e) { d = {}; }
+  }
+  if (!d || typeof d !== "object") d = {};
+  let args = rec && rec.arguments;
+  if (typeof args === "string") {
+    try { args = JSON.parse(args); } catch (e) { args = {}; }
+  }
+  if (!args || typeof args !== "object") args = {};
+  return {
+    kind: recordKind(d.decision, d.source),
+    toolLabel: toolCallLabel(rec && rec.name, args)
+  };
+}
+
+// Server rows first, by created_at. A local card with the same key is the
+// same decision and is not repeated; its duration fills an empty server one
+// (the countdown lives only on the card). Local-only rows follow.
+function mergeRunRecords(serverRecs, cardRecords, runId, botId) {
+  const out = [];
+  const seen = {};
+  const recs = Array.isArray(serverRecs) ? serverRecs.slice() : [];
+  recs.sort(function (a, b) {
+    const ta = Date.parse(a && a.created_at || "") || 0;
+    const tb = Date.parse(b && b.created_at || "") || 0;
+    return ta - tb;
+  });
+  for (let i = 0; i < recs.length; i++) {
+    const r = recs[i];
+    if (!r || r.kind !== "permission") continue;
+    const fields = permRecordFields(r);
+    if (!fields.kind) continue;
+    const key = runRecordKey(runId, fields.kind, fields.toolLabel);
+    if (Object.prototype.hasOwnProperty.call(seen, key)) continue;
+    seen[key] = out.length;
+    out.push({
+      kind: fields.kind,
+      toolLabel: fields.toolLabel,
+      timeLabel: clockLabel(r.created_at),
+      duration: ""
+    });
+  }
+  const cards = Array.isArray(cardRecords) ? cardRecords : [];
+  for (let i = 0; i < cards.length; i++) {
+    const c = cards[i];
+    if (!c || c.runId !== runId || c.botId !== botId || !c.kind) continue;
+    const key = runRecordKey(c.runId || runId, c.kind, c.toolLabel);
+    if (Object.prototype.hasOwnProperty.call(seen, key)) {
+      const cur = out[seen[key]];
+      if (cur && !cur.duration && c.duration) cur.duration = String(c.duration);
+      continue;
+    }
+    seen[key] = out.length;
+    out.push({
+      kind: c.kind,
+      toolLabel: c.toolLabel || "",
+      timeLabel: c.timeLabel || "",
+      duration: c.duration || ""
+    });
+  }
+  return out;
+}
+
+// A saved bot reply drops its local partial by run id. Trimmed text is only
+// a fallback when that reply has no run id (the daemon trims trailing
+// whitespace, so the strings do not match). One entry per run; the last
+// unsaved copy wins.
+function partialAlreadyStored(messages, partial) {
+  const runId = partial && partial.runId != null && partial.runId !== "" ? String(partial.runId) : "";
+  const text = String(partial && partial.content || "").trim();
+  const list = Array.isArray(messages) ? messages : [];
+  for (let i = 0; i < list.length; i++) {
+    const m = list[i];
+    if (!m || m.role !== "bot") continue;
+    const mid = m.run_id != null && m.run_id !== "" ? String(m.run_id) : "";
+    if (runId && mid === runId) return true;
+    if (!mid && text && String(m.content || "").trim() === text) return true;
+  }
+  return false;
+}
+
+function partialsToShow(messages, partials, botId) {
+  const list = Array.isArray(partials) ? partials : [];
+  const byRun = {};
+  const order = [];
+  for (let i = 0; i < list.length; i++) {
+    const p = list[i];
+    if (!p || !p.content || p.botId !== botId) continue;
+    if (partialAlreadyStored(messages, p)) continue;
+    const id = p.runId == null ? "" : String(p.runId);
+    if (!Object.prototype.hasOwnProperty.call(byRun, id)) order.push(id);
+    byRun[id] = p;
+  }
+  const out = [];
+  for (let i = 0; i < order.length; i++) out.push(byRun[order[i]]);
+  return out;
 }
 
 // Announce only when the remaining whole seconds first land on 60 or 10.
