@@ -272,6 +272,37 @@ echo PUSH_DONE
 		}
 	}
 
+	t.Run("foreign author", func(t *testing.T) {
+		app, evals, auditPath := newPushApp(t)
+		before := packs.Load()
+		command := `set -e
+git init
+git checkout -b feature-evil
+echo hello > readme.txt
+git add readme.txt
+GIT_AUTHOR_NAME=Evil GIT_AUTHOR_EMAIL=evil@evil.example GIT_COMMITTER_NAME=Evil GIT_COMMITTER_EMAIL=evil@evil.example git commit -m evil
+git push https://github.com/acme/widgets.git feature-evil
+echo PUSH_DONE
+`
+		out, err := runPush(t, app, auditPath, []string{"acme/widgets"}, command, false)
+		if err == nil || strings.Contains(out, "PUSH_DONE") || strings.Contains(out, "git push sent") {
+			t.Fatalf("push was sent: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "author") {
+			t.Fatalf("reason author missing:\n%s", out)
+		}
+		if evals.Load() != 0 {
+			t.Fatalf("Evaluate ran (%d)", evals.Load())
+		}
+		if packs.Load() != before {
+			t.Fatal("receive-pack ran")
+		}
+		raw := readAudit(t, auditPath)
+		if !strings.Contains(raw, "github_push_denied") || !strings.Contains(raw, `"reason":"author"`) {
+			t.Fatalf("audit:\n%s", raw)
+		}
+	})
+
 	t.Run("force", func(t *testing.T) {
 		deny(t, feature("feature", "note-force", "git push --force https://github.com/acme/widgets.git feature"), "force")
 		deny(t, feature("feature", "note-lease", "git push --force-with-lease https://github.com/acme/widgets.git feature"), "force")

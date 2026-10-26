@@ -18,7 +18,7 @@ func TestWatchSIGHUP(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		go func() {
-			WatchSIGHUP(ctx, hup, "/tmp/lgb-tokens", func() { n.Add(1) }, buf)
+			WatchSIGHUP(ctx, hup, "/tmp/lgb-tokens", func() { n.Add(1) }, nil, buf)
 			close(done)
 		}()
 		hup <- syscall.SIGHUP
@@ -47,7 +47,7 @@ func TestWatchSIGHUP(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan struct{})
 		go func() {
-			WatchSIGHUP(ctx, hup, "", func() { n.Add(1) }, buf)
+			WatchSIGHUP(ctx, hup, "", func() { n.Add(1) }, nil, buf)
 			close(done)
 		}()
 		hup <- syscall.SIGHUP
@@ -68,6 +68,35 @@ func TestWatchSIGHUP(t *testing.T) {
 		}
 		if got := buf.String(); got != want || strings.Count(got, sighupIgnoreLine) != 2 {
 			t.Fatalf("log %q", got)
+		}
+	})
+	t.Run("refreshes when unset", func(t *testing.T) {
+		hup := make(chan os.Signal, 1)
+		var n atomic.Int32
+		var also atomic.Int32
+		buf := &safeBuf{}
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			WatchSIGHUP(ctx, hup, "", func() { n.Add(1) }, func() { also.Add(1) }, buf)
+			close(done)
+		}()
+		hup <- syscall.SIGHUP
+		deadline := time.Now().Add(2 * time.Second)
+		for also.Load() < 1 && time.Now().Before(deadline) {
+			time.Sleep(5 * time.Millisecond)
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("watch did not return")
+		}
+		if n.Load() != 0 || also.Load() != 1 {
+			t.Fatalf("reload %d also %d", n.Load(), also.Load())
+		}
+		if buf.String() != sighupIgnoreLine+"\n" {
+			t.Fatalf("log %q", buf.String())
 		}
 	})
 }

@@ -413,6 +413,7 @@ func (a *App) ReloadAuthTokens() {
 		return
 	}
 	a.authTokens.Store(&authTokenSet{toks: append([]namedToken(nil), toks...)})
+	a.RefreshProtectSnapshot()
 	a.writeStartup("local-grok-bots: reloaded AUTH_TOKENS_FILE (%d tokens)\n", len(toks))
 	if a.audit != nil && a.audit.Enabled() {
 		a.audit.Write(map[string]any{"action": "auth_tokens_reloaded", "count": len(toks)})

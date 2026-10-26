@@ -115,6 +115,9 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	if oerr != nil {
 		return a.pushDenied(bot, owner, repo, claimedFrom, "remote ref")
 	}
+	if reason := a.refusePushAuthors(pctx, bot, gate, mirror, owner, repo, specs, old); reason != "" {
+		return a.pushDenied(bot, owner, repo, claimedFrom, reason)
+	}
 	commits, err := mirrorLog(pctx, mirror, specs)
 	if err != nil {
 		return a.pushDenied(bot, owner, repo, claimedFrom, "mirror")
@@ -175,6 +178,34 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 		Stdout: "git push sent\n",
 		Events: []sandbox.Event{ev},
 	}
+}
+
+// refusePushAuthors checks the mirror before the approval card. Every
+// commit that would be pushed must use the configured bot author for both
+// the author and the committer. A missing identity or a log that cannot
+// be read is the same refusal.
+func (a *App) refusePushAuthors(pctx context.Context, bot store.Bot, gate *gitHubGate, mirror, owner, repo string, specs []pushSpec, old string) string {
+	if a == nil || gate == nil || gate.px == nil {
+		return "author"
+	}
+	name, email, err := github.CommitAuthor(bot.Name, a.policy.GitHub.AuthorName, a.policy.GitHub.AuthorEmail)
+	if err != nil || name == "" || email == "" {
+		return "author"
+	}
+	for i, sp := range specs {
+		oid := old
+		if i > 0 {
+			got, err := a.githubBranchOID(pctx, gate.px, owner, repo, sp.branch)
+			if err != nil {
+				return "remote ref"
+			}
+			oid = got
+		}
+		if err := mirrorAuthorsMatch(pctx, mirror, oid, sp.src, name, email); err != nil {
+			return "author"
+		}
+	}
+	return ""
 }
 
 func (a *App) pushDenied(bot store.Bot, owner, repo, claimedFrom, reason string) sandbox.PushResult {

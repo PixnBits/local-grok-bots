@@ -118,10 +118,11 @@ func checkAuthTokensBinds(file string, binds []string) error {
 // credential_home that overlaps a daemon secret. Credential homes are left
 // out of the secret list when they are the path being checked, then compared
 // with each other. Build binds also treat DATA_DIR itself, raw and resolved,
-// as a secret, and a bind that does not exist is refused. A home strictly
-// inside DATA_DIR/cli or DATA_DIR/coi does not overlap that parent directory.
-// It still overlaps any other secret. A home that equals or contains DATA_DIR
-// is refused.
+// as a secret, and a bind that does not exist is refused. A home inside
+// DATA_DIR is accepted only at DATA_DIR/coi/<name> (not homes), including
+// paths nested under that name. Any other path inside DATA_DIR is refused.
+// A home strictly inside DATA_DIR/coi does not overlap that parent directory.
+// It still overlaps any other secret. A home that contains DATA_DIR is refused.
 func checkPathOverlaps(cfg config.Config, pol policy.Policy) error {
 	secrets := append([]string{}, secretPaths(cfg, pol, true)...)
 	secrets = append(secrets, pathForms(cfg.DataDir)...)
@@ -152,6 +153,9 @@ func checkPathOverlaps(cfg config.Config, pol policy.Policy) error {
 		}
 		if hit, ok := homeInsideWorkspace(home, wsForms); ok {
 			return fmt.Errorf("tools.cli credential_home %s is inside the workspace %s", home, hit)
+		}
+		if credentialHomeInsideDataDir(home, cfg.DataDir) {
+			return fmt.Errorf("tools.cli credential_home %s is inside DATA_DIR; use DATA_DIR/coi/<name> or a path outside DATA_DIR", home)
 		}
 		if hit, ok := credentialHomeOverlaps(home, cfg.DataDir, base); ok {
 			return fmt.Errorf("tools.cli credential_home %s overlaps protected path %s", home, hit)
@@ -198,10 +202,51 @@ func nestedCredentialHome(a, b string) (inner, outer string, ok bool) {
 	return "", "", false
 }
 
+// credentialHomeInsideDataDir reports whether any raw or resolved form of
+// home is inside DATA_DIR and is not DATA_DIR/coi/<name> or a path nested
+// under that name. <name> is one path component and is not "homes".
+func credentialHomeInsideDataDir(home, dataDir string) bool {
+	for _, d := range pathForms(dataDir) {
+		for _, h := range pathForms(home) {
+			if !pathInside(d, h) {
+				continue
+			}
+			rel, err := filepath.Rel(d, h)
+			if err != nil || !coiHomeRel(rel) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// coiHomeRel is true for coi/<name> and coi/<name>/deeper, where name is
+// one component and is not homes, ".", or "..".
+func coiHomeRel(rel string) bool {
+	rel = filepath.Clean(rel)
+	if rel == "" || rel == "." {
+		return false
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	if len(parts) < 2 || parts[0] != "coi" {
+		return false
+	}
+	id := parts[1]
+	if id == "" || id == "." || id == ".." || id == "homes" {
+		return false
+	}
+	for _, p := range parts[2:] {
+		if p == "" || p == "." || p == ".." {
+			return false
+		}
+	}
+	return true
+}
+
 // credentialHomeOverlaps reports whether home equals or contains DATA_DIR,
 // or overlaps a specific secret. The returned path is the protected path
-// that matched. A home strictly inside DATA_DIR/cli or DATA_DIR/coi does
-// not overlap that parent directory. It still overlaps any other secret.
+// that matched. A home strictly inside DATA_DIR/coi does not overlap that
+// parent directory. It still overlaps any other secret.
 func credentialHomeOverlaps(home, dataDir string, secrets []string) (string, bool) {
 	if hit, ok := homeContainsDataDir(home, dataDir); ok {
 		return hit, true
@@ -234,7 +279,9 @@ func homeContainsDataDir(home, dataDir string) (string, bool) {
 }
 
 // homeParentForms is DATA_DIR/cli and DATA_DIR/coi, raw and resolved.
-// A credential home may sit strictly inside either directory.
+// A credential home strictly inside DATA_DIR/coi/<name> does not overlap
+// the coi directory. Homes inside DATA_DIR/cli are refused before this
+// exception is reached.
 func homeParentForms(dataDir string) []string {
 	seen := map[string]struct{}{}
 	var out []string
@@ -275,8 +322,9 @@ func credentialHomesNest(a, b string) bool {
 
 // homeOverlapsSecret compares home with one secret path. Equality, and a
 // home that contains the secret, overlap. A home strictly inside DATA_DIR/cli
-// or DATA_DIR/coi does not overlap that parent directory. The returned path
-// is the secret form that matched.
+// or DATA_DIR/coi does not overlap that parent directory. The cli case is
+// refused earlier when the home is inside DATA_DIR. The returned path is
+// the secret form that matched.
 func homeOverlapsSecret(home, secret string, parents map[string]struct{}) (string, bool) {
 	for _, h := range pathForms(home) {
 		for _, s := range pathForms(secret) {

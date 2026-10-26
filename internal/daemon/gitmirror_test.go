@@ -22,6 +22,54 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestMirrorAuthorsMatch(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal(err)
+	}
+	commit := func(t *testing.T, env []string) string {
+		t.Helper()
+		dir := t.TempDir()
+		git := func(args ...string) {
+			t.Helper()
+			cmd := exec.Command("git", args...)
+			cmd.Dir = dir
+			cmd.Env = append(os.Environ(),
+				"GIT_CONFIG_GLOBAL=/dev/null",
+				"GIT_CONFIG_SYSTEM=/dev/null",
+				"GIT_CONFIG_NOSYSTEM=1",
+			)
+			cmd.Env = append(cmd.Env, env...)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("git %v: %v\n%s", args, err, out)
+			}
+		}
+		git("init")
+		git("checkout", "-b", "feature")
+		git("commit", "--allow-empty", "-m", "note")
+		return filepath.Join(dir, ".git")
+	}
+	zero := strings.Repeat("0", 40)
+	good := commit(t, []string{
+		"GIT_AUTHOR_NAME=Ada",
+		"GIT_AUTHOR_EMAIL=Ada@users.noreply",
+		"GIT_COMMITTER_NAME=Ada",
+		"GIT_COMMITTER_EMAIL=Ada@users.noreply",
+	})
+	if err := mirrorAuthorsMatch(context.Background(), good, zero, "refs/heads/feature", "Ada", "Ada@users.noreply"); err != nil {
+		t.Fatal(err)
+	}
+	bad := commit(t, []string{
+		"GIT_AUTHOR_NAME=Evil",
+		"GIT_AUTHOR_EMAIL=evil@evil.example",
+		"GIT_COMMITTER_NAME=Evil",
+		"GIT_COMMITTER_EMAIL=evil@evil.example",
+	})
+	if err := mirrorAuthorsMatch(context.Background(), bad, zero, "refs/heads/feature", "Ada", "Ada@users.noreply"); err == nil {
+		t.Fatal("foreign author was accepted")
+	}
+}
+
 func TestMirrorIgnoresWorkspaceConfig(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Fatal(err)

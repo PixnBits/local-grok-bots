@@ -54,7 +54,7 @@ func setupCOI(t *testing.T, calls int, bots []string) *coiFix {
 
 	dir := t.TempDir()
 	ws := filepath.Join(dir, "ws")
-	cred := filepath.Join(dir, "cred")
+	cred := filepath.Join(dir, "coi", "fake")
 	bin := filepath.Join(dir, "bin", "fake")
 	for _, d := range []string{ws, cred, filepath.Dir(bin)} {
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -415,7 +415,7 @@ func TestCOIDeniesAndCaps(t *testing.T) {
 	if code != 1 || out != "coi: cli binary is not available" || f.ran() {
 		t.Fatalf("missing bin %d %q", code, out)
 	}
-	homeFile := filepath.Join(f.dir, "not-a-dir")
+	homeFile := filepath.Join(t.TempDir(), "not-a-dir")
 	if err := os.WriteFile(homeFile, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +430,10 @@ func TestCOIDeniesAndCaps(t *testing.T) {
 	}
 	f.writeTools(t, f.entry("fake", f.bin, inside, []string{f.bot.Name}, 5))
 	code, out = f.coi(t, "fake", "--version")
-	if code != 1 || out != "coi: credential home is not available" || strings.Contains(out, inside) || f.ran() {
+	// The turn workspace sits under DATA_DIR, so this home is refused when
+	// the policy is loaded. The broker reports that as an unavailable policy
+	// and does not echo the path.
+	if code != 1 || out != "coi: policy is not available" || strings.Contains(out, inside) || f.ran() {
 		t.Fatalf("inside home %d %q ran=%v", code, out, f.ran())
 	}
 
@@ -618,7 +621,7 @@ func TestCOIRefusesCredentialHomeOutsideTurn(t *testing.T) {
 	if !coi.Covers(f.run.protect, f.cred) {
 		t.Fatalf("snapshot %v lacks %s", f.run.protect, f.cred)
 	}
-	later := filepath.Join(f.dir, "later-home")
+	later := filepath.Join(t.TempDir(), "later-home")
 	if err := os.MkdirAll(later, 0o700); err != nil {
 		t.Fatal(err)
 	}

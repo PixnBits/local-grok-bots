@@ -149,6 +149,38 @@ func (a *App) auditSandboxGitHub(botID string, ev sandbox.Event) {
 	}
 }
 
+// auditSandboxNet records a trusted net or ssh grant_denied, or a
+// net_request, when the audit log is enabled. GitHub rows stay with
+// auditSandboxGitHub. The fields are the action, the bot id, the grant,
+// the host when one was named, and a short clipped detail.
+func (a *App) auditSandboxNet(botID string, ev sandbox.Event) {
+	if a == nil || a.audit == nil || !a.audit.Enabled() || ev.Untrusted {
+		return
+	}
+	action := ""
+	switch ev.Kind {
+	case "grant_denied":
+		if ev.Grant != "net" && ev.Grant != "ssh" {
+			return
+		}
+		action = "grant_denied"
+	case "net_request":
+		action = "net_request"
+	default:
+		return
+	}
+	rec := map[string]any{
+		"action": action,
+		"bot_id": safeAuditID(botID),
+		"grant":  clipASCII(ev.Grant),
+		"detail": clipASCII(ev.Detail),
+	}
+	if ev.Host != "" {
+		rec["host"] = clipASCII(ev.Host)
+	}
+	a.audit.Write(rec)
+}
+
 func (a *App) noteGitHubSock(botID, sock string) {
 	if a == nil {
 		return

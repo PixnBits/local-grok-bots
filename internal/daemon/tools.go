@@ -504,6 +504,7 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			SSHAllow:        current.SSHAllow,
 			BuildBinds:      binds,
 			Protect:         protect,
+			ProtectInodes:   a.protectInodes(),
 			SSHKey:          a.sshKeyPath(),
 			GitHubSock:      ghSock,
 			GitHubRepos:     ghRepos,
@@ -518,9 +519,7 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			},
 			Dial: a.shellDial,
 		})
-		for _, ev := range res.Events {
-			a.recordSandbox(current.ID, ev)
-		}
+		a.recordSandboxEvents(current.ID, res.Events)
 		summary := formatShell(res.Stdout, res.Stderr)
 		if err != nil {
 			return summary, fmt.Errorf("%s\n%s", err.Error(), summary)
@@ -536,6 +535,88 @@ func (a *App) sshKeyPath() string {
 }
 
 func (a *App) recordSandbox(botID string, ev sandbox.Event) {
+	a.recordSandboxNotice(botID, ev, true)
+}
+
+// recordSandboxEvents logs every event from one turn. Untrusted jail
+// notices are posted once per notice text. A count is added when the same
+// text was reported more than once. Dropped-line counts from
+// jail_report_truncated are included. Trusted notices stay one per event.
+func (a *App) recordSandboxEvents(botID string, events []sandbox.Event) {
+	counts := map[string]int{}
+	var order []string
+	dropped := 0
+	for _, ev := range events {
+		if ev.Untrusted || ev.Kind == "jail_report" || ev.Kind == "jail_report_truncated" {
+			a.recordSandboxNotice(botID, ev, false)
+			dropped += droppedLines(ev)
+			if text := untrustedNotice(ev); text != "" {
+				if counts[text] == 0 {
+					order = append(order, text)
+				}
+				counts[text]++
+			}
+			continue
+		}
+		a.recordSandbox(botID, ev)
+	}
+	if len(order) == 0 {
+		if dropped > 0 {
+			a.postSystemNotice(botID, fmt.Sprintf("Notice: Untrusted jail report: dropped lines (dropped %d)", dropped))
+		}
+		return
+	}
+	for _, text := range order {
+		n := counts[text]
+		msg := "Notice: " + text
+		switch {
+		case n > 1 && dropped > 0:
+			msg = fmt.Sprintf("%s (x%d, dropped %d)", msg, n, dropped)
+		case n > 1:
+			msg = fmt.Sprintf("%s (x%d)", msg, n)
+		case dropped > 0:
+			msg = fmt.Sprintf("%s (dropped %d)", msg, dropped)
+		}
+		a.postSystemNotice(botID, msg)
+	}
+}
+
+func droppedLines(ev sandbox.Event) int {
+	if ev.Kind != "jail_report_truncated" {
+		return 0
+	}
+	rest, ok := strings.CutPrefix(ev.Detail, "dropped ")
+	if !ok {
+		return 0
+	}
+	n, err := strconv.Atoi(rest)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+func untrustedNotice(ev sandbox.Event) string {
+	if ev.Notice == "" {
+		return ""
+	}
+	notice := ev.Notice
+	if !strings.Contains(strings.ToLower(notice), "untrusted") {
+		notice = "Untrusted jail report: " + notice
+	}
+	return notice
+}
+
+func (a *App) postSystemNotice(botID, content string) {
+	if a == nil || a.st == nil || content == "" {
+		return
+	}
+	_, _ = a.st.AddMessage(store.Message{
+		BotID: botID, Thread: "user", Role: "system", Content: content,
+	})
+}
+
+func (a *App) recordSandboxNotice(botID string, ev sandbox.Event, postNotice bool) {
 	if ev.Untrusted || ev.Kind == "jail_report" {
 		detail := map[string]any{"untrusted": true}
 		if ev.Reported != "" {
@@ -557,14 +638,10 @@ func (a *App) recordSandbox(botID string, ev sandbox.Event) {
 			detail["repo"] = ev.Repo
 		}
 		a.log(botID, "jail_report", detail)
-		if ev.Notice != "" {
-			notice := ev.Notice
-			if !strings.Contains(strings.ToLower(notice), "untrusted") {
-				notice = "Untrusted jail report: " + notice
+		if postNotice {
+			if text := untrustedNotice(ev); text != "" {
+				a.postSystemNotice(botID, "Notice: "+text)
 			}
-			_, _ = a.st.AddMessage(store.Message{
-				BotID: botID, Thread: "user", Role: "system", Content: "Notice: " + notice,
-			})
 		}
 		return
 	}
@@ -581,11 +658,10 @@ func (a *App) recordSandbox(botID string, ev sandbox.Event) {
 		}
 		a.log(botID, ev.Kind, detail)
 		a.auditSandboxGitHub(botID, ev)
+		a.auditSandboxNet(botID, ev)
 	}
-	if ev.Notice != "" {
-		_, _ = a.st.AddMessage(store.Message{
-			BotID: botID, Thread: "user", Role: "system", Content: "Notice: " + ev.Notice,
-		})
+	if postNotice && ev.Notice != "" {
+		a.postSystemNotice(botID, "Notice: "+ev.Notice)
 	}
 }
 

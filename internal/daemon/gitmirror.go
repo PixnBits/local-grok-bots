@@ -167,6 +167,63 @@ func runGit(ctx context.Context, gitDir string, args ...string) (stdout, stderr 
 	return execGit(ctx, gitDir, nil, nil, args...)
 }
 
+// mirrorAuthorsMatch reports whether every commit in the push range has
+// author and committer name and email equal to the configured identity.
+// A zero old id checks every commit reachable from src. Any other old id
+// checks old..src. A log that cannot be read fails closed.
+func mirrorAuthorsMatch(ctx context.Context, gitDir, old, src, name, email string) error {
+	rev, err := authorRev(old, src)
+	if err != nil {
+		return err
+	}
+	stdout, _, err := runGit(ctx, gitDir,
+		"log", "-z", "--format=AUTHOR%x00%an%x00%ae%x00%cn%x00%ce",
+		"--no-textconv", "--no-ext-diff", "--no-show-signature",
+		rev, "--",
+	)
+	if err != nil {
+		return errors.New("author")
+	}
+	parts := bytes.Split(bytes.TrimRight(stdout, "\x00\n"), []byte{0})
+	if len(parts) == 0 || len(stdout) == 0 {
+		return errors.New("author")
+	}
+	if len(parts)%5 != 0 {
+		return errors.New("author")
+	}
+	for i := 0; i < len(parts); i += 5 {
+		if string(parts[i]) != "AUTHOR" || string(parts[i+1]) != name || string(parts[i+2]) != email || string(parts[i+3]) != name || string(parts[i+4]) != email {
+			return errors.New("author")
+		}
+	}
+	return nil
+}
+
+func authorRev(old, src string) (string, error) {
+	if !strings.HasPrefix(src, "refs/heads/") || strings.ContainsAny(src, " \t\r\n\x00") || strings.Contains(src, "..") {
+		return "", errors.New("author")
+	}
+	if old == "" || zeroOID(old) {
+		return src, nil
+	}
+	if !hexSHA(old) || strings.Contains(old, "..") {
+		return "", errors.New("author")
+	}
+	return old + ".." + src, nil
+}
+
+func zeroOID(s string) bool {
+	if !hexSHA(s) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] != '0' {
+			return false
+		}
+	}
+	return true
+}
+
 func mirrorLog(ctx context.Context, gitDir string, specs []pushSpec) (string, error) {
 	var b strings.Builder
 	for _, sp := range specs {

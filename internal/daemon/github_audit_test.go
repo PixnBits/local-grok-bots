@@ -1,12 +1,12 @@
 package daemon
 
 import (
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"errors"
 
 	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/github"
@@ -83,6 +83,52 @@ func TestAuditSandboxGitHubAllowlist(t *testing.T) {
 	}
 	if strings.Count(raw, "\n") != 2 {
 		t.Fatalf("audit line split:\n%s", raw)
+	}
+}
+
+func TestAuditSandboxNetAndSSH(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "no"}, nil
+	}})
+	auditPath := filepath.Join(t.TempDir(), "audit.log")
+	lg, err := audit.Open(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lg.Close() })
+	app.audit = lg
+	app.recordSandbox("bot_1", sandbox.Event{Kind: "grant_denied", Grant: "net", Host: "evil.test", Detail: "missing net grant"})
+	app.recordSandbox("bot_1", sandbox.Event{Kind: "grant_denied", Grant: "ssh", Host: "ssh.test", Detail: "not allowlisted"})
+	app.recordSandbox("bot_1", sandbox.Event{Kind: "net_request", Grant: "net", Host: "nope.test", Detail: "not allowlisted"})
+	app.recordSandbox("bot_1", sandbox.Event{Kind: "grant_denied", Grant: "github", Host: "github.com", Detail: sandbox.GitHubNetworkDenied})
+	app.recordSandbox("bot_1", sandbox.Event{Kind: "grant_denied", Grant: "git", Detail: "clone"})
+	app.recordSandbox("bot_1", sandbox.Event{Kind: "jail_report", Untrusted: true, Reported: "grant_denied", Grant: "net", Host: "evil.test", Detail: "missing net grant"})
+	raw := readAudit(t, auditPath)
+	if strings.Count(raw, `"action":"grant_denied"`) != 2 || strings.Count(raw, `"action":"net_request"`) != 1 || strings.Count(raw, `"action":"github_refuse"`) != 1 {
+		t.Fatalf("audit:\n%s", raw)
+	}
+	if strings.Contains(raw, `"action":"grant_denied"`) && strings.Count(raw, "\n") != 4 {
+		t.Fatalf("extra audit rows:\n%s", raw)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatal(err)
+		}
+		action, _ := rec["action"].(string)
+		if action != "grant_denied" && action != "net_request" {
+			continue
+		}
+		for k := range rec {
+			switch k {
+			case "action", "bot_id", "grant", "detail", "host", "ts":
+			default:
+				t.Fatalf("field %s in %s", k, line)
+			}
+		}
+		if rec["bot_id"] != "bot_1" || rec["detail"] == "" || rec["grant"] == "" || rec["host"] == "" {
+			t.Fatalf("row %s", line)
+		}
 	}
 }
 

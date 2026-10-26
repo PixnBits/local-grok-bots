@@ -1,9 +1,11 @@
 package sandbox
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -185,6 +187,103 @@ func TestParseEventFileCaps(t *testing.T) {
 		}
 		if got[1].Detail != "hllo" || strings.Contains(got[1].Detail, "é") {
 			t.Fatalf("non-ascii detail %+v", got[1])
+		}
+	})
+}
+
+func TestEventsHostDirSwap(t *testing.T) {
+	ws := t.TempDir()
+	p, err := prepare(context.Background(), Request{Workspace: ws, Command: "true"}, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.close)
+	if err := os.WriteFile(p.events, []byte("block original-line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const marker = "HOST-FORGED-MARKER"
+	host := t.TempDir()
+	if err := os.WriteFile(filepath.Join(host, "log"), []byte("block "+marker+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eventsDir := filepath.Join(p.dir, "rw", "events")
+	away := filepath.Join(p.dir, "rw", "events-away")
+	if err := os.Rename(eventsDir, away); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(host, eventsDir); err != nil {
+		t.Fatal(err)
+	}
+	got := readPreparedEvents(p)
+	sawOriginal := false
+	sawUnavailable := false
+	for _, ev := range got {
+		if strings.Contains(ev.Detail, marker) || strings.Contains(ev.Notice, marker) || strings.Contains(ev.Host, marker) {
+			t.Fatalf("host log was read: %+v", got)
+		}
+		if ev.Detail == "original-line" {
+			sawOriginal = true
+		}
+		if ev.Kind == "jail_report_truncated" && ev.Detail == "events unavailable" && !ev.Untrusted {
+			sawUnavailable = true
+		}
+	}
+	if runtime.GOOS == "linux" {
+		if !sawOriginal || sawUnavailable {
+			t.Fatalf("linux fd lost the original directory: %+v", got)
+		}
+		return
+	}
+	if !sawUnavailable && !sawOriginal {
+		t.Fatalf("events %+v", got)
+	}
+	if sawOriginal && sawUnavailable {
+		t.Fatalf("both original and unavailable: %+v", got)
+	}
+}
+
+func TestEventsMissingAndSymlinkLog(t *testing.T) {
+	assertUnavailable := func(t *testing.T, got []Event) {
+		t.Helper()
+		if len(got) != 1 || got[0].Kind != "jail_report_truncated" || got[0].Untrusted || got[0].Detail != "events unavailable" {
+			t.Fatalf("events %+v", got)
+		}
+	}
+	t.Run("missing", func(t *testing.T) {
+		ws := t.TempDir()
+		p, err := prepare(context.Background(), Request{Workspace: ws, Command: "true"}, ws)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(p.close)
+		if err := os.Remove(p.events); err != nil {
+			t.Fatal(err)
+		}
+		assertUnavailable(t, readPreparedEvents(p))
+	})
+	t.Run("symlink", func(t *testing.T) {
+		ws := t.TempDir()
+		p, err := prepare(context.Background(), Request{Workspace: ws, Command: "true"}, ws)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(p.close)
+		other := filepath.Join(t.TempDir(), "other")
+		if err := os.WriteFile(other, []byte("block SYMLINK-TARGET-MARKER\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(p.events); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(other, p.events); err != nil {
+			t.Fatal(err)
+		}
+		got := readPreparedEvents(p)
+		assertUnavailable(t, got)
+		for _, ev := range got {
+			if strings.Contains(ev.Detail, "SYMLINK-TARGET-MARKER") {
+				t.Fatalf("followed the log symlink: %+v", got)
+			}
 		}
 	})
 }

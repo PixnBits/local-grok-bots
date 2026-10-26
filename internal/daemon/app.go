@@ -72,6 +72,10 @@ type App struct {
 	// The broker will not use a credential home that is absent from it.
 	protectMu    sync.Mutex
 	protectByBot map[string][]string
+	// protectSnap is the startup inode snapshot of shellProtect paths and
+	// their ancestor directories. SIGHUP and a successful token reload
+	// replace the pointer. Readers copy the slice.
+	protectSnap atomic.Pointer[protectSnap]
 	// coiCap counts brokered host-CLI calls per bot.
 	coiOnce sync.Once
 	coiCap  *coi.HourCap
@@ -254,6 +258,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		cancel()
 		return nil, err
 	}
+	a.RefreshProtectSnapshot()
 	a.wg.Add(1)
 	go a.timerLoop()
 	bots, err := st.ListBots()

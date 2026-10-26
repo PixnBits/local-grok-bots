@@ -502,12 +502,14 @@ func TestBuildBinds(t *testing.T) {
 	if err == nil && !strings.Contains(res.Stdout, "missing") {
 		t.Fatalf("ungranted cat succeeded: %v\n%s", err, res.Stdout)
 	}
+	protect := t.TempDir()
 	res, err = runCmd(t, Request{
-		Workspace:  ws,
-		Command:    cat,
-		Grants:     []string{"build"},
-		BuildBinds: []string{ws, badDir, tool},
-		Protect:    []string{t.TempDir()},
+		Workspace:     ws,
+		Command:       cat,
+		Grants:        []string{"build"},
+		BuildBinds:    []string{ws, badDir, tool},
+		Protect:       []string{protect},
+		ProtectInodes: SnapshotProtect([]string{protect}),
 	})
 	if err != nil || !strings.Contains(res.Stdout, "toolchain") {
 		t.Fatalf("build bind missing: %v\n%s\n%s", err, res.Stdout, res.Stderr)
@@ -562,7 +564,7 @@ func TestJailCannotForgeSandboxBlock(t *testing.T) {
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
-	assertUntrustedJail(t, parseEventFile(p.events))
+	assertUntrustedJail(t, readPreparedEvents(p))
 
 	requireBin(t, "bwrap")
 	res, err := runCmd(t, Request{

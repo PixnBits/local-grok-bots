@@ -28,7 +28,13 @@ type Request struct {
 	// Protect is the daemon's current protected set, raw and resolved.
 	// A build bind that overlaps it, or that cannot be resolved, is not mounted.
 	Protect []string
-	SSHKey  string
+	// ProtectInodes is the startup snapshot of protected paths and their
+	// ancestor directories. An empty snapshot refuses every build bind.
+	// A protected directory that is missing, no longer a directory, or whose
+	// device or inode changed refuses every build bind for the turn.
+	// A regular file in the snapshot does not.
+	ProtectInodes []ProtectInode
+	SSHKey        string
 	// GitHubSock is the host credential-proxy socket. Empty leaves GitHub
 	// fetch unavailable. GitHubRepos is the allowlist copied into the wrapper.
 	GitHubSock      string
@@ -76,6 +82,10 @@ type prepared struct {
 	env       []string
 	mounts    []mount
 	events    string
+	// eventsDir is the daemon-created prep/rw/events directory, opened
+	// O_PATH|O_DIRECTORY|O_CLOEXEC. It is not passed to child processes.
+	// The jail can replace /lgb/events; this fd still names the original inode.
+	eventsDir *os.File
 	proxy     *proxy
 	push      *pushSrv
 	before    *treeSnap
@@ -100,6 +110,10 @@ func (p *prepared) close() {
 		p.push.close()
 	}
 	closeMountFiles(p.mounts)
+	if p.eventsDir != nil {
+		_ = p.eventsDir.Close()
+		p.eventsDir = nil
+	}
 	if p.dir != "" {
 		_ = os.RemoveAll(p.dir)
 	}
@@ -151,7 +165,7 @@ func Run(ctx context.Context, req Request) (Result, error) {
 	if p.push != nil {
 		events = append(events, p.push.drain()...)
 	}
-	events = append(events, parseEventFile(p.events)...)
+	events = append(events, readPreparedEvents(p)...)
 	if blockErr != nil {
 		events = append(events, blockEvent(blockErr.Error()))
 		if runErr == nil {
@@ -192,6 +206,11 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 	if err := OwnPath(p.events, 0o600); err != nil {
 		return nil, err
 	}
+	df, err := openEventsDirectory(dir)
+	if err != nil {
+		return nil, err
+	}
+	p.eventsDir = df
 	empty := filepath.Join(ro, "empty-hooks")
 	if err := os.MkdirAll(empty, 0o755); err != nil {
 		return nil, err
@@ -344,7 +363,7 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 				p.extra = append(p.extra, blockEvent("refused bind "+raw+": unsupported without bwrap"))
 			}
 		} else {
-			mounts, events, applied := selectBuildBinds(ws, req.BuildBinds, req.Protect)
+			mounts, events, applied := selectBuildBinds(ws, req.BuildBinds, req.Protect, req.ProtectInodes)
 			p.mounts = append(p.mounts, mounts...)
 			p.extra = append(p.extra, events...)
 			if len(applied) > 0 {
@@ -438,22 +457,35 @@ func normalizeHosts(hosts []string) []string {
 }
 
 // selectBuildBinds decides which SANDBOX_BUILD_BINDS entries are mounted.
-// An empty protected list refuses every bind. Each absolute path is resolved
-// with EvalSymlinks. A path that is not absolute, is a refused toolchain
-// path, cannot be resolved, or overlaps protected (raw or resolved) is not
-// mounted. On Linux the resolved path is then opened without following
-// symlinks and checked again; a failure skips that bind. The turn continues
-// and a sandbox_block names the bind path. A path inside the workspace is
-// skipped with no event when the protected list is non-empty. The mount
-// destination stays the resolved path.
-func selectBuildBinds(ws string, binds, protected []string) (mounts []mount, events []Event, applied []string) {
-	if !protectListed(protected) {
+// An empty protected list, or an empty inode snapshot, refuses every bind.
+// A protected directory in the snapshot that is missing, no longer a
+// directory, or whose device or inode changed refuses every bind for the
+// turn. Regular files in the snapshot do not. Each absolute path is then
+// resolved with EvalSymlinks. A path that is not absolute, is a refused
+// toolchain path, cannot be resolved, or overlaps protected (raw or
+// resolved) is not mounted. On Linux the resolved path is opened without
+// following symlinks and checked again; a failure skips that bind. The turn
+// continues and a sandbox_block names the bind path. A path inside the
+// workspace is skipped with no event when the protected list is non-empty
+// and the snapshot is unchanged. The mount destination stays the resolved path.
+func selectBuildBinds(ws string, binds, protected []string, snap []ProtectInode) (mounts []mount, events []Event, applied []string) {
+	if !protectListed(protected) || len(snap) == 0 {
 		for _, raw := range binds {
 			raw = strings.TrimSpace(raw)
 			if raw == "" {
 				continue
 			}
 			events = append(events, blockEvent("refused bind "+raw))
+		}
+		return nil, events, nil
+	}
+	if protectDirsChanged(snap) {
+		for _, raw := range binds {
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				continue
+			}
+			events = append(events, blockEvent("refused bind "+raw+": protected path changed"))
 		}
 		return nil, events, nil
 	}
@@ -496,7 +528,7 @@ func selectBuildBinds(ws string, binds, protected []string) (mounts []mount, eve
 		if skip {
 			continue
 		}
-		f, err := openBuildBind(resolved, protected)
+		f, err := openBuildBind(resolved, protected, snap)
 		if err != nil {
 			if f != nil {
 				_ = f.Close()
@@ -727,24 +759,43 @@ func gitHubSSHRepo(raw string) (string, string, bool) {
 	return owner, repo, true
 }
 
-// parseEventFile reads the jail event log. Every recognized line is an
-// untrusted jail_report. The file is opened with O_NOFOLLOW, only a regular
-// file is accepted, and the read stops at 64 KiB and 64 non-empty lines.
-// Overflow is one daemon-generated jail_report_truncated event.
-func parseEventFile(path string) []Event {
-	f, err := openEventsFile(path)
-	if err != nil {
-		return nil
+// eventsUnavailable is the daemon event for any events-log failure.
+func eventsUnavailable() []Event {
+	return []Event{{Kind: "jail_report_truncated", Detail: "events unavailable"}}
+}
+
+// eventsFromFile reads a regular file already opened by the caller.
+// A stat failure, a non-regular file, or a read error is events unavailable.
+func eventsFromFile(f *os.File) []Event {
+	if f == nil {
+		return eventsUnavailable()
 	}
-	defer f.Close()
 	st, err := f.Stat()
 	if err != nil || !st.Mode().IsRegular() {
-		return []Event{{Kind: "jail_report_truncated", Detail: "not a regular file"}}
+		return eventsUnavailable()
 	}
 	b, err := io.ReadAll(io.LimitReader(f, maxEventBytes+1))
 	if err != nil {
-		return nil
+		return eventsUnavailable()
 	}
+	return parseEventBytes(b)
+}
+
+// parseEventFile reads a path for tests. The turn reads through the
+// directory fd from prepare. Any open, type, or read failure is one
+// daemon-generated jail_report_truncated event, events unavailable.
+func parseEventFile(path string) []Event {
+	f, err := openEventsFile(path)
+	if err != nil {
+		return eventsUnavailable()
+	}
+	defer f.Close()
+	return eventsFromFile(f)
+}
+
+// parseEventBytes applies the 64 KiB and 64-line caps. Overflow is one
+// daemon-generated jail_report_truncated event with detail "dropped N".
+func parseEventBytes(b []byte) []Event {
 	overflow := 0
 	if len(b) > maxEventBytes {
 		overflow++

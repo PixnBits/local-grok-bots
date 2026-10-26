@@ -33,9 +33,16 @@ type bindInode struct {
 // (/proc/self/fd/N returns EINVAL from the new user namespace), so it
 // refuses the bind instead of mounting the path. A failure here, including
 // ENOSYS and ELOOP, also refuses the bind.
-func openBuildBind(resolved string, protected []string) (*os.File, error) {
+func openBuildBind(resolved string, protected []string, snap []ProtectInode) (*os.File, error) {
 	resolved = filepath.Clean(resolved)
 	protectedInodes := snapshotProtectedInodes(protected)
+	for _, ent := range snap {
+		ino := bindInode{dev: ent.Dev, ino: ent.Ino}
+		if inodeProtected(ino, protectedInodes) {
+			continue
+		}
+		protectedInodes = append(protectedInodes, ino)
+	}
 	if buildBindBeforeOpen != nil {
 		buildBindBeforeOpen()
 	}
