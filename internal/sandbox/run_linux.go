@@ -69,13 +69,7 @@ func runBwrap(ctx context.Context, p *prepared, bwrap string) (string, string, e
 	if st, err := os.Stat("/etc/services"); err == nil && !st.IsDir() {
 		args = append(args, "--ro-bind", "/etc/services", "/etc/services")
 	}
-	for _, m := range p.mounts {
-		flag := "--bind"
-		if m.RO {
-			flag = "--ro-bind"
-		}
-		args = append(args, flag, m.Src, m.Dst)
-	}
+	args = append(args, mountArgs(p.mounts)...)
 	for _, e := range p.env {
 		k, v, ok := strings.Cut(e, "=")
 		if !ok {

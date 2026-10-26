@@ -15,6 +15,9 @@ import (
 // adminTokenFile is the generated admin token under DATA_DIR.
 const adminTokenFile = "admin-token"
 
+// euid is the daemon's effective uid. Tests replace it.
+var euid = os.Geteuid
+
 // adminTokenMax is the largest admin-token file this daemon will read.
 const adminTokenMax = 4 << 10
 
@@ -105,11 +108,47 @@ func prepareAdminDir(dataDir string) error {
 	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return fmt.Errorf("DATA_DIR %s is not a directory", dataDir)
 	}
-	if int(st.Uid) != os.Geteuid() {
+	if int(st.Uid) != euid() {
 		return fmt.Errorf("DATA_DIR %s owner mismatch", dataDir)
 	}
 	if st.Mode&0o022 != 0 {
 		return fmt.Errorf("DATA_DIR %s is group or other writable", dataDir)
+	}
+	if err := cleanAdminTokenTemps(dataDir); err != nil {
+		return err
+	}
+	return nil
+}
+
+// cleanAdminTokenTemps removes regular DATA_DIR/admin-token.tmp-* files
+// owned by the effective uid. It uses Lstat and does not follow symlinks.
+// Directories, symlinks, and other non-regular entries are left in place.
+func cleanAdminTokenTemps(dir string) error {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("DATA_DIR %s: %w", dir, err)
+	}
+	prefix := adminTokenFile + ".tmp-"
+	id := euid()
+	for _, ent := range ents {
+		name := ent.Name()
+		if !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		var st unix.Stat_t
+		if err := unix.Lstat(path, &st); err != nil {
+			continue
+		}
+		if st.Mode&unix.S_IFMT != unix.S_IFREG {
+			continue
+		}
+		if int(st.Uid) != id {
+			continue
+		}
+		if err := unix.Unlink(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("DATA_DIR %s: %w", path, err)
+		}
 	}
 	return nil
 }

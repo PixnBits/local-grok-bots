@@ -143,7 +143,7 @@ func TestFileNamedDefaultWithoutAdminToken(t *testing.T) {
 	dir := t.TempDir()
 	path := writeTokenFile(t, dir, "default:"+aliceTok+"\n", 0o600)
 	err := startTokens(t, dir, path, "")
-	if err == nil || !strings.Contains(err.Error(), "line 1: duplicate name") || strings.Contains(err.Error(), aliceTok) {
+	if err == nil || !strings.Contains(err.Error(), "line 1: name \"default\" is reserved") || strings.Contains(err.Error(), "duplicate name") || strings.Contains(err.Error(), aliceTok) {
 		t.Fatalf("err %v", err)
 	}
 }
@@ -167,7 +167,7 @@ func TestAuthTokensFileRejects(t *testing.T) {
 		{"non-ascii", "alice:" + strings.Repeat("d", 32) + "é\n", "", "line 1: invalid token", strings.Repeat("d", 32) + "é"},
 		{"duplicate name", "alice:" + aliceTok + "\nalice:" + bobTok + "\n", "", "line 2: duplicate name", aliceTok},
 		{"duplicate token", "alice:" + aliceTok + "\nbob:" + aliceTok + "\n", "", "line 2: duplicate token", aliceTok},
-		{"default name", "default:" + bobTok + "\n", aliceTok, "line 1: duplicate name", bobTok},
+		{"default name", "default:" + bobTok + "\n", aliceTok, "line 1: name \"default\" is reserved", bobTok},
 		{"default value", "alice:" + aliceTok + "\n", aliceTok, "line 1: duplicate token", aliceTok},
 	}
 	for _, tc := range checks {
@@ -361,7 +361,7 @@ func TestGeneratedTokenDuplicateIsRejected(t *testing.T) {
 	}
 	path = writeTokenFile(t, dir, "default:"+strings.Repeat("d", 32)+"\n", 0o600)
 	err = startWithPolicy(t, dir, path, "", policy)
-	if err == nil || !strings.Contains(err.Error(), "duplicate name") || strings.Contains(err.Error(), strings.Repeat("d", 32)) {
+	if err == nil || !strings.Contains(err.Error(), "name \"default\" is reserved") || strings.Contains(err.Error(), "duplicate name") || strings.Contains(err.Error(), strings.Repeat("d", 32)) {
 		t.Fatalf("name clash %v", err)
 	}
 }

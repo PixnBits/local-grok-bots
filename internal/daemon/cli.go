@@ -1074,14 +1074,18 @@ func botGrants(bot store.Bot) clisession.Grants {
 	return g
 }
 
-// daemonSecrets are paths no CLI tool or shell may read: the admin token,
-// the database, policy.toml, DATA_DIR/cli (MCP tokens and CLI state),
-// DATA_DIR/coi (staged jail homes and the proxy socket), DATA_DIR/cli-proxy
-// and DATA_DIR/cli-egress (the per-run unix sockets), AUTH_TOKENS_FILE when
-// set (the cleaned absolute path and, when it differs, the symlink target),
-// and each tools.cli credential_home from the policy read for this call.
-// The workspace is not included. Those data directories are created so Grok,
-// which only denies paths that exist, still binds them.
+// secretDirNames are the DATA_DIR children no CLI tool or shell may read.
+// sandbox holds the SSH private key (id_ed25519). secrets is reserved for
+// other daemon files. cli holds MCP tokens and CLI state. coi holds staged
+// jail homes. cli-proxy and cli-egress hold per-run sockets.
+var secretDirNames = []string{"cli", "coi", "cli-proxy", "cli-egress", "sandbox", "secrets"}
+
+// daemonSecrets are paths no CLI tool or shell may read. The set is every
+// configured secret, raw and resolved: the admin token, the database,
+// secretDirNames, the policy file, an absolute audit_log, AUTH_TOKENS_FILE,
+// the GitHub token file, and each tools.cli credential_home from the policy
+// read for this call. The workspace is not included. The secret directories
+// are created so Grok, which only denies paths that exist, still binds them.
 func (a *App) daemonSecrets() []string {
 	pol := a.policy
 	if fresh, err := a.policyNow(); err == nil && (strings.TrimSpace(a.cfg.PolicyPath) == "" || fresh.Loaded) {
@@ -1095,7 +1099,7 @@ func (a *App) secretsFrom(pol policy.Policy) []string {
 	if err != nil {
 		return nil
 	}
-	for _, name := range []string{"cli", "coi", "cli-proxy", "cli-egress"} {
+	for _, name := range secretDirNames {
 		d := filepath.Join(dir, name)
 		_ = os.MkdirAll(d, 0o700)
 		_ = os.Chmod(d, 0o700)
@@ -1103,9 +1107,16 @@ func (a *App) secretsFrom(pol policy.Policy) []string {
 	return secretPaths(a.cfg, pol, true)
 }
 
-// secretPaths lists daemon secret paths. includeHomes adds each tools.cli
-// credential_home. The directories are not created here.
+// secretPaths is the protected set. includeHomes adds each tools.cli
+// credential_home. Each path is the cleaned absolute form and, when it
+// differs, the nearest-existing-ancestor resolution. The directories are
+// not created here.
 func secretPaths(cfg config.Config, pol policy.Policy, includeHomes bool) []string {
+	return expandProtected(rawSecretPaths(cfg, pol, includeHomes))
+}
+
+// rawSecretPaths lists configured secret paths before symlink resolution.
+func rawSecretPaths(cfg config.Config, pol policy.Policy, includeHomes bool) []string {
 	dir, err := filepath.Abs(cfg.DataDir)
 	if err != nil {
 		return nil
@@ -1115,19 +1126,32 @@ func secretPaths(cfg config.Config, pol policy.Policy, includeHomes bool) []stri
 		filepath.Join(dir, adminTokenFile),
 		filepath.Join(dir, "state.db"), filepath.Join(dir, "state.db-wal"), filepath.Join(dir, "state.db-shm"),
 	}
-	for _, name := range []string{"cli", "coi", "cli-proxy", "cli-egress"} {
+	for _, name := range secretDirNames {
 		out = append(out, filepath.Join(dir, name))
 	}
 	if p := strings.TrimSpace(cfg.PolicyPath); p != "" {
 		if abs, err := filepath.Abs(p); err == nil {
-			out = append(out, abs)
+			out = append(out, filepath.Clean(abs))
 		}
 	}
-	seen := map[string]bool{}
-	for _, p := range out {
-		seen[filepath.Clean(p)] = true
+	if p := auditSecretPath(pol.AuditLog); p != "" {
+		out = append(out, p)
+	}
+	if p := strings.TrimSpace(cfg.AuthTokensFile); p != "" {
+		if abs, err := filepath.Abs(p); err == nil {
+			out = append(out, filepath.Clean(abs))
+		}
+	}
+	if p := strings.TrimSpace(pol.GitHub.TokenFile); p != "" {
+		if abs, err := filepath.Abs(p); err == nil {
+			out = append(out, filepath.Clean(abs))
+		}
 	}
 	if includeHomes {
+		seen := map[string]bool{}
+		for _, p := range out {
+			seen[filepath.Clean(p)] = true
+		}
 		for _, tool := range pol.CLITools {
 			home := filepath.Clean(strings.TrimSpace(tool.CredentialHome))
 			if home == "" || home == "." || !filepath.IsAbs(home) || seen[home] {
@@ -1137,12 +1161,36 @@ func secretPaths(cfg config.Config, pol policy.Policy, includeHomes bool) []stri
 			out = append(out, home)
 		}
 	}
-	for _, p := range authTokensPaths(cfg.AuthTokensFile) {
-		if seen[p] {
-			continue
+	return out
+}
+
+// auditSecretPath is an absolute audit_log. stderr, syslog, and empty are
+// not filesystem paths.
+func auditSecretPath(dest string) string {
+	dest = strings.TrimSpace(dest)
+	switch dest {
+	case "", "stderr", "syslog":
+		return ""
+	}
+	if !filepath.IsAbs(dest) {
+		return ""
+	}
+	return filepath.Clean(dest)
+}
+
+// expandProtected adds the raw path and its nearest-existing-ancestor
+// resolution. Duplicates are dropped.
+func expandProtected(paths []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range paths {
+		for _, form := range pathForms(p) {
+			if form == "" || form == "." || seen[form] {
+				continue
+			}
+			seen[form] = true
+			out = append(out, form)
 		}
-		seen[p] = true
-		out = append(out, p)
 	}
 	return out
 }

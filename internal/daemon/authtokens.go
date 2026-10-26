@@ -103,7 +103,7 @@ func readProtectedFile(path string, max int64, kind, tooBig string) ([]byte, err
 		unix.Close(fd)
 		return nil, fmt.Errorf("%s: mode allows group or other access", kind)
 	}
-	if int(st.Uid) != os.Geteuid() {
+	if int(st.Uid) != euid() {
 		unix.Close(fd)
 		return nil, fmt.Errorf("%s: owner mismatch", kind)
 	}
@@ -247,6 +247,9 @@ func parseAuthTokens(text, defaultToken string) ([]namedToken, error) {
 		val = trimASCIISpace(val)
 		if !authTokenName.MatchString(name) {
 			return nil, fmt.Errorf("auth tokens: line %d: invalid name", lineNo)
+		}
+		if name == defaultTokenName {
+			return nil, fmt.Errorf("auth tokens: line %d: name \"default\" is reserved", lineNo)
 		}
 		if !printableToken(val) {
 			return nil, fmt.Errorf("auth tokens: line %d: invalid token", lineNo)

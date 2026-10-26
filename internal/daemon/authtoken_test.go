@@ -367,6 +367,108 @@ func TestAdminTokenDataDirRefused(t *testing.T) {
 	})
 }
 
+func TestStaleAdminTokenTempsRemoved(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, adminTokenFile+".tmp-stale")
+	if err := os.WriteFile(stale, []byte("old-temp"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	canary := filepath.Join(t.TempDir(), "canary")
+	if err := os.WriteFile(canary, []byte("canary-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, adminTokenFile+".tmp-link")
+	if err := os.Symlink(canary, link); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(dir, adminTokenFile+".tmp-dir")
+	if err := os.Mkdir(sub, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldName := filepath.Join(dir, adminTokenFile+".tmp")
+	if err := os.WriteFile(oldName, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareAdminDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale temp remains: %v", err)
+	}
+	lst, err := os.Lstat(link)
+	if err != nil || lst.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("symlink temp %v %v", lst, err)
+	}
+	raw, err := os.ReadFile(canary)
+	if err != nil || string(raw) != "canary-bytes" {
+		t.Fatalf("canary %q %v", raw, err)
+	}
+	st, err := os.Lstat(sub)
+	if err != nil || !st.IsDir() {
+		t.Fatalf("dir temp %v %v", st, err)
+	}
+	if _, err := os.Lstat(oldName); err != nil {
+		t.Fatalf("unrelated temp name removed: %v", err)
+	}
+}
+
+func TestStaleAdminTokenTempOtherEUIDKept(t *testing.T) {
+	dir := t.TempDir()
+	stale := filepath.Join(dir, adminTokenFile+".tmp-other")
+	if err := os.WriteFile(stale, []byte("old-temp"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	prev := euid
+	euid = func() int { return otherEUID() }
+	t.Cleanup(func() { euid = prev })
+	if err := cleanAdminTokenTemps(dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(stale); err != nil {
+		t.Fatalf("other owner's temp removed: %v", err)
+	}
+}
+
+func TestEUIDMismatchRefuses(t *testing.T) {
+	prev := euid
+	euid = func() int { return otherEUID() }
+	t.Cleanup(func() { euid = prev })
+	t.Run("data dir", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		err := prepareAdminDir(dir)
+		if err == nil || !strings.Contains(err.Error(), "owner mismatch") || !strings.Contains(err.Error(), dir) {
+			t.Fatalf("err %v", err)
+		}
+	})
+	t.Run("protected file", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "tokens")
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := readProtectedFile(path, 1024, "auth tokens", "")
+		if err == nil || !strings.Contains(err.Error(), "owner mismatch") {
+			t.Fatalf("err %v", err)
+		}
+	})
+}
+
+func otherEUID() int {
+	if os.Geteuid() == 1 {
+		return 2
+	}
+	return 1
+}
+
 func TestDataDirModeCheckedOnNew(t *testing.T) {
 	t.Setenv("MANAGED_POLICY", "")
 	t.Setenv("BIND_ADDR", "")

@@ -323,6 +323,245 @@ func TestCredentialHomeUnderDataDirCLI(t *testing.T) {
 	})
 }
 
+func TestBuildBindOverlapsConfiguredSecrets(t *testing.T) {
+	data := t.TempDir()
+	ghDir := t.TempDir()
+	gh := filepath.Join(ghDir, "github.token")
+	if err := os.WriteFile(gh, []byte("not-a-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	audDir := t.TempDir()
+	aud := filepath.Join(audDir, "audit.log")
+	pol := policy.Policy{AuditLog: aud, GitHub: policy.GitHub{TokenFile: gh}}
+	cfg := config.Config{DataDir: data, PolicyPath: filepath.Join(t.TempDir(), "policy.toml")}
+	checks := []struct {
+		name string
+		bind string
+	}{
+		{"github token dir", ghDir},
+		{"sandbox", filepath.Join(data, "sandbox")},
+		{"audit dir", audDir},
+		{"secrets", filepath.Join(data, "secrets")},
+	}
+	for _, tc := range checks {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg.BuildBinds = []string{tc.bind}
+			err := checkPathOverlaps(cfg, pol)
+			if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), tc.bind) {
+				t.Fatalf("err %v", err)
+			}
+		})
+	}
+	t.Run("unrelated", func(t *testing.T) {
+		cfg.BuildBinds = []string{t.TempDir()}
+		if err := checkPathOverlaps(cfg, pol); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestBuildBindAbsentAtStartup(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("BIND_ADDR", "")
+	t.Setenv("AUTH_TOKEN", "")
+	t.Setenv("AUTH_TOKENS_FILE", "")
+	dir := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "absent-bind")
+	err := overlapStart(t, config.Config{DataDir: dir, BuildBinds: []string{missing}})
+	if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), missing) || !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func TestCredentialHomeUnderDataDirCOI(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("BIND_ADDR", "")
+	t.Setenv("AUTH_TOKEN", "")
+	t.Setenv("AUTH_TOKENS_FILE", "")
+	t.Run("coi name is allowed", func(t *testing.T) {
+		dir := t.TempDir()
+		home := filepath.Join(dir, "coi", "grok")
+		if err := overlapStart(t, config.Config{
+			DataDir:    dir,
+			PolicyPath: writeHomePolicy(t, dir, home),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("equals coi", func(t *testing.T) {
+		dir := t.TempDir()
+		home := filepath.Join(dir, "coi")
+		err := overlapStart(t, config.Config{
+			DataDir:    dir,
+			PolicyPath: writeHomePolicy(t, dir, home),
+		})
+		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), home) {
+			t.Fatalf("err %v", err)
+		}
+	})
+	t.Run("sandbox child", func(t *testing.T) {
+		dir := t.TempDir()
+		home := filepath.Join(dir, "sandbox", "keys")
+		err := overlapStart(t, config.Config{
+			DataDir:    dir,
+			PolicyPath: writeHomePolicy(t, dir, home),
+		})
+		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), home) {
+			t.Fatalf("err %v", err)
+		}
+	})
+	t.Run("overlaps another home", func(t *testing.T) {
+		dir := t.TempDir()
+		outer := filepath.Join(dir, "coi", "grok")
+		inner := filepath.Join(outer, "nested")
+		body := homePolicy(outer) + "[[tools.cli]]\nname = \"other\"\npath = \"/usr/bin/other\"\ncredential_home = \"" + inner + "\"\ntimeout = \"1s\"\nmax_output = 1\nmax_calls_per_hour = 1\n"
+		path := filepath.Join(dir, "policy.toml")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		err := overlapStart(t, config.Config{DataDir: dir, PolicyPath: path})
+		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), inner) {
+			t.Fatalf("err %v", err)
+		}
+	})
+	t.Run("build bind over a home", func(t *testing.T) {
+		dir := t.TempDir()
+		home := t.TempDir()
+		err := overlapStart(t, config.Config{
+			DataDir:    dir,
+			PolicyPath: writeHomePolicy(t, dir, home),
+			BuildBinds: []string{home},
+		})
+		if err == nil || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), home) {
+			t.Fatalf("err %v", err)
+		}
+	})
+}
+
+func TestProdShapedConfigStarts(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("BIND_ADDR", "")
+	t.Setenv("SANDBOX_BUILD_BINDS", "")
+	t.Setenv("AUTH_TOKENS_FILE", "")
+	tok := strings.Repeat("p", 32)
+	t.Setenv("AUTH_TOKEN", tok)
+	root := t.TempDir()
+	data := filepath.Join(root, "var", "lib", "local-grok-bots")
+	if err := os.MkdirAll(data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(data, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	etc := filepath.Join(root, "etc", "local-grok-bots")
+	if err := os.MkdirAll(etc, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(root, "home", "user")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	policyPath := filepath.Join(etc, "policy.toml")
+	audit := filepath.Join(data, "audit.log")
+	body := "[backend]\nbackend = \"ollama\"\n[security]\naudit_log = \"" + audit + "\"\n[[tools.cli]]\nname = \"grok\"\npath = \"/usr/bin/grok\"\ncredential_home = \"" + home + "\"\ntimeout = \"1s\"\nmax_output = 1\nmax_calls_per_hour = 1\n"
+	if err := os.WriteFile(policyPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app, err := New(config.Config{
+		DataDir:    data,
+		PolicyPath: policyPath,
+		AuthToken:  tok,
+		BindAddr:   "127.0.0.1:0",
+		OllamaURL:  "http://127.0.0.1:9",
+		Model:      "test-model",
+		Version:    "0.1.0",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.Shutdown()
+	st, err := os.Lstat(data)
+	if err != nil || st.Mode().Perm() != 0o755 {
+		t.Fatalf("mode %v %v", st.Mode(), err)
+	}
+}
+
+func TestPolicySampleCredentialHome(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("BIND_ADDR", "")
+	t.Setenv("AUTH_TOKEN", "")
+	t.Setenv("AUTH_TOKENS_FILE", "")
+	t.Setenv("SANDBOX_BUILD_BINDS", "")
+	raw, err := os.ReadFile(filepath.Join("..", "..", "policy.toml.sample"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	home := filepath.Join(dir, "coi", "grok")
+	body := activateSampleCLI(string(raw), home)
+	if !strings.Contains(body, "credential_home = \""+home+"\"") || strings.Contains(body, "/var/lib/local-grok-bots/coi/grok") {
+		t.Fatalf("sample credential_home was not substituted:\n%s", body)
+	}
+	policyPath := filepath.Join(t.TempDir(), "policy.toml")
+	if err := os.WriteFile(policyPath, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pol, err := policy.Load(policy.Options{Path: policyPath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pol.CLITools) != 1 || pol.CLITools[0].CredentialHome != home {
+		t.Fatalf("tools %+v warnings %v", pol.CLITools, pol.Warnings)
+	}
+	app, err := New(config.Config{
+		DataDir:    dir,
+		PolicyPath: policyPath,
+		BindAddr:   "127.0.0.1:0",
+		OllamaURL:  "http://127.0.0.1:9",
+		Model:      "test-model",
+		Version:    "0.1.0",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.Shutdown()
+}
+
+// activateSampleCLI uncomments the sample [[tools.cli]] example and points
+// credential_home at home.
+func activateSampleCLI(sample, home string) string {
+	var b strings.Builder
+	in := false
+	for _, line := range strings.Split(sample, "\n") {
+		trim := strings.TrimSpace(strings.TrimRight(line, "\r"))
+		if strings.HasPrefix(trim, "# [[tools.cli]]") {
+			in = true
+		}
+		if in && strings.HasPrefix(trim, "#") {
+			rest := strings.TrimPrefix(trim, "#")
+			rest = strings.TrimPrefix(rest, " ")
+			if strings.HasPrefix(strings.TrimSpace(rest), "credential_home") {
+				rest = "credential_home = \"" + home + "\""
+			}
+			b.WriteString(rest)
+			b.WriteByte('\n')
+			if strings.HasPrefix(strings.TrimSpace(rest), "lock") {
+				in = false
+			}
+			continue
+		}
+		if in && trim == "" {
+			in = false
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
 func writeHomePolicy(t *testing.T, dir, home string) string {
 	t.Helper()
 	path := filepath.Join(dir, "policy.toml")
