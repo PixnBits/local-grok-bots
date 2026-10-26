@@ -238,7 +238,7 @@ check("chip-warn", ctx.stateChipName(2, 3, 1) === "Bot state: 2 timers, 3 memory
 check("chip-warns", ctx.stateChipName(0, 0, 2) === "Bot state: 0 timers, 0 memory entries, 2 warnings");
 check("hint", ctx.composerHint(false) === ctx.HINT_IDLE && ctx.composerHint(true) === ctx.HINT_RUNNING);
 check("ph-wide", ctx.composerPlaceholder("Recipe Helper", false) === "Message Recipe Helper");
-check("ph-narrow", ctx.composerPlaceholder("Garden Notes", true) === "Message");
+check("ph-narrow", ctx.composerPlaceholder("Garden Notes", true) === "Message Garden Notes");
 check("bash-label", ctx.toolCallLabel("Bash", {command: "git status"}) === "Bash(git status)");
 check("eye-q", ctx.cardEyebrow({kind: "question", tool: "AskUserQuestion"}, "Recipe Helper") === "QUESTION FROM Recipe Helper");
 check("eye-push", ctx.cardEyebrow({tool: "git_push"}, "") === "APPROVAL REQUIRED · GIT_PUSH");

@@ -354,7 +354,7 @@ window.addEventListener("storage", function (ev) {
   .mark[data-shape="hex"]::before,
   .mark[data-shape="hex"]::after { clip-path: polygon(25% 6%, 75% 6%, 100% 50%, 75% 94%, 25% 94%, 0 50%); }
   .swatches, .shapes { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-  .shape-btn { width: 32px; height: 32px; padding: 0; border-radius: 8px; }
+  .shape-btn { width: 40px; height: 40px; padding: 0; border-radius: 10px; }
   .swatch { width: 28px; height: 28px; padding: 0; border-radius: 99px; border: 0; }
   .mark[hidden] { display: none; }
   .shape-btn { display: inline-flex; align-items: center; justify-content: center; }
@@ -379,6 +379,187 @@ window.addEventListener("storage", function (ev) {
   }
   .mark-advisory { margin: 0; color: var(--attention-text); font-size: 12px; line-height: 16px; }
   .mark-advisory[hidden] { display: none !important; }
+  .mark-preview {
+    width: 56px; height: 56px; border-radius: 14px; background: var(--surface-2);
+    display: grid; place-items: center; flex: none;
+  }
+  .mark-preview .mark { width: 40px; height: 40px; }
+  .mark-preview .mark[data-shape="diamond"] { width: 28px; height: 28px; margin: 6px; }
+  .profile-col { padding: 24px 0 96px; }
+  .profile-nav { padding: 16px 12px 16px 16px; display: flex; flex-direction: column; gap: 2px; }
+  .nav-link {
+    display: flex; align-items: center; gap: 8px; width: 100%; height: 36px; padding: 0 10px;
+    border: 0; border-radius: 8px; background: transparent; color: var(--text);
+    font-size: 14px; text-align: left; text-decoration: none;
+  }
+  .nav-link svg { width: 18px; height: 18px; flex: none; color: var(--text-2); }
+  .nav-link[aria-current="true"] { background: var(--surface-2); font-weight: 600; }
+  .nav-link .chev { margin-left: auto; color: var(--muted); }
+  .access-phone { display: none; }
+  #profile-main, #profile-access { display: grid; gap: 16px; }
+  #profile-main[hidden], #profile-access[hidden], .profile-nav-block[hidden] { display: none !important; }
+  .sec {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+    padding: 20px 24px 24px; display: grid; gap: 14px;
+  }
+  .sec-h { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .sec h2, .sec-h h2 { margin: 0; font-size: 20px; font-weight: 650; line-height: 26px; }
+  .aside { font-size: 12px; color: var(--muted); display: inline-flex; align-items: center; gap: 4px; flex: none; }
+  .aside.ok { color: var(--success-text); }
+  .aside .phone-only { display: none; }
+  .fld { display: grid; gap: 6px; min-width: 0; }
+  .fld .lbl, .fld > label { font-size: 13px; font-weight: 600; }
+  .fld input, .fld textarea, .fld select { height: 40px; border-radius: 10px; }
+  .fld textarea { height: auto; min-height: 168px; padding: 10px 12px; }
+  .fld input:focus, .fld textarea:focus, .fld select:focus, .chips:focus-within {
+    border-color: var(--focus); box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .fld.is-dirty, .sec.is-dirty { box-shadow: inset 3px 0 0 var(--accent); border-radius: 4px; }
+  .fld.is-error input, .fld.is-error textarea, .chips.is-error { border-color: var(--danger); }
+  .help { margin: 0; font-size: 12px; line-height: 16px; color: var(--muted); display: flex; gap: 6px; align-items: flex-start; }
+  .help.is-error { color: var(--danger-text); }
+  .help .help-alert { display: none; flex: none; margin-top: 1px; }
+  .help.is-error .help-alert { display: block; }
+  .changed[hidden], .info-box[hidden], .advisory[hidden] { display: none !important; }
+  .changed { color: var(--muted); }
+  .mark-block { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  .advisory {
+    display: flex; gap: 8px; align-items: flex-start; border-radius: 10px; padding: 10px 12px;
+    background: var(--attention-soft); color: var(--attention-text); font-size: 13px; line-height: 18px;
+  }
+  .info-box { background: var(--surface-2); border-radius: 10px; padding: 12px 14px; color: var(--text-2); font-size: 13px; }
+  .access-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+  .profile-layout.is-access { grid-template-columns: 220px minmax(0, 960px); }
+  .grant { display: grid; grid-template-columns: 36px 1fr auto; grid-template-rows: auto auto; column-gap: 10px; align-items: center; padding: 8px 0; }
+  .grant .gi {
+    grid-row: 1 / span 2; width: 36px; height: 36px; border-radius: 10px; background: var(--surface-2);
+    display: grid; place-items: center; color: var(--text-2);
+  }
+  .grant b { font-family: var(--mono); font-size: 13px; font-weight: 600; }
+  .grant span { grid-column: 2; font-size: 12px; color: var(--muted); line-height: 16px; }
+  .toggle {
+    width: 40px; height: 24px; padding: 0; border: 0; border-radius: 99px; position: relative;
+    background: var(--surface-3); box-shadow: inset 0 0 0 1px var(--border-control); flex: none;
+  }
+  .toggle[aria-checked="true"] { background: var(--accent); box-shadow: none; }
+  .toggle::after {
+    content: ""; position: absolute; top: 3px; left: 3px; width: 18px; height: 18px; border-radius: 99px;
+    background: var(--surface); transition: transform .15s ease;
+  }
+  .toggle[aria-checked="true"]::after { transform: translateX(16px); }
+  .chips {
+    display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-height: 44px; padding: 6px 8px;
+    border-radius: 10px; border: 1px solid var(--border-control); background: var(--surface);
+  }
+  .chip {
+    display: inline-flex; align-items: center; gap: 4px; height: 28px; padding: 0 4px 0 10px;
+    border-radius: 8px; background: var(--surface-2); font-family: var(--mono); font-size: 12.5px; color: var(--text);
+  }
+  .chip.is-new { background: var(--accent-soft); }
+  .chip.bad { background: var(--danger-soft); color: var(--danger-text); outline: 1px solid var(--danger); }
+  .chip-x {
+    width: 20px; height: 20px; min-width: 20px; min-height: 20px; padding: 0; border: 0; border-radius: 5px;
+    background: transparent; color: var(--muted); display: grid; place-items: center;
+  }
+  .chips input {
+    flex: 1; min-width: 120px; height: 28px; border: 0; background: transparent; padding: 0 4px;
+    font-family: var(--mono); font-size: 12.5px; box-shadow: none;
+  }
+  .chips input:focus { box-shadow: none; }
+  .seg-line { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .seg-line .seg { flex: 1; min-width: 180px; }
+  .seg button[aria-checked="true"], .seg [role="radio"][aria-checked="true"] { background: var(--surface); box-shadow: var(--e1); }
+  .tool-pick { display: flex; gap: 8px; align-items: center; font-family: var(--mono); font-size: 13px; font-weight: 600; }
+  .tool-pick input { width: auto; }
+  .tool-list.is-off { color: var(--muted); }
+  .routine-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .routine-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .routine-row.is-paused .routine-name { color: var(--text-2); }
+  .routine-meta { font-size: 12px; color: var(--muted); }
+  .routine-prompt { font-size: 13px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sched-chip {
+    flex: none; display: inline-flex; align-items: center; height: 22px; padding: 0 8px;
+    border-radius: 6px; background: var(--surface-2); font-size: 12px; color: var(--text-2);
+  }
+  .routine-form { background: var(--bg); border-radius: 14px; padding: 12px; display: grid; gap: 10px; }
+  .routine-form[hidden] { display: none !important; }
+  .builder { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .builder input { width: 88px; }
+  .builder .seg { width: auto; }
+  .builder .seg button, #server-tools-seg button {
+    height: 28px; min-height: 28px; border: 0; background: transparent; border-radius: 8px;
+    font-size: 12px; font-weight: 600; padding: 0 10px;
+  }
+  .linkrow {
+    display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 14px 16px;
+  }
+  .linkrow b { display: block; font-size: 14px; }
+  .linkrow span { display: block; font-size: 12px; color: var(--muted); font-weight: 400; }
+  .linkrow svg { margin-left: auto; flex: none; color: var(--muted); }
+  #profile-form { display: grid; gap: 16px; margin: 0; }
+  #profile-log { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 10px; }
+  #profile-log svg { flex: none; }
+  .access-crumb { color: var(--muted); font-size: 13px; font-weight: 400; flex: none; white-space: nowrap; }
+  .access-crumb[hidden], #perm-draft[hidden], #perm-editor[hidden], #perm-rules[hidden], #perm-suggestions[hidden], #perm-sug-head[hidden], #routine-live[hidden], #routine-draft[hidden], #routine-err[hidden] { display: none !important; }
+  .routine-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: center; padding: 12px 0; border-top: 1px solid var(--border); }
+  .routine-main { min-width: 0; display: grid; gap: 2px; }
+  #server-tools-seg, .builder .seg { margin: 0; }
+  .perm-list .perm-card {
+    width: auto; max-width: none; align-self: stretch;
+    background: transparent; border: 0; border-radius: 0; box-shadow: none;
+    border-bottom: 1px solid var(--border); padding: 8px 0; gap: 6px;
+  }
+  .help svg, .advisory svg, .aside svg { flex: none; }
+  @media (max-width: 540px) {
+    .savebar { flex-wrap: wrap; }
+    .save-actions { margin-left: auto; }
+  }
+  .savebar {
+    position: fixed; z-index: 30; left: 50%; bottom: 24px; transform: translateX(-50%);
+    width: min(720px, calc(100% - 32px)); display: flex; align-items: center; gap: 12px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--e2);
+    padding: 10px 10px 10px 16px;
+  }
+  .savebar[hidden] { display: none !important; }
+  .savebar .pip { width: 8px; height: 8px; border-radius: 99px; background: var(--accent); flex: none; }
+  .save-copy { flex: 1; min-width: 0; font-size: 13px; font-weight: 600; display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+  .save-fields { color: var(--muted); font-weight: 400; }
+  .save-fields.is-error { color: var(--danger-text); font-weight: 600; }
+  .save-actions { display: flex; gap: 8px; flex: none; }
+  .savebar button.primary { height: 36px; padding: 0 14px; border-radius: 10px; font-size: 13px; font-weight: 600; border-color: transparent; }
+  .savebar button.primary:hover { background: var(--accent-hover); }
+  .savebar button.ghost { border-color: transparent; height: 36px; }
+  .savebar button.ghost:hover { background: var(--surface-3); }
+  .savebar button.is-loading { position: relative; }
+  .savebar button.is-loading .btn-label { visibility: hidden; }
+  .btn-spin { display: none; }
+  .savebar button.is-loading .btn-spin {
+    display: block; position: absolute; left: 50%; top: 50%; width: 14px; height: 14px; margin: -7px 0 0 -7px;
+    border-radius: 50%; border: 2px solid var(--on-accent); border-right-color: transparent; animation: spin .8s linear infinite;
+  }
+  .draft-chip {
+    flex: none; height: 22px; display: inline-flex; align-items: center; padding: 0 8px; border-radius: 6px;
+    background: var(--accent-soft); color: var(--accent-text); font-size: 12px; font-weight: 600;
+  }
+  .draft-sub { flex: none; color: var(--muted); font-size: 13px; font-weight: 400; }
+  .draft-chip[hidden], .draft-sub[hidden], #profile-log[hidden], #profile-menu[hidden], #profile-kicker[hidden] { display: none !important; }
+  .solo-id { align-items: center; }
+  .discard-backdrop { position: fixed; inset: 0; background: var(--scrim); z-index: 70; }
+  .discard-dialog {
+    position: fixed; z-index: 71; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: min(420px, calc(100% - 32px)); background: var(--surface); border: 1px solid var(--border);
+    border-radius: 14px; box-shadow: var(--e3); padding: 20px; display: grid; gap: 16px;
+  }
+  .discard-dialog h2 { margin: 0; font-size: 17px; font-weight: 650; }
+  .discard-dialog .row { justify-content: flex-end; }
+  .discard-dialog[hidden], .discard-backdrop[hidden] { display: none !important; }
+  button.small { height: 28px; min-height: 28px; padding: 0 10px; font-size: 12px; border-radius: 8px; }
+  button.primary:hover { background: var(--accent-hover); }
+  @media (max-width: 1100px) {
+    .access-grid { grid-template-columns: 1fr; }
+    .profile-layout.is-access { grid-template-columns: 220px minmax(0, 720px); }
+  }
   .thread-bar > .mark, .solo-bar > .mark, .sheet-head > .mark { flex: none; }
   .bot-copy .bot-attn {
     position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
@@ -734,6 +915,7 @@ window.addEventListener("storage", function (ev) {
     box-shadow: none; padding: 7px 0; border-radius: 0;
   }
   .composer textarea:focus-visible { outline: 2px solid transparent; outline-offset: 0; box-shadow: none; }
+  .composer textarea::placeholder { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .composer-slot { display: flex; align-items: center; gap: 8px; flex: none; }
   .composer-hint { margin: 8px 0 0; text-align: center; font-size: 12px; color: var(--muted); }
   .composer-hint[hidden] { display: none !important; }
@@ -802,6 +984,9 @@ window.addEventListener("storage", function (ev) {
     .composer-hint { display: none; }
     .profile-layout { display: flex; flex-direction: column; overflow: auto; justify-content: flex-start; }
     .profile-nav, .profile-col { overflow: visible; min-height: auto; flex: none; }
+    .profile-nav { display: none; }
+    .profile-col { padding: 12px 12px 96px; }
+    .access-phone { display: flex; }
     /* The roster footer is 56px and full width below 980px. Keep Undo on screen. */
     .toast {
       bottom: calc(56px + 12px + env(safe-area-inset-bottom, 0px));
@@ -829,7 +1014,12 @@ window.addEventListener("storage", function (ev) {
     .bubble, .msg-group { max-width: 85%; }
     .perm-card .perm-actions > button { flex: 1 1 100%; }
     .perm-card .perm-actions .deny { margin-left: 0; }
-    button:not(.copy-btn):not(.swatch):not(.shape-btn):not(.bot):not([role="radio"]):not(.state-chip):not(.stop-btn):not(#send-btn):not(.tsum), .icon-btn, #menu-btn { min-height: 44px; }
+    button:not(.copy-btn):not(.swatch):not(.shape-btn):not(.bot):not([role="radio"]):not(.state-chip):not(.stop-btn):not(#send-btn):not(.tsum):not(.chip-x):not(.toggle):not(.nav-link), .icon-btn, #menu-btn { min-height: 44px; }
+    #menu-btn, #profile-menu, .routine-more { min-width: 44px; min-height: 44px; }
+    .savebar .phone-only { display: inline; }
+    .savebar .wide-only { display: none; }
+    .aside .wide-only { display: none; }
+    .aside .phone-only { display: inline; }
     .state-chip { height: 32px; min-height: 32px; gap: 6px; padding: 0 8px; }
     .state-chip svg { width: 14px; height: 14px; }
     .state-chip .chip-chev { display: none; }
@@ -852,6 +1042,7 @@ window.addEventListener("storage", function (ev) {
   }
   @media (prefers-reduced-motion: reduce) {
     .state-sheet, .state-backdrop, .toast, .skel-mark, .skel-line { transition: none; animation: none; }
+    .savebar, .discard-dialog, .btn-spin, .toggle::after { transition: none; animation: none; }
     .pulse, .dots i, .caret, .stop-spin, .perm-card .is-loading::after { animation: none; }
     #bot-list.is-stale,
     #bot-list.is-stale * { transition: none; }
@@ -942,81 +1133,239 @@ window.addEventListener("storage", function (ev) {
         <span class="mark" id="profile-head-mark" aria-hidden="true"></span>
         <h2 class="solo-id" id="profile-heading" tabindex="-1">
           <span class="name" id="profile-head-name">Profile</span>
-          <span class="solo-kicker">Profile</span>
+          <span id="profile-kicker" class="solo-kicker">Profile</span>
+          <span class="draft-chip" id="draft-chip" hidden>Draft</span>
+          <span class="draft-sub" id="draft-sub" hidden>Not created yet</span>
+          <span class="access-crumb" id="access-crumb" hidden>› Permissions &amp; access</span>
         </h2>
-        <button type="button" class="ghost" id="profile-log">Log</button>
+        <button type="button" class="ghost" id="profile-log"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M8 7h11M8 12h11M8 17h11M5 7h.01M5 12h.01M5 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Log</button>
         <div class="menu">
-          <button type="button" id="profile-menu" aria-haspopup="menu" aria-expanded="false" aria-controls="bot-menu" aria-label="Bot menu">⋯</button>
+          <button type="button" class="icon-btn" id="profile-menu" aria-haspopup="menu" aria-expanded="false" aria-controls="bot-menu" aria-label="Bot menu"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><circle cx="6" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18" cy="12" r="1.6" fill="currentColor"/></svg></button>
         </div>
       </header>
       <div class="profile-layout">
-        <nav class="profile-nav" aria-label="Profile sections"></nav>
-        <div class="profile-col">
-      <form class="panel profile" id="profile-form">
-        <div class="shapes" id="shape-picker" role="group" aria-label="Mark shape"></div>
-        <div class="colours" role="group" aria-label="Mark colour">
-          <div class="swatches" id="color-picker"></div>
-          <label class="color-custom" for="color-custom">Custom colour</label>
-          <input type="color" id="color-custom" value="#4C77DD">
-        </div>
-        <p class="mark-advisory" id="mark-advisory" hidden></p>
-        <label>Name<input id="profile-name" autocomplete="off"></label>
-        <label>Label<input id="profile-label" placeholder="Short role line" autocomplete="off"></label>
-        <label>Description<textarea id="profile-description" placeholder="Standing prompt. This is what the model is given."></textarea></label>
-        <label>Model override<input id="profile-model" placeholder="blank uses the daemon default" autocomplete="off"></label>
-        <fieldset class="grants">
-          <legend>Grants</legend>
-          <label><input type="checkbox" name="grant" value="net"> net</label>
-          <label><input type="checkbox" name="grant" value="git"> git</label>
-          <label><input type="checkbox" name="grant" value="github"> github</label>
-          <label><input type="checkbox" name="grant" value="ssh"> ssh</label>
-          <label><input type="checkbox" name="grant" value="build"> build</label>
-        </fieldset>
-        <label>Network allowlist<input id="profile-net" placeholder="host.example" autocomplete="off"></label>
-        <label>SSH allowlist<input id="profile-ssh" placeholder="host.example" autocomplete="off"></label>
-        <label>GitHub repositories<input id="profile-github" placeholder="owner/repo" autocomplete="off"></label>
-        <p class="empty" style="padding:0">An empty GitHub list allows no repositories. It does not inherit the policy list. It can only narrow the policy ceiling.</p>
-        <fieldset class="grants" id="server-tools">
-          <legend>Server tools</legend>
-          <label><input type="radio" name="server-tools-mode" id="server-tools-inherit" value="inherit" checked> Inherit from policy</label>
-          <label><input type="radio" name="server-tools-mode" id="server-tools-explicit" value="explicit"> Explicit list</label>
-          <span id="server-tools-picks"></span>
-        </fieldset>
-        <p class="empty" id="server-tools-hint" style="padding:0">Inherit from policy uses the effective list. An explicit list with nothing checked allows none. A bot without a net grant still loses every non-function tool.</p>
-        <p class="empty" style="padding:0">Only you can set grants. Bots cannot grant them to themselves. Durable permission rules are the same: nothing is auto-allowed until you accept it, and a write still asks.</p>
-        <h2>Permission rules</h2>
-        <div id="perm-rules" class="perm-list"></div>
-        <div class="routine">
-          <label>Pattern<input id="perm-pattern" placeholder="Read(./src/**)" autocomplete="off"></label>
-          <label>Effect
-            <select id="perm-effect">
-              <option value="allow">allow</option>
-              <option value="ask">ask</option>
-              <option value="deny">deny</option>
-            </select>
-          </label>
-          <div class="row">
-            <button type="button" id="perm-add">Add rule</button>
-            <button type="button" id="perm-analyze" class="ghost">Analyze history</button>
+        <nav class="profile-nav profile-nav-block" id="profile-nav-main" aria-label="Profile sections">
+          <button type="button" class="nav-link" data-sec="sec-identity" aria-current="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="8" r="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M5 19c1.5-3 3.5-4.5 7-4.5S17.5 16 19 19" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Identity</button>
+          <button type="button" class="nav-link" data-sec="sec-behaviour"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 8h16M4 16h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="9" cy="8" r="2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="15" cy="16" r="2" fill="none" stroke="currentColor" stroke-width="2"/></svg>Behaviour</button>
+          <button type="button" class="nav-link" data-sec="sec-routines"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 8v5l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Routines</button>
+          <button type="button" class="nav-link" id="nav-access">Permissions &amp; access <span class="chev">›</span></button>
+        </nav>
+        <nav class="profile-nav profile-nav-block" id="profile-nav-access" hidden aria-label="Permissions and access">
+          <button type="button" class="nav-link" data-sec="sec-grants" aria-current="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 12h18M12 4c2 2.5 3 5 3 8s-1 5.5-3 8c-2-2.5-3-5-3-8s1-5.5 3-8z" fill="none" stroke="currentColor" stroke-width="2"/></svg>Grants</button>
+          <button type="button" class="nav-link" data-sec="sec-allow"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 7h11M8 12h11M8 17h11M5 7h.01M5 12h.01M5 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Allowlists</button>
+          <button type="button" class="nav-link" data-sec="sec-tools"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14.5 6.5l3 3L8 19H5v-3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>Server tools</button>
+          <button type="button" class="nav-link" data-sec="sec-rules"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>Permission rules</button>
+        </nav>
+        <div class="profile-col" id="profile-col">
+          <div id="profile-main">
+            <form id="profile-form">
+              <section class="sec" id="sec-identity">
+                <div class="sec-h"><h2>Identity</h2></div>
+                <div class="fld" id="fld-mark">
+                  <span class="lbl">Mark</span>
+                  <div class="mark-block">
+                    <div class="mark-preview" id="mark-preview"></div>
+                    <div>
+                      <div class="shapes" id="shape-picker" role="group" aria-label="Mark shape"></div>
+                      <div class="colours" role="group" aria-label="Mark colour">
+                        <div class="swatches" id="color-picker"></div>
+                        <label class="color-custom" for="color-custom">Custom colour</label>
+                        <input type="color" id="color-custom" value="#4C77DD">
+                      </div>
+                    </div>
+                  </div>
+                  <p class="mark-advisory" id="mark-advisory" hidden></p>
+                  <p class="help changed" hidden>Changed</p>
+                </div>
+                <label class="fld" id="fld-name">
+                  <span class="lbl">Name</span>
+                  <input id="profile-name" autocomplete="off">
+                  <p class="help" id="help-name">Unique. Other bots address it by this name.</p>
+                  <p class="help changed" hidden>Changed</p>
+                </label>
+                <label class="fld" id="fld-label">
+                  <span class="lbl">Label</span>
+                  <input id="profile-label" placeholder="Short role line" autocomplete="off">
+                  <p class="help changed" hidden>Changed</p>
+                </label>
+              </section>
+              <section class="sec" id="sec-behaviour">
+                <div class="sec-h"><h2>Behaviour</h2></div>
+                <label class="fld" id="fld-description">
+                  <span class="lbl">Description</span>
+                  <textarea id="profile-description" placeholder="Standing prompt. This is what the model is given."></textarea>
+                  <p class="help changed" hidden>Changed</p>
+                </label>
+                <div class="advisory" id="profile-warn" hidden>
+                  <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M12 4l9 16H3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 10v4M12 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                  <span id="profile-warn-text"></span>
+                </div>
+                <label class="fld" id="fld-model">
+                  <span class="lbl">Model override</span>
+                  <input id="profile-model" autocomplete="off">
+                  <p class="help" id="help-model">Leave blank to use the daemon default.</p>
+                  <p class="help changed" hidden>Changed</p>
+                </label>
+              </section>
+            </form>
+            <section class="sec" id="sec-routines">
+              <div class="sec-h">
+                <h2>Routines</h2>
+                <span class="aside ok" id="routine-aside"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path d="M20 6L9 17l-5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="wide-only">Routine changes save immediately</span><span class="phone-only">Saves instantly</span></span>
+              </div>
+              <div class="info-box" id="routine-draft" hidden>Routines can be added once the bot is created. They save as soon as you add them.</div>
+              <div id="routine-live">
+                <div id="routines"></div>
+                <button type="button" class="ghost" id="routine-new">+ New routine</button>
+                <form class="routine-form" id="routine-form" hidden>
+                  <label class="fld">
+                    <span class="lbl">Name</span>
+                    <input id="routine-name" autocomplete="off">
+                  </label>
+                  <div class="fld">
+                    <span class="lbl">Schedule</span>
+                    <div class="builder">
+                      <span>Every</span>
+                      <input id="routine-n" type="number" min="1" step="1" inputmode="numeric" value="1" aria-label="Interval length">
+                      <div class="seg" id="routine-unit" role="radiogroup" aria-label="Interval unit">
+                        <button type="button" role="radio" data-unit="minutes" aria-checked="false">minutes</button>
+                        <button type="button" role="radio" data-unit="hours" aria-checked="false">hours</button>
+                        <button type="button" role="radio" data-unit="days" aria-checked="true">days</button>
+                      </div>
+                    </div>
+                    <p class="help" id="routine-preview"></p>
+                  </div>
+                  <label class="fld">
+                    <span class="lbl">Prompt</span>
+                    <textarea id="routine-prompt" placeholder="Instruction when it fires"></textarea>
+                  </label>
+                  <div class="row">
+                    <button type="button" class="primary small" id="routine-add">Add routine</button>
+                    <button type="button" class="ghost small" id="routine-cancel">Cancel</button>
+                  </div>
+                </form>
+                <p class="help is-error" id="routine-err" hidden></p>
+              </div>
+            </section>
+            <button type="button" class="linkrow access-phone" id="open-access">
+              <span><b>Permissions &amp; access</b><span>Grants, allowlists, server tools, and rules</span></span>
+              <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
+          </div>
+          <div id="profile-access" hidden>
+            <div class="access-grid">
+              <section class="sec" id="sec-grants">
+                <div class="sec-h"><h2>Grants</h2><span class="aside">Saved with the profile</span></div>
+                <div class="grant" id="grant-net">
+                  <div class="gi" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 12h18M12 4c2 2.5 3 5 3 8s-1 5.5-3 8c-2-2.5-3-5-3-8s1-5.5 3-8z" fill="none" stroke="currentColor" stroke-width="2"/></svg></div>
+                  <b>net</b>
+                  <span>Network through the proxy, limited to the network allowlist</span>
+                  <button type="button" class="toggle" role="switch" data-grant="net" aria-checked="false" aria-label="net"></button>
+                </div>
+                <div class="grant" id="grant-git">
+                  <div class="gi" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18"><circle cx="6" cy="6" r="2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="6" cy="18" r="2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="18" cy="12" r="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M6 8v8M6 12h10" fill="none" stroke="currentColor" stroke-width="2"/></svg></div>
+                  <b>git</b>
+                  <span>Run git inside the workspace</span>
+                  <button type="button" class="toggle" role="switch" data-grant="git" aria-checked="false" aria-label="git"></button>
+                </div>
+                <div class="grant" id="grant-github">
+                  <div class="gi" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="12" cy="12" r="2" fill="currentColor"/></svg></div>
+                  <b>github</b>
+                  <span>Fetch, push and open pull requests on allowlisted repositories. Every push and PR asks first.</span>
+                  <button type="button" class="toggle" role="switch" data-grant="github" aria-checked="false" aria-label="github"></button>
+                </div>
+                <div class="grant" id="grant-ssh">
+                  <div class="gi" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 6h16v12H4z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M7 15l3-3-3-3M12 15h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+                  <b>ssh</b>
+                  <span>SSH to hosts on the SSH allowlist</span>
+                  <button type="button" class="toggle" role="switch" data-grant="ssh" aria-checked="false" aria-label="ssh"></button>
+                </div>
+                <div class="grant" id="grant-build">
+                  <div class="gi" aria-hidden="true"><svg viewBox="0 0 24 24" width="18" height="18"><path d="M14.5 6.5l3 3L8 19H5v-3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg></div>
+                  <b>build</b>
+                  <span>Toolchains and build caches in the jail</span>
+                  <button type="button" class="toggle" role="switch" data-grant="build" aria-checked="false" aria-label="build"></button>
+                </div>
+                <p class="help">Only you can set grants. Bots cannot grant them to themselves. Durable permission rules are the same: nothing is auto-allowed until you accept it, and a write still asks.</p>
+                <p class="help changed" id="fld-grants" hidden>Changed</p>
+              </section>
+              <section class="sec" id="sec-allow">
+                <div class="sec-h"><h2>Allowlists</h2><span class="aside">Saved with the profile</span></div>
+                <div class="fld" id="fld-net">
+                  <span class="lbl">Network allowlist</span>
+                  <div class="chips" id="chips-net">
+                    <input id="profile-net" placeholder="Add host…" autocomplete="off" aria-label="Network allowlist">
+                  </div>
+                  <p class="help" id="help-net">Press Enter or comma to add. Paste a list to add several.</p>
+                  <p class="help changed" hidden>Changed</p>
+                </div>
+                <div class="fld" id="fld-ssh">
+                  <span class="lbl">SSH allowlist</span>
+                  <div class="chips" id="chips-ssh">
+                    <input id="profile-ssh" placeholder="Add host…" autocomplete="off" aria-label="SSH allowlist">
+                  </div>
+                  <p class="help" id="help-ssh">Empty allows no hosts.</p>
+                  <p class="help changed" hidden>Changed</p>
+                </div>
+                <div class="fld" id="fld-github">
+                  <span class="lbl">GitHub repositories</span>
+                  <div class="chips" id="chips-github">
+                    <input id="profile-github" placeholder="Add owner/repo…" autocomplete="off" aria-label="GitHub repositories">
+                  </div>
+                  <p class="help" id="help-github">An empty GitHub list allows no repositories. It does not inherit the policy list. It can only narrow the policy ceiling.</p>
+                  <p class="help changed" hidden>Changed</p>
+                </div>
+              </section>
+              <section class="sec" id="sec-tools">
+                <div class="sec-h"><h2>Server tools</h2><span class="aside">Saved with the profile</span></div>
+                <div class="fld" id="fld-tools">
+                  <div id="server-tools">
+                    <div class="seg" id="server-tools-seg" role="radiogroup" aria-label="Server tools">
+                      <button type="button" role="radio" id="server-tools-inherit" aria-checked="true">Inherit from policy</button>
+                      <button type="button" role="radio" id="server-tools-explicit" aria-checked="false">Explicit list</button>
+                    </div>
+                    <div id="server-tools-picks" class="tool-list"></div>
+                  </div>
+                  <p class="help" id="server-tools-hint">Inherit from policy uses the effective list. An explicit list with nothing checked allows none. A bot without a net grant still loses every non-function tool.</p>
+                  <p class="help changed" hidden>Changed</p>
+                </div>
+              </section>
+              <section class="sec" id="sec-rules">
+                <div class="sec-h">
+                  <h2>Permission rules</h2>
+                  <span class="aside ok"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path d="M20 6L9 17l-5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Rules save immediately</span>
+                </div>
+                <p class="info-box" id="perm-draft" hidden>Rules can be added once the bot is created.</p>
+                <div id="perm-rules" class="perm-list"></div>
+                <div class="routine" id="perm-editor">
+                  <label class="fld">Pattern<input id="perm-pattern" placeholder="Read(./src/**)" autocomplete="off"></label>
+                  <label class="fld">Effect
+                    <select id="perm-effect">
+                      <option value="allow">allow</option>
+                      <option value="ask">ask</option>
+                      <option value="deny">deny</option>
+                    </select>
+                  </label>
+                  <div class="row">
+                    <button type="button" class="primary small" id="perm-add">Add rule</button>
+                    <button type="button" class="ghost small" id="perm-analyze"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path d="M12 3l1.2 4.2L17 8.5l-3.8 1.3L12 14l-1.2-4.2L7 8.5l3.8-1.3zM18 14l.6 2 2 .6-2 .6-.6 2-.6-2-2-.6 2-.6z" fill="currentColor"/></svg>Analyze history</button>
+                  </div>
+                </div>
+                <h2 id="perm-sug-head">Suggestions</h2>
+                <div id="perm-suggestions" class="perm-list"></div>
+                <div class="err" id="profile-err"></div>
+              </section>
+            </div>
           </div>
         </div>
-        <h2>Suggestions</h2>
-        <div id="perm-suggestions" class="perm-list"></div>
-        <div class="row">
-          <button class="primary" type="submit">Save</button>
-        </div>
-        <div class="warn" id="profile-warn" hidden></div>
-        <div class="err" id="profile-err"></div>
-        <h2>Routines</h2>
-        <div id="routines"></div>
-        <div class="routine">
-          <input id="routine-name" placeholder="Name" autocomplete="off">
-          <input id="routine-schedule" placeholder="Schedule — 30s, 5m, 2h, 1d" autocomplete="off">
-          <textarea id="routine-prompt" placeholder="Instruction when it fires"></textarea>
-          <button type="button" id="routine-add">Add routine</button>
-        </div>
-      </form>
-        </div>
+      </div>
+      <div class="savebar" id="savebar" hidden>
+        <span class="pip" aria-hidden="true"></span>
+        <span class="save-copy"><span id="save-lead">Unsaved changes</span><span id="save-fields" class="save-fields"></span></span>
+        <span class="save-actions">
+          <button type="button" class="ghost" id="save-discard">Discard</button>
+          <button type="button" class="primary" id="save-go"><span class="btn-label" id="save-go-label">Save changes</span><span class="btn-spin" aria-hidden="true"></span></button>
+        </span>
       </div>
     </section>
     <section class="view" id="view-log">
@@ -1052,23 +1401,17 @@ window.addEventListener("storage", function (ev) {
   <div class="sheet-head"><span class="mark mark-20" id="state-sheet-mark" hidden aria-hidden="true"></span><h2 id="state-sheet-title">state</h2><button type="button" class="ghost sheet-close" id="state-close" aria-label="Close"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div>
   <div class="sheet-body" id="state-sheet-body"></div>
 </aside>
-<div class="state-backdrop" id="create-backdrop" hidden></div>
-<aside class="state-sheet" id="create-sheet" hidden role="dialog" aria-modal="true" aria-labelledby="create-title">
-  <div class="sheet-grab" aria-hidden="true"></div>
-  <div class="sheet-head"><h2 id="create-title">New bot</h2><button type="button" class="ghost sheet-close" id="create-close" aria-label="Close"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div>
-  <div class="sheet-body">
-    <form class="create" id="create-form">
-      <input name="name" placeholder="Name" autocomplete="off" required>
-      <input name="label" placeholder="Label — short role line" autocomplete="off">
-      <textarea name="description" placeholder="Description — the standing prompt"></textarea>
-      <div class="row">
-        <button class="primary" type="submit">Create bot</button>
-      </div>
-      <div class="err" id="create-err"></div>
-    </form>
+<div class="discard-backdrop" id="discard-backdrop" hidden></div>
+<aside class="discard-dialog" id="discard-dialog" hidden role="dialog" aria-modal="true" aria-labelledby="discard-title">
+  <h2 id="discard-title">Discard unsaved changes?</h2>
+  <div class="row">
+    <button type="button" class="ghost" id="discard-go">Discard</button>
+    <button type="button" class="primary" id="discard-keep">Keep editing</button>
   </div>
 </aside>
 <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<template id="tpl-alert"><svg class="help-alert" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path d="M12 4l9 16H3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 10v4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M12 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></template>
+<template id="tpl-more"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><circle cx="6" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18" cy="12" r="1.6" fill="currentColor"/></svg></template>
 <script>
 const KINDS = ["user_message","bot_message","dm_sent","dm_received","tool_start","tool_end","bot_created","bot_updated","bot_deleted","timer_fired","timer_missed","model_call","run_input","run_started","run_finished","daemon_start","daemon_stop","grant_use","grant_denied","net_request","sandbox_block"];
 const SHAPES = ["circle","square","diamond","triangle","hex"];
@@ -1090,6 +1433,16 @@ const state = {
   showHidden: false,
   showArchived: false,
   mark: {shape: "circle", color: COLORS[0]},
+  draft: false,
+  profilePane: "main",
+  profileBase: null,
+  profileLoad: 0,
+  chipLists: {net: [], ssh: [], github: []},
+  saveError: "",
+  expectPop: false,
+  routineEdit: "",
+  pendingLeave: null,
+  saving: false,
   desktopLog: false,
   conn: "loading",
   botsLoaded: false,
@@ -1212,6 +1565,10 @@ function setView(name) {
   const prev = state.view;
   const enter = prev !== name;
   state.view = name;
+  if (name !== "profile") {
+    state.draft = false;
+    state.profileBase = null;
+  }
   const wide = isWide();
   const solo = name === "profile" || name === "log";
   document.body.classList.toggle("solo", solo);
@@ -1513,7 +1870,7 @@ function renderBots() {
       empty.append(el("p", "empty", "No bots yet."));
       const nb = el("button", "primary", "New bot");
       nb.type = "button";
-      nb.addEventListener("click", () => openCreate(nb));
+      nb.addEventListener("click", () => openDraft(true));
       empty.append(nb);
       list.append(empty);
     }
@@ -1710,6 +2067,7 @@ function botFromPathname(pathname, root) {
   return m ? decodeURIComponent(m[1]) : null;
 }
 function levelURL(root, view, bot, search) {
+  if (view === "draft") return root + "/" + (search || "") + "#new";
   const id = view !== "bots" && bot ? bot : null;
   const path = root + (id ? "/bots/" + encodeURIComponent(id) : "/");
   const hash = view === "profile" ? "#profile" : view === "log" ? "#log" : "";
@@ -1720,12 +2078,14 @@ function parseLevel(pathname, hash, root, hist) {
   const h = String(hash || "").replace(/^#/, "");
   if (h === "profile" && bot) return { view: "profile", bot: bot };
   if (h === "log") return { view: "log", bot: bot };
+  if (h === "new") return { view: "draft", bot: null };
   if (hist && hist.lgb === 1 && hist.view === "profile" && (hist.bot || bot)) {
     return { view: "profile", bot: hist.bot || bot };
   }
   if (hist && hist.lgb === 1 && hist.view === "log") {
     return { view: "log", bot: hist.bot || bot };
   }
+  if (hist && hist.lgb === 1 && hist.view === "draft") return { view: "draft", bot: null };
   if (bot) return { view: "chat", bot: bot };
   return { view: "bots", bot: null };
 }
@@ -1735,6 +2095,7 @@ function backAction(hist) {
 }
 function parentLevel(level) {
   const bot = level && level.bot ? level.bot : null;
+  if (level && level.view === "draft") return { view: "bots", bot: null };
   if (level && level.view === "profile" && bot) return { view: "chat", bot: bot };
   if (level && level.view === "log") return bot ? { view: "chat", bot: bot } : { view: "bots", bot: null };
   return { view: "bots", bot: null };
@@ -1765,18 +2126,19 @@ function ensureHistory() {
   commitLevel(stamp, "replace");
 }
 function navBack() {
+  if (state.view === "profile" && state.profilePane === "access") {
+    setProfilePane("main");
+    return;
+  }
   if (backAction(history.state) === "back") {
     history.back();
     return;
   }
-  const parent = parentLevel(parseLevel(location.pathname, location.hash, base(), history.state));
-  commitLevel(parent, "replace");
-  if (parent.view === "chat" && parent.bot) openBot(parent.bot, false);
-  else if (parent.view === "log") openLog(false);
-  else goHome(false);
+  confirmLeave(leaveProfile);
 }
 function knownBot(id) { return !!(id && state.bots.some(b => b.id === id)); }
 function revealLevel(level) {
+  if (level.view === "draft") return openDraft(false);
   if (level.view === "profile" && knownBot(level.bot)) return openProfile(level.bot, false);
   if (level.view === "chat" && knownBot(level.bot)) return openBot(level.bot, false);
   if (level.view === "log") {
@@ -1796,6 +2158,10 @@ function revealLevel(level) {
   return goHome(false);
 }
 function openLog(push = true) {
+  if (!navBypass && profileDirty()) {
+    confirmLeave(() => openLog(push));
+    return;
+  }
   closeState();
   closeRosterMenu();
   if (push) commitLevel({ view: "log", bot: state.botId }, "push");
@@ -1806,6 +2172,10 @@ function openLog(push = true) {
 function setTitle() {
   if (state.view === "log") {
     document.title = "Log — Local Grok Bots";
+    return;
+  }
+  if (state.draft) {
+    document.title = "New bot — Local Grok Bots";
     return;
   }
   const b = state.botId && currentBot();
@@ -1839,10 +2209,36 @@ window.addEventListener("hashchange", () => {
   revealLevel(parseLevel(location.pathname, location.hash, base(), history.state));
 });
 window.addEventListener("popstate", () => {
+  if (state.expectPop) {
+    state.expectPop = false;
+    navBypass = true;
+    try {
+      ensureHistory();
+      revealLevel(parseLevel(location.pathname, location.hash, base(), history.state));
+    } finally { navBypass = false; }
+    return;
+  }
+  if (discardOpen()) {
+    commitLevel(stayingLevel(), "push");
+    return;
+  }
+  if (profileDirty()) {
+    commitLevel(stayingLevel(), "push");
+    state.pendingLeave = () => {
+      state.expectPop = true;
+      history.back();
+    };
+    openDiscardDialog();
+    return;
+  }
   ensureHistory();
   revealLevel(parseLevel(location.pathname, location.hash, base(), history.state));
 });
 async function openBot(id, push = true) {
+  if (!navBypass && profileDirty()) {
+    confirmLeave(() => openBot(id, push));
+    return;
+  }
   if (state.botId !== id) {
     stopStream();
     state.loadedFor = null;
@@ -2504,24 +2900,7 @@ function setWorking(on, text) {
     stick();
   }
 }
-$("#create-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  $("#create-err").textContent = "";
-  const fd = new FormData(e.target);
-  try {
-    const bot = await api("/api/bots", {method:"POST", body: JSON.stringify({
-      name: fd.get("name"),
-      label: fd.get("label") || "",
-      description: fd.get("description") || "",
-      mark: {shape: "circle", color: COLORS[0]}
-    })});
-    e.target.reset();
-    closeCreate();
-    await loadBots();
-    openBot(bot.id);
-  } catch (err) { $("#create-err").textContent = err.message; }
-});
-$("#new-bot").addEventListener("click", () => openCreate($("#new-bot")));
+$("#new-bot").addEventListener("click", () => openDraft(true));
 $("#menu-show-hidden").addEventListener("click", () => {
   state.showHidden = !state.showHidden;
   renderBots();
@@ -2550,7 +2929,7 @@ $("#composer-input").addEventListener("keydown", (e) => {
   const input = $("#composer-input");
   const touch = window.matchMedia && window.matchMedia("(hover: none)").matches;
   const menuOpen = ($("#bot-menu") && !$("#bot-menu").hidden) || ($("#roster-menu") && !$("#roster-menu").hidden);
-  const sheetOpen = (typeof stateOpen === "function" && stateOpen()) || (typeof createOpen === "function" && createOpen());
+  const sheetOpen = (typeof stateOpen === "function" && stateOpen()) || (typeof discardOpen === "function" && discardOpen());
   let dialogOpen = false;
   if (typeof permCards !== "undefined") {
     for (const rec of permCards.values()) if (rec && !rec.settled) dialogOpen = true;
@@ -3346,7 +3725,7 @@ $("#menu-btn").addEventListener("click", (e) => {
 });
 document.addEventListener("click", (e) => {
   if (!e.target.closest("#roster-menu-wrap")) closeRosterMenu();
-  if (!e.target.closest(".menu")) closeMenu();
+  if (!e.target.closest(".menu")) { closeMenu(); closeRoutineMenus(); }
 });
 $("#bot-menu").addEventListener("click", async (e) => {
   const btn = e.target.closest("button");
@@ -3363,11 +3742,19 @@ $("#bot-menu").addEventListener("click", async (e) => {
       await api("/api/bots/" + state.botId, {method:"PATCH", body: JSON.stringify({pinned: !(b && b.pinned)})});
       await loadBots();
     } else if (act === "hide") {
-      await api("/api/bots/" + state.botId, {method:"PATCH", body: JSON.stringify({hidden: !(b && b.hidden)})});
-      await loadBots();
-      if (!(b && b.hidden)) setView("bots");
-    } else if (act === "duplicate") { await duplicateBot(state.botId); }
-    else if (act === "archive") { await setArchived(state.botId, !(b && b.archived)); }
+      const leaving = !(b && b.hidden);
+      const run = async () => {
+        await api("/api/bots/" + state.botId, {method:"PATCH", body: JSON.stringify({hidden: !(b && b.hidden)})});
+        await loadBots();
+        if (leaving) setView("bots");
+      };
+      if (leaving) confirmLeave(() => run().catch(err2 => showRunError(err2.message)));
+      else await run();
+    } else if (act === "duplicate") {
+      confirmLeave(() => duplicateBot(state.botId).catch(err2 => showRunError(err2.message)));
+    } else if (act === "archive") {
+      confirmLeave(() => setArchived(state.botId, !(b && b.archived)).catch(err2 => showRunError(err2.message)));
+    }
   } catch (err) {
     showRunError(err.message);
   }
@@ -3430,6 +3817,537 @@ async function setArchived(id, archived, opts) {
   focusRosterTarget(archiveFocusTarget(isWide(), idsBefore, id));
   if (state.botId === id) await refreshBot();
 }
+// profile-logic:begin
+const PHX_WHEN = new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/Phoenix",
+  weekday: "short", month: "short", day: "numeric",
+  hour: "numeric", minute: "2-digit", hourCycle: "h12"
+});
+const PHX_DAY = new Intl.DateTimeFormat("en-CA", {
+  timeZone: "America/Phoenix", year: "numeric", month: "2-digit", day: "2-digit"
+});
+const RESERVED_TLD = { example: 1, invalid: 1, test: 1, localhost: 1 };
+
+function splitChipTokens(text) {
+  return String(text == null ? "" : text).split(/[\s,]+/).map(s => s.trim()).filter(Boolean);
+}
+function portOK(port) {
+  if (!/^\d+$/.test(port || "")) return false;
+  const n = Number(port);
+  return n >= 1 && n <= 65535;
+}
+function ipv4ok(host) {
+  const parts = String(host || "").split(".");
+  if (parts.length !== 4) return false;
+  return parts.every(x => /^\d{1,3}$/.test(x) && Number(x) <= 255);
+}
+function ipv6ok(host) {
+  if (!/^[0-9a-fA-F:]+$/.test(host || "")) return false;
+  const colons = (String(host).match(/:/g) || []).length;
+  return colons >= 2 && colons <= 7;
+}
+function dnsLabelOK(label) {
+  return /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/i.test(label || "");
+}
+function dnsok(host) {
+  const labels = String(host || "").split(".");
+  if (labels.length < 2) return false;
+  if (!labels.every(dnsLabelOK)) return false;
+  const tld = labels[labels.length - 1].toLowerCase();
+  if (!/^[a-z]{2,24}$/.test(tld)) return false;
+  if (RESERVED_TLD[tld]) return false;
+  return true;
+}
+function hostEntryValid(raw) {
+  let s = String(raw == null ? "" : raw).trim();
+  if (!s || /[\s/]/.test(s)) return false;
+  if (s.startsWith("[")) {
+    const m = /^\[([^\]]+)\](?::(\d+))?$/.exec(s);
+    if (!m) return false;
+    return ipv6ok(m[1]) && (!m[2] || portOK(m[2]));
+  }
+  const colons = (s.match(/:/g) || []).length;
+  if (colons >= 2) return ipv6ok(s);
+  let host = s;
+  if (colons === 1) {
+    const i = s.lastIndexOf(":");
+    host = s.slice(0, i);
+    if (!portOK(s.slice(i + 1))) return false;
+  }
+  if (host.startsWith("*.")) host = host.slice(2);
+  if (!host || host.startsWith(".") || host.endsWith(".")) return false;
+  if (ipv4ok(host)) return true;
+  return dnsok(host);
+}
+function repoPartOK(p) {
+  if (!p || p.length > 100) return false;
+  if (p.indexOf("..") >= 0) return false;
+  if (!/^[a-z0-9._-]+$/.test(p)) return false;
+  if (p[0] === "." || p[0] === "-" || p[p.length - 1] === ".") return false;
+  return true;
+}
+function repoEntryValid(raw) {
+  const s = String(raw == null ? "" : raw).trim();
+  if (/[\r\n\t\0]/.test(s)) return false;
+  const slash = s.indexOf("/");
+  if (slash <= 0 || slash !== s.lastIndexOf("/")) return false;
+  const owner = s.slice(0, slash).toLowerCase();
+  const repo = s.slice(slash + 1).toLowerCase();
+  return repoPartOK(owner) && repoPartOK(repo) && !repo.endsWith(".git");
+}
+function chipInvalidMessage(kind, value) {
+  const v = String(value == null ? "" : value);
+  if (kind === "repo" || kind === "github") {
+    return '"' + v + '" is not owner/repo. Use a name like example-org/notes-site.';
+  }
+  return '"' + v + '" is not a host name. Use a name like docs.example.org.';
+}
+function sameList(a, b) {
+  const aa = a || [];
+  const bb = b || [];
+  if (aa.length !== bb.length) return false;
+  for (let i = 0; i < aa.length; i++) if (aa[i] !== bb[i]) return false;
+  return true;
+}
+function sameTools(a, b) {
+  if (a == null && b == null) return true;
+  if (a == null || b == null) return false;
+  const as = a.slice().sort();
+  const bs = b.slice().sort();
+  return sameList(as, bs);
+}
+function dirtyFieldLabels(base, cur) {
+  const out = [];
+  const b = base || {};
+  const c = cur || {};
+  if ((b.name || "") !== (c.name || "")) out.push("Name");
+  if ((b.label || "") !== (c.label || "")) out.push("Label");
+  if ((b.description || "") !== (c.description || "")) out.push("Description");
+  if ((b.model || "") !== (c.model || "")) out.push("Model override");
+  const bm = b.mark || {};
+  const cm = c.mark || {};
+  if ((bm.shape || "") !== (cm.shape || "") || String(bm.color || "").toLowerCase() !== String(cm.color || "").toLowerCase()) out.push("Mark");
+  if (!sameList(b.grants, c.grants)) out.push("Grants");
+  if (!sameList(b.net, c.net)) out.push("Network allowlist");
+  if (!sameList(b.ssh, c.ssh)) out.push("SSH allowlist");
+  if (!sameList(b.github, c.github)) out.push("GitHub repositories");
+  if (!sameTools(b.server_tools, c.server_tools)) out.push("Server tools");
+  return out;
+}
+function scheduleFromBuilder(mode, n, unit) {
+  if (mode !== "every") return "";
+  const num = typeof n === "number" ? n : Number(String(n == null ? "" : n).trim());
+  if (!Number.isInteger(num) || num <= 0) return "";
+  const suffix = unit === "minutes" ? "m" : unit === "hours" ? "h" : unit === "days" ? "d" : "";
+  if (!suffix) return "";
+  return "every " + num + suffix;
+}
+function scheduleLabel(schedule) {
+  const raw = String(schedule == null ? "" : schedule).trim();
+  const s = raw.toLowerCase();
+  if (s === "once") return "once";
+  const body = s.replace(/^every\s+/, "");
+  const m = body.match(/^(\d+)(s|m|h|d)$/);
+  if (!m) return raw;
+  const n = Number(m[1]);
+  const unit = m[2];
+  let word = "sec";
+  if (unit === "m") word = "min";
+  else if (unit === "h") word = n === 1 ? "hour" : "hours";
+  else if (unit === "d") word = n === 1 ? "day" : "days";
+  return "every " + n + " " + word;
+}
+function intervalMs(schedule) {
+  const s = String(schedule == null ? "" : schedule).trim().toLowerCase().replace(/^every\s+/, "");
+  const m = s.match(/^(\d+)(s|m|h|d)$/);
+  if (!m) return 0;
+  const n = Number(m[1]);
+  if (m[2] === "s") return n * 1000;
+  if (m[2] === "m") return n * 60000;
+  if (m[2] === "h") return n * 3600000;
+  return n * 86400000;
+}
+function phxParts(ms) {
+  const o = {};
+  for (const part of PHX_WHEN.formatToParts(new Date(ms))) {
+    if (part.type !== "literal") o[part.type] = part.value;
+  }
+  return o;
+}
+function phxDayKey(ms) {
+  return PHX_DAY.format(new Date(ms));
+}
+function dayDiff(fromKey, toKey) {
+  const a = String(fromKey || "").split("-").map(Number);
+  const b = String(toKey || "").split("-").map(Number);
+  const ua = Date.UTC(a[0], a[1] - 1, a[2]);
+  const ub = Date.UTC(b[0], b[1] - 1, b[2]);
+  return Math.round((ub - ua) / 86400000);
+}
+function clockFrom(p) {
+  return String(p.hour || "") + ":" + String(p.minute || "00") + (p.dayPeriod ? " " + p.dayPeriod : "");
+}
+function routineWhen(iso, nowMs) {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (isNaN(t)) return "";
+  const now = typeof nowMs === "number" ? nowMs : Date.now();
+  const diff = dayDiff(phxDayKey(now), phxDayKey(t));
+  const p = phxParts(t);
+  let when = (p.month || "") + " " + (p.day || "");
+  if (diff === 0) when = "today";
+  else if (diff === 1) when = "tomorrow";
+  else if (diff === -1) when = "yesterday";
+  else if (diff >= -6 && diff <= 6) when = p.weekday || when;
+  return when + " " + clockFrom(p) + " MST";
+}
+function routineRelative(iso, nowMs) {
+  if (!iso) return "";
+  const t = Date.parse(iso);
+  if (isNaN(t)) return "";
+  const now = typeof nowMs === "number" ? nowMs : Date.now();
+  const future = t >= now;
+  let mins = Math.round(Math.abs(t - now) / 60000);
+  if (mins < 0) mins = 0;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  let body = m + "m";
+  if (h && m) body = h + "h " + m + "m";
+  else if (h) body = h + "h";
+  return future ? "in " + body : body + " ago";
+}
+function routineMeta(timer, nowMs) {
+  const t = timer || {};
+  if (!t.enabled) return "Paused · turn on to schedule";
+  const next = t.next_fire_at ? routineWhen(t.next_fire_at, nowMs) : "";
+  const rel = t.next_fire_at ? routineRelative(t.next_fire_at, nowMs) : "";
+  let last = t.last_fire_at ? routineWhen(t.last_fire_at, nowMs) : "";
+  last = last.replace(/ MST$/, "");
+  const bits = [];
+  if (next) bits.push("Next: " + next);
+  if (rel) bits.push(rel);
+  if (last) bits.push("Last: " + last);
+  return bits.join(" · ");
+}
+function routinePreview(schedule, nowMs) {
+  const label = scheduleLabel(schedule);
+  const ms = intervalMs(schedule);
+  if (!label || !ms) return "";
+  const now = typeof nowMs === "number" ? nowMs : Date.now();
+  const p = phxParts(now + ms);
+  const when = (p.weekday || "") + " " + (p.month || "") + " " + (p.day || "") + " " + clockFrom(p) + " MST";
+  return "Runs " + label + ", first run " + when;
+}
+function builderFromSchedule(schedule) {
+  const s = String(schedule == null ? "" : schedule).trim().toLowerCase().replace(/^every\s+/, "");
+  const m = s.match(/^(\d+)(m|h|d)$/);
+  if (!m) return null;
+  const unit = m[2] === "m" ? "minutes" : m[2] === "h" ? "hours" : "days";
+  return { n: Number(m[1]), unit: unit };
+}
+// profile-logic:end
+const GRANT_ORDER = ["net", "git", "github", "ssh", "build"];
+const CHIP_KINDS = ["net", "ssh", "github"];
+const CHIP_HELP = {
+  net: "Press Enter or comma to add. Paste a list to add several.",
+  ssh: "Empty allows no hosts.",
+  github: "An empty GitHub list allows no repositories. It does not inherit the policy list. It can only narrow the policy ceiling."
+};
+const DIRTY_FIELDS = [
+  ["Name", "fld-name"],
+  ["Label", "fld-label"],
+  ["Description", "fld-description"],
+  ["Model override", "fld-model"],
+  ["Mark", "fld-mark"],
+  ["Grants", "fld-grants"],
+  ["Network allowlist", "fld-net"],
+  ["SSH allowlist", "fld-ssh"],
+  ["GitHub repositories", "fld-github"],
+  ["Server tools", "fld-tools"]
+];
+let navBypass = false;
+
+function cloneTpl(id) {
+  const tpl = document.getElementById(id);
+  const node = tpl && tpl.content && tpl.content.firstElementChild;
+  return node ? node.cloneNode(true) : document.createElement("span");
+}
+function alertSvg() { return cloneTpl("tpl-alert"); }
+function moreSvg() { return cloneTpl("tpl-more"); }
+function chipKindOf(kind) { return kind === "github" ? "repo" : "host"; }
+function chipValid(kind, value) {
+  return kind === "github" ? repoEntryValid(value) : hostEntryValid(value);
+}
+function ensureChipState() {
+  if (!state.chipLists) state.chipLists = { net: [], ssh: [], github: [] };
+  for (const k of CHIP_KINDS) if (!state.chipLists[k]) state.chipLists[k] = [];
+}
+function setChipList(kind, values) {
+  ensureChipState();
+  state.chipLists[kind] = (values || []).map(v => ({ value: String(v), bad: !chipValid(kind, v), fresh: false }));
+  paintChips(kind);
+}
+function addChipTokens(kind, text, markFresh) {
+  ensureChipState();
+  const have = new Set(state.chipLists[kind].map(c => c.value));
+  let added = false;
+  for (const token of splitChipTokens(text)) {
+    if (have.has(token)) continue;
+    have.add(token);
+    state.chipLists[kind].push({ value: token, bad: !chipValid(kind, token), fresh: !!markFresh });
+    added = true;
+  }
+  if (!added) return;
+  paintChips(kind);
+  paintDirty();
+  if (markFresh) {
+    setTimeout(() => {
+      for (const c of state.chipLists[kind] || []) c.fresh = false;
+      paintChips(kind);
+    }, 2000);
+  }
+}
+function removeChipAt(kind, index) {
+  ensureChipState();
+  state.chipLists[kind].splice(index, 1);
+  paintChips(kind);
+  paintDirty();
+}
+function paintChips(kind) {
+  ensureChipState();
+  const box = $("#chips-" + kind);
+  const input = $("#profile-" + kind);
+  if (!box || !input) return;
+  box.querySelectorAll(".chip").forEach(n => n.remove());
+  const list = state.chipLists[kind];
+  for (let i = 0; i < list.length; i++) {
+    const item = list[i];
+    const chip = el("span", "chip" + (item.fresh ? " is-new" : "") + (item.bad ? " bad" : ""));
+    chip.append(document.createTextNode(item.value));
+    const x = el("button", "chip-x", "×");
+    x.type = "button";
+    x.setAttribute("aria-label", "Remove " + item.value);
+    x.addEventListener("click", () => removeChipAt(kind, i));
+    chip.append(x);
+    box.insertBefore(chip, input);
+  }
+  const bad = list.find(c => c.bad);
+  box.classList.toggle("is-error", !!bad);
+  const help = $("#help-" + kind);
+  if (help) {
+    help.replaceChildren();
+    if (bad) {
+      help.classList.add("is-error");
+      help.append(alertSvg(), document.createTextNode(chipInvalidMessage(chipKindOf(kind), bad.value)));
+    } else {
+      help.classList.remove("is-error");
+      help.textContent = CHIP_HELP[kind];
+    }
+  }
+}
+function commitChipInput(kind) {
+  const input = $("#profile-" + kind);
+  if (!input) return;
+  const text = input.value;
+  input.value = "";
+  if (String(text || "").trim()) addChipTokens(kind, text, true);
+}
+function onChipKey(kind, e) {
+  const input = e.target;
+  if (e.key === "Enter" || e.key === ",") {
+    e.preventDefault();
+    commitChipInput(kind);
+    return;
+  }
+  if (e.key === "Backspace" && !input.value) {
+    ensureChipState();
+    if (state.chipLists[kind].length) {
+      e.preventDefault();
+      removeChipAt(kind, state.chipLists[kind].length - 1);
+    }
+  }
+}
+function onChipPaste(kind, e) {
+  const text = (e.clipboardData && e.clipboardData.getData("text")) || "";
+  if (!text) return;
+  e.preventDefault();
+  addChipTokens(kind, text, true);
+  e.target.value = "";
+}
+function chipValues(kind) {
+  ensureChipState();
+  return state.chipLists[kind].map(c => c.value);
+}
+function badChipMessage() {
+  ensureChipState();
+  for (const kind of CHIP_KINDS) {
+    const bad = state.chipLists[kind].find(c => c.bad);
+    if (bad) return chipInvalidMessage(chipKindOf(kind), bad.value);
+  }
+  return "";
+}
+function readGrants() {
+  const on = new Set();
+  document.querySelectorAll("[data-grant]").forEach(b => {
+    if (b.getAttribute("aria-checked") === "true") on.add(b.getAttribute("data-grant"));
+  });
+  return GRANT_ORDER.filter(g => on.has(g));
+}
+function serverToolsExplicit() {
+  const btn = $("#server-tools-explicit");
+  return !!(btn && btn.getAttribute("aria-checked") === "true");
+}
+$("#profile-form").addEventListener("submit", (e) => { e.preventDefault(); saveProfile(); });
+function serverToolsPayload() {
+  const picked = document.querySelector("#server-tools-seg [aria-checked='true']");
+  const value = picked && picked.id === "server-tools-explicit" ? "explicit" : "inherit";
+  if (value !== "explicit") return null;
+  const list = [];
+  for (const box of document.querySelectorAll('#server-tools-picks input[name="server-tool"]')) {
+    if (box.checked) list.push(box.value);
+  }
+  return list;
+}
+function readProfile() {
+  return {
+    name: $("#profile-name") ? $("#profile-name").value : "",
+    label: $("#profile-label") ? $("#profile-label").value : "",
+    description: $("#profile-description") ? $("#profile-description").value : "",
+    model: $("#profile-model") ? $("#profile-model").value.trim() : "",
+    mark: { shape: (state.mark && state.mark.shape) || "circle", color: String((state.mark && state.mark.color) || "").toLowerCase() },
+    grants: readGrants(),
+    net: chipValues("net"),
+    ssh: chipValues("ssh"),
+    github: chipValues("github"),
+    server_tools: serverToolsPayload()
+  };
+}
+function profilePayload() {
+  const cur = readProfile();
+  const model = cur.model;
+  return {
+    name: cur.name,
+    label: cur.label,
+    description: cur.description,
+    mark: { shape: state.mark.shape, color: state.mark.color },
+    model: model || null,
+    grants: cur.grants,
+    net_allow: cur.net,
+    ssh_allow: cur.ssh,
+    github_allow: cur.github,
+    server_tools: cur.server_tools
+  };
+}
+function profileDirty() {
+  if (navBypass) return false;
+  if (state.view !== "profile" || !state.profileBase) return false;
+  return dirtyFieldLabels(state.profileBase, readProfile()).length > 0;
+}
+function changeCountLabel(n) {
+  return n === 1 ? "1 change" : n + " changes";
+}
+function paintFieldMarks(labels) {
+  const set = new Set(labels || []);
+  for (const pair of DIRTY_FIELDS) {
+    const node = document.getElementById(pair[1]);
+    if (!node) continue;
+    const on = set.has(pair[0]);
+    const box = node.classList.contains("changed") ? node.closest(".sec") : node;
+    if (box) box.classList.toggle("is-dirty", on);
+    const ch = node.classList.contains("changed") ? node : node.querySelector(":scope > .changed");
+    if (ch) ch.hidden = !on;
+  }
+}
+function paintSaveBar() {
+  const bar = $("#savebar");
+  if (!bar) return;
+  const labels = state.profileBase ? dirtyFieldLabels(state.profileBase, readProfile()) : [];
+  const draft = !!state.draft;
+  const show = state.view === "profile" && (draft || labels.length > 0);
+  bar.hidden = !show;
+  const phone = window.matchMedia("(max-width: 540px)").matches;
+  const lead = $("#save-lead");
+  const fields = $("#save-fields");
+  const go = $("#save-go-label");
+  if (lead) {
+    if (draft) lead.textContent = "New bot · nothing is created until you press Create";
+    else lead.textContent = phone ? changeCountLabel(labels.length) : "Unsaved changes";
+  }
+  if (go) go.textContent = draft ? "Create bot" : (phone ? "Save" : "Save changes");
+  if (fields) {
+    if (state.saveError) {
+      fields.textContent = state.saveError;
+      fields.classList.add("is-error");
+      fields.classList.remove("wide-only");
+    } else if (draft) {
+      fields.textContent = "";
+      fields.classList.remove("is-error");
+    } else {
+      fields.textContent = labels.length ? "· " + labels.join(", ") : "";
+      fields.classList.remove("is-error");
+      fields.classList.add("wide-only");
+    }
+  }
+}
+function paintDirty() {
+  const labels = state.profileBase ? dirtyFieldLabels(state.profileBase, readProfile()) : [];
+  paintFieldMarks(labels);
+  paintSaveBar();
+}
+function paintWarnings(list) {
+  const box = $("#profile-warn");
+  const text = $("#profile-warn-text");
+  if (!box || !text) return;
+  const words = (list || []).filter(Boolean);
+  if (!words.length) {
+    box.hidden = true;
+    text.textContent = "";
+    return;
+  }
+  let msg = words.join(" ");
+  if (msg.indexOf("Saving still works") < 0) msg += " Saving still works.";
+  text.textContent = msg;
+  box.hidden = false;
+}
+function setGrants(list) {
+  const on = new Set(list || []);
+  document.querySelectorAll("[data-grant]").forEach(b => {
+    b.setAttribute("aria-checked", on.has(b.getAttribute("data-grant")) ? "true" : "false");
+  });
+}
+function setServerMode(explicit) {
+  const inherit = $("#server-tools-inherit");
+  const chosen = $("#server-tools-explicit");
+  if (inherit) inherit.setAttribute("aria-checked", explicit ? "false" : "true");
+  if (chosen) chosen.setAttribute("aria-checked", explicit ? "true" : "false");
+  syncServerToolsMode();
+}
+function syncServerToolsMode() {
+  const on = serverToolsExplicit();
+  const picks = $("#server-tools-picks");
+  if (picks) picks.classList.toggle("is-off", !on);
+  for (const box of document.querySelectorAll('#server-tools-picks input[name="server-tool"]')) box.disabled = !on;
+}
+function paintServerTools(selected) {
+  const box = $("#server-tools-picks");
+  if (!box) return;
+  box.replaceChildren();
+  const have = new Set(selected || []);
+  const names = SERVER_TOOL_NAMES.slice();
+  for (const n of have) if (!names.includes(n)) names.push(n);
+  for (const name of names) {
+    const label = el("label", "tool-pick");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.name = "server-tool";
+    input.value = name;
+    input.checked = have.has(name);
+    input.addEventListener("change", paintDirty);
+    label.append(input, document.createTextNode(" " + name));
+    box.append(label);
+  }
+  syncServerToolsMode();
+}
 async function duplicateBot(id) {
   const full = await api("/api/bots/" + id);
   const timers = await api("/api/bots/" + id + "/timers");
@@ -3468,7 +4386,7 @@ function paintMarkPicker() {
     b.title = SHAPE_NAMES[shape] || shape;
     b.setAttribute("aria-pressed", shape === state.mark.shape ? "true" : "false");
     b.append(markEl({shape, color: state.mark.color}));
-    b.addEventListener("click", () => { state.mark.shape = shape; paintMarkPicker(); });
+    b.addEventListener("click", () => { state.mark.shape = shape; paintMarkPicker(); paintDirty(); });
     shapes.append(b);
   }
   const colors = $("#color-picker");
@@ -3491,9 +4409,11 @@ function paintMarkPicker() {
     b.setAttribute("aria-label", name);
     b.title = name;
     b.setAttribute("aria-pressed", sameColor(color, state.mark.color) ? "true" : "false");
-    b.addEventListener("click", () => { state.mark.color = color; paintMarkPicker(); });
+    b.addEventListener("click", () => { state.mark.color = color; paintMarkPicker(); paintDirty(); });
     colors.append(b);
   }
+  const preview = $("#mark-preview");
+  if (preview) preview.replaceChildren(markEl(state.mark));
   paintMark($("#profile-head-mark"), state.mark);
   if (/^#[0-9a-fA-F]{6}$/.test(state.mark.color || "")) $("#color-custom").value = state.mark.color;
   const adv = $("#mark-advisory");
@@ -3506,188 +4426,583 @@ function paintMarkPicker() {
 function syncProfileHeadingName() {
   const name = $("#profile-name").value.trim();
   $("#profile-head-name").textContent = name || "Profile";
+  if (state.draft && !name) $("#profile-head-name").textContent = "New bot";
 }
-$("#profile-name").addEventListener("input", syncProfileHeadingName);
-$("#color-custom").addEventListener("input", (e) => {
-  const v = String(e.target.value || "").toLowerCase();
-  if (/^#[0-9a-f]{6}$/.test(v)) { state.mark.color = v; paintMarkPicker(); }
-});
-async function openProfile(id, push = true) {
-  state.botId = id;
+function syncProfileChrome() {
+  const draft = !!state.draft;
+  const access = state.profilePane === "access";
+  const chip = $("#draft-chip");
+  const sub = $("#draft-sub");
+  const kicker = $("#profile-kicker");
+  const crumb = $("#access-crumb");
+  const log = $("#profile-log");
+  const menu = $("#profile-menu");
+  if (chip) chip.hidden = !draft;
+  if (sub) sub.hidden = !draft;
+  if (kicker) kicker.hidden = draft;
+  if (crumb) crumb.hidden = !access;
+  if (log) log.hidden = draft;
+  if (menu) menu.hidden = draft;
+  const routineDraft = $("#routine-draft");
+  const routineLive = $("#routine-live");
+  const routineAside = $("#routine-aside");
+  if (routineDraft) routineDraft.hidden = !draft;
+  if (routineLive) routineLive.hidden = draft;
+  if (routineAside) routineAside.hidden = draft;
+  const permDraft = $("#perm-draft");
+  const permEditor = $("#perm-editor");
+  const permRules = $("#perm-rules");
+  const permSug = $("#perm-suggestions");
+  const permHead = $("#perm-sug-head");
+  if (permDraft) permDraft.hidden = !draft;
+  if (permEditor) permEditor.hidden = draft;
+  if (permRules) permRules.hidden = draft;
+  if (permSug) permSug.hidden = draft;
+  if (permHead) permHead.hidden = draft;
+}
+function setProfilePane(pane) {
+  state.profilePane = pane === "access" ? "access" : "main";
+  const access = state.profilePane === "access";
+  const main = $("#profile-main");
+  const sub = $("#profile-access");
+  const navMain = $("#profile-nav-main");
+  const navAccess = $("#profile-nav-access");
+  const layout = document.querySelector(".profile-layout");
+  if (main) main.hidden = access;
+  if (sub) sub.hidden = !access;
+  if (navMain) navMain.hidden = access;
+  if (navAccess) navAccess.hidden = !access;
+  if (layout) layout.classList.toggle("is-access", access);
+  syncProfileChrome();
+  resetScrollTops(document.querySelectorAll(".profile-layout, .profile-col"));
+}
+function scrollProfileTo(id) {
+  const target = document.getElementById(id);
+  if (!target) return;
+  const scroller = isWide() ? $("#profile-col") : document.querySelector(".profile-layout");
+  if (!scroller) return;
+  const top = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop;
+  scroller.scrollTo({ top: Math.max(0, top - 8), behavior: "auto" });
+  const nav = state.profilePane === "access" ? $("#profile-nav-access") : $("#profile-nav-main");
+  if (!nav) return;
+  nav.querySelectorAll("[data-sec]").forEach(b => {
+    if (b.getAttribute("data-sec") === id) b.setAttribute("aria-current", "true");
+    else b.removeAttribute("aria-current");
+  });
+}
+function applyBotFields(b) {
+  const bot = b || {};
+  state.mark = { shape: (bot.mark && bot.mark.shape) || "circle", color: (bot.mark && bot.mark.color) || COLORS[0] };
+  $("#profile-name").value = bot.name || "";
+  $("#profile-label").value = bot.label || "";
+  $("#profile-description").value = bot.description || "";
+  $("#profile-model").value = bot.model || "";
+  setGrants(bot.grants || []);
+  setChipList("net", bot.net_allow || []);
+  setChipList("ssh", bot.ssh_allow || []);
+  setChipList("github", bot.github_allow || []);
+  const tools = bot.server_tools;
+  setServerMode(tools != null);
+  paintServerTools(Array.isArray(tools) ? tools : []);
+  paintWarnings(bot.warnings || []);
+  paintMarkPicker();
+  syncProfileHeadingName();
+}
+function blankDraftFields() {
+  state.mark = { shape: "circle", color: COLORS[0] };
+  $("#profile-name").value = "";
+  $("#profile-label").value = "";
+  $("#profile-description").value = "";
+  $("#profile-model").value = "";
+  setGrants([]);
+  setChipList("net", []);
+  setChipList("ssh", []);
+  setChipList("github", []);
+  setServerMode(false);
+  paintServerTools([]);
+  paintWarnings([]);
+  const err = $("#profile-err");
+  if (err) { err.style.color = ""; err.textContent = ""; }
+  paintMarkPicker();
+  syncProfileHeadingName();
+}
+function applySnapshot(snap) {
+  const s = snap || {};
+  state.mark = { shape: (s.mark && s.mark.shape) || "circle", color: (s.mark && s.mark.color) || COLORS[0] };
+  $("#profile-name").value = s.name || "";
+  $("#profile-label").value = s.label || "";
+  $("#profile-description").value = s.description || "";
+  $("#profile-model").value = s.model || "";
+  setGrants(s.grants || []);
+  setChipList("net", s.net || []);
+  setChipList("ssh", s.ssh || []);
+  setChipList("github", s.github || []);
+  setServerMode(s.server_tools != null);
+  paintServerTools(Array.isArray(s.server_tools) ? s.server_tools : []);
+  paintMarkPicker();
+  syncProfileHeadingName();
+  state.saveError = "";
+  paintDirty();
+}
+function showStatusToast(message) {
+  const toast = $("#toast");
+  if (!toast) return;
+  clearTimeout(state.toastTimer);
+  toast.replaceChildren(el("span", "toast-copy", message));
+  toast.hidden = false;
+  state.toastTimer = setTimeout(dismissToast, 2000);
+}
+function setSaving(on) {
+  state.saving = !!on;
+  const btn = $("#save-go");
+  const discard = $("#save-discard");
+  if (btn) {
+    btn.classList.toggle("is-loading", !!on);
+    btn.disabled = !!on;
+    if (on) btn.setAttribute("aria-busy", "true");
+    else btn.removeAttribute("aria-busy");
+  }
+  if (discard) discard.disabled = !!on;
+}
+async function saveProfile() {
+  if (state.saving) return;
+  const blocked = badChipMessage();
+  if (blocked) {
+    state.saveError = blocked;
+    paintSaveBar();
+    return;
+  }
+  state.saveError = "";
+  paintSaveBar();
+  setSaving(true);
+  try {
+    if (state.draft) {
+      const bot = await api("/api/bots", { method: "POST", body: JSON.stringify(profilePayload()) });
+      await loadBots();
+      navBypass = true;
+      try {
+        await openBot(bot.id, false);
+        commitLevel({ view: "chat", bot: bot.id }, "replace");
+      } finally { navBypass = false; }
+      return;
+    }
+    if (!state.botId) return;
+    const updated = await api("/api/bots/" + state.botId, { method: "PATCH", body: JSON.stringify(profilePayload()) });
+    if (updated) applyBotFields(updated);
+    state.profileBase = readProfile();
+    state.saveError = "";
+    paintDirty();
+    showStatusToast("Saved");
+    await loadBots();
+  } catch (err) {
+    state.saveError = (state.draft ? "Couldn't create the bot. The daemon said: " : "Couldn't save. The daemon said: ") + (err && err.message ? err.message : String(err || ""));
+    paintSaveBar();
+  } finally {
+    setSaving(false);
+  }
+}
+function discardOpen() {
+  const d = $("#discard-dialog");
+  return !!d && !d.hidden;
+}
+function openDiscardDialog() {
+  const d = $("#discard-dialog");
+  const b = $("#discard-backdrop");
+  if (!d) return;
+  state.discardReturn = document.activeElement;
+  d.hidden = false;
+  if (b) b.hidden = false;
+  const keep = $("#discard-keep");
+  if (keep) keep.focus();
+}
+function closeDiscardDialog() {
+  const d = $("#discard-dialog");
+  const b = $("#discard-backdrop");
+  if (d) d.hidden = true;
+  if (b) b.hidden = true;
+}
+function keepEditing() {
+  state.pendingLeave = null;
+  closeDiscardDialog();
+  const back = state.discardReturn;
+  state.discardReturn = null;
+  if (back && document.contains(back) && typeof back.focus === "function") back.focus();
+}
+function allowLeave(proceed) {
+  navBypass = true;
+  return Promise.resolve().then(proceed).finally(() => { navBypass = false; });
+}
+function confirmLeave(proceed) {
+  if (navBypass || !profileDirty()) return Promise.resolve().then(proceed);
+  state.pendingLeave = proceed;
+  openDiscardDialog();
+  return Promise.resolve();
+}
+function discardAndLeave() {
+  const fn = state.pendingLeave;
+  state.pendingLeave = null;
+  closeDiscardDialog();
+  allowLeave(fn || function () {});
+}
+function stayingLevel() {
+  if (state.draft) return { view: "draft", bot: null };
+  return { view: "profile", bot: state.botId };
+}
+function leaveProfile() {
+  if (backAction(history.state) === "back") {
+    state.expectPop = true;
+    history.back();
+    return;
+  }
+  const parent = parentLevel(parseLevel(location.pathname, location.hash, base(), history.state));
+  commitLevel(parent, "replace");
+  if (parent.view === "chat" && parent.bot) openBot(parent.bot, false);
+  else if (parent.view === "log") openLog(false);
+  else goHome(false);
+}
+function discardSaveBar() {
+  if (state.draft) {
+    allowLeave(leaveProfile);
+    return;
+  }
+  applySnapshot(state.profileBase);
+}
+function showRoutineErr(err) {
+  const note = $("#routine-err");
+  if (!note) return;
+  note.hidden = !err;
+  note.textContent = err ? (err.message || String(err)) : "";
+}
+function closeRoutineForm() {
+  state.routineEdit = "";
+  const form = $("#routine-form");
+  if (form) form.hidden = true;
+  const add = $("#routine-add");
+  if (add) add.textContent = "Add routine";
+  showRoutineErr(null);
+}
+function setRoutineUnit(unit) {
+  document.querySelectorAll("#routine-unit [data-unit]").forEach(b => {
+    const on = b.getAttribute("data-unit") === unit;
+    b.setAttribute("aria-checked", on ? "true" : "false");
+    b.tabIndex = on ? 0 : -1;
+  });
+}
+function routineUnit() {
+  const on = document.querySelector("#routine-unit [aria-checked='true']");
+  return on ? on.getAttribute("data-unit") : "days";
+}
+function paintRoutinePreview() {
+  const n = $("#routine-n");
+  const out = $("#routine-preview");
+  if (!out) return;
+  const schedule = scheduleFromBuilder("every", n ? n.value : "", routineUnit());
+  out.textContent = schedule ? routinePreview(schedule, Date.now()) : "";
+}
+function openRoutineForm(timer) {
+  const form = $("#routine-form");
+  if (!form) return;
+  form.hidden = false;
+  state.routineEdit = timer && timer.id ? timer.id : "";
+  $("#routine-name").value = timer && timer.name ? timer.name : "";
+  $("#routine-prompt").value = timer && timer.prompt ? timer.prompt : "";
+  const parsed = builderFromSchedule(timer && timer.schedule);
+  if (parsed) {
+    $("#routine-n").value = String(parsed.n);
+    setRoutineUnit(parsed.unit);
+  } else if (timer && timer.schedule) {
+    $("#routine-n").value = "";
+    setRoutineUnit("days");
+  } else {
+    $("#routine-n").value = "1";
+    setRoutineUnit("days");
+  }
+  const add = $("#routine-add");
+  if (add) add.textContent = state.routineEdit ? "Save routine" : "Add routine";
+  showRoutineErr(null);
+  paintRoutinePreview();
+  const name = $("#routine-name");
+  if (name) name.focus();
+}
+function closeRoutineMenus() {
+  document.querySelectorAll("#routines .menu-pop").forEach(pop => {
+    pop.hidden = true;
+    const trigger = menuTriggerOf(pop);
+    if (trigger) trigger.setAttribute("aria-expanded", "false");
+  });
+}
+function bindRoutineMenu(pop) {
+  pop.addEventListener("keydown", (e) => {
+    if (handleMenuEscape(e, pop)) return;
+    const items = [...pop.querySelectorAll("[role='menuitem']")].filter(b => !b.hidden && !b.disabled);
+    const act = menuKeyAction(e.key, items, items.indexOf(document.activeElement));
+    if (!act) return;
+    if (act.close) {
+      pop.hidden = true;
+      const trigger = menuTriggerOf(pop);
+      if (trigger) {
+        trigger.setAttribute("aria-expanded", "false");
+        if (e.key !== "Escape" && typeof trigger.focus === "function") trigger.focus();
+      }
+      return;
+    }
+    if (act.move != null && items[act.move]) {
+      e.preventDefault();
+      items[act.move].focus();
+    }
+  });
+  pop.addEventListener("focusout", (e) => { handleMenuFocusOut(e, pop); });
+}
+
+async function submitRoutine() {
+  if (!state.botId || state.draft) return;
+  showRoutineErr(null);
+  const schedule = scheduleFromBuilder("every", $("#routine-n").value, routineUnit());
+  if (!schedule) {
+    showRoutineErr(new Error("Enter a positive number of minutes, hours, or days."));
+    return;
+  }
+  const body = {
+    name: $("#routine-name").value.trim(),
+    schedule: schedule,
+    prompt: $("#routine-prompt").value
+  };
+  try {
+    if (state.routineEdit) {
+      await api("/api/timers/" + state.routineEdit, { method: "PATCH", body: JSON.stringify(body) });
+    } else {
+      body.enabled = true;
+      await api("/api/bots/" + state.botId + "/timers", { method: "POST", body: JSON.stringify(body) });
+    }
+    closeRoutineForm();
+    showStatusToast("Routine saved");
+    await loadRoutines();
+  } catch (err) { showRoutineErr(err); }
+}
+function openDraft(push) {
+  if (push !== true) push = false;
+  if (state.draft && state.view === "profile" && !push) return;
+  if (!navBypass && profileDirty()) {
+    confirmLeave(() => openDraft(push));
+    return;
+  }
+  state.profileLoad = (state.profileLoad || 0) + 1;
   closeMenu();
   closeState();
-  const b = await api("/api/bots/" + id);
-  const i = state.bots.findIndex(x => x.id === b.id);
-  if (i >= 0) state.bots[i] = b; else state.bots.push(b);
-  state.mark = {shape: (b.mark && b.mark.shape) || "circle", color: (b.mark && b.mark.color) || COLORS[0]};
-  $("#profile-name").value = b.name || "";
-  syncProfileHeadingName();
-  $("#profile-label").value = b.label || "";
-  $("#profile-description").value = b.description || "";
-  $("#profile-model").value = b.model || "";
-  const grants = new Set(b.grants || []);
-  for (const box of document.querySelectorAll('#profile-form input[name="grant"]')) {
-    box.checked = grants.has(box.value);
-  }
-  $("#profile-net").value = (b.net_allow || []).join(", ");
-  $("#profile-ssh").value = (b.ssh_allow || []).join(", ");
-  $("#profile-github").value = (b.github_allow || []).join(", ");
-  const tools = b.server_tools;
-  $("#server-tools-inherit").checked = tools == null;
-  $("#server-tools-explicit").checked = tools != null;
-  paintServerTools(Array.isArray(tools) ? tools : []);
-  syncServerToolsMode();
-  $("#profile-err").textContent = "";
-  const warn = $("#profile-warn");
-  if (b.warnings && b.warnings.length) {
-    warn.hidden = false;
-    warn.textContent = b.warnings.join("\n");
-  } else {
-    warn.hidden = true;
-    warn.textContent = "";
-  }
-  paintMarkPicker();
-  await loadRoutines();
-  await loadPermPanel();
-  if (push) commitLevel({ view: "profile", bot: id }, "push");
+  closeRosterMenu();
+  closeRoutineForm();
+  state.draft = true;
+  state.botId = null;
+  state.profilePane = "main";
+  state.saveError = "";
+  blankDraftFields();
+  const rules = $("#perm-rules");
+  const sug = $("#perm-suggestions");
+  if (rules) rules.replaceChildren();
+  if (sug) sug.replaceChildren();
+  state.profileBase = readProfile();
+  if (push) commitLevel({ view: "draft", bot: null }, "push");
+  setProfilePane("main");
   setView("profile");
   setTitle();
   focusPane("profile");
   resetScrollTops(document.querySelectorAll(".profile-layout, .profile-col"));
+  paintDirty();
+  const name = $("#profile-name");
+  if (name) name.focus();
 }
+async function openProfile(id, push = true) {
+  if (!navBypass && state.view === "profile" && !state.draft && state.botId === id && state.profileBase) {
+    setProfilePane("main");
+    return;
+  }
+  if (!navBypass && profileDirty()) {
+    confirmLeave(() => { openProfile(id, push); });
+    return;
+  }
+  const seq = ++state.profileLoad;
+  closeMenu();
+  closeState();
+  closeRoutineForm();
+  const b = await api("/api/bots/" + id);
+  if (seq !== state.profileLoad) return;
+  state.draft = false;
+  state.botId = id;
+  const i = state.bots.findIndex(x => x.id === b.id);
+  if (i >= 0) state.bots[i] = b; else state.bots.push(b);
+  state.saveError = "";
+  applyBotFields(b);
+  state.profileBase = readProfile();
+  const err = $("#profile-err");
+  if (err) { err.style.color = ""; err.textContent = ""; }
+  try { await loadRoutines(); } catch (err2) { showRoutineErr(err2); }
+  if (seq !== state.profileLoad) return;
+  try { await loadPermPanel(); } catch (err3) { showPermErr(err3); }
+  if (seq !== state.profileLoad) return;
+  if (push) commitLevel({ view: "profile", bot: id }, "push");
+  setProfilePane("main");
+  setView("profile");
+  setTitle();
+  focusPane("profile");
+  resetScrollTops(document.querySelectorAll(".profile-layout, .profile-col"));
+  paintDirty();
+}
+
 // scroll:begin
 function resetScrollTops(nodes) {
   if (!nodes) return;
   for (const n of nodes) if (n) n.scrollTop = 0;
 }
 // scroll:end
+
 async function loadRoutines() {
   const box = $("#routines");
+  if (!box) return;
   box.replaceChildren();
-  if (!state.botId) return;
+  if (!state.botId || state.draft) return;
   const timers = await api("/api/bots/" + state.botId + "/timers");
   if (!timers.length) box.append(el("p", "empty", "No routines."));
+  const now = Date.now();
   for (const t of timers) {
-    const row = el("div", "routine");
-    row.append(el("strong", null, t.name || "Untitled"));
-    const when = t.next_fire_at ? new Date(t.next_fire_at).toLocaleString() : "";
-    row.append(el("div", "meta", t.schedule + (when ? " · next " + when : "") + (t.enabled ? "" : " · paused")));
-    const actions = el("div", "row");
-    const toggle = el("button", "ghost", t.enabled ? "Pause" : "Resume");
+    const row = el("div", "routine-row" + (t.enabled ? "" : " is-paused"));
+    const main = el("div", "routine-main");
+    const top = el("div", "routine-top");
+    const name = t.name || "Untitled";
+    top.append(el("span", "routine-name", name));
+    top.append(el("span", "sched-chip", scheduleLabel(t.schedule || "")));
+    main.append(top);
+    main.append(el("div", "routine-meta", routineMeta(t, now)));
+    if (t.prompt) main.append(el("div", "routine-prompt", t.prompt));
+    const toggle = el("button", "toggle");
     toggle.type = "button";
+    toggle.setAttribute("role", "switch");
+    toggle.setAttribute("aria-checked", t.enabled ? "true" : "false");
+    toggle.setAttribute("aria-label", "Turn " + name + " on/off");
     toggle.addEventListener("click", async () => {
-      await api("/api/timers/" + t.id, {method:"PATCH", body: JSON.stringify({enabled: !t.enabled})});
-      await loadRoutines();
+      showRoutineErr(null);
+      try {
+        await api("/api/timers/" + t.id, { method: "PATCH", body: JSON.stringify({ enabled: !t.enabled }) });
+        showStatusToast("Routine saved");
+        await loadRoutines();
+      } catch (err) { showRoutineErr(err); }
     });
-    const del = el("button", "ghost danger", "Delete");
+    const menu = el("div", "menu");
+    const more = el("button", "icon-btn routine-more");
+    more.type = "button";
+    more.setAttribute("aria-haspopup", "menu");
+    more.setAttribute("aria-expanded", "false");
+    more.setAttribute("aria-label", "Actions for " + name);
+    more.append(moreSvg());
+    const pop = el("div", "menu-pop");
+    pop.hidden = true;
+    pop.setAttribute("role", "menu");
+    const edit = el("button", null, "Edit");
+    edit.type = "button";
+    edit.setAttribute("role", "menuitem");
+    edit.addEventListener("click", () => { closeRoutineMenus(); openRoutineForm(t); });
+    const del = el("button", null, "Delete");
     del.type = "button";
+    del.setAttribute("role", "menuitem");
     del.addEventListener("click", async () => {
-      await api("/api/timers/" + t.id, {method:"DELETE"});
-      await loadRoutines();
+      closeRoutineMenus();
+      showRoutineErr(null);
+      try {
+        await api("/api/timers/" + t.id, { method: "DELETE" });
+        showStatusToast("Routine deleted");
+        await loadRoutines();
+      } catch (err) { showRoutineErr(err); }
     });
-    actions.append(toggle, del);
-    row.append(actions);
+    pop.append(edit, del);
+    bindRoutineMenu(pop);
+    more.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const willOpen = pop.hidden;
+      closeRoutineMenus();
+      closeMenu();
+      pop.hidden = !willOpen;
+      more.setAttribute("aria-expanded", willOpen ? "true" : "false");
+      if (willOpen) edit.focus();
+    });
+    menu.append(more, pop);
+    row.append(main, toggle, menu);
     box.append(row);
   }
 }
-function splitList(s) {
-  return String(s || "").split(/[\s,]+/).map(x => x.trim()).filter(Boolean);
+
+
+$("#profile-name").addEventListener("input", syncProfileHeadingName);
+$("#profile-name").addEventListener("input", paintDirty);
+$("#profile-label").addEventListener("input", paintDirty);
+$("#profile-description").addEventListener("input", paintDirty);
+$("#profile-model").addEventListener("input", paintDirty);
+$("#color-custom").addEventListener("input", (e) => {
+  const v = String(e.target.value || "").toLowerCase();
+  if (/^#[0-9a-f]{6}$/.test(v)) { state.mark.color = v; paintMarkPicker(); paintDirty(); }
+});
+document.querySelectorAll("[data-grant]").forEach(b => {
+  b.addEventListener("click", () => {
+    const on = b.getAttribute("aria-checked") === "true";
+    b.setAttribute("aria-checked", on ? "false" : "true");
+    paintDirty();
+  });
+});
+function selectSeg(buttons, index) {
+  buttons.forEach((btn, i) => {
+    const on = i === index;
+    btn.setAttribute("aria-checked", on ? "true" : "false");
+    btn.tabIndex = on ? 0 : -1;
+  });
 }
-const SERVER_TOOL_NAMES = ["web_search", "x_search"];
-function paintServerTools(selected) {
-  const box = $("#server-tools-picks");
-  if (!box) return;
-  box.replaceChildren();
-  const have = new Set(selected || []);
-  const names = SERVER_TOOL_NAMES.slice();
-  for (const n of have) if (!names.includes(n)) names.push(n);
-  for (const name of names) {
-    const label = el("label");
-    const input = document.createElement("input");
-    input.type = "checkbox";
-    input.name = "server-tool";
-    input.value = name;
-    input.checked = have.has(name);
-    label.append(input, document.createTextNode(" " + name));
-    box.append(label);
-  }
-  syncServerToolsMode();
+function wireRadios(root, onChange) {
+  if (!root) return;
+  const buttons = [...root.querySelectorAll("[role='radio']")];
+  buttons.forEach((btn, i) => {
+    if (!btn.hasAttribute("tabindex")) btn.tabIndex = btn.getAttribute("aria-checked") === "true" ? 0 : -1;
+    btn.addEventListener("click", () => { selectSeg(buttons, i); onChange(btn, i); });
+    btn.addEventListener("keydown", (e) => {
+      const act = themeRadioKey(e.key, buttons.findIndex(b => b.getAttribute("aria-checked") === "true"), buttons.length);
+      if (!act || act.index == null || !act.select) return;
+      e.preventDefault();
+      selectSeg(buttons, act.index);
+      buttons[act.index].focus();
+      onChange(buttons[act.index], act.index);
+    });
+  });
 }
-function syncServerToolsMode() {
-  const picked = document.querySelector('#profile-form input[name="server-tools-mode"]:checked');
-  const on = !!(picked && picked.value === "explicit");
-  for (const box of document.querySelectorAll('#profile-form input[name="server-tool"]')) {
-    box.disabled = !on;
-  }
+wireRadios($("#server-tools-seg"), () => { syncServerToolsMode(); paintDirty(); });
+wireRadios($("#routine-unit"), () => paintRoutinePreview());
+for (const kind of CHIP_KINDS) {
+  const input = $("#profile-" + kind);
+  if (!input) continue;
+  input.addEventListener("keydown", (e) => onChipKey(kind, e));
+  input.addEventListener("paste", (e) => onChipPaste(kind, e));
+  input.addEventListener("blur", () => commitChipInput(kind));
 }
-function serverToolsPayload() {
-  const picked = document.querySelector('#profile-form input[name="server-tools-mode"]:checked');
-  if (!picked || picked.value !== "explicit") return null;
-  const list = [];
-  for (const box of document.querySelectorAll('#profile-form input[name="server-tool"]')) {
-    if (box.checked) list.push(box.value);
-  }
-  return list;
-}
-for (const mode of document.querySelectorAll('#profile-form input[name="server-tools-mode"]')) {
-  mode.addEventListener("change", syncServerToolsMode);
-}
-$("#profile-form").addEventListener("submit", async (e) => {
+document.querySelectorAll("#profile-nav-main [data-sec], #profile-nav-access [data-sec]").forEach(b => {
+  b.addEventListener("click", () => scrollProfileTo(b.getAttribute("data-sec")));
+});
+$("#nav-access").addEventListener("click", () => setProfilePane("access"));
+$("#open-access").addEventListener("click", () => setProfilePane("access"));
+$("#routine-new").addEventListener("click", () => openRoutineForm(null));
+$("#routine-add").addEventListener("click", submitRoutine);
+$("#routine-cancel").addEventListener("click", closeRoutineForm);
+$("#routine-form").addEventListener("submit", (e) => { e.preventDefault(); submitRoutine(); });
+$("#routine-n").addEventListener("input", paintRoutinePreview);
+$("#save-go").addEventListener("click", saveProfile);
+$("#save-discard").addEventListener("click", discardSaveBar);
+$("#discard-go").addEventListener("click", discardAndLeave);
+$("#discard-keep").addEventListener("click", keepEditing);
+$("#discard-backdrop").addEventListener("click", keepEditing);
+window.addEventListener("beforeunload", (e) => {
+  if (!profileDirty()) return;
   e.preventDefault();
-  if (!state.botId) return;
-  $("#profile-err").textContent = "";
-  const model = $("#profile-model").value.trim();
-  try {
-    const grants = [];
-    for (const box of document.querySelectorAll('#profile-form input[name="grant"]')) {
-      if (box.checked) grants.push(box.value);
-    }
-    const updated = await api("/api/bots/" + state.botId, {method:"PATCH", body: JSON.stringify({
-      name: $("#profile-name").value,
-      label: $("#profile-label").value,
-      description: $("#profile-description").value,
-      mark: state.mark,
-      model: model || null,
-      grants,
-      net_allow: splitList($("#profile-net").value),
-      ssh_allow: splitList($("#profile-ssh").value),
-      github_allow: splitList($("#profile-github").value),
-      server_tools: serverToolsPayload()
-    })});
-    await loadBots();
-    const note = $("#profile-err");
-    const warn = $("#profile-warn");
-    if (updated && updated.warnings && updated.warnings.length) {
-      warn.hidden = false;
-      warn.textContent = updated.warnings.join("\n");
-    } else {
-      warn.hidden = true;
-      warn.textContent = "";
-    }
-    note.style.color = "var(--success-text)";
-    note.textContent = "Saved.";
-  } catch (err) {
-    const note = $("#profile-err");
-    note.style.color = "";
-    note.textContent = err.message;
-  }
+  e.returnValue = "";
 });
-$("#routine-add").addEventListener("click", async () => {
-  if (!state.botId) return;
-  $("#profile-err").textContent = "";
-  try {
-    await api("/api/bots/" + state.botId + "/timers", {method:"POST", body: JSON.stringify({
-      name: $("#routine-name").value.trim(),
-      schedule: $("#routine-schedule").value.trim(),
-      prompt: $("#routine-prompt").value,
-      enabled: true
-    })});
-    $("#routine-name").value = "";
-    $("#routine-schedule").value = "";
-    $("#routine-prompt").value = "";
-    await loadRoutines();
-  } catch (err) { $("#profile-err").textContent = err.message; }
-});
+const phoneMq = window.matchMedia("(max-width: 540px)");
+const onPhoneChange = () => { if (state.view === "profile") paintSaveBar(); };
+if (phoneMq.addEventListener) phoneMq.addEventListener("change", onPhoneChange);
+else if (phoneMq.addListener) phoneMq.addListener(onPhoneChange);
+
 function riskBadge(risk, effect) {
   const label = risk || effect || "rule";
   return el("span", "risk " + (risk || effect || ""), label);
@@ -3724,7 +5039,7 @@ async function loadPermPanel() {
     if (rule.warning) card.append(el("div", "meta", rule.warning));
     if (rule.match_form) card.append(el("div", "meta", "Matches: " + rule.match_form));
     if (rule.reason) card.append(el("div", "meta", rule.reason));
-    const revoke = el("button", "ghost", "Revoke");
+    const revoke = el("button", "ghost small", "Revoke");
     revoke.type = "button";
     revoke.addEventListener("click", async () => {
       clearPermErr();
@@ -3759,7 +5074,7 @@ async function loadPermPanel() {
     if (examples) card.append(el("div", "meta", examples));
     const actions = el("div", "row");
     if (s.status !== "refused") {
-      const accept = el("button", "primary", "Accept");
+      const accept = el("button", "primary small", "Accept");
       accept.type = "button";
       accept.addEventListener("click", async () => {
         clearPermErr();
@@ -3773,7 +5088,7 @@ async function loadPermPanel() {
       });
       actions.append(accept);
     }
-    const dismiss = el("button", "ghost", "Dismiss");
+    const dismiss = el("button", "ghost small", "Dismiss");
     dismiss.type = "button";
     dismiss.addEventListener("click", async () => {
       clearPermErr();
@@ -4629,7 +5944,7 @@ function composerHint(running) {
 }
 
 function composerPlaceholder(name, narrow) {
-  if (narrow) return "Message";
+  void narrow;
   const n = name ? String(name) : "";
   return n ? "Message " + n : "Message";
 }
@@ -4989,44 +6304,6 @@ function toggleRosterMenu() {
   const first = [...menu.querySelectorAll("button")].find(b => !b.hidden && !b.disabled);
   if (first) first.focus();
 }
-function createOpen() {
-  const sheet = $("#create-sheet");
-  return !!sheet && !sheet.hidden;
-}
-function openCreate(opener) {
-  const sheet = $("#create-sheet");
-  const backdrop = $("#create-backdrop");
-  if (!sheet) return;
-  closeRosterMenu();
-  closeMenu();
-  state.createReturn = opener || document.activeElement;
-  sheet.hidden = false;
-  if (backdrop) backdrop.hidden = false;
-  if (motionOff()) {
-    sheet.classList.add("is-open");
-    if (backdrop) backdrop.classList.add("is-open");
-  } else {
-    sheet.classList.remove("is-open");
-    if (backdrop) backdrop.classList.remove("is-open");
-    void sheet.offsetWidth;
-    sheet.classList.add("is-open");
-    if (backdrop) backdrop.classList.add("is-open");
-  }
-  const name = sheet.querySelector("input[name=name]");
-  if (name) name.focus();
-}
-function closeCreate() {
-  const sheet = $("#create-sheet");
-  const backdrop = $("#create-backdrop");
-  if (!sheet || sheet.hidden) return;
-  sheet.classList.remove("is-open");
-  if (backdrop) backdrop.classList.remove("is-open");
-  sheet.hidden = true;
-  if (backdrop) backdrop.hidden = true;
-  const back = state.createReturn;
-  state.createReturn = null;
-  if (back && document.contains(back) && typeof back.focus === "function") back.focus();
-}
 $("#roster-menu-btn").addEventListener("click", (e) => {
   e.stopPropagation();
   toggleRosterMenu();
@@ -5067,8 +6344,6 @@ $("#roster-menu").addEventListener("keydown", (e) => {
 $("#roster-menu").addEventListener("focusout", (e) => {
   if (handleMenuFocusOut(e, $("#roster-menu"))) closeRosterMenu();
 });
-$("#create-close").addEventListener("click", closeCreate);
-$("#create-backdrop").addEventListener("click", closeCreate);
 $("#bot-list").addEventListener("keydown", (e) => {
   if (e.altKey || e.ctrlKey || e.metaKey) return;
   const rows = [...$("#bot-list").querySelectorAll("button.bot")];
@@ -5084,12 +6359,12 @@ $("#bot-list").addEventListener("keydown", (e) => {
   }
 });
 document.addEventListener("keydown", (e) => {
-  if (createOpen()) {
+  if (discardOpen()) {
     if (e.key === "Escape") {
       e.preventDefault();
       e.stopPropagation();
-      closeCreate();
-    } else if (e.key === "Tab") trapStateTab(e, $("#create-sheet"), document.activeElement);
+      keepEditing();
+    } else if (e.key === "Tab") trapStateTab(e, $("#discard-dialog"), document.activeElement);
     return;
   }
   if (e.key !== "Escape") return;
