@@ -12,14 +12,19 @@ import (
 )
 
 // Event is one grant use, denial, domain request, or thread notice.
+// Untrusted events are lines the jail wrote. Reported is the kind that line
+// claimed. A jailed process can write anything, so those fields are not a
+// grant decision and are not a sandbox_block.
 type Event struct {
-	Kind   string `json:"kind"`
-	Grant  string `json:"grant,omitempty"`
-	Host   string `json:"host,omitempty"`
-	Detail string `json:"detail,omitempty"`
-	Notice string `json:"notice,omitempty"`
-	Owner  string `json:"owner,omitempty"`
-	Repo   string `json:"repo,omitempty"`
+	Kind      string `json:"kind"`
+	Grant     string `json:"grant,omitempty"`
+	Host      string `json:"host,omitempty"`
+	Detail    string `json:"detail,omitempty"`
+	Notice    string `json:"notice,omitempty"`
+	Owner     string `json:"owner,omitempty"`
+	Repo      string `json:"repo,omitempty"`
+	Untrusted bool   `json:"untrusted,omitempty"`
+	Reported  string `json:"reported,omitempty"`
 }
 
 type proxy struct {
@@ -153,8 +158,10 @@ func (p *proxy) handle(conn net.Conn) {
 
 // GitHubNetworkDenied is the splice-proxy detail for github.com and
 // api.github.com. GitHubProxyDenied is the detail when the credential
-// bridge cannot be built. GitHubAllowlistDenied is the jail-wrapper
-// detail for a remote outside the allowlist. The daemon audits these.
+// bridge cannot be built. Both are host-side and the daemon audits them.
+// GitHubAllowlistDenied is the detail a jail wrapper writes for a remote
+// outside the allowlist. That line is an untrusted jail report. The host
+// GitHub proxy audits a request that actually reaches it.
 const (
 	GitHubNetworkDenied   = "github is not on the network grant"
 	GitHubProxyDenied     = "github proxy unavailable"

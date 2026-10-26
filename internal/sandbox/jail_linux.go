@@ -148,7 +148,9 @@ func bindReadOnly(src, dst string) error {
 }
 
 func remountReadOnly(dst string, recursive bool) error {
-	flags := uintptr(unix.MS_BIND | unix.MS_REMOUNT | unix.MS_RDONLY)
+	// A user namespace locks nosuid and nodev. A remount that omits them
+	// returns EPERM, which fails a file bind such as the preload library.
+	flags := uintptr(unix.MS_BIND | unix.MS_REMOUNT | unix.MS_RDONLY | unix.MS_NOSUID | unix.MS_NODEV)
 	if recursive {
 		flags |= unix.MS_REC
 	}

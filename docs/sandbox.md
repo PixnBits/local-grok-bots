@@ -27,7 +27,15 @@ Grants are explicit. The daemon checks the grant before the tool runs. Missing g
 
 Credentials never live inside the jail. For git and SSH the daemon mediates or injects; the process sees a placeholder or nothing. Block writes to `.git/hooks`, host shell rc files, and any path the daemon itself will later treat as executable config. Those are the trust-handoff vectors.
 
-Every grant use and every denial is a log event. Surface irreversible actions (push, SSH, package install) in the thread the same way inbound DMs appear, so they are visible without opening the log.
+Every grant use and every denial the daemon itself observes is a log event. Surface irreversible actions (push, SSH, package install) in the thread the same way inbound DMs appear, so they are visible without opening the log. A package-install line written by the jail is only an untrusted notice.
+
+### Shell jail binds and events
+
+`run_shell` uses bubblewrap when `bwrap` is installed, and otherwise `unshare` with a chroot (user, mount, and network namespaces). A `build` grant mounts `SANDBOX_BUILD_BINDS` read-only when bubblewrap is used. The daemon opens the bind with `openat2` (`O_PATH`, `RESOLVE_NO_SYMLINKS`, `RESOLVE_NO_MAGICLINKS`). Bubblewrap mounts that file descriptor with `--ro-bind-fd` and does not fall back to a path bind. The unshare fallback cannot mount the descriptor: bind-mounting `/proc/self/fd/N` from the new user namespace fails, and mounting the path would race. It refuses each build bind with a daemon-generated `sandbox_block` whose detail is `refused bind <path>: unsupported without bwrap`, and it does not mount the path. The rest of the shell still runs.
+
+The opened inode is refused when it is a protected path, an ancestor of a protected path (up to but not including `/`), or `DATA_DIR` (the daemon puts `DATA_DIR`, raw and resolved, on the protected list). These checks fail closed against a rename race. They do not stop every same-uid process on the host. A same-uid attacker outside the jail is out of scope beyond these fail-closed checks. Directories on bind paths should not be writable by other users. An empty protected list refuses every build bind.
+
+Lines the jail writes to `/lgb/events/log` are untrusted. The wrappers that write that file run as the bot, so the bot can append the same lines. The daemon records each line as `jail_report` with `untrusted: true` and `reported` set to the kind the line claimed (`sandbox_block`, `grant_use`, `grant_denied`). Those rows are not `sandbox_block`, `grant_use`, or `grant_denied`, they are not audited as those actions, and they do not start an approval or a decision. A user-visible notice from a jail line is informational text prefixed so it does not start a turn. `sandbox_block` and build `grant_use` come only from the daemon. The events file is mode `0600`, owned by the daemon, or by the jail uid when a root daemon drops to the overflow uid. The read is capped at 64 KiB and 64 lines, and each detail is printable ASCII of at most 256 bytes. Overflow is one daemon-generated `jail_report_truncated` event. `sandbox_block` detail is capped the same way.
 
 ## What this enables
 

@@ -487,14 +487,23 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			}
 		}
 		gate := &gitHubGate{px: px}
+		protect := a.shellProtect()
+		binds := a.cfg.BuildBinds
+		if granted(current.Grants, "build") {
+			var blocked []sandbox.Event
+			binds, blocked = guardBuildBinds(protect, binds)
+			for _, ev := range blocked {
+				a.recordSandbox(current.ID, ev)
+			}
+		}
 		res, err := sandbox.Run(shellCtx, sandbox.Request{
 			Workspace:       a.ws,
 			Command:         command,
 			Grants:          current.Grants,
 			NetAllow:        current.NetAllow,
 			SSHAllow:        current.SSHAllow,
-			BuildBinds:      a.cfg.BuildBinds,
-			Protect:         a.daemonSecrets(),
+			BuildBinds:      binds,
+			Protect:         protect,
 			SSHKey:          a.sshKeyPath(),
 			GitHubSock:      ghSock,
 			GitHubRepos:     ghRepos,
@@ -527,6 +536,38 @@ func (a *App) sshKeyPath() string {
 }
 
 func (a *App) recordSandbox(botID string, ev sandbox.Event) {
+	if ev.Untrusted || ev.Kind == "jail_report" {
+		detail := map[string]any{"untrusted": true}
+		if ev.Reported != "" {
+			detail["reported"] = ev.Reported
+		}
+		if ev.Grant != "" {
+			detail["grant"] = ev.Grant
+		}
+		if ev.Host != "" {
+			detail["host"] = ev.Host
+		}
+		if ev.Detail != "" {
+			detail["detail"] = ev.Detail
+		}
+		if ev.Owner != "" {
+			detail["owner"] = ev.Owner
+		}
+		if ev.Repo != "" {
+			detail["repo"] = ev.Repo
+		}
+		a.log(botID, "jail_report", detail)
+		if ev.Notice != "" {
+			notice := ev.Notice
+			if !strings.Contains(strings.ToLower(notice), "untrusted") {
+				notice = "Untrusted jail report: " + notice
+			}
+			_, _ = a.st.AddMessage(store.Message{
+				BotID: botID, Thread: "user", Role: "system", Content: "Notice: " + notice,
+			})
+		}
+		return
+	}
 	if ev.Kind != "" {
 		detail := map[string]any{}
 		if ev.Grant != "" {

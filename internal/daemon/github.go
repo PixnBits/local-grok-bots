@@ -117,7 +117,10 @@ func allowlistNames(owner, repo string) (string, string, bool) {
 
 // auditSandboxGitHub records a jail denial of GitHub. The row has no token.
 func (a *App) auditSandboxGitHub(botID string, ev sandbox.Event) {
-	if a == nil || ev.Kind != "grant_denied" || ev.Grant != "github" {
+	if a == nil || ev.Untrusted || ev.Kind == "jail_report" || ev.Kind == "jail_report_truncated" {
+		return
+	}
+	if ev.Kind != "grant_denied" || ev.Grant != "github" {
 		return
 	}
 	switch ev.Detail {

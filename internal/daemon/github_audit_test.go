@@ -66,6 +66,11 @@ func TestAuditSandboxGitHubAllowlist(t *testing.T) {
 		Owner: "bad\nowner", Repo: "nope",
 	})
 	app.recordSandbox("bot_1", sandbox.Event{Kind: "grant_denied", Grant: "git", Detail: "clone"})
+	app.recordSandbox("bot_1", sandbox.Event{
+		Kind: "jail_report", Untrusted: true, Reported: "grant_denied",
+		Grant: "github", Detail: sandbox.GitHubAllowlistDenied,
+		Owner: "Other", Repo: "Nope",
+	})
 	raw := readAudit(t, auditPath)
 	if strings.Count(raw, `"action":"github_refuse"`) != 2 || strings.Count(raw, `"reason":"allowlist"`) != 2 {
 		t.Fatalf("audit:\n%s", raw)

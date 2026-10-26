@@ -93,7 +93,16 @@ use git pwned" nlbad; echo NL:$?
 	if !strings.Contains(lowPath, "/acme/widgets") || strings.Contains(lowPath, "other/nope") {
 		t.Fatalf("path %q", path)
 	}
-	if _, ok := findEvent(res.Events, "grant_use", "git", ""); !ok {
+	foundUse := false
+	for _, e := range res.Events {
+		if e.Kind == "grant_use" && e.Grant == "git" {
+			t.Fatalf("jail line became grant_use: %+v", e)
+		}
+		if e.Kind == "jail_report" && e.Untrusted && e.Reported == "grant_use" && e.Grant == "git" {
+			foundUse = true
+		}
+	}
+	if !foundUse {
 		t.Fatalf("missing clone use: %+v", res.Events)
 	}
 	if !strings.Contains(res.Stdout, "NL:") || strings.Contains(res.Stdout, "NL:0") {
@@ -104,10 +113,13 @@ use git pwned" nlbad; echo NL:$?
 		if e.Detail == "pwned" || strings.Contains(e.Detail, "pwned") || strings.Contains(e.Notice, "pwned") || strings.Contains(e.Owner, "pwned") || strings.Contains(e.Repo, "pwned") {
 			t.Fatalf("event log split on a newline: %+v", e)
 		}
-		if e.Kind == "grant_denied" && e.Grant == "github" && e.Detail == GitHubAllowlistDenied && e.Owner == "other" && e.Repo == "nope" {
+		if e.Kind == "grant_denied" && e.Detail == GitHubAllowlistDenied {
+			t.Fatalf("allowlist line became grant_denied: %+v", e)
+		}
+		if e.Kind == "jail_report" && e.Untrusted && e.Reported == "grant_denied" && e.Grant == "github" && e.Detail == GitHubAllowlistDenied && e.Owner == "other" && e.Repo == "nope" {
 			nope = true
 		}
-		if e.Kind == "grant_denied" && e.Grant == "github" && e.Detail == GitHubAllowlistDenied && e.Owner == "acme" && e.Repo == "widgets" {
+		if e.Kind == "jail_report" && e.Untrusted && e.Reported == "grant_denied" && e.Grant == "github" && e.Detail == GitHubAllowlistDenied && e.Owner == "acme" && e.Repo == "widgets" {
 			ssh = true
 		}
 	}

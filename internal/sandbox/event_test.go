@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -25,12 +26,12 @@ func TestParseAllowlistEvent(t *testing.T) {
 	}
 	got := parseEventFile(path)
 	want := []Event{
-		{Kind: "grant_denied", Grant: "github", Detail: GitHubAllowlistDenied, Owner: "other", Repo: "nope"},
-		{Kind: "grant_denied", Grant: "github", Detail: GitHubAllowlistDenied, Owner: "acme", Repo: "widgets"},
-		{Kind: "grant_denied", Grant: "github", Detail: GitHubAllowlistDenied},
-		{Kind: "grant_denied", Grant: "github", Detail: GitHubAllowlistDenied},
-		{Kind: "grant_denied", Grant: "git", Detail: "clone"},
-		{Kind: "grant_use", Grant: "git", Detail: "clone"},
+		{Kind: "jail_report", Untrusted: true, Reported: "grant_denied", Grant: "github", Detail: GitHubAllowlistDenied, Owner: "other", Repo: "nope"},
+		{Kind: "jail_report", Untrusted: true, Reported: "grant_denied", Grant: "github", Detail: GitHubAllowlistDenied, Owner: "acme", Repo: "widgets"},
+		{Kind: "jail_report", Untrusted: true, Reported: "grant_denied", Grant: "github", Detail: GitHubAllowlistDenied},
+		{Kind: "jail_report", Untrusted: true, Reported: "grant_denied", Grant: "github", Detail: GitHubAllowlistDenied},
+		{Kind: "jail_report", Untrusted: true, Reported: "grant_denied", Grant: "git", Detail: "clone"},
+		{Kind: "jail_report", Untrusted: true, Reported: "grant_use", Grant: "git", Detail: "clone"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("events %+v", got)
@@ -94,13 +95,96 @@ func TestWrapperAllowlistLineStaysOneLine(t *testing.T) {
 		}
 	}
 	ev := parseEventFile(logPath)
-	if len(ev) != 4 || ev[0].Owner != "other" || ev[0].Repo != "nope" || ev[0].Detail != GitHubAllowlistDenied {
+	if len(ev) != 4 || !ev[0].Untrusted || ev[0].Kind != "jail_report" || ev[0].Reported != "grant_denied" || ev[0].Owner != "other" || ev[0].Repo != "nope" || ev[0].Detail != GitHubAllowlistDenied {
 		t.Fatalf("parsed %+v", ev)
 	}
-	if ev[1].Owner != "acme" || ev[1].Repo != "widgets" || ev[2].Grant != "git" || ev[2].Detail != "clone" {
+	if ev[1].Owner != "acme" || ev[1].Repo != "widgets" || ev[2].Grant != "git" || ev[2].Detail != "clone" || ev[2].Kind != "jail_report" {
 		t.Fatalf("parsed %+v", ev)
 	}
-	if ev[3].Grant != "github" || ev[3].Owner != "" || ev[3].Repo != "" || ev[3].Detail != GitHubAllowlistDenied {
+	if ev[3].Grant != "github" || ev[3].Owner != "" || ev[3].Repo != "" || ev[3].Detail != GitHubAllowlistDenied || ev[3].Kind == "grant_denied" {
 		t.Fatalf("parsed %+v", ev)
 	}
+}
+
+func TestParseEventFileCaps(t *testing.T) {
+	t.Run("oversize", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "log")
+		var b strings.Builder
+		b.WriteString("block hello\n")
+		b.WriteString(strings.Repeat("x", 70<<10))
+		b.WriteString("\nblock PASTCAP\n")
+		if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := parseEventFile(path)
+		if len(got) == 0 || got[len(got)-1].Kind != "jail_report_truncated" || got[len(got)-1].Untrusted {
+			t.Fatalf("events %+v", got)
+		}
+		for _, ev := range got {
+			if ev.Kind == "sandbox_block" || ev.Kind == "grant_use" || ev.Kind == "grant_denied" {
+				t.Fatalf("trusted kind %+v", ev)
+			}
+			if strings.Contains(ev.Detail, "PASTCAP") {
+				t.Fatalf("parsed past the cap %+v", ev)
+			}
+		}
+		if got[0].Kind != "jail_report" || got[0].Reported != "sandbox_block" || got[0].Detail != "hello" {
+			t.Fatalf("kept %+v", got[0])
+		}
+	})
+	t.Run("too many lines", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "log")
+		var lines []string
+		for i := 0; i < maxEventLines+6; i++ {
+			lines = append(lines, "deny git n"+strconv.Itoa(i))
+		}
+		if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := parseEventFile(path)
+		if len(got) != maxEventLines+1 {
+			t.Fatalf("len %d", len(got))
+		}
+		last := got[len(got)-1]
+		if last.Kind != "jail_report_truncated" || !strings.Contains(last.Detail, "dropped") {
+			t.Fatalf("tail %+v", last)
+		}
+		for _, ev := range got[:maxEventLines] {
+			if ev.Kind != "jail_report" || ev.Reported != "grant_denied" || ev.Kind == "grant_denied" {
+				t.Fatalf("line %+v", ev)
+			}
+		}
+		if strings.Contains(got[maxEventLines-1].Detail, "n"+strconv.Itoa(maxEventLines)) {
+			t.Fatalf("kept the overflow line %+v", got[maxEventLines-1])
+		}
+		if got[0].Detail != "n0" || got[maxEventLines-1].Detail != "n"+strconv.Itoa(maxEventLines-1) {
+			t.Fatalf("span %+v %+v", got[0], got[maxEventLines-1])
+		}
+	})
+	t.Run("long and non-ascii", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "log")
+		long := strings.Repeat("A", 400) + "TAIL" + "\xff\x00"
+		body := "block " + long + "\nblock héllo\n"
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got := parseEventFile(path)
+		if len(got) != 2 {
+			t.Fatalf("events %+v", got)
+		}
+		if got[0].Kind != "jail_report" || got[0].Reported != "sandbox_block" || len(got[0].Detail) != maxEventDetail || strings.Contains(got[0].Detail, "TAIL") {
+			t.Fatalf("long %+v", got[0])
+		}
+		for i := 0; i < len(got[0].Detail); i++ {
+			if got[0].Detail[i] < 0x20 || got[0].Detail[i] > 0x7e {
+				t.Fatalf("non-ascii in long detail %q", got[0].Detail)
+			}
+		}
+		if got[1].Detail != "hllo" || strings.Contains(got[1].Detail, "é") {
+			t.Fatalf("non-ascii detail %+v", got[1])
+		}
+	})
 }

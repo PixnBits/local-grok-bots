@@ -397,9 +397,49 @@ func (a *App) fireDue() {
 }
 
 func (a *App) log(botID, kind string, detail any) {
+	if kind == "sandbox_block" {
+		detail = clipSandboxDetail(detail)
+	}
 	_ = a.st.AddLog(botID, kind, detail)
 	if kind == "sandbox_block" {
 		a.auditSandboxBlock(botID, detail)
+	}
+}
+
+// clipASCII keeps bytes in 0x20–0x7E and then cuts to 256 bytes.
+func clipASCII(s string) string {
+	const max = 256
+	var b strings.Builder
+	n := 0
+	for i := 0; i < len(s) && n < max; i++ {
+		c := s[i]
+		if c < 0x20 || c > 0x7e {
+			continue
+		}
+		b.WriteByte(c)
+		n++
+	}
+	return b.String()
+}
+
+func clipSandboxDetail(detail any) any {
+	switch v := detail.(type) {
+	case string:
+		return clipASCII(v)
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for k, val := range v {
+			out[k] = val
+		}
+		if s, ok := out["detail"].(string); ok {
+			out["detail"] = clipASCII(s)
+		}
+		if s, ok := out["path"].(string); ok {
+			out["path"] = clipASCII(s)
+		}
+		return out
+	default:
+		return detail
 	}
 }
 

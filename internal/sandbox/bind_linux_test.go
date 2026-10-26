@@ -28,7 +28,7 @@ func TestBuildBindFDArgs(t *testing.T) {
 	fileResolved := mustResolved(t, file)
 	dirResolved := mustResolved(t, dir)
 
-	mounts, events, applied := selectBuildBinds(ws, []string{file, dir}, nil)
+	mounts, events, applied := selectBuildBinds(ws, []string{file, dir}, []string{t.TempDir()})
 	t.Cleanup(func() { closeMountFiles(mounts) })
 	if len(events) != 0 || len(applied) != 2 {
 		t.Fatalf("events %+v applied %v", events, applied)
@@ -253,6 +253,105 @@ func TestBuildBindSwapLoop(t *testing.T) {
 	}
 	if readSecret != 0 {
 		t.Fatalf("secret was readable")
+	}
+}
+
+func TestBuildBindAncestorRenameRefused(t *testing.T) {
+	ws := t.TempDir()
+	base := t.TempDir()
+	ancestor := filepath.Join(base, "ancestor")
+	if err := os.Mkdir(ancestor, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(ancestor, "secret")
+	const canary = "CANARY-SECRET-BYTES"
+	if err := os.WriteFile(secret, []byte(canary+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pub := filepath.Join(base, "pub")
+	if err := os.Mkdir(pub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pub, "hello"), []byte("public\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	buildBindBeforeOpen = func() {
+		away := filepath.Join(base, "away")
+		if err := os.Rename(pub, away); err != nil {
+			t.Errorf("move public: %v", err)
+			return
+		}
+		if err := os.Rename(ancestor, pub); err != nil {
+			t.Errorf("rename ancestor onto bind: %v", err)
+		}
+	}
+	t.Cleanup(func() { buildBindBeforeOpen = nil })
+
+	mounts, events, applied := selectBuildBinds(ws, []string{pub}, []string{secret})
+	t.Cleanup(func() { closeMountFiles(mounts) })
+	if len(mounts) != 0 || len(applied) != 0 {
+		t.Fatalf("ancestor of a secret was mounted: %+v %v", mounts, applied)
+	}
+	if len(events) != 1 || events[0].Kind != "sandbox_block" || !strings.Contains(events[0].Detail, "refused bind "+pub) {
+		t.Fatalf("events %+v", events)
+	}
+	if strings.Contains(events[0].Detail, canary) || events[0].Untrusted {
+		t.Fatalf("event %+v", events[0])
+	}
+}
+
+func TestUnshareRefusesBuildBind(t *testing.T) {
+	if _, err := exec.LookPath("unshare"); err != nil {
+		t.Fatal("unshare is required")
+	}
+	probe := exec.Command("unshare", "--user", "--map-root-user", "--mount", "true")
+	if err := probe.Run(); err != nil {
+		t.Fatalf("user namespace unavailable: %v", err)
+	}
+	preferUnshare = true
+	t.Cleanup(func() { preferUnshare = false })
+
+	dir := t.TempDir()
+	file := filepath.Join(dir, "tool.txt")
+	const original = "ORIGINAL-BIND\n"
+	if err := os.WriteFile(file, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ws := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	res, err := Run(ctx, Request{
+		Workspace:  ws,
+		Command:    "cat " + shQuote(file) + " || printf NOBIND\\n",
+		Grants:     []string{"build"},
+		BuildBinds: []string{file},
+		Protect:    []string{t.TempDir()},
+	})
+	if err != nil {
+		t.Fatalf("unshare: %v\nstdout:\n%s\nstderr:\n%s\nevents:%+v", err, res.Stdout, res.Stderr, res.Events)
+	}
+	if strings.Contains(res.Stdout, "ORIGINAL-BIND") || strings.Contains(res.Stdout, "SWAPPED-BIND") {
+		t.Fatalf("unshare mounted the build bind:\n%s", res.Stdout)
+	}
+	if !strings.Contains(res.Stdout, "NOBIND") {
+		t.Fatalf("stdout %q stderr %q", res.Stdout, res.Stderr)
+	}
+	want := "refused bind " + file + ": unsupported without bwrap"
+	var blocks int
+	for _, ev := range res.Events {
+		if ev.Kind == "grant_use" || ev.Kind == "grant_denied" {
+			t.Fatalf("unshare build bind produced %+v", ev)
+		}
+		if ev.Kind != "sandbox_block" {
+			continue
+		}
+		blocks++
+		if ev.Untrusted || ev.Detail != want {
+			t.Fatalf("event %+v", ev)
+		}
+	}
+	if blocks != 1 {
+		t.Fatalf("events %+v", res.Events)
 	}
 }
 

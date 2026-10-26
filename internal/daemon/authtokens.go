@@ -43,7 +43,25 @@ var (
 	errAuthSize     = errors.New("size")
 	errAuthParse    = errors.New("parse")
 	errAuthEmpty    = errors.New("empty")
+	errAuthSymlink  = errors.New("symlink")
 )
+
+// authCodedError is a startup or reload failure whose Error text is the
+// message and whose unwrap is one fixed reason code. The reload audit row
+// uses the code. The message does not repeat it.
+type authCodedError struct {
+	msg  string
+	code error
+}
+
+func (e *authCodedError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return e.msg
+}
+
+func (e *authCodedError) Unwrap() error { return e.code }
 
 func authReloadReason(err error) string {
 	switch {
@@ -67,6 +85,8 @@ func authReloadReason(err error) string {
 		return "parse"
 	case errors.Is(err, errAuthEmpty):
 		return "empty"
+	case errors.Is(err, errAuthSymlink):
+		return "symlink"
 	default:
 		return "other"
 	}
@@ -122,10 +142,10 @@ func readProtectedFile(path string, max int64, kind, tooBig string) ([]byte, err
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_NOCTTY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		if errors.Is(err, unix.ELOOP) {
-			return nil, fmt.Errorf("%s: symlink", kind)
+			return nil, &authCodedError{msg: fmt.Sprintf("%s: symlink", kind), code: errAuthSymlink}
 		}
 		if lst, lerr := os.Lstat(path); lerr == nil && lst.Mode()&os.ModeSymlink != 0 {
-			return nil, fmt.Errorf("%s: symlink", kind)
+			return nil, &authCodedError{msg: fmt.Sprintf("%s: symlink", kind), code: errAuthSymlink}
 		}
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("%w: %w", errAuthOpen, err)

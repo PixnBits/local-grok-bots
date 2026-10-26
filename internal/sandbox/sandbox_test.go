@@ -340,8 +340,12 @@ func TestGitDeniedWithoutGrant(t *testing.T) {
 	if err == nil {
 		t.Fatal("git init succeeded without a grant")
 	}
-	if _, ok := findEvent(res.Events, "grant_denied", "git", ""); !ok {
+	ev, ok := findEvent(res.Events, "jail_report", "git", "")
+	if !ok || !ev.Untrusted || ev.Reported != "grant_denied" {
 		t.Fatalf("missing git denial: %+v", res.Events)
+	}
+	if _, ok := findEvent(res.Events, "grant_denied", "git", ""); ok {
+		t.Fatalf("jail line became grant_denied: %+v", res.Events)
 	}
 	if strings.Contains(res.Stdout, "Initialized") {
 		t.Fatalf("git init ran:\n%s", res.Stdout)
@@ -379,8 +383,11 @@ echo PUSH_DONE
 	for _, sub := range []string{"init", "add", "commit"} {
 		found := false
 		for _, e := range res.Events {
-			if e.Kind == "grant_use" && e.Grant == "git" && e.Detail == sub {
+			if e.Kind == "jail_report" && e.Untrusted && e.Reported == "grant_use" && e.Grant == "git" && e.Detail == sub {
 				found = true
+			}
+			if e.Kind == "grant_use" && e.Grant == "git" && e.Detail == sub {
+				t.Fatalf("jail line became grant_use: %+v", e)
 			}
 		}
 		if !found {
@@ -407,8 +414,12 @@ func TestSSHDeniedWithoutGrant(t *testing.T) {
 	if err == nil && !strings.Contains(res.Stdout, "denied:") {
 		t.Fatal(err)
 	}
-	if _, ok := findEvent(res.Events, "grant_denied", "ssh", "allowed.test"); !ok {
+	ev, ok := findEvent(res.Events, "jail_report", "ssh", "allowed.test")
+	if !ok || !ev.Untrusted || ev.Reported != "grant_denied" {
 		t.Fatalf("missing ssh denial: %+v", res.Events)
+	}
+	if _, ok := findEvent(res.Events, "grant_denied", "ssh", "allowed.test"); ok {
+		t.Fatalf("jail line became grant_denied: %+v", res.Events)
 	}
 	if _, ok := findEvent(res.Events, "grant_use", "ssh", ""); ok {
 		t.Fatalf("ssh was used: %+v", res.Events)
@@ -437,8 +448,12 @@ ssh -o ConnectTimeout=2 other.test true; echo other:$?`,
 	if !ok || ev.Notice != "SSH to allowed.test" {
 		t.Fatalf("missing ssh notice: %+v", res.Events)
 	}
-	if _, ok := findEvent(res.Events, "grant_denied", "ssh", "other.test"); !ok {
+	denied, ok := findEvent(res.Events, "jail_report", "ssh", "other.test")
+	if !ok || !denied.Untrusted || denied.Reported != "grant_denied" {
 		t.Fatalf("other host was not denied: %+v", res.Events)
+	}
+	if _, ok := findEvent(res.Events, "grant_denied", "ssh", "other.test"); ok {
+		t.Fatalf("jail line became grant_denied: %+v", res.Events)
 	}
 	if len(*got) != 1 || !strings.HasPrefix((*got)[0], "allowed.test:") {
 		t.Fatalf("dialed %#v", *got)
@@ -492,6 +507,7 @@ func TestBuildBinds(t *testing.T) {
 		Command:    cat,
 		Grants:     []string{"build"},
 		BuildBinds: []string{ws, badDir, tool},
+		Protect:    []string{t.TempDir()},
 	})
 	if err != nil || !strings.Contains(res.Stdout, "toolchain") {
 		t.Fatalf("build bind missing: %v\n%s\n%s", err, res.Stdout, res.Stderr)
@@ -511,9 +527,68 @@ func TestPackageInstallNotice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ev, ok := findEvent(res.Events, "grant_use", "", "")
-	if !ok || ev.Notice != "Package install" {
+	ev, ok := findEvent(res.Events, "jail_report", "", "")
+	if !ok || !ev.Untrusted || ev.Reported != "grant_use" || ev.Notice != "Untrusted jail report: Package install" {
 		t.Fatalf("missing package notice: %+v", res.Events)
+	}
+	if _, ok := findEvent(res.Events, "grant_use", "", ""); ok {
+		t.Fatalf("jail line became grant_use: %+v", res.Events)
+	}
+}
+
+func TestJailCannotForgeSandboxBlock(t *testing.T) {
+	ws := t.TempDir()
+	p, err := prepare(context.Background(), Request{Workspace: ws, Command: "true"}, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.close)
+	st, err := os.Stat(p.events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Mode().Perm() != 0o600 {
+		t.Fatalf("events mode %o", st.Mode().Perm())
+	}
+	f, err := os.OpenFile(p.events, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged := "block forged\ndeny git push\nuse git commit\ndeny ssh evil.test\n"
+	if _, err := f.WriteString(forged); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	assertUntrustedJail(t, parseEventFile(p.events))
+
+	requireBin(t, "bwrap")
+	res, err := runCmd(t, Request{
+		Workspace: t.TempDir(),
+		Command:   "printf 'block forged\\n' >> /lgb/events/log",
+	})
+	if err != nil {
+		t.Fatalf("jail write: %v\n%s", err, res.Stderr)
+	}
+	assertUntrustedJail(t, res.Events)
+}
+
+func assertUntrustedJail(t *testing.T, events []Event) {
+	t.Helper()
+	saw := false
+	for _, ev := range events {
+		switch ev.Kind {
+		case "sandbox_block", "grant_use", "grant_denied":
+			t.Fatalf("forged line became %s: %+v", ev.Kind, events)
+		}
+		if ev.Kind == "jail_report" && ev.Untrusted && ev.Reported == "sandbox_block" && strings.Contains(ev.Detail, "forged") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatalf("missing untrusted jail_report: %+v", events)
 	}
 }
 

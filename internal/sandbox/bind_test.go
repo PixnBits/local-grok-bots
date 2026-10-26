@@ -81,7 +81,7 @@ func TestSelectBuildBinds(t *testing.T) {
 
 	t.Run("unresolved", func(t *testing.T) {
 		missing := filepath.Join(t.TempDir(), "gone")
-		mounts, events, applied := selectBuildBinds(ws, []string{missing}, nil)
+		mounts, events, applied := selectBuildBinds(ws, []string{missing}, []string{t.TempDir()})
 		if len(mounts) != 0 || len(applied) != 0 {
 			t.Fatalf("mounted missing %+v %v", mounts, applied)
 		}
@@ -89,4 +89,27 @@ func TestSelectBuildBinds(t *testing.T) {
 			t.Fatalf("events %+v", events)
 		}
 	})
+}
+
+func TestSelectBuildBindsEmptyProtect(t *testing.T) {
+	ws := t.TempDir()
+	bind := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bind, "tool.txt"), []byte("toolchain\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, protect := range [][]string{nil, {}, {""}, {" "}, {"."}, {"/"}} {
+		mounts, events, applied := selectBuildBinds(ws, []string{bind, "  ", ws}, protect)
+		t.Cleanup(func() { closeMountFiles(mounts) })
+		if len(mounts) != 0 || len(applied) != 0 {
+			t.Fatalf("protect %#v mounted %+v %v", protect, mounts, applied)
+		}
+		if len(events) != 2 {
+			t.Fatalf("protect %#v events %+v", protect, events)
+		}
+		for _, ev := range events {
+			if ev.Kind != "sandbox_block" || ev.Untrusted || (!strings.Contains(ev.Detail, bind) && !strings.Contains(ev.Detail, ws)) {
+				t.Fatalf("protect %#v event %+v", protect, ev)
+			}
+		}
+	}
 }

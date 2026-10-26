@@ -36,7 +36,7 @@ data/workspace/    the only tree bots may read, write, or shell in
 
 File tools resolve against `workspace/` and reject `..`, absolute host paths, and symlink escapes.
 
-`run_shell` uses bubblewrap when `bwrap` is installed, and otherwise `unshare` with a chroot. The workspace is bind-mounted at `/work`. The host filesystem outside it is not visible, and the shell starts with no network. If it reports its workspace as `/work`, that is the jail path, not the host path. If neither `bwrap` nor `unshare` can build the jail, the shell fails closed and the daemon still serves.
+`run_shell` uses bubblewrap when `bwrap` is installed, and otherwise `unshare` with a chroot. The workspace is bind-mounted at `/work`. The host filesystem outside it is not visible, and the shell starts with no network. If it reports its workspace as `/work`, that is the jail path, not the host path. If neither `bwrap` nor `unshare` can build the jail, the shell fails closed and the daemon still serves. With the `build` grant, each `SANDBOX_BUILD_BINDS` path is opened without following symlinks. Bubblewrap mounts that file descriptor (`--ro-bind-fd`) and does not fall back to a path bind. The unshare fallback refuses the bind with a daemon-generated `sandbox_block` (`refused bind <path>: unsupported without bwrap`) and does not mount the path.
 
 On macOS, `run_shell` runs under `/usr/bin/sandbox-exec` with a generated Seatbelt profile. It denies by default, reads system paths and the workspace, writes only the workspace and a private temp dir, never writes `.git/hooks`, and has no network. There is no `/work` mount, so the shell starts in the real workspace path. `net` and `ssh` grants are denied on macOS because the connect proxy needs `LD_PRELOAD`. A missing `sandbox-exec` fails closed. Apple marks `sandbox-exec` deprecated; it still ships, but this path has only been compile-checked, not run on a Mac. Behavior change: before this release `run_shell` always failed closed on macOS; Ollama bots with `run_shell` now run commands there.
 
@@ -48,11 +48,11 @@ To give a bot material, copy or mount it into `workspace/`. The shell PATH inclu
 
 ## Startup changes
 
-A `[[tools.cli]]` `credential_home` that contains a protected path, for example the `[github]` `token_file`, refuses startup. Move the token file outside that home.
+A `[[tools.cli]]` `credential_home` that contains a protected path, for example the `[github]` `token_file`, refuses startup. Move the token file outside that home. A home inside `DATA_DIR/workspace` (raw or resolved) refuses startup and names both paths. A home inside another tool's home does the same. Two distinct `DATA_DIR/coi/<id>` homes are allowed. A home outside `DATA_DIR`, such as a user home, is allowed when it does not overlap a protected path.
 
 A `DATA_DIR` that is a symlink, is not owned by the daemon user, or is group or other writable refuses every start.
 
-A `SANDBOX_BUILD_BINDS` entry that does not exist, or that overlaps a protected path, refuses startup. At run time, a bind that cannot be opened without following symlinks, or that overlaps a protected path, is skipped and logged. The turn continues without that bind.
+A `SANDBOX_BUILD_BINDS` entry that does not exist, or that overlaps a protected path, refuses startup. At run time, a bind that cannot be opened without following symlinks, or that overlaps a protected path, is skipped and logged. The turn continues without that bind. Bubblewrap mounts the opened file descriptor and does not fall back to a path bind. Without bubblewrap, the unshare fallback refuses every build bind with a daemon-generated `sandbox_block` and does not mount the path. `DATA_DIR` itself is on the protected list. An empty protected list refuses every build bind.
 
 ## systemd
 

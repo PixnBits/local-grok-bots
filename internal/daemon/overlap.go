@@ -104,7 +104,10 @@ func checkAuthTokensBinds(file string, binds []string) error {
 		}
 		for _, p := range paths {
 			if pathsOverlap(p, bind) {
-				return fmt.Errorf("AUTH_TOKENS_FILE %s overlaps SANDBOX_BUILD_BINDS %s: %w", p, bind, errAuthBind)
+				return &authCodedError{
+					msg:  fmt.Sprintf("AUTH_TOKENS_FILE %s overlaps SANDBOX_BUILD_BINDS %s", p, bind),
+					code: errAuthBind,
+				}
 			}
 		}
 	}
@@ -140,23 +143,59 @@ func checkPathOverlaps(cfg config.Config, pol policy.Policy) error {
 		}
 	}
 	base := secretPaths(cfg, pol, false)
+	wsForms := pathForms(cfg.Workspace())
 	var homes []string
 	for _, tool := range pol.CLITools {
 		home := strings.TrimSpace(tool.CredentialHome)
 		if home == "" {
 			continue
 		}
+		if hit, ok := homeInsideWorkspace(home, wsForms); ok {
+			return fmt.Errorf("tools.cli credential_home %s is inside the workspace %s", home, hit)
+		}
 		if hit, ok := credentialHomeOverlaps(home, cfg.DataDir, base); ok {
 			return fmt.Errorf("tools.cli credential_home %s overlaps protected path %s", home, hit)
 		}
 		for _, other := range homes {
-			if credentialHomesNest(home, other) {
-				return fmt.Errorf("tools.cli credential_home %s overlaps protected path %s", home, other)
+			if inner, outer, ok := nestedCredentialHome(home, other); ok {
+				return fmt.Errorf("tools.cli credential_home %s is inside another home %s", inner, outer)
 			}
 		}
 		homes = append(homes, home)
 	}
 	return nil
+}
+
+// homeInsideWorkspace reports whether any form of home is the workspace or
+// a path under it. The returned path is the workspace form that matched.
+func homeInsideWorkspace(home string, wsForms []string) (string, bool) {
+	for _, h := range pathForms(home) {
+		for _, ws := range wsForms {
+			if pathInside(ws, h) {
+				return ws, true
+			}
+		}
+	}
+	return "", false
+}
+
+// nestedCredentialHome reports a strict nest. inner and outer are the
+// configured paths, not the resolved forms. Equal homes are not a nest.
+func nestedCredentialHome(a, b string) (inner, outer string, ok bool) {
+	for _, x := range pathForms(a) {
+		for _, y := range pathForms(b) {
+			if x == y {
+				continue
+			}
+			if pathInside(y, x) {
+				return a, b, true
+			}
+			if pathInside(x, y) {
+				return b, a, true
+			}
+		}
+	}
+	return "", "", false
 }
 
 // credentialHomeOverlaps reports whether home equals or contains DATA_DIR,

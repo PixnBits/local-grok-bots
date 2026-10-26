@@ -36,15 +36,22 @@ func TestGitAuthorFromPolicy(t *testing.T) {
 		if _, statErr := os.Stat(filepath.Join(app.ws, "pwned.txt")); !os.IsNotExist(statErr) {
 			t.Fatalf("injection created pwned.txt: %v", statErr)
 		}
-		raw, jerr := json.Marshal(logKind(t, srv.URL, "grant_denied"))
+		raw, jerr := json.Marshal(logKind(t, srv.URL, "jail_report"))
 		if jerr != nil {
 			t.Fatal(jerr)
 		}
 		if strings.Contains(string(raw), "PWNED") || strings.Contains(string(raw), bad) {
 			t.Fatalf("author leaked into the log: %s", raw)
 		}
-		if !hasDetail(logDetails(t, srv.URL, "grant_denied"), "git", "") {
+		if !hasDetail(logDetails(t, srv.URL, "jail_report"), "git", "") {
 			t.Fatalf("denial not logged: %s", raw)
+		}
+		denied, jerr := json.Marshal(logKind(t, srv.URL, "grant_denied"))
+		if jerr != nil {
+			t.Fatal(jerr)
+		}
+		if strings.Contains(string(denied), "PWNED") || strings.Contains(string(denied), bad) || hasDetail(logDetails(t, srv.URL, "grant_denied"), "git", "") {
+			t.Fatalf("jail line became grant_denied: %s", denied)
 		}
 	})
 

@@ -701,6 +701,15 @@ func TestAuthTokensReloadReasons(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		{name: "symlink", reason: "symlink", mutate: func(t *testing.T, dir, path string) {
+			real := filepath.Join(dir, "tokens-real")
+			if err := os.Rename(path, real); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(real, path); err != nil {
+				t.Fatal(err)
+			}
+		}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
