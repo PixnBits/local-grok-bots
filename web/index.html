@@ -329,6 +329,14 @@ window.addEventListener("storage", function (ev) {
   }
   .bot-copy small { color: var(--muted); }
   .bot.dim { opacity: .6; }
+  /* Stale rows only. The error note stays at full opacity, with no fade. */
+  #bot-list.is-stale button.bot,
+  #bot-list.is-stale button.unarchive,
+  #bot-list.is-stale > .roster-group,
+  #bot-list.is-stale > .roster-back,
+  #bot-list.is-stale > .empty,
+  #bot-list.is-stale > .empty-state,
+  #bot-list.is-stale > .skel-row { opacity: .55; }
   /* clip-path removes an inset box-shadow, so the edge is a full-size
      underlay and the fill is inset inside the same silhouette. */
   .mark {
@@ -677,6 +685,22 @@ window.addEventListener("storage", function (ev) {
     .state-sheet .sheet-head { height: 56px; }
     .profile-layout { display: flex; flex-direction: column; overflow: auto; justify-content: flex-start; }
     .profile-nav, .profile-col { overflow: visible; min-height: auto; flex: none; }
+    /* The roster footer is 56px and full width below 980px. Keep Undo on screen. */
+    .toast {
+      bottom: calc(56px + 12px + env(safe-area-inset-bottom, 0px));
+      max-width: min(360px, calc(100% - 32px));
+    }
+    .toast-copy {
+      display: flex;
+      flex: 1 1 auto;
+      align-items: center;
+      min-width: 0;
+      overflow: hidden;
+      /* pre, not nowrap: flex drops the edge spaces of "Archived " and " · ". */
+      white-space: pre;
+    }
+    .toast-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .toast > button { flex: none; }
   }
   @media (max-width: 540px) {
     .roster-foot { height: 56px; max-height: 56px; }
@@ -692,6 +716,8 @@ window.addEventListener("storage", function (ev) {
   @media (prefers-reduced-motion: reduce) {
     .state-sheet, .state-backdrop, .toast, .skel-mark, .skel-line { transition: none; animation: none; }
     .pulse { animation: none; }
+    #bot-list.is-stale,
+    #bot-list.is-stale * { transition: none; }
   }
 </style>
 </head>
@@ -724,7 +750,7 @@ window.addEventListener("storage", function (ev) {
       <nav class="roster-scroll" aria-label="Bots">
       <div class="bots" id="bot-list"></div>
       </nav>
-      <footer class="roster-foot"><p id="health"><i class="dot health-retry" id="health-dot" aria-hidden="true"></i><span id="health-text">reconnecting…</span></p><button class="ghost small" id="log-toggle" type="button">Log</button></footer>
+      <footer class="roster-foot"><p id="health"><i class="dot health-retry" id="health-dot" aria-hidden="true"></i><span id="health-text">connecting…</span></p><button class="ghost small" id="log-toggle" type="button">Log</button></footer>
     </section>
     <section class="view" id="view-chat">
       <div class="thread" id="thread">
@@ -914,7 +940,7 @@ const state = {
   showArchived: false,
   mark: {shape: "circle", color: COLORS[0]},
   desktopLog: false,
-  conn: "retrying",
+  conn: "loading",
   botsLoaded: false,
   everFailed: false,
   backoff: 1000,
@@ -1058,10 +1084,6 @@ function statusNode(status) {
   s.append(el("i", "dot"), document.createTextNode(status || "idle"));
   return s;
 }
-function rowStatus(b) {
-  if (b && !b.archived && b.pending_permissions > 0) return "needs approval";
-  return (b && b.status) || "idle";
-}
 function eyeOffIcon() {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 24 24");
@@ -1103,12 +1125,80 @@ function approvalWords(n) {
   return n === 1 ? "1 approval waiting" : n + " approvals waiting";
 }
 // roster-logic:end
-function renderBots() {
-  const list = $("#bot-list");
-  list.replaceChildren();
-  // The archived view lists only archived bots; the normal roster never does.
-  const live = state.bots.filter(b => !b.archived);
-  const archived = state.bots.filter(b => b.archived);
+// roster-sig:begin
+function rowStatus(b) {
+  if (b && !b.archived && b.pending_permissions > 0) return "needs approval";
+  return (b && b.status) || "idle";
+}
+function rosterSignature(inputs) {
+  const src = inputs || {};
+  const bots = Array.isArray(src.bots) ? src.bots : [];
+  const botsLoaded = !!src.botsLoaded;
+  const everFailed = !!src.everFailed;
+  const conn = src.conn == null ? "" : String(src.conn);
+  const mode = src.mode != null && src.mode !== "" ? String(src.mode) : rosterListMode(botsLoaded, everFailed, conn);
+  const lines = [];
+  for (let i = 0; i < bots.length; i++) {
+    const b = bots[i] || {};
+    const mark = b.mark && typeof b.mark === "object" ? b.mark : {};
+    const pending = Number(b.pending_permissions);
+    lines.push([
+      b.id == null ? "" : String(b.id),
+      b.name == null ? "" : String(b.name),
+      b.label == null ? "" : String(b.label),
+      mark.shape || "",
+      mark.color || "",
+      rowStatus(b),
+      b.hidden ? 1 : 0,
+      b.pinned ? 1 : 0,
+      b.archived ? 1 : 0,
+      pending > 0 ? pending : 0
+    ]);
+  }
+  return JSON.stringify([
+    mode,
+    botsLoaded ? 1 : 0,
+    everFailed ? 1 : 0,
+    src.showHidden ? 1 : 0,
+    src.showArchived ? 1 : 0,
+    src.botId == null ? "" : String(src.botId),
+    lines
+  ]);
+}
+function rosterFocusKey(kind, botId) {
+  if (kind === "back") return "back";
+  if (kind !== "bot" && kind !== "unarchive") return "";
+  if (botId == null || botId === "") return "";
+  return kind + ":" + botId;
+}
+function rosterFocusMatch(key, kind, botId) {
+  const want = rosterFocusKey(kind, botId);
+  return !!key && !!want && key === want;
+}
+// roster-sig:end
+let rosterSig = null;
+function rosterFocusKeyFromEl(el) {
+  if (!el || !el.classList) return "";
+  if (el.classList.contains("roster-back")) return rosterFocusKey("back", "");
+  if (el.classList.contains("unarchive")) return rosterFocusKey("unarchive", el.getAttribute("data-bot-id") || "");
+  if (el.classList.contains("bot")) return rosterFocusKey("bot", el.getAttribute("data-bot-id") || "");
+  return "";
+}
+function restoreRosterFocus(list, key) {
+  if (!list || !key || !list.querySelectorAll) return;
+  const buttons = list.querySelectorAll("button");
+  for (const el of buttons) {
+    let kind = "";
+    if (el.classList.contains("roster-back")) kind = "back";
+    else if (el.classList.contains("unarchive")) kind = "unarchive";
+    else if (el.classList.contains("bot")) kind = "bot";
+    else continue;
+    if (!rosterFocusMatch(key, kind, el.getAttribute("data-bot-id") || "")) continue;
+    if (typeof el.focus === "function") el.focus({ preventScroll: true });
+    return;
+  }
+}
+function syncRosterMenus(live, archived) {
   const hiddenCount = live.filter(b => b.hidden).length;
   const showHiddenBtn = $("#menu-show-hidden");
   if (showHiddenBtn) {
@@ -1122,7 +1212,59 @@ function renderBots() {
     archBtn.hidden = !label;
     archBtn.textContent = label;
   }
+}
+function syncLogBots() {
+  const sel = $("#log-bot");
+  if (!sel) return;
+  const cur = sel.value;
+  sel.replaceChildren(new Option("All bots", ""));
+  for (const b of state.bots) sel.append(new Option(b.name, b.id));
+  if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+}
+function syncRosterBusy(list, mode) {
+  const stale = !!(list && mode === "error" && state.botsLoaded);
+  if (!list || !list.classList) return;
+  list.classList.toggle("is-stale", stale);
+  if (stale) list.setAttribute("aria-busy", "true");
+  else list.removeAttribute("aria-busy");
+}
+function renderBots() {
+  const list = $("#bot-list");
+  // The archived view lists only archived bots; the normal roster never does.
+  const live = state.bots.filter(b => !b.archived);
+  const archived = state.bots.filter(b => b.archived);
+  syncRosterMenus(live, archived);
   const mode = rosterListMode(state.botsLoaded, state.everFailed, state.conn);
+  syncRosterBusy(list, mode);
+  const sig = rosterSignature({
+    bots: state.bots,
+    botsLoaded: state.botsLoaded,
+    everFailed: state.everFailed,
+    conn: state.conn,
+    showHidden: state.showHidden,
+    showArchived: state.showArchived,
+    botId: state.botId,
+    mode: mode
+  });
+  // Polls call this every few seconds. Skip the rebuild when the rows would
+  // look the same, so a focused row keeps receiving arrow keys.
+  if (sig === rosterSig) {
+    syncLogBots();
+    syncComposer();
+    return;
+  }
+  let focusKey = "";
+  const active = document.activeElement;
+  // A hidden phone pane (chat/log covers the roster) must not steal focus back.
+  const listShown = list && list.getClientRects && list.getClientRects().length > 0;
+  if (active && listShown && list.contains(active)) focusKey = rosterFocusKeyFromEl(active);
+  list.replaceChildren();
+  const commit = () => {
+    if (focusKey) restoreRosterFocus(list, focusKey);
+    rosterSig = sig;
+    syncLogBots();
+    syncComposer();
+  };
   if (mode === "loading") {
     for (let i = 0; i < 3; i++) {
       const row = el("div", "skel-row");
@@ -1132,12 +1274,12 @@ function renderBots() {
       row.append(el("span", "skel-mark"), lines);
       list.append(row);
     }
-    syncComposer();
+    commit();
     return;
   }
   if (mode === "error") list.append(el("p", "roster-error", ROSTER_ERROR_NOTE));
   if (mode === "error" && !state.botsLoaded) {
-    syncComposer();
+    commit();
     return;
   }
   if (state.showArchived) {
@@ -1163,6 +1305,7 @@ function renderBots() {
   const appendRow = (b) => {
     const btn = el("button", "bot" + (b.hidden ? " dim" : "") + (b.id === state.botId ? " is-selected" : ""));
     btn.type = "button";
+    btn.setAttribute("data-bot-id", b.id);
     if (b.id === state.botId) btn.setAttribute("aria-current", "page");
     const copy = el("span", "bot-copy");
     const line1 = el("span", "bot-line");
@@ -1189,6 +1332,7 @@ function renderBots() {
       const row = el("div", "bot-row");
       const un = el("button", "ghost unarchive", "Unarchive");
       un.type = "button";
+      un.setAttribute("data-bot-id", b.id);
       un.addEventListener("click", (e) => { e.stopPropagation(); setArchived(b.id, false); });
       row.append(btn, un);
       list.append(row);
@@ -1210,13 +1354,7 @@ function renderBots() {
   } else {
     shown.forEach(appendRow);
   }
-  const sel = $("#log-bot");
-  if (!sel) { syncComposer(); return; }
-  const cur = sel.value;
-  sel.replaceChildren(new Option("All bots", ""));
-  for (const b of state.bots) sel.append(new Option(b.name, b.id));
-  if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
-  syncComposer();
+  commit();
 }
 async function loadBots() {
   const fresh = await api("/api/bots");
@@ -3138,10 +3276,71 @@ $("#state-close").addEventListener("click", closeState);
 $("#state-backdrop").addEventListener("click", closeState);
 document.addEventListener("keydown", onStateKey);
 // health:begin
+const DOWN_AFTER_MS = 10000;
 function healthView(phase, version) {
-  if (phase === "retrying" || phase === "loading") return { text: "reconnecting…", dot: "retry" };
+  if (phase === "loading") return { text: "connecting…", dot: "retry" };
+  if (phase === "retrying") return { text: "reconnecting…", dot: "retry" };
   if (phase === "down") return { text: "daemon unreachable", dot: "down" };
   return { text: "daemon " + (version || "") + " · connected", dot: "ok" };
+}
+function connPhase(failSince, now) {
+  if (typeof failSince !== "number" || !isFinite(failSince)) return "ok";
+  if (typeof now !== "number" || !isFinite(now)) return "retrying";
+  if (now - failSince >= DOWN_AFTER_MS) return "down";
+  return "retrying";
+}
+function makeConnTracker(opts) {
+  const opt = opts || {};
+  const now = typeof opt.now === "function" ? opt.now : function () { return Date.now(); };
+  const setTimer = typeof opt.setTimeout === "function" ? opt.setTimeout : function (fn, ms) { return setTimeout(fn, ms); };
+  const clearTimer = typeof opt.clearTimeout === "function" ? opt.clearTimeout : function (id) { clearTimeout(id); };
+  const onChange = typeof opt.onChange === "function" ? opt.onChange : function () {};
+  let failSince = null;
+  let phase = "ok";
+  let timer = 0;
+  let armed = false;
+  function setPhase(next) {
+    if (next === phase) return;
+    phase = next;
+    onChange(phase);
+  }
+  function disarm() {
+    if (!armed) return;
+    clearTimer(timer);
+    armed = false;
+    timer = 0;
+  }
+  function arm(t) {
+    disarm();
+    if (failSince == null) return;
+    const remain = DOWN_AFTER_MS - (t - failSince);
+    if (remain <= 0) return;
+    armed = true;
+    timer = setTimer(function () {
+      armed = false;
+      timer = 0;
+      if (failSince == null) return;
+      const tick = now();
+      const next = connPhase(failSince, tick);
+      setPhase(next);
+      if (next === "retrying") arm(tick);
+    }, remain);
+  }
+  return {
+    phase: function () { return phase; },
+    fail: function () {
+      const t = now();
+      if (failSince == null) failSince = t;
+      const next = connPhase(failSince, t);
+      arm(t);
+      setPhase(next);
+    },
+    ok: function () {
+      failSince = null;
+      disarm();
+      setPhase("ok");
+    }
+  };
 }
 function archivedMenuLabel(count) {
   if (typeof count !== "number" || !isFinite(count) || count < 0) return "";
@@ -3254,14 +3453,22 @@ function showArchiveToast(id, name, prev) {
   const toast = $("#toast");
   if (!toast) return;
   clearTimeout(state.toastTimer);
-  const full = archiveToastText(name);
-  const cut = full.lastIndexOf("Undo");
-  const label = document.createElement("span");
-  label.textContent = cut >= 0 ? full.slice(0, cut) : full;
+  const shown = name == null ? "" : String(name);
+  const full = archiveToastText(shown);
+  const undoAt = full.lastIndexOf("Undo");
+  const lead = undoAt >= 0 ? full.slice(0, undoAt) : full;
+  const head = "Archived ";
+  const copy = el("span", "toast-copy");
+  const nameAt = lead.startsWith(head) ? head.length : -1;
+  if (nameAt >= 0 && lead.slice(nameAt, nameAt + shown.length) === shown) {
+    copy.append(document.createTextNode(lead.slice(0, nameAt)), el("span", "toast-name", shown), document.createTextNode(lead.slice(nameAt + shown.length)));
+  } else {
+    copy.append(el("span", "toast-name", lead));
+  }
   const undo = el("button", "ghost", "Undo");
   undo.type = "button";
   undo.addEventListener("click", () => undoArchive(id, prev));
-  toast.replaceChildren(label, undo);
+  toast.replaceChildren(copy, undo);
   toast.hidden = false;
   state.toastTimer = setTimeout(dismissToast, ARCHIVE_TOAST_MS);
 }
@@ -3273,7 +3480,8 @@ function paintHealth() {
   const text = $("#health-text");
   const dot = $("#health-dot");
   if (!text || !dot) return;
-  const phase = state.conn === "ok" ? "ok" : (state.conn === "down" ? "down" : "retrying");
+  const known = state.conn === "ok" || state.conn === "down" || state.conn === "retrying" || state.conn === "loading";
+  const phase = known ? state.conn : "loading";
   const view = healthView(phase, state.version);
   text.textContent = view.text;
   dot.className = "dot health-" + view.dot;
@@ -3398,6 +3606,17 @@ document.addEventListener("keydown", (e) => {
 let daemonTimer = 0;
 let daemonBusy = false;
 let didBoot = false;
+const connTracker = makeConnTracker({
+  now: () => Date.now(),
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (id) => clearTimeout(id),
+  onChange: (phase) => {
+    state.conn = phase;
+    state.everFailed = phase !== "ok";
+    paintHealth();
+    renderBots();
+  }
+});
 function scheduleDaemon(ms) {
   clearTimeout(daemonTimer);
   daemonTimer = setTimeout(() => { refreshDaemon(); }, ms);
@@ -3417,18 +3636,14 @@ async function refreshDaemon() {
   if (daemonBusy) return;
   daemonBusy = true;
   try {
-    if (state.everFailed || !state.botsLoaded) {
-      state.conn = "retrying";
-      paintHealth();
-      if (!state.botsLoaded && !state.everFailed) renderBots();
-    }
     const h = await api("/api/health");
     state.version = (h && h.version) || "";
-    state.conn = "ok";
-    state.everFailed = false;
-    await loadBots();
     state.backoff = 1000;
+    state.everFailed = false;
+    state.conn = "ok";
+    connTracker.ok();
     paintHealth();
+    await loadBots();
     if (state.view === "log" || state.desktopLog) loadLog().catch(() => {});
     await bootFromURL();
     scheduleDaemon(3000);
@@ -3437,13 +3652,14 @@ async function refreshDaemon() {
       scheduleDaemon(3000);
       return;
     }
-    state.conn = "down";
-    state.everFailed = true;
-    paintHealth();
-    renderBots();
     const wait = state.backoff || 1000;
     state.backoff = nextBackoff(wait);
-    scheduleDaemon(wait);
+    try {
+      // Phase is how long this outage has lasted, not which retry is in flight.
+      connTracker.fail();
+    } finally {
+      scheduleDaemon(wait);
+    }
   } finally {
     daemonBusy = false;
   }

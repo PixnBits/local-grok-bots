@@ -66,7 +66,18 @@ func TestRosterStatic(t *testing.T) {
 		`function archiveToastText`,
 		`setTimeout(dismissToast, ARCHIVE_TOAST_MS)`,
 		`el("button", "ghost", "Undo")`,
+		`el("span", "toast-copy")`,
+		`el("span", "toast-name", shown)`,
+		`.toast-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }`,
+		`bottom: calc(56px + 12px + env(safe-area-inset-bottom, 0px))`,
+		`max-width: min(360px, calc(100% - 32px))`,
 		`id="toast" class="toast" role="status" aria-live="polite"`,
+		`setAttribute("data-bot-id", b.id)`,
+		`setAttribute("aria-busy", "true")`,
+		`removeAttribute("aria-busy")`,
+		`classList.toggle("is-stale", stale)`,
+		`#bot-list.is-stale button.bot`,
+		`id="health-text">connecting…`,
 		`document.title = "Log — Local Grok Bots"`,
 		`function desktopPaneFocusTarget`,
 		`focusPane("chat")`,
@@ -221,6 +232,7 @@ func TestRosterLogic(t *testing.T) {
 	for _, pair := range [][2]string{
 		{"// health:begin", "// health:end"},
 		{"// roster-logic:begin", "// roster-logic:end"},
+		{"// roster-sig:begin", "// roster-sig:end"},
 		{"// contrast:begin", "// contrast:end"},
 		{"// runstate:begin", "// runstate:end"},
 		{"// roster-keys:begin", "// roster-keys:end"},
@@ -241,7 +253,9 @@ const ctx = {};
 vm.createContext(ctx);
 vm.runInContext(snippet + "\n" + [
   "healthView", "archivedMenuLabel", "ROSTER_ERROR_NOTE", "nextBackoff",
+  "connPhase", "makeConnTracker", "DOWN_AFTER_MS",
   "rosterListMode", "approvalWords",
+  "rosterSignature", "rosterFocusKey", "rosterFocusMatch",
   "contrastAdvisories", "markContrastFails", "contrastRatio",
   "noteRunStarted",
   "rosterRowMove", "menuKeyAction",
@@ -254,7 +268,7 @@ const dark = "This colour is hard to see in dark mode. Pick a preset to fix it."
 const light = "This colour is hard to see in light mode. Pick a preset to fix it.";
 function hv(phase, version) { return ctx.healthView(phase, version); }
 check("health-retry", hv("retrying").text === "reconnecting…" && hv("retrying").dot === "retry");
-check("health-loading", hv("loading").text === "reconnecting…" && hv("loading").dot === "retry");
+check("health-loading", hv("loading").text === "connecting…" && hv("loading").dot === "retry");
 check("health-down", hv("down").text === "daemon unreachable" && hv("down").dot === "down");
 check("health-ok", hv("ok", "1.2.3").text === "daemon 1.2.3 · connected" && hv("ok", "1.2.3").dot === "ok");
 check("error-note", ctx.ROSTER_ERROR_NOTE === "Can't reach the daemon. Retrying…");
@@ -301,6 +315,101 @@ check("pane-profile", JSON.stringify(pane("profile", true)) === JSON.stringify({
 check("pane-log", JSON.stringify(pane("log", true)) === JSON.stringify({sel: "#view-log h2.solo-title", tabindex: -1}));
 check("pane-narrow", pane("chat", false) === null && pane("bots", true) === null);
 check("toast-text", ctx.archiveToastText("Ada") === "Archived Ada · Undo" && ctx.ARCHIVE_TOAST_MS === 6000);
+function bot(extra) {
+  const b = { id: "a", name: "Ada", label: "pilot", mark: { shape: "circle", color: "#4C77DD" }, status: "idle", hidden: false, pinned: false, archived: false, pending_permissions: 0 };
+  if (extra) Object.keys(extra).forEach(function (k) { b[k] = extra[k]; });
+  return b;
+}
+function sig(over) {
+  const base = { botsLoaded: true, everFailed: false, conn: "ok", showHidden: false, showArchived: false, botId: "a", bots: [bot()] };
+  if (over) Object.keys(over).forEach(function (k) { base[k] = over[k]; });
+  return ctx.rosterSignature(base);
+}
+const sameA = ctx.rosterSignature({
+  botsLoaded: true, everFailed: false, conn: "ok", showHidden: false, showArchived: false, botId: "a",
+  bots: [{ id: "a", name: "Ada", label: "pilot", status: "idle", hidden: false, pinned: false, archived: false, pending_permissions: 0, mark: { shape: "circle", color: "#4C77DD" }, last_activity: "2020-01-01T00:00:00Z" }]
+});
+const sameB = ctx.rosterSignature({
+  botId: "a", showArchived: false, showHidden: false, conn: "ok", everFailed: false, botsLoaded: true,
+  bots: [{ last_activity: "1999-05-05T00:00:00Z", pending_permissions: 0, archived: false, pinned: false, hidden: false, status: "idle", label: "pilot", name: "Ada", id: "a", mark: { color: "#4C77DD", shape: "circle" }, updated_at: 9 }]
+});
+check("sig-same", sameA === sameB && sameA === sig());
+check("sig-status", sig() !== sig({ bots: [bot({ status: "running" })] }));
+check("sig-name", sig() !== sig({ bots: [bot({ name: "Bea" })] }));
+check("sig-pending", sig() !== sig({ bots: [bot({ pending_permissions: 2 })] }));
+check("sig-pending-count", sig({ bots: [bot({ pending_permissions: 1 })] }) !== sig({ bots: [bot({ pending_permissions: 2 })] }));
+check("sig-hidden", sig() !== sig({ showHidden: true }));
+check("sig-selected", sig() !== sig({ botId: "b" }));
+check("sig-phase-stable", sig({ everFailed: true, conn: "retrying" }) === sig({ everFailed: true, conn: "down" }));
+const left = bot();
+const right = bot({ id: "b", name: "Bea" });
+check("sig-order", ctx.rosterSignature({ botsLoaded: true, everFailed: false, conn: "ok", showHidden: false, showArchived: false, botId: "", bots: [left, right] }) !== ctx.rosterSignature({ botsLoaded: true, everFailed: false, conn: "ok", showHidden: false, showArchived: false, botId: "", bots: [right, left] }));
+check("focus-keys", ctx.rosterFocusKey("bot", "a") === "bot:a" && ctx.rosterFocusKey("unarchive", "a") === "unarchive:a" && ctx.rosterFocusKey("back", "x") === "back");
+check("focus-match", ctx.rosterFocusMatch("bot:a", "bot", "a") === true && ctx.rosterFocusMatch("bot:a", "unarchive", "a") === false && ctx.rosterFocusMatch("unarchive:a", "unarchive", "a") === true && ctx.rosterFocusMatch("back", "back", "") === true && ctx.rosterFocusMatch("", "bot", "a") === false && ctx.rosterFocusMatch("bot:", "bot", "") === false);
+check("conn-bounds", ctx.DOWN_AFTER_MS === 10000 && ctx.connPhase(null, 0) === "ok" && ctx.connPhase(undefined, 10000) === "ok" && ctx.connPhase(0, 0) === "retrying" && ctx.connPhase(0, 9999) === "retrying" && ctx.connPhase(0, 10000) === "down" && ctx.connPhase(50, 10049) === "retrying" && ctx.connPhase(50, 10050) === "down");
+function runOutage() {
+  let t = 0;
+  let failReturned = false;
+  const timers = [];
+  let nextId = 1;
+  const changes = [];
+  const tracker = ctx.makeConnTracker({
+    now: function () { return t; },
+    setTimeout: function (fn, ms) {
+      const id = nextId++;
+      timers.push({ id: id, fn: fn, at: t + ms });
+      return id;
+    },
+    clearTimeout: function (id) {
+      for (let i = timers.length - 1; i >= 0; i--) if (timers[i].id === id) timers.splice(i, 1);
+    },
+    onChange: function (phase) { changes.push({ phase: phase, t: t, sync: !failReturned }); }
+  });
+  check("track-start", tracker.phase() === "ok" && changes.length === 0);
+  tracker.fail();
+  failReturned = true;
+  check("track-sync", changes.length === 1 && changes[0].phase === "retrying" && changes[0].sync === true && changes[0].t === 0 && tracker.phase() === "retrying");
+  t = 1000; tracker.fail();
+  t = 3000; tracker.fail();
+  t = 7000; tracker.fail();
+  check("track-hold", tracker.phase() === "retrying" && changes.length === 1 && timers.length === 1 && timers[0].at === 10000);
+  t = 10000;
+  const fire = timers[0].fn;
+  timers.splice(0, 1);
+  fire();
+  check("track-down", tracker.phase() === "down" && changes.length === 2 && changes[1].phase === "down" && changes[1].t === 10000 && timers.length === 0);
+  t = 15000; tracker.fail();
+  check("track-still-down", tracker.phase() === "down" && changes.length === 2 && timers.length === 0);
+  const beforeOk = changes.length;
+  tracker.ok();
+  check("track-ok", tracker.phase() === "ok" && changes.length === beforeOk + 1 && changes[changes.length - 1].phase === "ok" && changes[changes.length - 1].t === 15000 && timers.length === 0);
+  t = 20000; tracker.fail();
+  check("track-fresh", tracker.phase() === "retrying" && changes.length === 4 && changes[3].phase === "retrying" && changes[3].t === 20000 && timers.length === 1 && timers[0].at === 30000);
+  check("track-views", hv("retrying").text === "reconnecting…" && hv("retrying").dot === "retry" && hv("down").text === "daemon unreachable" && hv("down").dot === "down" && hv("ok", "9").text === "daemon 9 · connected" && hv("ok", "9").dot === "ok" && hv("loading").text === "connecting…" && hv("loading").dot === "retry");
+  const phases = changes.map(function (c) { return c.phase; });
+  check("track-phases", JSON.stringify(phases) === JSON.stringify(["retrying", "down", "ok", "retrying"]));
+}
+runOutage();
+function runClear() {
+  let t2 = 5;
+  const q = [];
+  let n = 1;
+  let phase = "";
+  const tr = ctx.makeConnTracker({
+    now: function () { return t2; },
+    setTimeout: function (fn, ms) { const id = n++; q.push({ id: id, fn: fn, at: t2 + ms }); return id; },
+    clearTimeout: function (id) { for (let i = q.length - 1; i >= 0; i--) if (q[i].id === id) q.splice(i, 1); },
+    onChange: function (next) { phase = next; }
+  });
+  tr.fail();
+  check("track-armed", tr.phase() === "retrying" && phase === "retrying" && q.length === 1 && q[0].at === 10005);
+  const leaked = q[0].fn;
+  tr.ok();
+  check("track-cleared", tr.phase() === "ok" && phase === "ok" && q.length === 0);
+  leaked();
+  check("track-no-stale", tr.phase() === "ok" && phase === "ok");
+}
+runClear();
 console.log(JSON.stringify(cases));
 `
 	raw := runNode(t, node, script)
