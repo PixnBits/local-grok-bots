@@ -189,7 +189,7 @@ window.addEventListener("storage", function (ev) {
   }
   * { box-sizing: border-box; }
   :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
-  html, body { margin: 0; height: 100%; }
+  html, body { margin: 0; height: 100%; height: 100dvh; overflow: hidden; }
   body {
     font-family: var(--font);
     color: var(--text);
@@ -210,26 +210,21 @@ window.addEventListener("storage", function (ev) {
     padding: 10px 12px;
   }
   textarea { resize: vertical; min-height: 72px; }
-  /* The app is exactly one viewport tall so the message list, not the page,
-     is what scrolls; paging and auto-scroll depend on that. */
-  .app { height: 100vh; height: 100dvh; display: flex; flex-direction: column; }
-  header.top {
-    display: flex; align-items: center; gap: 12px;
-    padding: 14px 16px 8px;
-  }
-  header.top h1 {
-    font-family: var(--font);
-    font-size: 22px;
-    font-weight: 600;
-    margin: 0;
-    letter-spacing: -.02em;
-  }
-  header.top .sub { color: var(--muted); font-size: 12px; }
+  /* One viewport. The document does not scroll; paging stays on the message list. */
+  .app { height: 100vh; height: 100dvh; overflow: hidden; display: flex; flex-direction: column; }
   .theme-switch { display: inline-flex; align-items: center; gap: 8px; flex: none; color: var(--muted); font-size: 13px; }
   .theme-switch select { width: auto; padding: 4px 8px; }
-  nav.tabs { display: flex; gap: 6px; padding: 0 16px 12px; }
-  nav.tabs button[aria-selected="true"] { background: var(--text); color: var(--surface); border-color: var(--text); }
-  main { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 0 16px 16px; }
+  main { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: hidden; padding: 0; }
+  .roster-head { height: 64px; flex: none; display: flex; align-items: center; padding: 0 12px 0 20px; border-bottom: 1px solid var(--border); }
+  .roster-head h1 { margin: 0; font-family: var(--font); font-size: 17px; font-weight: 700; }
+  .roster-foot { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; }
+  .roster-foot #health { flex: 1 0 100%; margin: 0; }
+  .roster-foot .theme-switch { margin-right: auto; }
+  .solo-bar { height: 64px; flex: none; width: 100%; display: flex; align-items: center; gap: 8px; padding: 0 12px 0 4px; border-bottom: 1px solid var(--border); background: var(--surface); }
+  .solo-id { margin: 0; min-width: 0; flex: 1; display: flex; align-items: baseline; gap: 8px; font-family: inherit; font-size: inherit; font-weight: inherit; line-height: inherit; }
+  .solo-id .name { min-width: 0; font-size: 17px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .solo-kicker { color: var(--muted); flex: none; font-size: 13px; }
+  .solo-title { margin: 0; flex: 1; min-width: 0; font-family: var(--font); font-size: 17px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .panel {
     background: var(--surface);
     border: 1px solid var(--border);
@@ -237,12 +232,35 @@ window.addEventListener("storage", function (ev) {
     box-shadow: var(--e2);
     min-height: 0;
   }
-  .view { display: none; flex: 1; min-height: 0; }
-  .view.on { display: flex; flex-direction: column; gap: 12px; overflow-y: auto; }
-  #view-chat.on { overflow: hidden; }
-  /* In the scrolling views, panels keep their full height and the view
-     scrolls; without this, flex shrinks them and forms spill out. */
-  #view-bots > *, #view-profile > * { flex-shrink: 0; }
+  .view { display: none; flex: 1; min-height: 0; overflow: hidden; }
+  .view.on { display: flex; flex-direction: column; gap: 12px; }
+  #view-bots.on { overflow: hidden; gap: 0; }
+  #view-chat.on { overflow: hidden; align-items: center; }
+  #view-profile.on, #view-log.on { overflow: hidden; gap: 0; }
+  #view-bots.on, .roster-scroll, .msgs, .profile-layout, .profile-col, .sheet-body, .log { overscroll-behavior: contain; }
+  /* Header and footer stay put. The list and the create form scroll together. */
+  .roster-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 8px 0; }
+  #bot-list { flex: none; min-height: 0; overflow: visible; }
+  #view-bots > * { flex-shrink: 0; }
+  #view-bots > .roster-scroll { flex-shrink: 1; }
+  .profile-layout {
+    flex: 1; min-height: 0; overflow: hidden; width: 100%;
+    display: grid;
+    grid-template-columns: 220px minmax(0, 720px);
+    grid-template-rows: minmax(0, 1fr);
+    gap: 32px;
+    justify-content: center;
+  }
+  .profile-nav { min-height: 0; overflow: auto; }
+  .profile-nav:empty { display: none; }
+  .profile-layout:has(> .profile-nav:empty) { grid-template-columns: minmax(0, 720px); }
+  .profile-col { min-width: 0; min-height: 0; overflow: auto; }
+  .back {
+    width: 44px; height: 44px; flex: none; padding: 0;
+    border: 0; background: transparent; color: var(--text);
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .thread-back { display: none; }
   .create, .profile { padding: 14px; display: grid; gap: 8px; }
   .grants { border: 1px solid var(--border); border-radius: 10px; margin: 0; padding: 8px 12px; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
   .grants legend { padding: 0 6px; color: var(--muted); }
@@ -283,6 +301,8 @@ window.addEventListener("storage", function (ev) {
   .mark[data-shape="square"]::before { border-radius: 4px; }
   .mark[data-shape="square"]::after { border-radius: 2px; }
   .mark[data-shape="diamond"] { width: 20px; height: 20px; margin: 4px; transform: rotate(45deg); }
+  .mark.mark-20 { width: 20px; height: 20px; }
+  .mark.mark-20[data-shape="diamond"] { width: 14px; height: 14px; margin: 3px; }
   .mark[data-shape="diamond"]::before { border-radius: 3px; }
   .mark[data-shape="diamond"]::after { border-radius: 1px; }
   .mark[data-shape="triangle"]::before,
@@ -312,9 +332,7 @@ window.addEventListener("storage", function (ev) {
     #color-custom { width: 100%; height: auto; aspect-ratio: 1; min-width: 0; }
     .colours .swatch { width: 100%; height: auto; aspect-ratio: 1; min-width: 0; }
   }
-  .profile-head { display: flex; align-items: center; gap: 10px; min-width: 0; margin: 0; }
-  .profile-head .name { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .thread-bar > .mark { flex: none; }
+  .thread-bar > .mark, .solo-bar > .mark, .sheet-head > .mark { flex: none; }
   .bot-copy .bot-attn { color: var(--attention-text); font-weight: 600; }
   .swatch[aria-pressed="true"], .shape-btn[aria-pressed="true"] { outline: 2px solid var(--text); outline-offset: 2px; }
   .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); text-transform: lowercase; flex: none; }
@@ -325,7 +343,7 @@ window.addEventListener("storage", function (ev) {
   .status.idle .dot { background: var(--status-idle); }
   /* Compact: a count pill in place of the status. The words go under the label. */
   .perm-badge { flex: none; min-width: 20px; text-align: center; font-size: 11px; font-weight: 700; color: var(--on-attention); background: var(--attention); border-radius: 999px; padding: 2px 6px; white-space: nowrap; }
-  .thread { position: relative; }
+  .thread { position: relative; --thread-pad: 24px; }
   .new-pill {
     position: absolute; left: 50%; transform: translateX(-50%); bottom: 84px; z-index: 5;
     background: var(--accent); color: var(--on-accent); border: 0; border-radius: 99px; padding: 6px 14px;
@@ -333,12 +351,16 @@ window.addEventListener("storage", function (ev) {
   }
   .new-pill[hidden] { display: none; }
   .thread {
-    flex: 1; min-height: 240px; display: flex; flex-direction: column; overflow: hidden;
+    flex: 1; min-height: 0; width: 100%; max-width: 800px;
+    display: flex; flex-direction: column; overflow: hidden;
+    border: 0; border-radius: 0; box-shadow: none; background: transparent;
   }
   .thread-bar, .edit-bar {
     display: flex; justify-content: space-between; align-items: center; gap: 8px;
     padding: 12px 14px; border-bottom: 1px solid var(--border);
+    flex: none;
   }
+  .thread-bar { height: 64px; padding: 0 var(--thread-pad); box-sizing: border-box; }
   .thread-id { min-width: 0; flex: 1; }
   /* Bot state: the header chip opens a slide-over (bottom sheet on mobile). */
   .state-chip {
@@ -353,18 +375,50 @@ window.addEventListener("storage", function (ev) {
   .state-chip.warn { border-color: var(--attention); background: var(--attention-soft); color: var(--attention-text); }
   .state-chip[aria-expanded="true"] { background: var(--accent-soft); color: var(--accent-text); border-color: var(--accent); }
   .state-chip[hidden] { display: none; }
-  .state-backdrop { position: fixed; inset: 0; background: var(--scrim); z-index: 40; }
+  .state-backdrop {
+    position: fixed; inset: 0; background: var(--scrim); z-index: 40;
+    opacity: 0; transition: opacity .2s ease;
+  }
+  .state-backdrop.is-open { opacity: 1; }
   .state-backdrop[hidden], .state-sheet[hidden] { display: none; }
   .state-sheet {
-    position: fixed; top: 0; right: 0; bottom: 0; width: min(400px, 100vw); z-index: 41;
+    position: fixed; top: 0; right: 0; bottom: 0; width: 400px; max-width: 100%; z-index: 41;
     background: var(--surface); box-shadow: var(--e3);
     display: flex; flex-direction: column;
+    transform: translateX(100%);
+    transition: transform .2s ease;
   }
-  .state-sheet .sheet-head { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-bottom: 1px solid var(--border); }
-  .state-sheet .sheet-head h2 { margin: 0; font-family: var(--font); font-size: 18px; }
-  .state-sheet .sheet-body { overflow-y: auto; padding: 4px 14px 16px; flex: 1; }
+  .state-sheet.is-open { transform: translateX(0); }
+  .sheet-grab {
+    display: none; width: 36px; height: 5px; border-radius: 3px;
+    background: var(--border-strong); margin: 8px auto 0; flex: none;
+  }
+  .state-sheet .sheet-head {
+    height: 64px; flex: none;
+    display: flex; align-items: center; gap: 8px;
+    padding: 0 8px 0 20px; border-bottom: 1px solid var(--border);
+  }
+  .state-sheet .sheet-head h2 {
+    margin: 0; flex: 1; min-width: 0;
+    font-family: var(--font); font-size: 17px; font-weight: 650;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .sheet-close {
+    width: 44px; height: 44px; min-width: 44px; min-height: 44px; padding: 0; border: 0;
+    flex: none; background: transparent;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .state-sheet .sheet-body { overflow-y: auto; padding: 4px 14px 16px; flex: 1; min-height: 0; }
   @media (max-width: 979px) {
-    .state-sheet { top: auto; left: 0; width: auto; height: 75vh; height: 75dvh; border-radius: 16px 16px 0 0; box-shadow: var(--e3); }
+    .state-sheet {
+      top: auto; left: 0; right: 0; width: auto;
+      height: 75%;
+      height: 75dvh;
+      border-radius: 20px 20px 0 0;
+      transform: translateY(100%);
+    }
+    .state-sheet.is-open { transform: translateY(0); }
+    .sheet-grab { display: block; }
   }
   .st-sec h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 14px 0 6px; }
   .st-row { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; border-top: 1px solid var(--border); font-size: 14px; }
@@ -390,7 +444,7 @@ window.addEventListener("storage", function (ev) {
   .menu-pop[hidden] { display: none !important; }
   .menu-pop button { text-align: left; background: transparent; border: 0; border-radius: 8px; }
   .menu-pop button:hover { background: var(--surface-2); }
-  .msgs { flex: 1; overflow: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+  .msgs { flex: 1; min-height: 0; overflow: auto; padding: 16px var(--thread-pad); display: flex; flex-direction: column; gap: 10px; }
   .bubble { max-width: min(78ch, 100%); padding: 10px 12px; border-radius: 14px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .bubble.user { background: var(--accent-soft); align-self: flex-end; border-bottom-right-radius: 4px; }
   .bubble.bot { background: var(--surface); border: 1px solid var(--border); align-self: flex-start; border-bottom-left-radius: 4px; }
@@ -489,14 +543,14 @@ window.addEventListener("storage", function (ev) {
     background: var(--surface-2); border-radius: 8px; padding: 6px 8px;
   }
   .perm-card.settled { opacity: .8; }
-  .note { margin: 0 14px 8px; color: var(--danger-text); background: var(--danger-soft); border-radius: 10px; padding: 8px 10px; font-size: 13px; }
+  .note { margin: 0 var(--thread-pad) 8px; flex: none; color: var(--danger-text); background: var(--danger-soft); border-radius: 10px; padding: 8px 10px; font-size: 13px; }
   .note.continue {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
     color: var(--accent-text); background: var(--accent-soft);
   }
   .note.continue button { flex: none; }
   .note[hidden] { display: none !important; }
-  .composer { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); align-items: flex-end; }
+  .composer { display: flex; gap: 8px; padding: 12px var(--thread-pad); border-top: 1px solid var(--border); align-items: flex-end; flex: none; }
   .composer textarea { min-height: 44px; max-height: 40vh; height: 44px; resize: none; overflow-y: hidden; }
   .routine { display: grid; gap: 4px; padding: 8px 0; border-top: 1px solid var(--border); }
   .routine .meta { color: var(--muted); font-size: 12px; }
@@ -522,44 +576,44 @@ window.addEventListener("storage", function (ev) {
   }
   .auth.on { display: flex; }
   .auth .card { width: min(420px, 100%); padding: 16px; display: grid; gap: 10px; }
-  .desktop-log { display: none; }
   @media (min-width: 980px) {
-    nav.tabs { display: none; }
-    main { display: grid; grid-template-columns: 280px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 12px; align-items: stretch; }
-    #view-bots { overflow-y: auto; }
-    #view-chat { overflow: hidden; }
-    #view-bots, #view-chat { display: flex !important; }
+    main { display: grid; grid-template-columns: 280px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); gap: 0; align-items: stretch; }
+    #view-bots { border-right: 1px solid var(--border); overflow: hidden; min-width: 0; }
+    #view-chat { overflow: hidden; align-items: center; min-width: 0; }
+    #view-bots, #view-chat { display: flex !important; flex-direction: column; }
     #view-profile, #view-log { display: none !important; }
     body.solo #view-bots, body.solo #view-chat { display: none !important; }
     body.solo #view-profile.on, body.solo #view-log.on { display: flex !important; grid-column: 1 / -1; }
-    .desktop-log { display: inline-flex; }
+    .thread-back { display: none; }
+  }
+  @media (max-width: 979px) {
+    .thread-back { display: inline-flex; }
+    .roster-head, .thread-bar, .solo-bar { height: 56px; }
+    .profile-layout { display: flex; flex-direction: column; overflow: auto; justify-content: flex-start; }
+    .profile-nav, .profile-col { overflow: visible; min-height: auto; flex: none; }
+  }
+  @media (max-width: 540px) {
+    .state-sheet .sheet-head { height: 56px; }
+    main { padding: 0; }
+    .thread { --thread-pad: 12px; }
+    .panel { border-left: 0; border-right: 0; border-radius: 0; }
+    .bubble { max-width: 85%; }
+    .perm-card .perm-actions > button { flex: 1 1 100%; }
+    button:not(.copy-btn):not(.swatch):not(.shape-btn), .state-chip { min-height: 44px; }
+    .sheet-close, .solo-back, .thread-back { min-width: 44px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .state-sheet, .state-backdrop { transition: none; animation: none; }
+    .pulse { animation: none; }
   }
 </style>
 </head>
 <body>
 <div class="app">
-  <header class="top">
-    <div>
-      <h1>Local Grok Bots</h1>
-      <div class="sub" id="health">connecting…</div>
-    </div>
-    <span style="flex:1"></span>
-    <label class="theme-switch">Appearance
-      <select id="theme-select">
-        <option value="system">System</option>
-        <option value="light">Light</option>
-        <option value="dark">Dark</option>
-      </select>
-    </label>
-    <button class="ghost desktop-log" id="log-toggle" type="button">Log</button>
-  </header>
-  <nav class="tabs" role="tablist">
-    <button type="button" data-view="bots" aria-selected="true">Bots</button>
-    <button type="button" data-view="chat" aria-selected="false">Thread</button>
-    <button type="button" data-view="log" aria-selected="false">Log</button>
-  </nav>
   <main>
     <section class="view on" id="view-bots">
+      <header class="roster-head"><h1>Bots</h1></header>
+      <div class="roster-scroll">
       <div class="bots" id="bot-list"></div>
       <form class="panel create" id="create-form">
         <h2>New bot</h2>
@@ -573,10 +627,20 @@ window.addEventListener("storage", function (ev) {
         </div>
         <div class="err" id="create-err"></div>
       </form>
+      </div>
+      <footer class="roster-foot"><p id="health">connecting…</p><label class="theme-switch">Appearance
+        <select id="theme-select" aria-label="Appearance">
+          <option value="system">System</option>
+          <option value="light">Light</option>
+          <option value="dark">Dark</option>
+        </select>
+      </label>
+      <button class="ghost" id="log-toggle" type="button">Log</button></footer>
     </section>
     <section class="view" id="view-chat">
-      <div class="panel thread" id="thread">
+      <div class="thread" id="thread">
         <div class="thread-bar">
+          <button type="button" class="back thread-back" id="thread-back" aria-label="Back"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           <span class="mark" id="thread-mark" hidden aria-hidden="true"></span>
           <div class="thread-id">
             <h2 id="thread-name">No bot selected</h2>
@@ -584,7 +648,7 @@ window.addEventListener("storage", function (ev) {
           </div>
           <button type="button" class="state-chip" id="state-chip" hidden aria-label="Bot state" aria-haspopup="dialog" aria-expanded="false" aria-controls="state-sheet" title="Bot state: timers, memory, tools, runs"></button>
           <div class="menu">
-            <button type="button" id="menu-btn" aria-haspopup="menu" aria-expanded="false" aria-label="Bot menu">⋯</button>
+            <button type="button" id="menu-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="bot-menu" aria-label="Bot menu">⋯</button>
             <div class="menu-pop" id="bot-menu" hidden role="menu">
               <button type="button" data-act="profile" role="menuitem">View profile</button>
               <button type="button" data-act="state" role="menuitem">Bot state</button>
@@ -605,11 +669,22 @@ window.addEventListener("storage", function (ev) {
       </div>
     </section>
     <section class="view" id="view-profile">
-      <form class="panel profile" id="profile-form">
-        <div class="row" style="justify-content:space-between;align-items:center">
-          <h2 class="profile-head"><span class="mark" id="profile-head-mark" aria-hidden="true"></span><span class="name" id="profile-head-name">Profile</span></h2>
-          <button type="button" id="profile-back" class="ghost">Back</button>
+      <header class="solo-bar">
+        <button type="button" class="back solo-back" id="solo-back" aria-label="Back"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <span class="mark" id="profile-head-mark" aria-hidden="true"></span>
+        <h2 class="solo-id" id="profile-heading" tabindex="-1">
+          <span class="name" id="profile-head-name">Profile</span>
+          <span class="solo-kicker">Profile</span>
+        </h2>
+        <button type="button" class="ghost" id="profile-log">Log</button>
+        <div class="menu">
+          <button type="button" id="profile-menu" aria-haspopup="menu" aria-expanded="false" aria-controls="bot-menu" aria-label="Bot menu">⋯</button>
         </div>
+      </header>
+      <div class="profile-layout">
+        <nav class="profile-nav" aria-label="Profile sections"></nav>
+        <div class="profile-col">
+      <form class="panel profile" id="profile-form">
         <div class="shapes" id="shape-picker" role="group" aria-label="Mark shape"></div>
         <div class="colours" role="group" aria-label="Mark colour">
           <div class="swatches" id="color-picker"></div>
@@ -672,13 +747,16 @@ window.addEventListener("storage", function (ev) {
           <button type="button" id="routine-add">Add routine</button>
         </div>
       </form>
+        </div>
+      </div>
     </section>
     <section class="view" id="view-log">
-      <div class="panel" style="display:flex;flex-direction:column;min-height:0;flex:1">
-        <div class="edit-bar">
-          <h2>Log</h2>
-          <button type="button" id="log-refresh">Refresh</button>
-        </div>
+      <header class="solo-bar">
+        <button type="button" class="back log-back" id="log-back" aria-label="Back"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <h2 class="solo-title">Log</h2>
+        <button type="button" id="log-refresh">Refresh</button>
+      </header>
+      <div style="display:flex;flex-direction:column;min-height:0;flex:1">
         <div style="padding:12px" class="filters">
           <select id="log-bot"><option value="">All bots</option></select>
           <select id="log-kind">
@@ -700,8 +778,9 @@ window.addEventListener("storage", function (ev) {
   </form>
 </div>
 <div class="state-backdrop" id="state-backdrop" hidden></div>
-<aside class="state-sheet" id="state-sheet" hidden role="dialog" aria-label="Bot state">
-  <div class="sheet-head"><h2 id="state-sheet-title">Bot state</h2><button type="button" class="ghost" id="state-close">Close</button></div>
+<aside class="state-sheet" id="state-sheet" hidden role="dialog" aria-modal="true" aria-label="Bot state">
+  <div class="sheet-grab" aria-hidden="true"></div>
+  <div class="sheet-head"><span class="mark mark-20" id="state-sheet-mark" hidden aria-hidden="true"></span><h2 id="state-sheet-title">state</h2><button type="button" class="ghost sheet-close" id="state-close" aria-label="Close"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button></div>
   <div class="sheet-body" id="state-sheet-body"></div>
 </aside>
 <script>
@@ -773,29 +852,64 @@ function paintMark(n, mark) {
 function markEl(mark) {
   return paintMark(el("span", "mark"), mark);
 }
+function isWide() { return window.matchMedia("(min-width: 980px)").matches; }
+// drill:begin
+function shouldFocusDrill(prev, next, wide) {
+  return !wide && prev !== next;
+}
+function drillFocusTarget(name, wide) {
+  if (wide) return null;
+  if (name === "bots") return { sel: "#view-bots h1", tabindex: -1 };
+  if (name === "chat") return { sel: "#thread-name", tabindex: -1 };
+  if (name === "profile") return { sel: "#profile-heading", tabindex: -1 };
+  if (name === "log") return { sel: "#view-log h2.solo-title", tabindex: -1 };
+  return null;
+}
+function applyDrillFocus(el, tabindex) {
+  if (!el || typeof el.focus !== "function") return false;
+  if (tabindex != null) el.tabIndex = tabindex;
+  el.focus({ preventScroll: true });
+  return true;
+}
+function focusDrillView(name, wide, query) {
+  const spec = drillFocusTarget(name, wide);
+  if (!spec) return false;
+  const el = typeof query === "function" ? query(spec.sel) : null;
+  return applyDrillFocus(el, spec.tabindex);
+}
+// drill:end
 function setView(name) {
+  const prev = state.view;
+  const enter = prev !== name;
   state.view = name;
-  const wide = window.innerWidth >= 980;
+  const wide = isWide();
   const solo = name === "profile" || name === "log";
   document.body.classList.toggle("solo", solo);
-  for (const b of document.querySelectorAll("nav.tabs button")) {
-    b.setAttribute("aria-selected", b.dataset.view === name ? "true" : "false");
-  }
+  state.desktopLog = name === "log";
   for (const v of ["bots","chat","profile","log"]) {
     let on = v === name;
     if (wide && !solo && (v === "bots" || v === "chat")) on = true;
     $("#view-" + v).classList.toggle("on", on);
   }
-  if (name === "log") loadLog();
+  if (name === "log" && enter) loadLog();
+  if (shouldFocusDrill(prev, name, wide)) focusDrillView(name, wide, (sel) => $(sel));
 }
-document.querySelectorAll("nav.tabs button").forEach(b => b.addEventListener("click", () => {
-  state.desktopLog = false;
-  setView(b.dataset.view);
-}));
 $("#log-toggle").addEventListener("click", () => {
-  state.desktopLog = !state.desktopLog;
-  setView(state.desktopLog ? "log" : (state.botId ? "chat" : "bots"));
+  if (state.view === "log") navBack();
+  else openLog(true);
 });
+$("#profile-log").addEventListener("click", () => openLog(true));
+$("#solo-back").addEventListener("click", navBack);
+$("#log-back").addEventListener("click", navBack);
+$("#thread-back").addEventListener("click", navBack);
+$("#profile-menu").addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleBotMenu($("#profile-menu"));
+});
+const wideMq = window.matchMedia("(min-width: 980px)");
+const onWideChange = () => setView(state.view);
+if (wideMq.addEventListener) wideMq.addEventListener("change", onWideChange);
+else wideMq.addListener(onWideChange);
 function statusNode(status) {
   const s = el("span", "status " + (status || "idle"));
   s.append(el("i", "dot"), document.createTextNode(status || "idle"));
@@ -911,17 +1025,123 @@ function showRunError(text) {
   note.hidden = false;
   note.textContent = text;
 }
+function menuTriggers() { return document.querySelectorAll("[aria-controls='bot-menu']"); }
 function closeMenu() {
-  $("#bot-menu").hidden = true;
-  $("#menu-btn").setAttribute("aria-expanded", "false");
+  const menu = $("#bot-menu");
+  if (menu) menu.hidden = true;
+  for (const b of menuTriggers()) b.setAttribute("aria-expanded", "false");
 }
-// The selected bot lives in the URL as {base}/bots/{id}, so reload and
-// back/forward restore it. push=false is for popstate and the first load.
-function botPath(id) { return base() + (id ? "/bots/" + encodeURIComponent(id) : "/"); }
-function botFromPath() {
-  const rest = location.pathname.slice(base().length);
+// One menu node. The thread ⋯ and the profile ⋯ both anchor it.
+function toggleBotMenu(btn) {
+  const menu = $("#bot-menu");
+  const wrap = btn && btn.closest(".menu");
+  if (wrap && menu.parentElement !== wrap) {
+    wrap.append(menu);
+    menu.hidden = true;
+  }
+  const willOpen = menu.hidden;
+  menu.hidden = !willOpen;
+  for (const b of menuTriggers()) b.setAttribute("aria-expanded", b === btn && willOpen ? "true" : "false");
+}
+// The selected bot lives in the URL as {base}/bots/{id}. Profile and log stay
+// on that same path (or /) with a hash: the daemon only serves /, /index.html
+// and /bots/{id}, so an extra path segment would 404 on reload.
+// route:begin
+function botFromPathname(pathname, root) {
+  const rest = String(pathname || "").slice(String(root || "").length);
   const m = rest.match(/^\/bots\/([^/]+)\/?$/);
   return m ? decodeURIComponent(m[1]) : null;
+}
+function levelURL(root, view, bot, search) {
+  const id = view !== "bots" && bot ? bot : null;
+  const path = root + (id ? "/bots/" + encodeURIComponent(id) : "/");
+  const hash = view === "profile" ? "#profile" : view === "log" ? "#log" : "";
+  return path + (search || "") + hash;
+}
+function parseLevel(pathname, hash, root, hist) {
+  const bot = botFromPathname(pathname, root);
+  const h = String(hash || "").replace(/^#/, "");
+  if (h === "profile" && bot) return { view: "profile", bot: bot };
+  if (h === "log") return { view: "log", bot: bot };
+  if (hist && hist.lgb === 1 && hist.view === "profile" && (hist.bot || bot)) {
+    return { view: "profile", bot: hist.bot || bot };
+  }
+  if (hist && hist.lgb === 1 && hist.view === "log") {
+    return { view: "log", bot: hist.bot || bot };
+  }
+  if (bot) return { view: "chat", bot: bot };
+  return { view: "bots", bot: null };
+}
+function backAction(hist) {
+  if (hist && hist.lgb === 1 && hist.idx > 0) return "back";
+  return "up";
+}
+function parentLevel(level) {
+  const bot = level && level.bot ? level.bot : null;
+  if (level && level.view === "profile" && bot) return { view: "chat", bot: bot };
+  if (level && level.view === "log") return bot ? { view: "chat", bot: bot } : { view: "bots", bot: null };
+  return { view: "bots", bot: null };
+}
+function historyStamp(hist, pathname, hash, root) {
+  if (hist && hist.lgb === 1) return null;
+  const level = parseLevel(pathname, hash, root, hist);
+  return { op: "replace", view: level.view, bot: level.bot };
+}
+// route:end
+function botPath(id) { return base() + (id ? "/bots/" + encodeURIComponent(id) : "/"); }
+function botFromPath() { return botFromPathname(location.pathname, base()); }
+function commitLevel(level, mode) {
+  const view = level && level.view ? level.view : "bots";
+  const bot = level && level.bot ? level.bot : null;
+  const url = levelURL(base(), view, bot, location.search);
+  const prev = history.state && history.state.lgb === 1 ? history.state : null;
+  const here = location.pathname + location.search + location.hash;
+  if (prev && prev.view === view && (prev.bot || null) === bot && here === url) return;
+  const idx = mode === "push" ? ((prev ? prev.idx : 0) + 1) : (prev ? prev.idx : 0);
+  const rec = { lgb: 1, view: view, bot: bot, idx: idx };
+  if (mode === "push") history.pushState(rec, "", url);
+  else history.replaceState(rec, "", url);
+}
+function ensureHistory() {
+  const stamp = historyStamp(history.state, location.pathname, location.hash, base());
+  if (!stamp) return;
+  commitLevel(stamp, "replace");
+}
+function navBack() {
+  if (backAction(history.state) === "back") {
+    history.back();
+    return;
+  }
+  const parent = parentLevel(parseLevel(location.pathname, location.hash, base(), history.state));
+  commitLevel(parent, "replace");
+  if (parent.view === "chat" && parent.bot) openBot(parent.bot, false);
+  else if (parent.view === "log") openLog(false);
+  else goHome(false);
+}
+function knownBot(id) { return !!(id && state.bots.some(b => b.id === id)); }
+function revealLevel(level) {
+  if (level.view === "profile" && knownBot(level.bot)) return openProfile(level.bot, false);
+  if (level.view === "chat" && knownBot(level.bot)) return openBot(level.bot, false);
+  if (level.view === "log") {
+    if (level.bot && !knownBot(level.bot)) {
+      goHome(false);
+      commitLevel({ view: "bots", bot: null }, "replace");
+      return;
+    }
+    if (level.bot) state.botId = level.bot;
+    return openLog(false);
+  }
+  if (level.bot && !knownBot(level.bot)) {
+    goHome(false);
+    commitLevel({ view: "bots", bot: null }, "replace");
+    return;
+  }
+  return goHome(false);
+}
+function openLog(push = true) {
+  closeState();
+  if (push) commitLevel({ view: "log", bot: state.botId }, "push");
+  setView("log");
 }
 function setTitle() {
   const b = state.botId && currentBot();
@@ -935,7 +1155,7 @@ function goHome(push = true) {
   state.loadedFor = null;
   state.hasMore = false;
   stopStream();
-  if (push && location.pathname !== botPath(null)) history.pushState({}, "", botPath(null) + location.search);
+  if (push) commitLevel({ view: "bots", bot: null }, "push");
   $("#thread-name").textContent = "No bot selected";
   $("#thread-mark").hidden = true;
   $("#thread-label").textContent = "";
@@ -944,17 +1164,23 @@ function goHome(push = true) {
   setTitle();
   setView("bots");
 }
+window.addEventListener("hashchange", () => {
+  if (history.state && history.state.lgb === 1) return;
+  ensureHistory();
+  revealLevel(parseLevel(location.pathname, location.hash, base(), history.state));
+});
 window.addEventListener("popstate", () => {
-  const id = botFromPath();
-  if (id && state.bots.some(b => b.id === id)) openBot(id, false);
-  else goHome(false);
+  ensureHistory();
+  revealLevel(parseLevel(location.pathname, location.hash, base(), history.state));
 });
 async function openBot(id, push = true) {
   if (state.botId !== id) { stopStream(); state.loadedFor = null; closeState(); state.botState = null; paintStateChip(); }
   state.botId = id;
-  if (push && location.pathname !== botPath(id)) history.pushState({bot: id}, "", botPath(id) + location.search);
+  if (push) commitLevel({ view: "chat", bot: id }, "push");
   setTitle();
   closeMenu();
+  const named = currentBot();
+  if (named && named.name) $("#thread-name").textContent = named.name;
   setView("chat");
   await refreshBot();
   await loadThread();
@@ -1817,9 +2043,7 @@ async function pollActive() {
 }
 $("#menu-btn").addEventListener("click", (e) => {
   e.stopPropagation();
-  const menu = $("#bot-menu");
-  menu.hidden = !menu.hidden;
-  $("#menu-btn").setAttribute("aria-expanded", menu.hidden ? "false" : "true");
+  toggleBotMenu($("#menu-btn"));
 });
 document.addEventListener("click", (e) => {
   if (!e.target.closest(".menu")) closeMenu();
@@ -1832,7 +2056,7 @@ $("#bot-menu").addEventListener("click", async (e) => {
   const b = currentBot();
   try {
     if (act === "profile") { await openProfile(state.botId); }
-    else if (act === "state") { await openState(); }
+    else if (act === "state") { await openState(btn); }
     else if (act === "pin") {
       await api("/api/bots/" + state.botId, {method:"PATCH", body: JSON.stringify({pinned: !(b && b.pinned)})});
       await loadBots();
@@ -1930,9 +2154,10 @@ $("#color-custom").addEventListener("input", (e) => {
   const v = String(e.target.value || "").toLowerCase();
   if (/^#[0-9a-f]{6}$/.test(v)) { state.mark.color = v; paintMarkPicker(); }
 });
-async function openProfile(id) {
+async function openProfile(id, push = true) {
   state.botId = id;
   closeMenu();
+  closeState();
   const b = await api("/api/bots/" + id);
   const i = state.bots.findIndex(x => x.id === b.id);
   if (i >= 0) state.bots[i] = b; else state.bots.push(b);
@@ -1966,8 +2191,17 @@ async function openProfile(id) {
   paintMarkPicker();
   await loadRoutines();
   await loadPermPanel();
+  setTitle();
+  if (push) commitLevel({ view: "profile", bot: id }, "push");
   setView("profile");
+  resetScrollTops(document.querySelectorAll(".profile-layout, .profile-col"));
 }
+// scroll:begin
+function resetScrollTops(nodes) {
+  if (!nodes) return;
+  for (const n of nodes) if (n) n.scrollTop = 0;
+}
+// scroll:end
 async function loadRoutines() {
   const box = $("#routines");
   box.replaceChildren();
@@ -2039,7 +2273,6 @@ function serverToolsPayload() {
 for (const mode of document.querySelectorAll('#profile-form input[name="server-tools-mode"]')) {
   mode.addEventListener("change", syncServerToolsMode);
 }
-$("#profile-back").addEventListener("click", () => openBot(state.botId));
 $("#profile-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   if (!state.botId) return;
@@ -2275,7 +2508,10 @@ function countdown(ms) {
   const parts = d ? [d + "d", h + "h"] : h ? [h + "h", m + "m"] : m ? [m + "m", s + "s"] : [s + "s"];
   return neg ? parts.join(" ") + " ago" : "in " + parts.join(" ");
 }
-function stateOpen() { return !$("#state-sheet").hidden; }
+function stateOpen() {
+  const sheet = $("#state-sheet");
+  return !!sheet && !sheet.hidden && sheet.classList.contains("is-open");
+}
 function stateBox() { return $("#state-sheet-body"); }
 async function loadState() {
   const id = state.botId;
@@ -2301,19 +2537,121 @@ function paintStateChip() {
   chip.title = "Bot state: " + desc;
   chip.setAttribute("aria-label", "Bot state (" + desc + ")");
 }
-function closeState() {
-  $("#state-sheet").hidden = true;
-  $("#state-backdrop").hidden = true;
-  $("#state-chip").setAttribute("aria-expanded", "false");
+let stateReturnFocus = null;
+let stateHideToken = 0;
+function motionOff() {
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
-async function openState() {
+// menu:begin
+function menuTriggerOf(pop) {
+  if (!pop) return null;
+  const owner = (pop.closest && pop.closest(".menu")) || pop.parentElement || null;
+  if (!owner || typeof owner.querySelector !== "function") return null;
+  return owner.querySelector("[aria-haspopup='menu']");
+}
+function restoreMenuOrOpener(opener) {
+  const pop = opener && opener.closest && opener.closest(".menu-pop");
+  if (!pop) return opener || null;
+  pop.hidden = true;
+  const trigger = menuTriggerOf(pop);
+  if (trigger && trigger.setAttribute) trigger.setAttribute("aria-expanded", "false");
+  return trigger || null;
+}
+function restoreStateFocus() {
+  const opener = stateReturnFocus;
+  stateReturnFocus = null;
+  if (!opener || !document.contains(opener)) return;
+  // After the closing click, so focus lands on the trigger once the sheet is gone.
+  setTimeout(() => {
+    if (!document.contains(opener)) return;
+    const target = restoreMenuOrOpener(opener);
+    if (typeof closeMenu === "function") closeMenu();
+    if (target && typeof target.focus === "function") target.focus();
+  }, 0);
+}
+function handleMenuEscape(event, pop) {
+  if (!pop || pop.hidden || !event || event.key !== "Escape") return false;
+  if (event.preventDefault) event.preventDefault();
+  if (event.stopPropagation) event.stopPropagation();
+  if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+  pop.hidden = true;
+  const trigger = menuTriggerOf(pop);
+  if (trigger && trigger.setAttribute) trigger.setAttribute("aria-expanded", "false");
+  if (trigger && typeof trigger.focus === "function") trigger.focus();
+  return true;
+}
+function handleMenuFocusOut(event, pop) {
+  if (!pop || pop.hidden) return false;
+  const next = event && event.relatedTarget;
+  if (next && pop.contains && pop.contains(next)) return false;
+  const owner = (pop.closest && pop.closest(".menu")) || pop.parentElement || null;
+  if (next && owner && owner.contains && owner.contains(next)) return false;
+  pop.hidden = true;
+  const trigger = menuTriggerOf(pop);
+  if (trigger && trigger.setAttribute) trigger.setAttribute("aria-expanded", "false");
+  return true;
+}
+// menu:end
+document.addEventListener("keydown", (e) => {
+  if (handleMenuEscape(e, $("#bot-menu"))) closeMenu();
+}, true);
+$("#bot-menu").addEventListener("focusout", (e) => {
+  if (handleMenuFocusOut(e, $("#bot-menu"))) closeMenu();
+});
+function closeState() {
+  const sheet = $("#state-sheet");
+  const backdrop = $("#state-backdrop");
+  if (!sheet || sheet.hidden || !sheet.classList.contains("is-open")) return;
+  const token = ++stateHideToken;
+  sheet.classList.remove("is-open");
+  if (backdrop) backdrop.classList.remove("is-open");
+  $("#state-chip").setAttribute("aria-expanded", "false");
+  const hide = () => {
+    if (token !== stateHideToken) return;
+    if (sheet.classList.contains("is-open")) return;
+    sheet.hidden = true;
+    if (backdrop) backdrop.hidden = true;
+    restoreStateFocus();
+  };
+  if (motionOff()) hide();
+  else {
+    sheet.addEventListener("transitionend", function onEnd(ev) {
+      if (ev.target !== sheet || ev.propertyName !== "transform") return;
+      sheet.removeEventListener("transitionend", onEnd);
+      hide();
+    });
+    setTimeout(hide, 300);
+  }
+}
+async function openState(opener) {
   if (!state.botId) return;
   closeMenu();
+  stateHideToken++;
+  stateReturnFocus = opener || null;
   const b = currentBot();
-  $("#state-sheet-title").textContent = (b ? b.name + " · " : "") + "state";
-  $("#state-sheet").hidden = false;
-  $("#state-backdrop").hidden = false;
+  const title = b && b.name ? b.name + " · state" : "state";
+  $("#state-sheet-title").textContent = title;
+  $("#state-sheet").setAttribute("aria-label", title);
+  const sheetMark = $("#state-sheet-mark");
+  if (b) { paintMark(sheetMark, b.mark); sheetMark.hidden = false; }
+  else sheetMark.hidden = true;
+  const sheet = $("#state-sheet");
+  const backdrop = $("#state-backdrop");
+  sheet.hidden = false;
+  backdrop.hidden = false;
+  if (motionOff()) {
+    sheet.classList.add("is-open");
+    backdrop.classList.add("is-open");
+  } else {
+    sheet.classList.remove("is-open");
+    backdrop.classList.remove("is-open");
+    void sheet.offsetWidth;
+    sheet.classList.add("is-open");
+    backdrop.classList.add("is-open");
+  }
   $("#state-chip").setAttribute("aria-expanded", "true");
+  const closeBtn = $("#state-close");
+  if (closeBtn) closeBtn.focus();
   if (state.botState) renderState(stateBox(), state.botState);
   else stateBox().replaceChildren(el("p", "st-empty", "Loading…"));
   await loadState();
@@ -2426,18 +2764,68 @@ function tickFires() {
   }
 }
 setInterval(tickFires, 1000);
-$("#state-chip").addEventListener("click", () => { if (stateOpen()) closeState(); else openState(); });
+// focus:begin
+function stateFocusables(root) {
+  const sel = "button, [href], input, select, textarea, [tabindex]";
+  const all = root && root.querySelectorAll ? root.querySelectorAll(sel) : [];
+  const out = [];
+  for (const el of all) {
+    if (!el || el.disabled || el.hidden) continue;
+    const tab = el.getAttribute && el.getAttribute("tabindex");
+    if (tab === "-1") continue;
+    out.push(el);
+  }
+  return out;
+}
+function trapStateTab(event, root, active) {
+  if (!event || event.key !== "Tab") return false;
+  const nodes = stateFocusables(root);
+  if (!nodes.length) {
+    event.preventDefault();
+    return true;
+  }
+  const first = nodes[0];
+  const last = nodes[nodes.length - 1];
+  const inside = !!(root && root.contains && root.contains(active));
+  if (event.shiftKey && (active === first || !inside)) {
+    event.preventDefault();
+    last.focus();
+    return true;
+  }
+  if (!event.shiftKey && (active === last || !inside)) {
+    event.preventDefault();
+    first.focus();
+    return true;
+  }
+  return false;
+}
+// focus:end
+function onStateKey(e) {
+  if (!stateOpen()) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeState();
+    return;
+  }
+  if (e.key === "Tab") trapStateTab(e, $("#state-sheet"), document.activeElement);
+}
+$("#state-chip").addEventListener("click", () => { if (stateOpen()) closeState(); else openState($("#state-chip")); });
 $("#state-close").addEventListener("click", closeState);
 $("#state-backdrop").addEventListener("click", closeState);
-document.addEventListener("keydown", (e) => { if (e.key === "Escape" && stateOpen()) closeState(); });
+document.addEventListener("keydown", onStateKey);
+ensureHistory();
 (async function init() {
   try {
     const h = await api("/api/health");
     $("#health").textContent = "daemon " + h.version;
     await loadBots();
-    const id = botFromPath();
-    if (id && state.bots.some(b => b.id === id)) await openBot(id, false);
-    else if (id) history.replaceState({}, "", botPath(null) + location.search);
+    const level = parseLevel(location.pathname, location.hash, base(), history.state);
+    if (level.bot && !knownBot(level.bot)) {
+      goHome(false);
+      commitLevel({ view: "bots", bot: null }, "replace");
+    } else {
+      await revealLevel(level);
+    }
   } catch (err) {
     if (err.message !== "unauthorized") $("#health").textContent = err.message;
   }
