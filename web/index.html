@@ -364,18 +364,24 @@ window.addEventListener("storage", function (ev) {
   .color-custom { font-size: 13px; color: var(--muted); white-space: nowrap; }
   .color-custom-row { display: inline-flex; align-items: center; gap: 8px; }
   #color-custom { width: 32px; height: 32px; padding: 0; border: 1px solid var(--border); border-radius: 8px; background: none; }
-  /* At 390px the presets fill one grid. Label and swatch sit on the next row. */
+  /* At 390px eight 28px circles do not fit one row in this column.
+     Four columns; the row matches the column so circles stay in the grid.
+     12px above clears the shape and swatch selection rings.
+     The label and custom swatch sit on the next row. */
   @media (max-width: 540px) {
-    .colours { display: flex; flex-direction: column; align-items: stretch; gap: 8px; }
+    .colours { display: flex; flex-direction: column; align-items: stretch; gap: 8px; margin-top: 12px; container-type: inline-size; }
     #color-picker {
       display: grid;
-      grid-template-columns: repeat(8, minmax(0, 1fr));
-      gap: 6px 4px;
+      grid-template-columns: repeat(4, minmax(28px, 1fr));
+      gap: 8px;
+      grid-auto-rows: calc((100cqi - 3 * 8px) / 4);
     }
     #color-picker:has(.swatch:nth-child(9)) { grid-template-columns: repeat(9, minmax(0, 1fr)); }
     .colours:has(.swatch:nth-child(9)) { grid-template-columns: repeat(10, minmax(0, 1fr)); }
+    /* Nine tracks are under 28px here, so the extra swatch stays on the four-column grid. */
+    #color-picker.swatches:has(.swatch:nth-child(9)) { grid-template-columns: repeat(4, minmax(28px, 1fr)); }
     .color-custom-row { display: flex; }
-    .colours .swatch { width: 100%; height: auto; aspect-ratio: 1; min-width: 0; border-radius: 99px; }
+    .colours .swatch { width: 100%; height: 100%; min-width: 0; min-height: 0; padding: 0; border: 0; }
   }
   .mark-advisory { margin: 0; color: var(--attention-text); font-size: 12px; line-height: 16px; }
   .mark-advisory[hidden] { display: none !important; }
