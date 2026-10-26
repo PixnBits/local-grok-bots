@@ -76,7 +76,12 @@ func TestRosterStatic(t *testing.T) {
 		`setAttribute("aria-busy", "true")`,
 		`removeAttribute("aria-busy")`,
 		`classList.toggle("is-stale", stale)`,
-		`#bot-list.is-stale button.bot`,
+		`function displayStatus`,
+		`statusNode(displayStatus(b, stale))`,
+		`.status.unknown { color: var(--muted); font-weight: 400; }`,
+		`.status.unknown .dot { width: 8px; height: 8px; background: transparent; border: 2px solid var(--muted); box-shadow: none; }`,
+		`el("span", "toast-sep", sepText)`,
+		`sep.setAttribute("aria-hidden", "true")`,
 		`id="health-text">connecting…`,
 		`document.title = "Log — Local Grok Bots"`,
 		`function desktopPaneFocusTarget`,
@@ -114,10 +119,14 @@ func TestRosterStatic(t *testing.T) {
 		`<option value="system">System</option>`,
 		`"Custom " + color`,
 		`confirm("Archive`,
+		`#bot-list.is-stale button.bot`,
 	} {
 		if strings.Contains(src, s) {
 			t.Errorf("index.html still has %q", s)
 		}
+	}
+	if regexp.MustCompile(`is-stale[^{]*\{[^}]*opacity`).MatchString(src) {
+		t.Error("#bot-list.is-stale button.bot opacity rule must be absent")
 	}
 
 	roster := section(t, src, `id="view-bots"`, `id="view-chat"`)
@@ -176,6 +185,24 @@ func TestRosterStatic(t *testing.T) {
 	}
 	if !strings.Contains(wide, ".roster-head, .thread-bar, .solo-bar { height: 56px; }") {
 		t.Error("roster, thread, and solo bars must be 56px below 980px")
+	}
+	themeBtn, ok := ruleBody(wide, "#theme-seg button")
+	if !ok || !strings.Contains(themeBtn, "height: 44px") || !strings.Contains(themeBtn, "min-height: 44px") {
+		t.Fatalf("theme segment below 980px = %q", themeBtn)
+	}
+	baseTheme, ok := ruleBody(src, ".menu-pop .seg button")
+	if !ok || !strings.Contains(baseTheme, "height: 28px") || !strings.Contains(baseTheme, "min-height: 28px") {
+		t.Fatalf("theme segment base = %q", baseTheme)
+	}
+	if strings.Contains(baseTheme, "44px") {
+		t.Fatalf("theme segment at 980px and wider must stay 28px: %q", baseTheme)
+	}
+	if !strings.Contains(wide, "white-space: pre") {
+		t.Error("toast copy must keep white-space: pre so the space after Archived stays")
+	}
+	sep, ok := ruleBody(wide, ".toast-sep")
+	if !ok || !strings.Contains(sep, "display: none") {
+		t.Fatalf("toast separator below 980px = %q", sep)
 	}
 	phone := strings.Join(mediaBodies(t, src, "@media (max-width: 540px)"), "\n")
 	if strings.Contains(phone, ".state-sheet .sheet-head") {
@@ -255,7 +282,7 @@ vm.runInContext(snippet + "\n" + [
   "healthView", "archivedMenuLabel", "ROSTER_ERROR_NOTE", "nextBackoff",
   "connPhase", "makeConnTracker", "DOWN_AFTER_MS",
   "rosterListMode", "approvalWords",
-  "rosterSignature", "rosterFocusKey", "rosterFocusMatch",
+  "rosterSignature", "displayStatus", "rosterFocusKey", "rosterFocusMatch",
   "contrastAdvisories", "markContrastFails", "contrastRatio",
   "noteRunStarted",
   "rosterRowMove", "menuKeyAction",
@@ -334,6 +361,16 @@ const sameB = ctx.rosterSignature({
   bots: [{ last_activity: "1999-05-05T00:00:00Z", pending_permissions: 0, archived: false, pinned: false, hidden: false, status: "idle", label: "pilot", name: "Ada", id: "a", mark: { color: "#4C77DD", shape: "circle" }, updated_at: 9 }]
 });
 check("sig-same", sameA === sameB && sameA === sig());
+check("disp-stale-idle", ctx.displayStatus(bot({ status: "idle" }), true) === "unknown");
+check("disp-stale-running", ctx.displayStatus(bot({ status: "running" }), true) === "unknown");
+check("disp-stale-paused", ctx.displayStatus(bot({ status: "paused" }), true) === "unknown");
+check("disp-stale-needs", ctx.displayStatus(bot({ status: "running", pending_permissions: 2 }), true) === "unknown");
+check("disp-idle", ctx.displayStatus(bot({ status: "idle" }), false) === "idle");
+check("disp-running", ctx.displayStatus(bot({ status: "running" }), false) === "running");
+check("disp-paused", ctx.displayStatus(bot({ status: "paused" }), false) === "paused");
+check("disp-needs", ctx.displayStatus(bot({ status: "idle", pending_permissions: 1 }), false) === "needs approval");
+check("sig-stale", sig({ stale: true }) !== sig({ stale: false }));
+check("sig-stale-word", sig({ stale: true }).indexOf("\"unknown\"") !== -1 && sig({ stale: false }).indexOf("\"unknown\"") === -1);
 check("sig-status", sig() !== sig({ bots: [bot({ status: "running" })] }));
 check("sig-name", sig() !== sig({ bots: [bot({ name: "Bea" })] }));
 check("sig-pending", sig() !== sig({ bots: [bot({ pending_permissions: 2 })] }));

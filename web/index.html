@@ -329,14 +329,6 @@ window.addEventListener("storage", function (ev) {
   }
   .bot-copy small { color: var(--muted); }
   .bot.dim { opacity: .6; }
-  /* Stale rows only. The error note stays at full opacity, with no fade. */
-  #bot-list.is-stale button.bot,
-  #bot-list.is-stale button.unarchive,
-  #bot-list.is-stale > .roster-group,
-  #bot-list.is-stale > .roster-back,
-  #bot-list.is-stale > .empty,
-  #bot-list.is-stale > .empty-state,
-  #bot-list.is-stale > .skel-row { opacity: .55; }
   /* clip-path removes an inset box-shadow, so the edge is a full-size
      underlay and the fill is inset inside the same silhouette. */
   .mark {
@@ -401,6 +393,9 @@ window.addEventListener("storage", function (ev) {
   .status.idle .dot { background: var(--status-idle); }
   .status.needs { color: var(--attention-text); font-weight: 600; }
   .status.needs .dot { background: var(--attention); }
+  /* Stale rows keep normal text colour. The word is "unknown"; the dot is a hollow ring. */
+  .status.unknown { color: var(--muted); font-weight: 400; }
+  .status.unknown .dot { width: 8px; height: 8px; background: transparent; border: 2px solid var(--muted); box-shadow: none; }
   /* Count pill on the label line. The words live in .bot-attn for the accessible name. */
   .perm-badge {
     flex: none; height: 20px; min-width: 20px; box-sizing: border-box;
@@ -683,6 +678,9 @@ window.addEventListener("storage", function (ev) {
     .thread-back { display: inline-flex; }
     .roster-head, .thread-bar, .solo-bar { height: 56px; }
     .state-sheet .sheet-head { height: 56px; }
+    /* Theme radios grow to a 44px target. The segment's height follows the buttons. */
+    #theme-seg { height: auto; align-items: stretch; }
+    #theme-seg button { height: 44px; min-height: 44px; }
     .profile-layout { display: flex; flex-direction: column; overflow: auto; justify-content: flex-start; }
     .profile-nav, .profile-col { overflow: visible; min-height: auto; flex: none; }
     /* The roster footer is 56px and full width below 980px. Keep Undo on screen. */
@@ -696,10 +694,11 @@ window.addEventListener("storage", function (ev) {
       align-items: center;
       min-width: 0;
       overflow: hidden;
-      /* pre, not nowrap: flex drops the edge spaces of "Archived " and " · ". */
+      /* pre, not nowrap: flex drops the trailing space in "Archived ". */
       white-space: pre;
     }
     .toast-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .toast-sep { display: none; }
     .toast > button { flex: none; }
   }
   @media (max-width: 540px) {
@@ -1130,6 +1129,10 @@ function rowStatus(b) {
   if (b && !b.archived && b.pending_permissions > 0) return "needs approval";
   return (b && b.status) || "idle";
 }
+function displayStatus(b, stale) {
+  if (stale) return "unknown";
+  return rowStatus(b);
+}
 function rosterSignature(inputs) {
   const src = inputs || {};
   const bots = Array.isArray(src.bots) ? src.bots : [];
@@ -1137,6 +1140,9 @@ function rosterSignature(inputs) {
   const everFailed = !!src.everFailed;
   const conn = src.conn == null ? "" : String(src.conn);
   const mode = src.mode != null && src.mode !== "" ? String(src.mode) : rosterListMode(botsLoaded, everFailed, conn);
+  // The displayed word is part of the signature, so entering and leaving
+  // the stale list rebuilds rows and real statuses come back on recovery.
+  const stale = src.stale != null ? !!src.stale : mode === "error" && botsLoaded;
   const lines = [];
   for (let i = 0; i < bots.length; i++) {
     const b = bots[i] || {};
@@ -1148,7 +1154,7 @@ function rosterSignature(inputs) {
       b.label == null ? "" : String(b.label),
       mark.shape || "",
       mark.color || "",
-      rowStatus(b),
+      displayStatus(b, stale),
       b.hidden ? 1 : 0,
       b.pinned ? 1 : 0,
       b.archived ? 1 : 0,
@@ -1157,6 +1163,7 @@ function rosterSignature(inputs) {
   }
   return JSON.stringify([
     mode,
+    stale ? 1 : 0,
     botsLoaded ? 1 : 0,
     everFailed ? 1 : 0,
     src.showHidden ? 1 : 0,
@@ -1235,6 +1242,7 @@ function renderBots() {
   const archived = state.bots.filter(b => b.archived);
   syncRosterMenus(live, archived);
   const mode = rosterListMode(state.botsLoaded, state.everFailed, state.conn);
+  const stale = mode === "error" && !!state.botsLoaded;
   syncRosterBusy(list, mode);
   const sig = rosterSignature({
     bots: state.bots,
@@ -1244,7 +1252,8 @@ function renderBots() {
     showHidden: state.showHidden,
     showArchived: state.showArchived,
     botId: state.botId,
-    mode: mode
+    mode: mode,
+    stale: stale
   });
   // Polls call this every few seconds. Skip the rebuild when the rows would
   // look the same, so a focused row keeps receiving arrow keys.
@@ -1311,7 +1320,7 @@ function renderBots() {
     const line1 = el("span", "bot-line");
     line1.append(el("span", "bot-name", b.name || ""));
     if (b.hidden) line1.append(eyeOffIcon());
-    line1.append(statusNode(rowStatus(b)));
+    line1.append(statusNode(displayStatus(b, stale)));
     const line2 = el("span", "bot-line");
     line2.append(el("span", "bot-label", b.label || ""));
     // Waiting beats running. The count pill is the visible badge; bot-attn
@@ -3461,7 +3470,10 @@ function showArchiveToast(id, name, prev) {
   const copy = el("span", "toast-copy");
   const nameAt = lead.startsWith(head) ? head.length : -1;
   if (nameAt >= 0 && lead.slice(nameAt, nameAt + shown.length) === shown) {
-    copy.append(document.createTextNode(lead.slice(0, nameAt)), el("span", "toast-name", shown), document.createTextNode(lead.slice(nameAt + shown.length)));
+    const sepText = lead.slice(nameAt + shown.length);
+    const sep = el("span", "toast-sep", sepText);
+    sep.setAttribute("aria-hidden", "true");
+    copy.append(document.createTextNode(lead.slice(0, nameAt)), el("span", "toast-name", shown), sep);
   } else {
     copy.append(el("span", "toast-name", lead));
   }
