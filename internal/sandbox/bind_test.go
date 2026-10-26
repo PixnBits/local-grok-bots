@@ -40,7 +40,7 @@ func TestSelectBuildBinds(t *testing.T) {
 		t.Fatal(err)
 	}
 	normalResolved = filepath.Clean(normalResolved)
-	mounts, events, applied := selectBuildBinds(ws, []string{bind, normal}, []string{secret})
+	mounts, events, applied := selectBuildBinds(ws, []string{bind, normal}, []string{secret}, SnapshotProtect([]string{secret}), "")
 	for _, m := range mounts {
 		if m.Src == bind || m.Dst == bind || m.Src == secretDir || m.Dst == secret || m.Src == secret {
 			t.Fatalf("protected bind mounted: %+v", mounts)
@@ -81,7 +81,8 @@ func TestSelectBuildBinds(t *testing.T) {
 
 	t.Run("unresolved", func(t *testing.T) {
 		missing := filepath.Join(t.TempDir(), "gone")
-		mounts, events, applied := selectBuildBinds(ws, []string{missing}, nil)
+		protect := t.TempDir()
+		mounts, events, applied := selectBuildBinds(ws, []string{missing}, []string{protect}, SnapshotProtect([]string{protect}), "")
 		if len(mounts) != 0 || len(applied) != 0 {
 			t.Fatalf("mounted missing %+v %v", mounts, applied)
 		}
@@ -89,4 +90,64 @@ func TestSelectBuildBinds(t *testing.T) {
 			t.Fatalf("events %+v", events)
 		}
 	})
+}
+
+func TestSelectBuildBindsEmptyProtect(t *testing.T) {
+	ws := t.TempDir()
+	bind := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bind, "tool.txt"), []byte("toolchain\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, protect := range [][]string{nil, {}, {""}, {" "}, {"."}, {"/"}} {
+		mounts, events, applied := selectBuildBinds(ws, []string{bind, "  ", ws}, protect, nil, "")
+		t.Cleanup(func() { closeMountFiles(mounts) })
+		if len(mounts) != 0 || len(applied) != 0 {
+			t.Fatalf("protect %#v mounted %+v %v", protect, mounts, applied)
+		}
+		if len(events) != 2 {
+			t.Fatalf("protect %#v events %+v", protect, events)
+		}
+		for _, ev := range events {
+			if ev.Kind != "sandbox_block" || ev.Untrusted || (!strings.Contains(ev.Detail, bind) && !strings.Contains(ev.Detail, ws)) {
+				t.Fatalf("protect %#v event %+v", protect, ev)
+			}
+		}
+	}
+}
+
+func TestSelectBuildBindsEmptySnapshot(t *testing.T) {
+	ws := t.TempDir()
+	bind := t.TempDir()
+	protect := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bind, "tool.txt"), []byte("toolchain\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, snap := range [][]ProtectInode{nil, {}} {
+		mounts, events, applied := selectBuildBinds(ws, []string{bind}, []string{protect}, snap, "")
+		t.Cleanup(func() { closeMountFiles(mounts) })
+		if len(mounts) != 0 || len(applied) != 0 {
+			t.Fatalf("snap %#v mounted %+v %v", snap, mounts, applied)
+		}
+		if len(events) != 1 || events[0].Kind != "sandbox_block" || events[0].Untrusted || !strings.Contains(events[0].Detail, "refused bind "+bind) || strings.Contains(events[0].Detail, "protected path changed") {
+			t.Fatalf("snap %#v events %+v", snap, events)
+		}
+	}
+}
+
+func TestSelectBuildBindsTripped(t *testing.T) {
+	ws := t.TempDir()
+	bind := t.TempDir()
+	protect := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bind, "tool.txt"), []byte("toolchain\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snap := SnapshotProtect([]string{protect})
+	mounts, events, applied := selectBuildBinds(ws, []string{bind}, []string{protect}, snap, "protected path changed (restart required)")
+	t.Cleanup(func() { closeMountFiles(mounts) })
+	if len(mounts) != 0 || len(applied) != 0 {
+		t.Fatalf("mounted %+v %v", mounts, applied)
+	}
+	if len(events) != 1 || events[0].Detail != "refused bind "+bind+": protected path changed (restart required)" {
+		t.Fatalf("events %+v", events)
+	}
 }

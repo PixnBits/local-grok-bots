@@ -1094,6 +1094,64 @@ func (a *App) daemonSecrets() []string {
 	return a.secretsFrom(pol)
 }
 
+// shellProtect is the per-turn build-bind deny list. It is daemonSecrets
+// plus DATA_DIR itself, raw and resolved. Blank, ".", and "/" are dropped.
+// An empty result fails closed in guardBuildBinds and in the sandbox.
+func (a *App) shellProtect() []string {
+	if a == nil {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(p string) {
+		p = strings.TrimSpace(p)
+		if p == "" || p == "." || p == "/" {
+			return
+		}
+		if _, ok := seen[p]; ok {
+			return
+		}
+		seen[p] = struct{}{}
+		out = append(out, p)
+	}
+	for _, p := range a.daemonSecrets() {
+		add(p)
+	}
+	for _, p := range pathForms(a.cfg.DataDir) {
+		add(p)
+	}
+	return out
+}
+
+// guardBuildBinds refuses every build bind when protect is empty. The
+// events are daemon-generated sandbox_block rows. The returned bind list
+// is nil so the sandbox does not emit the same refusal again. A non-empty
+// protect returns the binds unchanged.
+func guardBuildBinds(protect, binds []string) ([]string, []sandbox.Event) {
+	if protectListedDaemon(protect) {
+		return binds, nil
+	}
+	var ev []sandbox.Event
+	for _, raw := range binds {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		ev = append(ev, sandbox.Event{Kind: "sandbox_block", Detail: clipASCII("refused bind " + raw)})
+	}
+	return nil, ev
+}
+
+func protectListedDaemon(paths []string) bool {
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p != "" && p != "." && p != "/" {
+			return true
+		}
+	}
+	return false
+}
+
 func (a *App) secretsFrom(pol policy.Policy) []string {
 	dir, err := filepath.Abs(a.cfg.DataDir)
 	if err != nil {

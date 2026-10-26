@@ -435,8 +435,11 @@ func TestShellGitAndSSHGrants(t *testing.T) {
 	if err == nil || strings.Contains(out, "not sent") || !strings.Contains(out, "denied") {
 		t.Fatalf("push without git: %v\n%s", err, out)
 	}
-	if !hasDetail(logDetails(t, srv.URL, "grant_denied"), "git", "") {
+	if !hasDetail(logDetails(t, srv.URL, "jail_report"), "git", "") {
 		t.Fatal("git denial not logged")
+	}
+	if hasDetail(logDetails(t, srv.URL, "grant_denied"), "git", "") {
+		t.Fatal("jail line became grant_denied")
 	}
 	_, err = app.dispatchTool(ctx, bot, "write_file", map[string]any{"path": ".bashrc", "content": "echo pwn\n"})
 	if err == nil {
@@ -467,8 +470,11 @@ echo PUSH_DONE
 	}
 
 	out, err = app.dispatchTool(ctx, bot, "run_shell", map[string]any{"command": "ssh -o ConnectTimeout=2 allowed.test true; echo ssh:$?"})
-	if _, ok := findHost(logDetails(t, srv.URL, "grant_denied"), "ssh", "allowed.test"); !ok {
+	if _, ok := findHost(logDetails(t, srv.URL, "jail_report"), "ssh", "allowed.test"); !ok {
 		t.Fatalf("ssh denial: %v\n%s", err, out)
+	}
+	if _, ok := findHost(logDetails(t, srv.URL, "grant_denied"), "ssh", "allowed.test"); ok {
+		t.Fatal("jail line became grant_denied")
 	}
 	res, b = do(t, "PATCH", srv.URL+"/api/bots/"+bot.ID, map[string]any{
 		"grants": []string{"git", "ssh"}, "ssh_allow": []string{"allowed.test"},
@@ -485,8 +491,11 @@ ssh -o ConnectTimeout=2 other.test true; echo other:$?`})
 	if _, ok := findHost(used, "ssh", "allowed.test"); !ok {
 		t.Fatalf("ssh use %#v", used)
 	}
-	if _, ok := findHost(logDetails(t, srv.URL, "grant_denied"), "ssh", "other.test"); !ok {
+	if _, ok := findHost(logDetails(t, srv.URL, "jail_report"), "ssh", "other.test"); !ok {
 		t.Fatal("ssh allowlist did not deny other.test")
+	}
+	if _, ok := findHost(logDetails(t, srv.URL, "grant_denied"), "ssh", "other.test"); ok {
+		t.Fatal("jail line became grant_denied")
 	}
 	if len(dialed()) != 1 || !strings.HasPrefix(dialed()[0], "allowed.test:") {
 		t.Fatalf("dialed %#v", dialed())

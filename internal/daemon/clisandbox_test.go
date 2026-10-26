@@ -105,8 +105,8 @@ func TestGeneratedSettingsDenyDaemonSecrets(t *testing.T) {
 
 func TestDaemonSecretsCoverCredentialHomes(t *testing.T) {
 	dir := t.TempDir()
-	homeA := filepath.Join(dir, "homes", "grok")
-	homeB := filepath.Join(dir, "homes", "other")
+	homeA := filepath.Join(dir, "coi", "grok")
+	homeB := filepath.Join(dir, "coi", "other")
 	if err := os.MkdirAll(homeA, 0o700); err != nil || os.MkdirAll(homeB, 0o700) != nil {
 		t.Fatal(err)
 	}
@@ -204,8 +204,8 @@ func TestTurnDeniesCredentialHomeAddedAfterStartup(t *testing.T) {
 	t.Cleanup(func() { claudeSandboxMissing = old })
 	t.Setenv("HOME", t.TempDir())
 	dir := t.TempDir()
-	homeA := filepath.Join(dir, "homes", "grok")
-	homeB := filepath.Join(dir, "homes", "later")
+	homeA := filepath.Join(dir, "coi", "grok")
+	homeB := filepath.Join(dir, "coi", "later")
 	if err := os.MkdirAll(homeA, 0o700); err != nil || os.MkdirAll(homeB, 0o700) != nil {
 		t.Fatal(err)
 	}

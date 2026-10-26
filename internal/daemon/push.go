@@ -84,7 +84,13 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	parentDir := filepath.Join(a.cfg.DataDir, "mirrors")
 	mirror, err := copyGitMirror(pctx, parentDir, held)
 	if err != nil {
-		return a.pushDenied(bot, owner, repo, claimedFrom, "mirror")
+		reason := "mirror"
+		if errors.Is(err, errMirrorReplace) {
+			reason = "replace"
+		} else if errors.Is(err, errMirrorShallow) {
+			reason = "shallow"
+		}
+		return a.pushDenied(bot, owner, repo, claimedFrom, reason)
 	}
 	defer os.RemoveAll(mirror)
 	if !held.stable() {
@@ -111,11 +117,19 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	if len(specs) == 0 {
 		return a.pushDenied(bot, owner, repo, claimedFrom, "refspec")
 	}
-	old, oerr := a.githubBranchOID(pctx, gate.px, owner, repo, specs[0].branch)
-	if oerr != nil {
+	heads, zero, herr := a.githubAdvertisedHeads(pctx, gate.px, owner, repo)
+	if herr != nil {
 		return a.pushDenied(bot, owner, repo, claimedFrom, "remote ref")
 	}
-	commits, err := mirrorLog(pctx, mirror, specs)
+	old := zero
+	if got, ok := heads["refs/heads/"+specs[0].branch]; ok && hexSHA(got) && !zeroOID(got) {
+		old = got
+	}
+	exclude := upstreamHeadOIDs(heads)
+	if reason := a.refusePushAuthors(pctx, bot, gate, mirror, specs, exclude); reason != "" {
+		return a.pushDenied(bot, owner, repo, claimedFrom, reason)
+	}
+	commits, err := mirrorLog(pctx, mirror, specs, exclude)
 	if err != nil {
 		return a.pushDenied(bot, owner, repo, claimedFrom, "mirror")
 	}
@@ -175,6 +189,41 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 		Stdout: "git push sent\n",
 		Events: []sandbox.Event{ev},
 	}
+}
+
+// upstreamHeadOIDs is every non-zero refs/heads object id from one
+// advertisement. The bot's own refs/remotes are not a source. mirrorAuthorsMatch
+// drops ids that are not commits in the mirror.
+func upstreamHeadOIDs(heads map[string]string) []string {
+	var out []string
+	for ref, oid := range heads {
+		if !strings.HasPrefix(ref, "refs/heads/") || !hexSHA(oid) || zeroOID(oid) {
+			continue
+		}
+		out = append(out, oid)
+	}
+	return out
+}
+
+// refusePushAuthors checks the mirror before the approval card. Every
+// commit the upstream does not already have must use the configured bot
+// author for both the author and the committer. exclude comes only from
+// the upstream advertisement. A missing identity or a log that cannot be
+// read is the same refusal.
+func (a *App) refusePushAuthors(pctx context.Context, bot store.Bot, gate *gitHubGate, mirror string, specs []pushSpec, exclude []string) string {
+	if a == nil || gate == nil || gate.px == nil {
+		return "author"
+	}
+	name, email, err := github.CommitAuthor(bot.Name, a.policy.GitHub.AuthorName, a.policy.GitHub.AuthorEmail)
+	if err != nil || name == "" || email == "" {
+		return "author"
+	}
+	for _, sp := range specs {
+		if err := mirrorAuthorsMatch(pctx, mirror, sp.src, name, email, exclude); err != nil {
+			return "author"
+		}
+	}
+	return ""
 }
 
 func (a *App) pushDenied(bot store.Bot, owner, repo, claimedFrom, reason string) sandbox.PushResult {

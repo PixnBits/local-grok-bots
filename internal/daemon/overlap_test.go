@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,7 +54,7 @@ func TestCredentialHomeOverlapsSecret(t *testing.T) {
 			DataDir:    dir,
 			PolicyPath: writeHomePolicy(t, dir, home),
 		})
-		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), home) || !strings.Contains(err.Error(), "protected path "+home) {
+		if err == nil || err.Error() != dataDirHomeErr(home) {
 			t.Fatalf("err %v", err)
 		}
 	})
@@ -71,7 +72,7 @@ func TestCredentialHomeOverlapsSecret(t *testing.T) {
 			DataDir:    dir,
 			PolicyPath: writeHomePolicy(t, dir, link),
 		})
-		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), link) || !strings.Contains(err.Error(), "protected path "+target) {
+		if err == nil || err.Error() != dataDirHomeErr(link) || strings.Contains(err.Error(), "protected path") {
 			t.Fatalf("err %v", err)
 		}
 	})
@@ -110,7 +111,7 @@ func TestCredentialHomeOverlapsSecret(t *testing.T) {
 		if err := os.WriteFile(policyPath, []byte(homePolicy(link)), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := app.policyNow(); err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), link) || !strings.Contains(err.Error(), "protected path "+target) {
+		if _, err := app.policyNow(); err == nil || err.Error() != dataDirHomeErr(link) {
 			t.Fatalf("reload %v", err)
 		}
 		secrets := app.daemonSecrets()
@@ -145,8 +146,11 @@ func TestAuthTokensFileInsideBuildBind(t *testing.T) {
 		err := overlapStart(t, config.Config{
 			DataDir: dir, AuthTokensFile: tokens, BuildBinds: []string{bind},
 		})
-		if err == nil || !strings.Contains(err.Error(), "AUTH_TOKENS_FILE") || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), bind) || strings.Contains(err.Error(), aliceTok) {
+		if err == nil || !strings.Contains(err.Error(), "AUTH_TOKENS_FILE") || !strings.Contains(err.Error(), "SANDBOX_BUILD_BINDS") || !strings.Contains(err.Error(), bind) || strings.Contains(err.Error(), aliceTok) || strings.HasSuffix(err.Error(), ": bind") || strings.Contains(err.Error(), ": bind") {
 			t.Fatalf("err %v", err)
+		}
+		if !errors.Is(err, errAuthBind) {
+			t.Fatalf("reason %v", err)
 		}
 	})
 	t.Run("symlink tokens path", func(t *testing.T) {
@@ -291,14 +295,15 @@ func TestCredentialHomeUnderDataDirCLI(t *testing.T) {
 	t.Setenv("MANAGED_POLICY", "")
 	t.Setenv("BIND_ADDR", "")
 	t.Setenv("AUTH_TOKEN", "")
-	t.Run("under cli is allowed", func(t *testing.T) {
+	t.Run("under cli is refused", func(t *testing.T) {
 		dir := t.TempDir()
 		home := filepath.Join(dir, "cli", "bot", "home")
-		if err := overlapStart(t, config.Config{
+		err := overlapStart(t, config.Config{
 			DataDir:    dir,
 			PolicyPath: writeHomePolicy(t, dir, home),
-		}); err != nil {
-			t.Fatal(err)
+		})
+		if err == nil || err.Error() != dataDirHomeErr(home) {
+			t.Fatalf("err %v", err)
 		}
 	})
 	t.Run("equals data dir", func(t *testing.T) {
@@ -307,7 +312,7 @@ func TestCredentialHomeUnderDataDirCLI(t *testing.T) {
 			DataDir:    dir,
 			PolicyPath: writeHomePolicy(t, dir, dir),
 		})
-		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), "protected path "+dir) {
+		if err == nil || err.Error() != dataDirHomeErr(dir) {
 			t.Fatalf("err %v", err)
 		}
 	})
@@ -400,7 +405,7 @@ func TestCredentialHomeUnderDataDirCOI(t *testing.T) {
 			DataDir:    dir,
 			PolicyPath: writeHomePolicy(t, dir, home),
 		})
-		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), "protected path "+home) {
+		if err == nil || err.Error() != dataDirHomeErr(home) {
 			t.Fatalf("err %v", err)
 		}
 	})
@@ -411,8 +416,7 @@ func TestCredentialHomeUnderDataDirCOI(t *testing.T) {
 			DataDir:    dir,
 			PolicyPath: writeHomePolicy(t, dir, home),
 		})
-		prot := filepath.Join(dir, "sandbox")
-		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), home) || !strings.Contains(err.Error(), "protected path "+prot) {
+		if err == nil || err.Error() != dataDirHomeErr(home) {
 			t.Fatalf("err %v", err)
 		}
 	})
@@ -426,7 +430,7 @@ func TestCredentialHomeUnderDataDirCOI(t *testing.T) {
 			t.Fatal(err)
 		}
 		err := overlapStart(t, config.Config{DataDir: dir, PolicyPath: path})
-		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), inner) || !strings.Contains(err.Error(), "protected path "+outer) {
+		if err == nil || !strings.Contains(err.Error(), "credential_home") || !strings.Contains(err.Error(), inner) || !strings.Contains(err.Error(), "is inside another home "+outer) {
 			t.Fatalf("err %v", err)
 		}
 	})
@@ -442,6 +446,135 @@ func TestCredentialHomeUnderDataDirCOI(t *testing.T) {
 			t.Fatalf("err %v", err)
 		}
 	})
+}
+
+func TestCredentialHomeDataDirLocations(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("BIND_ADDR", "")
+	t.Setenv("AUTH_TOKEN", "")
+	t.Setenv("AUTH_TOKENS_FILE", "")
+	dirCases := func(t *testing.T, dir, home string, allow bool) {
+		t.Helper()
+		err := overlapStart(t, config.Config{
+			DataDir:    dir,
+			PolicyPath: writeHomePolicy(t, dir, home),
+		})
+		if allow {
+			if err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+		if err == nil || err.Error() != dataDirHomeErr(home) {
+			t.Fatalf("err %v", err)
+		}
+	}
+	t.Run("nested under coi name", func(t *testing.T) {
+		dir := t.TempDir()
+		dirCases(t, dir, filepath.Join(dir, "coi", "grok", "state"), true)
+	})
+	t.Run("coi homes", func(t *testing.T) {
+		dir := t.TempDir()
+		dirCases(t, dir, filepath.Join(dir, "coi", "homes"), false)
+		dirCases(t, dir, filepath.Join(dir, "coi", "homes", "x"), false)
+	})
+	t.Run("other data children", func(t *testing.T) {
+		dir := t.TempDir()
+		for _, name := range []string{"mirrors", "github", "config"} {
+			dirCases(t, dir, filepath.Join(dir, name), false)
+		}
+	})
+	t.Run("symlink into cli", func(t *testing.T) {
+		dir := t.TempDir()
+		target := filepath.Join(dir, "cli", "bot")
+		if err := os.MkdirAll(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(t.TempDir(), "home")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		err := overlapStart(t, config.Config{
+			DataDir:    dir,
+			PolicyPath: writeHomePolicy(t, dir, link),
+		})
+		if err == nil || err.Error() != dataDirHomeErr(link) {
+			t.Fatalf("err %v", err)
+		}
+	})
+}
+
+func TestCredentialHomeInsideWorkspace(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("BIND_ADDR", "")
+	t.Setenv("AUTH_TOKEN", "")
+	t.Setenv("AUTH_TOKENS_FILE", "")
+	t.Run("subdirectory", func(t *testing.T) {
+		dir := t.TempDir()
+		home := filepath.Join(dir, "workspace", "bot")
+		err := overlapStart(t, config.Config{
+			DataDir:    dir,
+			PolicyPath: writeHomePolicy(t, dir, home),
+		})
+		ws := filepath.Join(dir, "workspace")
+		if err == nil || !strings.Contains(err.Error(), "credential_home "+home) || !strings.Contains(err.Error(), "is inside the workspace "+ws) {
+			t.Fatalf("err %v", err)
+		}
+	})
+	t.Run("symlink into workspace", func(t *testing.T) {
+		dir := t.TempDir()
+		ws := filepath.Join(dir, "workspace", "secret")
+		if err := os.MkdirAll(ws, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(t.TempDir(), "home")
+		if err := os.Symlink(ws, link); err != nil {
+			t.Fatal(err)
+		}
+		err := overlapStart(t, config.Config{
+			DataDir:    dir,
+			PolicyPath: writeHomePolicy(t, dir, link),
+		})
+		if err == nil || !strings.Contains(err.Error(), "credential_home "+link) || !strings.Contains(err.Error(), "is inside the workspace") || !strings.Contains(err.Error(), "workspace") {
+			t.Fatalf("err %v", err)
+		}
+	})
+}
+
+func TestCredentialHomeOutsideDataDir(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("BIND_ADDR", "")
+	t.Setenv("AUTH_TOKEN", "")
+	t.Setenv("AUTH_TOKENS_FILE", "")
+	dir := t.TempDir()
+	home := filepath.Join(t.TempDir(), "home", "user")
+	if err := os.MkdirAll(home, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := overlapStart(t, config.Config{
+		DataDir:    dir,
+		PolicyPath: writeHomePolicy(t, dir, home),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestTwoCOIHomesAllowed(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("BIND_ADDR", "")
+	t.Setenv("AUTH_TOKEN", "")
+	t.Setenv("AUTH_TOKENS_FILE", "")
+	dir := t.TempDir()
+	a := filepath.Join(dir, "coi", "a")
+	b := filepath.Join(dir, "coi", "b")
+	body := homePolicy(a) + "[[tools.cli]]\nname = \"other\"\npath = \"/usr/bin/other\"\ncredential_home = \"" + b + "\"\ntimeout = \"1s\"\nmax_output = 1\nmax_calls_per_hour = 1\n"
+	path := filepath.Join(dir, "policy.toml")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := overlapStart(t, config.Config{DataDir: dir, PolicyPath: path}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestProdShapedConfigStarts(t *testing.T) {
@@ -575,6 +708,10 @@ func writeHomePolicy(t *testing.T, dir, home string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func dataDirHomeErr(home string) string {
+	return "tools.cli credential_home " + home + " is inside DATA_DIR; use DATA_DIR/coi/<name> or a path outside DATA_DIR"
 }
 
 func homePolicy(home string) string {

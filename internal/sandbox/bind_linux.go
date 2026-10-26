@@ -7,12 +7,15 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"golang.org/x/sys/unix"
 )
 
-// buildBindBeforeOpen runs after EvalSymlinks and the overlap check, and
-// before openat2. Tests use it to swap a path component in between.
+// buildBindBeforeOpen runs after the protected-inode snapshot and before the
+// bind path is stat'd and opened. Tests use it to rename or swap a path
+// component in between. The snapshot is taken first so a parent of a secret
+// renamed onto the bind path still matches an inode the check already holds.
 var buildBindBeforeOpen func()
 
 var errBindRecheck = errors.New("bind recheck")
@@ -25,18 +28,27 @@ type bindInode struct {
 // openBuildBind pins a build bind that passed the path check.
 // openat2 with RESOLVE_NO_SYMLINKS refuses a symlink swapped into any
 // component. The fd is O_PATH|O_CLOEXEC and is not O_DIRECTORY, so a file
-// or a directory both open. The caller passes it to bwrap --ro-bind-fd.
-// A failure, including ENOSYS and ELOOP, refuses the bind. There is no
-// path-based --ro-bind fallback.
-func openBuildBind(resolved string, protected []string) (*os.File, error) {
+// or a directory both open. Bubblewrap mounts it with --ro-bind-fd and does
+// not fall back to a path bind. The unshare fallback cannot mount this fd
+// (/proc/self/fd/N returns EINVAL from the new user namespace), so it
+// refuses the bind instead of mounting the path. A failure here, including
+// ENOSYS and ELOOP, also refuses the bind.
+func openBuildBind(resolved string, protected []string, snap []ProtectInode) (*os.File, error) {
 	resolved = filepath.Clean(resolved)
+	protectedInodes := snapshotProtectedInodes(protected)
+	for _, ent := range snap {
+		ino := bindInode{dev: ent.Dev, ino: ent.Ino}
+		if inodeProtected(ino, protectedInodes) {
+			continue
+		}
+		protectedInodes = append(protectedInodes, ino)
+	}
+	if buildBindBeforeOpen != nil {
+		buildBindBeforeOpen()
+	}
 	want, ok := statBindInode(resolved)
 	if !ok {
 		return nil, errBindRecheck
-	}
-	protectedInodes := snapshotProtectedInodes(protected)
-	if buildBindBeforeOpen != nil {
-		buildBindBeforeOpen()
 	}
 	how := &unix.OpenHow{
 		Flags:   uint64(unix.O_PATH | unix.O_CLOEXEC),
@@ -80,19 +92,38 @@ func statBindInode(path string) (bindInode, bool) {
 	return bindInode{dev: uint64(st.Dev), ino: uint64(st.Ino)}, true
 }
 
+// snapshotProtectedInodes records each protected path and every ancestor
+// directory up to, but not including, "/". A bind whose opened inode is one
+// of those would contain a secret or would be DATA_DIR when the daemon put
+// DATA_DIR on the protected list. The walk does not enter the opened object.
 func snapshotProtectedInodes(protected []string) []bindInode {
 	var out []bindInode
 	seen := map[bindInode]struct{}{}
-	for _, p := range protected {
+	add := func(p string) {
 		ino, ok := statBindInode(p)
 		if !ok {
-			continue
+			return
 		}
 		if _, dup := seen[ino]; dup {
-			continue
+			return
 		}
 		seen[ino] = struct{}{}
 		out = append(out, ino)
+	}
+	for _, p := range protected {
+		p = filepath.Clean(strings.TrimSpace(p))
+		if p == "" || p == "." || p == "/" {
+			continue
+		}
+		add(p)
+		for {
+			parent := filepath.Dir(p)
+			if parent == p || parent == "/" || parent == "." {
+				break
+			}
+			add(parent)
+			p = parent
+		}
 	}
 	return out
 }

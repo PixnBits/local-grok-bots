@@ -487,14 +487,26 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			}
 		}
 		gate := &gitHubGate{px: px}
+		a.observeProtectBaseline()
+		protect := a.shellProtect()
+		binds := a.cfg.BuildBinds
+		if granted(current.Grants, "build") {
+			var blocked []sandbox.Event
+			binds, blocked = guardBuildBinds(protect, binds)
+			for _, ev := range blocked {
+				a.recordSandbox(current.ID, ev)
+			}
+		}
 		res, err := sandbox.Run(shellCtx, sandbox.Request{
 			Workspace:       a.ws,
 			Command:         command,
 			Grants:          current.Grants,
 			NetAllow:        current.NetAllow,
 			SSHAllow:        current.SSHAllow,
-			BuildBinds:      a.cfg.BuildBinds,
-			Protect:         a.daemonSecrets(),
+			BuildBinds:      binds,
+			Protect:         protect,
+			ProtectInodes:   a.protectInodes(),
+			ProtectTripped:  a.protectBlockReason(),
 			SSHKey:          a.sshKeyPath(),
 			GitHubSock:      ghSock,
 			GitHubRepos:     ghRepos,
@@ -509,9 +521,7 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			},
 			Dial: a.shellDial,
 		})
-		for _, ev := range res.Events {
-			a.recordSandbox(current.ID, ev)
-		}
+		a.recordSandboxEvents(current.ID, res.Events)
 		summary := formatShell(res.Stdout, res.Stderr)
 		if err != nil {
 			return summary, fmt.Errorf("%s\n%s", err.Error(), summary)
@@ -527,8 +537,160 @@ func (a *App) sshKeyPath() string {
 }
 
 func (a *App) recordSandbox(botID string, ev sandbox.Event) {
-	if ev.Kind != "" {
-		detail := map[string]any{}
+	a.recordSandboxNotice(botID, ev, true)
+}
+
+// netAuditKey is one trusted net or ssh audit row for this turn.
+type netAuditKey struct {
+	action string
+	grant  string
+	host   string
+}
+
+type netAuditRow struct {
+	ev sandbox.Event
+	n  int
+}
+
+// recordSandboxEvents logs every event from one turn. Untrusted jail
+// notices are posted once per notice text. A count is added when the same
+// text was reported more than once. A dropped-line count is included on
+// the first notice only, or as its own summary when there is no notice.
+// Trusted net and ssh audit rows are deduped per action, grant, and host.
+// The bot log stays one row per event. Trusted notices stay one per event.
+func (a *App) recordSandboxEvents(botID string, events []sandbox.Event) {
+	counts := map[string]int{}
+	var order []string
+	dropped := 0
+	var netOrder []netAuditKey
+	netRows := map[netAuditKey]*netAuditRow{}
+	suppressed := 0
+	for _, ev := range events {
+		if ev.Untrusted || ev.Kind == "jail_report" || ev.Kind == "jail_report_truncated" {
+			a.recordSandboxNotice(botID, ev, false)
+			dropped += droppedLines(ev)
+			if text := untrustedNotice(ev); text != "" {
+				if counts[text] == 0 {
+					order = append(order, text)
+				}
+				counts[text]++
+			}
+			continue
+		}
+		if action := netAuditAction(ev); action != "" {
+			a.logSandboxEvent(botID, ev)
+			key := netAuditKey{action: action, grant: ev.Grant, host: ev.Host}
+			if row := netRows[key]; row != nil {
+				row.n++
+				continue
+			}
+			if len(netOrder) >= 64 {
+				suppressed++
+				continue
+			}
+			netRows[key] = &netAuditRow{ev: ev, n: 1}
+			netOrder = append(netOrder, key)
+			continue
+		}
+		a.recordSandbox(botID, ev)
+	}
+	for _, key := range netOrder {
+		row := netRows[key]
+		a.writeNetAudit(botID, row.ev, key.action, row.n)
+	}
+	if suppressed > 0 && a != nil && a.audit != nil && a.audit.Enabled() {
+		a.audit.Write(map[string]any{
+			"action": "audit_suppressed",
+			"count":  suppressed,
+		})
+	}
+	if len(order) == 0 {
+		if dropped > 0 {
+			a.postSystemNotice(botID, fmt.Sprintf("Notice: Untrusted jail report: dropped lines (dropped %d)", dropped))
+		}
+		return
+	}
+	for i, text := range order {
+		n := counts[text]
+		msg := "Notice: " + text
+		switch {
+		case i == 0 && n > 1 && dropped > 0:
+			msg = fmt.Sprintf("%s (x%d, dropped %d)", msg, n, dropped)
+		case i == 0 && dropped > 0:
+			msg = fmt.Sprintf("%s (dropped %d)", msg, dropped)
+		case n > 1:
+			msg = fmt.Sprintf("%s (x%d)", msg, n)
+		}
+		a.postSystemNotice(botID, msg)
+	}
+}
+
+// logSandboxEvent writes the bot log and a trusted notice without auditing.
+func (a *App) logSandboxEvent(botID string, ev sandbox.Event) {
+	if ev.Kind == "" {
+		return
+	}
+	a.log(botID, ev.Kind, sandboxEventDetail(ev))
+	if ev.Notice != "" {
+		a.postSystemNotice(botID, "Notice: "+ev.Notice)
+	}
+}
+
+func sandboxEventDetail(ev sandbox.Event) map[string]any {
+	detail := map[string]any{}
+	if ev.Grant != "" {
+		detail["grant"] = ev.Grant
+	}
+	if ev.Host != "" {
+		detail["host"] = ev.Host
+	}
+	if ev.Detail != "" {
+		detail["detail"] = ev.Detail
+	}
+	return detail
+}
+
+func droppedLines(ev sandbox.Event) int {
+	if ev.Kind != "jail_report_truncated" {
+		return 0
+	}
+	rest, ok := strings.CutPrefix(ev.Detail, "dropped ")
+	if !ok {
+		return 0
+	}
+	n, err := strconv.Atoi(rest)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+func untrustedNotice(ev sandbox.Event) string {
+	if ev.Notice == "" {
+		return ""
+	}
+	notice := ev.Notice
+	if !strings.Contains(strings.ToLower(notice), "untrusted") {
+		notice = "Untrusted jail report: " + notice
+	}
+	return notice
+}
+
+func (a *App) postSystemNotice(botID, content string) {
+	if a == nil || a.st == nil || content == "" {
+		return
+	}
+	_, _ = a.st.AddMessage(store.Message{
+		BotID: botID, Thread: "user", Role: "system", Content: content,
+	})
+}
+
+func (a *App) recordSandboxNotice(botID string, ev sandbox.Event, postNotice bool) {
+	if ev.Untrusted || ev.Kind == "jail_report" {
+		detail := map[string]any{"untrusted": true}
+		if ev.Reported != "" {
+			detail["reported"] = ev.Reported
+		}
 		if ev.Grant != "" {
 			detail["grant"] = ev.Grant
 		}
@@ -538,13 +700,27 @@ func (a *App) recordSandbox(botID string, ev sandbox.Event) {
 		if ev.Detail != "" {
 			detail["detail"] = ev.Detail
 		}
-		a.log(botID, ev.Kind, detail)
-		a.auditSandboxGitHub(botID, ev)
+		if ev.Owner != "" {
+			detail["owner"] = ev.Owner
+		}
+		if ev.Repo != "" {
+			detail["repo"] = ev.Repo
+		}
+		a.log(botID, "jail_report", detail)
+		if postNotice {
+			if text := untrustedNotice(ev); text != "" {
+				a.postSystemNotice(botID, "Notice: "+text)
+			}
+		}
+		return
 	}
-	if ev.Notice != "" {
-		_, _ = a.st.AddMessage(store.Message{
-			BotID: botID, Thread: "user", Role: "system", Content: "Notice: " + ev.Notice,
-		})
+	if ev.Kind != "" {
+		a.log(botID, ev.Kind, sandboxEventDetail(ev))
+		a.auditSandboxGitHub(botID, ev)
+		a.auditSandboxNet(botID, ev)
+	}
+	if postNotice && ev.Notice != "" {
+		a.postSystemNotice(botID, "Notice: "+ev.Notice)
 	}
 }
 

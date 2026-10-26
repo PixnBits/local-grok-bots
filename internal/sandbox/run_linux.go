@@ -15,6 +15,20 @@ import (
 	"strings"
 )
 
+// preferUnshare forces the unshare jail even when bwrap is installed.
+// Tests set it. Production leaves it false.
+var preferUnshare bool
+
+func init() {
+	refuseUnshareBuildBinds = func() bool {
+		if preferUnshare {
+			return true
+		}
+		_, err := LookPath("bwrap")
+		return err != nil
+	}
+}
+
 func refuseUnsandboxedRoot() error {
 	if msg := RootJailWarning(); msg != "" {
 		return fmt.Errorf("shell sandbox unavailable: %s", msg)
@@ -26,8 +40,10 @@ func launch(ctx context.Context, p *prepared) (string, string, error) {
 	if err := refuseUnsandboxedRoot(); err != nil {
 		return "", "", err
 	}
-	if path, err := LookPath("bwrap"); err == nil {
-		return runBwrap(ctx, p, path)
+	if !preferUnshare {
+		if path, err := LookPath("bwrap"); err == nil {
+			return runBwrap(ctx, p, path)
+		}
 	}
 	return runUnshare(ctx, p)
 }
@@ -240,7 +256,17 @@ func runUnshare(ctx context.Context, p *prepared) (string, string, error) {
 		return "", "", err
 	}
 	defer os.RemoveAll(jail)
-	cfg := stage2File{Workspace: p.workspace, Command: p.command, Env: p.env, Mounts: p.mounts}
+	// file is not serialized. Passing a build bind through stage2 would mount
+	// it by path and reopen the race. Refuse it here if prepare did not.
+	mounts := make([]mount, 0, len(p.mounts))
+	for _, m := range p.mounts {
+		if m.file != nil {
+			p.extra = append(p.extra, blockEvent("refused bind "+m.Src+": unsupported without bwrap"))
+			continue
+		}
+		mounts = append(mounts, m)
+	}
+	cfg := stage2File{Workspace: p.workspace, Command: p.command, Env: p.env, Mounts: mounts}
 	b, err := json.Marshal(cfg)
 	if err != nil {
 		return "", "", err

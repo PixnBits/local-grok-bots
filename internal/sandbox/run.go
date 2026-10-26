@@ -28,7 +28,17 @@ type Request struct {
 	// Protect is the daemon's current protected set, raw and resolved.
 	// A build bind that overlaps it, or that cannot be resolved, is not mounted.
 	Protect []string
-	SSHKey  string
+	// ProtectInodes is the startup snapshot of protected paths and their
+	// ancestor directories. An empty snapshot refuses every build bind.
+	// A protected directory that is missing, no longer a directory, or whose
+	// device or inode changed refuses every build bind for the turn.
+	// A regular file in the snapshot does not.
+	ProtectInodes []ProtectInode
+	// ProtectTripped, when set, refuses every build bind for this turn.
+	// The daemon latches it until restart. The text is the refusal suffix,
+	// for example "protected path changed (restart required)".
+	ProtectTripped string
+	SSHKey         string
 	// GitHubSock is the host credential-proxy socket. Empty leaves GitHub
 	// fetch unavailable. GitHubRepos is the allowlist copied into the wrapper.
 	GitHubSock      string
@@ -57,7 +67,8 @@ type mount struct {
 	Dst string `json:"dst"`
 	RO  bool   `json:"ro"`
 	// file is a Linux build-bind fd (O_PATH|O_CLOEXEC). Nil mounts use Src.
-	// It is not serialized for the unshare stage.
+	// It is not serialized. The unshare fallback does not mount it by path:
+	// it refuses the bind. Bubblewrap mounts it with --ro-bind-fd.
 	file *os.File
 }
 
@@ -75,12 +86,22 @@ type prepared struct {
 	env       []string
 	mounts    []mount
 	events    string
+	// eventsDir is the daemon-created prep/rw/events directory, opened
+	// O_PATH|O_DIRECTORY|O_CLOEXEC. It is not passed to child processes.
+	// The jail can replace /lgb/events; this fd still names the original inode.
+	eventsDir *os.File
 	proxy     *proxy
 	push      *pushSrv
 	before    *treeSnap
 	extra     []Event
 	grants    map[string]bool
 }
+
+// refuseUnshareBuildBinds reports that this turn will use the unshare jail.
+// That jail cannot bind-mount an O_PATH fd (mount of /proc/self/fd/N returns
+// EINVAL from the new user namespace), and a path bind would race. Linux
+// sets this. A true result refuses every build bind and does not mount it.
+var refuseUnshareBuildBinds func() bool
 
 func (p *prepared) close() {
 	if p == nil {
@@ -93,6 +114,10 @@ func (p *prepared) close() {
 		p.push.close()
 	}
 	closeMountFiles(p.mounts)
+	if p.eventsDir != nil {
+		_ = p.eventsDir.Close()
+		p.eventsDir = nil
+	}
 	if p.dir != "" {
 		_ = os.RemoveAll(p.dir)
 	}
@@ -144,9 +169,9 @@ func Run(ctx context.Context, req Request) (Result, error) {
 	if p.push != nil {
 		events = append(events, p.push.drain()...)
 	}
-	events = append(events, parseEventFile(p.events)...)
+	events = append(events, readPreparedEvents(p)...)
 	if blockErr != nil {
-		events = append(events, Event{Kind: "sandbox_block", Detail: blockErr.Error()})
+		events = append(events, blockEvent(blockErr.Error()))
 		if runErr == nil {
 			runErr = blockErr
 		} else {
@@ -176,9 +201,20 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 		}
 	}
 	p.events = filepath.Join(rw, "events", "log")
-	if err := os.WriteFile(p.events, nil, 0o666); err != nil {
+	// 0600, owned by the daemon. A root daemon with bwrap chowns it to the
+	// overflow uid so the dropped jail can append. The jail can still write
+	// the bytes; those lines are untrusted. World-writable mode is not used.
+	if err := os.WriteFile(p.events, nil, 0o600); err != nil {
 		return nil, err
 	}
+	if err := OwnPath(p.events, 0o600); err != nil {
+		return nil, err
+	}
+	df, err := openEventsDirectory(dir)
+	if err != nil {
+		return nil, err
+	}
+	p.eventsDir = df
 	empty := filepath.Join(ro, "empty-hooks")
 	if err := os.MkdirAll(empty, 0o755); err != nil {
 		return nil, err
@@ -322,11 +358,21 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 	})
 
 	if grants["build"] {
-		mounts, events, applied := selectBuildBinds(ws, req.BuildBinds, req.Protect)
-		p.mounts = append(p.mounts, mounts...)
-		p.extra = append(p.extra, events...)
-		if len(applied) > 0 {
-			p.extra = append(p.extra, Event{Kind: "grant_use", Grant: "build", Detail: strings.Join(applied, ",")})
+		if refuseUnshareBuildBinds != nil && refuseUnshareBuildBinds() {
+			for _, raw := range req.BuildBinds {
+				raw = strings.TrimSpace(raw)
+				if raw == "" {
+					continue
+				}
+				p.extra = append(p.extra, blockEvent("refused bind "+raw+": unsupported without bwrap"))
+			}
+		} else {
+			mounts, events, applied := selectBuildBinds(ws, req.BuildBinds, req.Protect, req.ProtectInodes, req.ProtectTripped)
+			p.mounts = append(p.mounts, mounts...)
+			p.extra = append(p.extra, events...)
+			if len(applied) > 0 {
+				p.extra = append(p.extra, Event{Kind: "grant_use", Grant: "build", Detail: strings.Join(applied, ",")})
+			}
 		}
 	}
 
@@ -415,14 +461,49 @@ func normalizeHosts(hosts []string) []string {
 }
 
 // selectBuildBinds decides which SANDBOX_BUILD_BINDS entries are mounted.
-// Each absolute path is resolved with EvalSymlinks. A path that is not
-// absolute, is a refused toolchain path, cannot be resolved, or overlaps
-// protected (raw or resolved) is not mounted. On Linux the resolved path
-// is then opened without following symlinks and checked again; a failure
-// skips that bind. The turn continues and a sandbox_block names the bind
-// path. A path inside the workspace is skipped with no event. The mount
-// destination stays the resolved path.
-func selectBuildBinds(ws string, binds, protected []string) (mounts []mount, events []Event, applied []string) {
+// A non-empty tripped suffix refuses every bind until the process restarts.
+// An empty protected list, or an empty inode snapshot, refuses every bind.
+// A protected directory in the snapshot that is missing, no longer a
+// directory, or whose device or inode changed refuses every bind for the
+// turn. Regular files in the snapshot do not. Each absolute path is then
+// resolved with EvalSymlinks. A path that is not absolute, is a refused
+// toolchain path, cannot be resolved, or overlaps protected (raw or
+// resolved) is not mounted. On Linux the resolved path is opened without
+// following symlinks and checked again; a failure skips that bind. The turn
+// continues and a sandbox_block names the bind path. A path inside the
+// workspace is skipped with no event when the protected list is non-empty
+// and the snapshot is unchanged. The mount destination stays the resolved path.
+func selectBuildBinds(ws string, binds, protected []string, snap []ProtectInode, tripped string) (mounts []mount, events []Event, applied []string) {
+	if strings.TrimSpace(tripped) != "" {
+		for _, raw := range binds {
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				continue
+			}
+			events = append(events, blockEvent("refused bind "+raw+": "+strings.TrimSpace(tripped)))
+		}
+		return nil, events, nil
+	}
+	if !protectListed(protected) || len(snap) == 0 {
+		for _, raw := range binds {
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				continue
+			}
+			events = append(events, blockEvent("refused bind "+raw))
+		}
+		return nil, events, nil
+	}
+	if protectDirsChanged(snap) {
+		for _, raw := range binds {
+			raw = strings.TrimSpace(raw)
+			if raw == "" {
+				continue
+			}
+			events = append(events, blockEvent("refused bind "+raw+": protected path changed"))
+		}
+		return nil, events, nil
+	}
 	ws = filepath.Clean(ws)
 	var roots []string
 	roots = append(roots, ws)
@@ -438,18 +519,18 @@ func selectBuildBinds(ws string, binds, protected []string) (mounts []mount, eve
 			continue
 		}
 		if !filepath.IsAbs(raw) || refusedBind(raw) {
-			events = append(events, Event{Kind: "sandbox_block", Detail: "refused bind " + raw})
+			events = append(events, blockEvent("refused bind "+raw))
 			continue
 		}
 		resolved, err := filepath.EvalSymlinks(raw)
 		if err != nil {
-			events = append(events, Event{Kind: "sandbox_block", Detail: "refused bind " + raw})
+			events = append(events, blockEvent("refused bind "+raw))
 			continue
 		}
 		resolved = filepath.Clean(resolved)
 		clean := filepath.Clean(raw)
 		if bindOverlapsProtected(clean, resolved, protected) {
-			events = append(events, Event{Kind: "sandbox_block", Detail: "refused bind " + raw})
+			events = append(events, blockEvent("refused bind "+raw))
 			continue
 		}
 		skip := false
@@ -462,18 +543,30 @@ func selectBuildBinds(ws string, binds, protected []string) (mounts []mount, eve
 		if skip {
 			continue
 		}
-		f, err := openBuildBind(resolved, protected)
+		f, err := openBuildBind(resolved, protected, snap)
 		if err != nil {
 			if f != nil {
 				_ = f.Close()
 			}
-			events = append(events, Event{Kind: "sandbox_block", Detail: "refused bind " + raw})
+			events = append(events, blockEvent("refused bind "+raw))
 			continue
 		}
 		mounts = append(mounts, mount{Src: resolved, Dst: resolved, RO: true, file: f})
 		applied = append(applied, raw)
 	}
 	return mounts, events, applied
+}
+
+// protectListed reports whether protected names at least one real path.
+// Blank, ".", and "/" do not count: an empty set fails closed.
+func protectListed(protected []string) bool {
+	for _, p := range protected {
+		p = strings.TrimSpace(p)
+		if p != "" && p != "." && p != "/" {
+			return true
+		}
+	}
+	return false
 }
 
 // bindOverlapsProtected reports whether the raw or resolved bind is the same
@@ -515,7 +608,7 @@ func pathHolds(root, path string) bool {
 // --ro-bind. A mount with an open fd is a build bind and uses --ro-bind-fd.
 // already is the number of ExtraFiles the caller will place before these fds.
 // Child fd numbers are 3+index in the final ExtraFiles slice. Build binds
-// never fall back to a path --ro-bind.
+// never fall back to a path --ro-bind. The unshare fallback refuses them.
 func mountArgs(mounts []mount, already int) (args []string, files []*os.File) {
 	n := already
 	for _, m := range mounts {
@@ -613,7 +706,7 @@ func captureReady(ctx context.Context, cmd *exec.Cmd, started func(), ready func
 }
 
 func allowlistEvent(raw string) Event {
-	ev := Event{Kind: "grant_denied", Grant: "github", Detail: GitHubAllowlistDenied}
+	ev := Event{Grant: "github", Detail: GitHubAllowlistDenied}
 	raw = strings.TrimSpace(raw)
 	if owner, repo, err := github.ParseGitHubRemote(raw); err == nil {
 		ev.Owner, ev.Repo = owner, repo
@@ -622,6 +715,43 @@ func allowlistEvent(raw string) Event {
 	if owner, repo, ok := gitHubSSHRepo(raw); ok {
 		ev.Owner, ev.Repo = owner, repo
 	}
+	return ev
+}
+
+const (
+	maxEventBytes  = 64 << 10
+	maxEventLines  = 64
+	maxEventDetail = 256
+)
+
+// blockEvent is a daemon-generated sandbox_block. Detail is printable ASCII
+// and at most 256 bytes. Jail lines never use this.
+func blockEvent(detail string) Event {
+	return Event{Kind: "sandbox_block", Detail: clipASCII(detail)}
+}
+
+// clipASCII keeps bytes in 0x20–0x7E and then cuts to 256 bytes.
+func clipASCII(s string) string {
+	var b strings.Builder
+	n := 0
+	for i := 0; i < len(s) && n < maxEventDetail; i++ {
+		c := s[i]
+		if c < 0x20 || c > 0x7e {
+			continue
+		}
+		b.WriteByte(c)
+		n++
+	}
+	return b.String()
+}
+
+func clipEventFields(ev Event) Event {
+	ev.Detail = clipASCII(ev.Detail)
+	ev.Host = clipASCII(ev.Host)
+	ev.Owner = clipASCII(ev.Owner)
+	ev.Repo = clipASCII(ev.Repo)
+	ev.Notice = clipASCII(ev.Notice)
+	ev.Grant = clipASCII(ev.Grant)
 	return ev
 }
 
@@ -644,32 +774,118 @@ func gitHubSSHRepo(raw string) (string, string, bool) {
 	return owner, repo, true
 }
 
-func parseEventFile(path string) []Event {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil
+// eventsUnavailable is the daemon event for any events-log failure.
+func eventsUnavailable() []Event {
+	return []Event{{Kind: "jail_report_truncated", Detail: "events unavailable"}}
+}
+
+// eventsFromFile reads a regular file already opened by the caller.
+// A stat failure, a non-regular file, or a read error is events unavailable.
+func eventsFromFile(f *os.File) []Event {
+	if f == nil {
+		return eventsUnavailable()
 	}
-	var out []Event
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		switch {
-		case line == "":
-			continue
-		case line == "push":
-			out = append(out, Event{Kind: "grant_denied", Grant: "git", Detail: "push not sent"})
-		case line == "pkg":
-			out = append(out, Event{Kind: "grant_use", Detail: "package install", Notice: "Package install"})
-		case strings.HasPrefix(line, "deny github allowlist "):
-			out = append(out, allowlistEvent(strings.TrimPrefix(line, "deny github allowlist ")))
-		case strings.HasPrefix(line, "deny git "):
-			out = append(out, Event{Kind: "grant_denied", Grant: "git", Detail: strings.TrimPrefix(line, "deny git ")})
-		case strings.HasPrefix(line, "use git "):
-			out = append(out, Event{Kind: "grant_use", Grant: "git", Detail: strings.TrimPrefix(line, "use git ")})
-		case strings.HasPrefix(line, "deny ssh "):
-			out = append(out, Event{Kind: "grant_denied", Grant: "ssh", Host: strings.TrimPrefix(line, "deny ssh ")})
-		case strings.HasPrefix(line, "block "):
-			out = append(out, Event{Kind: "sandbox_block", Detail: strings.TrimPrefix(line, "block ")})
+	st, err := f.Stat()
+	if err != nil || !st.Mode().IsRegular() {
+		return eventsUnavailable()
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxEventBytes+1))
+	if err != nil {
+		return eventsUnavailable()
+	}
+	return parseEventBytes(b)
+}
+
+// parseEventFile reads a path for tests. The turn reads through the
+// directory fd from prepare. Any open, type, or read failure is one
+// daemon-generated jail_report_truncated event, events unavailable.
+func parseEventFile(path string) []Event {
+	f, err := openEventsFile(path)
+	if err != nil {
+		return eventsUnavailable()
+	}
+	defer f.Close()
+	return eventsFromFile(f)
+}
+
+// parseEventBytes applies the 64 KiB and 64-line caps. Overflow is one
+// daemon-generated jail_report_truncated event with detail "dropped N".
+func parseEventBytes(b []byte) []Event {
+	overflow := 0
+	if len(b) > maxEventBytes {
+		overflow++
+		b = b[:maxEventBytes]
+		if i := bytes.LastIndexByte(b, '\n'); i >= 0 {
+			b = b[:i]
+		} else {
+			b = nil
 		}
 	}
+	var out []Event
+	kept := 0
+	for _, raw := range bytes.Split(b, []byte{'\n'}) {
+		line := strings.TrimSpace(string(raw))
+		if line == "" {
+			continue
+		}
+		if kept >= maxEventLines {
+			overflow++
+			continue
+		}
+		kept++
+		ev, ok := jailEvent(line)
+		if !ok {
+			continue
+		}
+		out = append(out, ev)
+	}
+	if overflow > 0 {
+		out = append(out, Event{
+			Kind:   "jail_report_truncated",
+			Detail: clipASCII(fmt.Sprintf("dropped %d", overflow)),
+		})
+	}
 	return out
+}
+
+// jailEvent maps one jail line to an untrusted report. The claimed kind is
+// Reported. The event kind is never sandbox_block, grant_use, or grant_denied.
+func jailEvent(line string) (Event, bool) {
+	ev := Event{Kind: "jail_report", Untrusted: true}
+	switch {
+	case line == "push":
+		ev.Reported = "grant_denied"
+		ev.Grant = "git"
+		ev.Detail = "push not sent"
+		ev.Notice = "Untrusted jail report: push not sent"
+	case line == "pkg":
+		ev.Reported = "grant_use"
+		ev.Detail = "package install"
+		ev.Notice = "Untrusted jail report: Package install"
+	case strings.HasPrefix(line, "deny github allowlist "):
+		parsed := allowlistEvent(strings.TrimPrefix(line, "deny github allowlist "))
+		ev.Reported = "grant_denied"
+		ev.Grant = parsed.Grant
+		ev.Detail = parsed.Detail
+		ev.Owner = parsed.Owner
+		ev.Repo = parsed.Repo
+	case strings.HasPrefix(line, "deny git "):
+		ev.Reported = "grant_denied"
+		ev.Grant = "git"
+		ev.Detail = strings.TrimPrefix(line, "deny git ")
+	case strings.HasPrefix(line, "use git "):
+		ev.Reported = "grant_use"
+		ev.Grant = "git"
+		ev.Detail = strings.TrimPrefix(line, "use git ")
+	case strings.HasPrefix(line, "deny ssh "):
+		ev.Reported = "grant_denied"
+		ev.Grant = "ssh"
+		ev.Host = strings.TrimPrefix(line, "deny ssh ")
+	case strings.HasPrefix(line, "block "):
+		ev.Reported = "sandbox_block"
+		ev.Detail = strings.TrimPrefix(line, "block ")
+	default:
+		return Event{}, false
+	}
+	return clipEventFields(ev), true
 }

@@ -1,12 +1,13 @@
 package daemon
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"errors"
 
 	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/github"
@@ -66,6 +67,11 @@ func TestAuditSandboxGitHubAllowlist(t *testing.T) {
 		Owner: "bad\nowner", Repo: "nope",
 	})
 	app.recordSandbox("bot_1", sandbox.Event{Kind: "grant_denied", Grant: "git", Detail: "clone"})
+	app.recordSandbox("bot_1", sandbox.Event{
+		Kind: "jail_report", Untrusted: true, Reported: "grant_denied",
+		Grant: "github", Detail: sandbox.GitHubAllowlistDenied,
+		Owner: "Other", Repo: "Nope",
+	})
 	raw := readAudit(t, auditPath)
 	if strings.Count(raw, `"action":"github_refuse"`) != 2 || strings.Count(raw, `"reason":"allowlist"`) != 2 {
 		t.Fatalf("audit:\n%s", raw)
@@ -79,6 +85,115 @@ func TestAuditSandboxGitHubAllowlist(t *testing.T) {
 	if strings.Count(raw, "\n") != 2 {
 		t.Fatalf("audit line split:\n%s", raw)
 	}
+}
+
+func TestAuditSandboxNetAndSSH(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "no"}, nil
+	}})
+	auditPath := filepath.Join(t.TempDir(), "audit.log")
+	lg, err := audit.Open(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lg.Close() })
+	app.audit = lg
+	app.recordSandbox("bot_1", sandbox.Event{Kind: "grant_denied", Grant: "net", Host: "evil.test", Detail: "missing net grant"})
+	app.recordSandbox("bot_1", sandbox.Event{Kind: "grant_denied", Grant: "ssh", Host: "ssh.test", Detail: "not allowlisted"})
+	app.recordSandbox("bot_1", sandbox.Event{Kind: "net_request", Grant: "net", Host: "nope.test", Detail: "not allowlisted"})
+	app.recordSandbox("bot_1", sandbox.Event{Kind: "grant_denied", Grant: "github", Host: "github.com", Detail: sandbox.GitHubNetworkDenied})
+	app.recordSandbox("bot_1", sandbox.Event{Kind: "grant_denied", Grant: "git", Detail: "clone"})
+	app.recordSandbox("bot_1", sandbox.Event{Kind: "jail_report", Untrusted: true, Reported: "grant_denied", Grant: "net", Host: "evil.test", Detail: "missing net grant"})
+	raw := readAudit(t, auditPath)
+	if strings.Count(raw, `"action":"grant_denied"`) != 3 || strings.Count(raw, `"action":"net_request"`) != 0 || strings.Count(raw, `"action":"github_refuse"`) != 1 {
+		t.Fatalf("audit:\n%s", raw)
+	}
+	if strings.Contains(raw, `"action":"grant_denied"`) && strings.Count(raw, "\n") != 4 {
+		t.Fatalf("extra audit rows:\n%s", raw)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatal(err)
+		}
+		action, _ := rec["action"].(string)
+		if action != "grant_denied" && action != "net_request" {
+			continue
+		}
+		for k := range rec {
+			switch k {
+			case "action", "bot_id", "grant", "detail", "host", "ts":
+			default:
+				t.Fatalf("field %s in %s", k, line)
+			}
+		}
+		if rec["bot_id"] != "bot_1" || rec["detail"] == "" || rec["grant"] == "" || rec["host"] == "" {
+			t.Fatalf("row %s", line)
+		}
+	}
+}
+
+func TestAuditNetDedupe(t *testing.T) {
+	open := func(t *testing.T) (*App, string) {
+		t.Helper()
+		app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+			return model.ChatResponse{Content: "no"}, nil
+		}})
+		auditPath := filepath.Join(t.TempDir(), "audit.log")
+		lg, err := audit.Open(auditPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = lg.Close() })
+		app.audit = lg
+		return app, auditPath
+	}
+	t.Run("distinct hosts", func(t *testing.T) {
+		app, auditPath := open(t)
+		var ev []sandbox.Event
+		for i := 0; i < 300; i++ {
+			ev = append(ev, sandbox.Event{
+				Kind: "net_request", Grant: "net", Host: fmt.Sprintf("h%d.test", i), Detail: "not allowlisted",
+			})
+		}
+		app.recordSandboxEvents("bot_1", ev)
+		raw := readAudit(t, auditPath)
+		if strings.Count(raw, `"action":"grant_denied"`) != 64 {
+			t.Fatalf("grant_denied rows:\n%s", raw)
+		}
+		if strings.Count(raw, `"action":"audit_suppressed"`) != 1 || !strings.Contains(raw, `"count":236`) {
+			t.Fatalf("suppressed:\n%s", raw)
+		}
+		logs, err := app.st.ListLog("bot_1", "net_request", "", 400)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(logs) != 300 {
+			t.Fatalf("bot log %d", len(logs))
+		}
+	})
+	t.Run("same host", func(t *testing.T) {
+		app, auditPath := open(t)
+		var ev []sandbox.Event
+		for i := 0; i < 300; i++ {
+			ev = append(ev, sandbox.Event{
+				Kind: "net_request", Grant: "net", Host: "same.test", Detail: "not allowlisted",
+			})
+		}
+		ev = append(ev, sandbox.Event{Kind: "net_request", Grant: "net", Host: "ok.test", Detail: "connected"})
+		ev = append(ev, sandbox.Event{Kind: "net_request", Grant: "net", Host: "ok.test", Detail: "connected"})
+		app.recordSandboxEvents("bot_1", ev)
+		raw := readAudit(t, auditPath)
+		if strings.Count(raw, `"action":"grant_denied"`) != 1 || !strings.Contains(raw, `"count":300`) {
+			t.Fatalf("deduped denial:\n%s", raw)
+		}
+		if strings.Count(raw, `"action":"net_request"`) != 1 || !strings.Contains(raw, `"count":2`) {
+			t.Fatalf("non-denial net_request:\n%s", raw)
+		}
+		if strings.Contains(raw, "audit_suppressed") {
+			t.Fatalf("suppressed:\n%s", raw)
+		}
+	})
 }
 
 func TestOffAllowlistPushAuditsOnce(t *testing.T) {

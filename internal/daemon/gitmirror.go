@@ -35,6 +35,10 @@ var gitOverrides = [][2]string{
 	{"protocol.file.allow", "never"},
 	{"protocol.ext.allow", "never"},
 	{"safe.directory", "*"},
+	// Replace refs and the commit graph can show a different commit than
+	// the one pack-objects sends. Both stay off for every host git command.
+	{"core.useReplaceRefs", "false"},
+	{"core.commitGraph", "false"},
 }
 
 func gitFixedArgs() []string {
@@ -64,6 +68,8 @@ func mirrorEnv(gitDir string, extra [][2]string) []string {
 		"GIT_ASKPASS=/bin/false",
 		"SSH_ASKPASS=/bin/false",
 		"GIT_ATTR_NOSYSTEM=1",
+		"GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_NO_LAZY_FETCH=1",
 		"LANG=C",
 		"LC_ALL=C",
 		fmt.Sprintf("GIT_CONFIG_COUNT=%d", len(pairs)),
@@ -167,17 +173,112 @@ func runGit(ctx context.Context, gitDir string, args ...string) (stdout, stderr 
 	return execGit(ctx, gitDir, nil, nil, args...)
 }
 
-func mirrorLog(ctx context.Context, gitDir string, specs []pushSpec) (string, error) {
+// errMirrorReplace and errMirrorShallow are copy refusals. The push is
+// denied with that reason before the approval card. Grafts use shallow.
+var errMirrorReplace = errors.New("replace")
+var errMirrorShallow = errors.New("shallow")
+
+// mirrorAuthorsMatch reports whether every commit the remote does not
+// already have uses the configured identity for author and committer.
+// exclude lists upstream object ids. Ids that are not commits in this
+// mirror are skipped, so a missing id checks more commits. An empty
+// successful log means there is nothing new. A log that cannot be read
+// fails closed.
+func mirrorAuthorsMatch(ctx context.Context, gitDir, src, name, email string, exclude []string) error {
+	args, err := revisionArgs(ctx, gitDir, src, exclude)
+	if err != nil {
+		return err
+	}
+	stdout, _, err := runGit(ctx, gitDir, append([]string{
+		"log", "-z", "--format=AUTHOR%x00%an%x00%ae%x00%cn%x00%ce",
+		"--no-textconv", "--no-ext-diff", "--no-show-signature",
+	}, args...)...)
+	if err != nil {
+		return errors.New("author")
+	}
+	stdout = bytes.TrimRight(stdout, "\x00\n")
+	if len(stdout) == 0 {
+		return nil
+	}
+	parts := bytes.Split(stdout, []byte{0})
+	if len(parts)%5 != 0 {
+		return errors.New("author")
+	}
+	for i := 0; i < len(parts); i += 5 {
+		if string(parts[i]) != "AUTHOR" || string(parts[i+1]) != name || string(parts[i+2]) != email || string(parts[i+3]) != name || string(parts[i+4]) != email {
+			return errors.New("author")
+		}
+	}
+	return nil
+}
+
+// revisionArgs is `git rev-list --end-of-options <src> ^<oid>... --`.
+// --not would also negate src when it is placed after --end-of-options,
+// and --end-of-options before --not hides the option. A caret revision
+// excludes that commit only. src must be a branch ref. Only hex object
+// ids that cat-file accepts as commits are excluded.
+func revisionArgs(ctx context.Context, gitDir, src string, exclude []string) ([]string, error) {
+	if !strings.HasPrefix(src, "refs/heads/") || strings.ContainsAny(src, " \t\r\n\x00") || strings.Contains(src, "..") {
+		return nil, errors.New("author")
+	}
+	var not []string
+	seen := map[string]struct{}{}
+	for _, oid := range exclude {
+		if !hexSHA(oid) || zeroOID(oid) {
+			continue
+		}
+		key := strings.ToLower(oid)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		if !mirrorHasCommit(ctx, gitDir, key) {
+			continue
+		}
+		not = append(not, key)
+	}
+	args := make([]string, 0, len(not)+3)
+	args = append(args, "--end-of-options", src)
+	for _, oid := range not {
+		args = append(args, "^"+oid)
+	}
+	args = append(args, "--")
+	return args, nil
+}
+
+// mirrorHasCommit reports whether oid is a commit in the mirror.
+// A missing object is false. The caller then checks more commits.
+func mirrorHasCommit(ctx context.Context, gitDir, oid string) bool {
+	if !hexSHA(oid) || zeroOID(oid) {
+		return false
+	}
+	_, _, err := runGit(ctx, gitDir, "cat-file", "-e", "--end-of-options", oid+"^{commit}")
+	return err == nil
+}
+
+func zeroOID(s string) bool {
+	if !hexSHA(s) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] != '0' {
+			return false
+		}
+	}
+	return true
+}
+
+func mirrorLog(ctx context.Context, gitDir string, specs []pushSpec, exclude []string) (string, error) {
 	var b strings.Builder
 	for _, sp := range specs {
-		if !strings.HasPrefix(sp.src, "refs/heads/") {
+		args, err := revisionArgs(ctx, gitDir, sp.src, exclude)
+		if err != nil {
 			return "", fmt.Errorf("refspec")
 		}
-		stdout, _, err := runGit(ctx, gitDir,
-			"log", "-n", "20", "--stat", "--format=%h %s",
+		stdout, _, err := runGit(ctx, gitDir, append([]string{
+			"log", "--stat", "--format=%h %s",
 			"--no-textconv", "--no-ext-diff", "--no-show-signature",
-			sp.src, "--",
-		)
+		}, args...)...)
 		if err != nil {
 			return "", err
 		}
