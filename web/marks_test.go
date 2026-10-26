@@ -11,7 +11,7 @@ import (
 // Shape and colour groups keep their labels. There is no preview row.
 // Every shape has an underlay edge, because clip-path drops an inset shadow.
 // The profile heading reads the bot name, including while it is typed.
-// At phone width the custom swatch shares the preset grid.
+// At phone width the preset swatches fill a grid and the custom control sits on the next row.
 func TestMarkMarkup(t *testing.T) {
 	src := string(IndexHTML)
 	for _, s := range []string{
