@@ -382,3 +382,70 @@ function runSR(opts) {
 		t.Fatalf("refused voices still spoke: %+v", got.TTS)
 	}
 }
+
+// Voice controls keep focus, announce every error, and name the mic problem.
+func TestComposerVoiceFocusAndErrors(t *testing.T) {
+	src := string(IndexHTML)
+	slot := between(t, src, "function syncVoiceSlot(hasText) {", "function syncSendEmpty()")
+	if !strings.Contains(slot, "had.hidden") || !strings.Contains(slot, `getElementById("send-btn")`) {
+		t.Fatal("hiding the focused mic, voice or settings button must move focus to Send or the field")
+	}
+	stop := between(t, src, "function stopAll() {", "async function toggleMic()")
+	if !strings.Contains(stop, "voiceHome().focus()") || !strings.Contains(stop, "prompt.contains(act)") {
+		t.Fatal("stopAll must move focus out of the voice bar and prompt before hiding them")
+	}
+	if !strings.Contains(stop, "if (v.errorShown) return;") || !strings.Contains(stop, "v.rec.onend = null") {
+		t.Fatal("stopAll must not announce over an error or after Voice mode off")
+	}
+	if strings.Count(src, "rescueFocus(box);") != 2 {
+		t.Fatal("both language-pack buttons must move focus before the prompt hides")
+	}
+	if strings.Count(src, `if (!v.errorShown) announceVoice("Dictation stopped");`) != 2 {
+		t.Fatal("Dictation stopped must not replace an error announcement")
+	}
+	if !strings.Contains(src, "announceVoice(text, true);") || !strings.Contains(src, `text + "\u00a0"`) {
+		t.Fatal("errors must be announced even when repeated")
+	}
+	if !strings.Contains(src, `.voice-settings label:has(#vs-tts), .voice-settings input:not([type="checkbox"]), .voice-settings select { min-height: 44px; }`) {
+		t.Fatal("the voice settings controls need 44px targets on phones")
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("node is required")
+	}
+	fn, err := json.Marshal(between(t, src, "function micErrorMessage(name) {", "function sttErrorMessage(status) {"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `const f = new Function("return function micErrorMessage(name) {" + ` + string(fn) + ` + ";")();
+const out = {};
+for (const k of ["NotAllowedError", "not-allowed", "NotFoundError", "NotReadableError", "mic", "language-not-supported", "insecure"]) out[k] = f(k);
+console.log(JSON.stringify(out));`
+	var got map[string]string
+	if err := json.Unmarshal([]byte(runNode(t, node, script)), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"NotAllowedError":        "Microphone access is blocked.",
+		"not-allowed":            "Microphone access is blocked.",
+		"NotFoundError":          "No microphone was found.",
+		"NotReadableError":       "in use by another app",
+		"mic":                    "can't record audio",
+		"language-not-supported": "doesn't support this language",
+	}
+	for k, w := range want {
+		if !strings.Contains(got[k], w) {
+			t.Fatalf("%s: got %q, want it to contain %q", k, got[k], w)
+		}
+	}
+	if got["insecure"] != "" {
+		t.Fatalf("insecure should fall through, got %q", got["insecure"])
+	}
+	seen := map[string]bool{}
+	for _, k := range []string{"NotAllowedError", "NotFoundError", "NotReadableError", "mic"} {
+		if seen[got[k]] {
+			t.Fatalf("mic errors must read differently, %s repeats %q", k, got[k])
+		}
+		seen[got[k]] = true
+	}
+}

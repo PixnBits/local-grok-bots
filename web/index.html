@@ -1113,6 +1113,7 @@ window.addEventListener("storage", function (ev) {
     #voice-btn[aria-pressed="true"] { color: var(--on-accent); background: transparent; }
     #voice-btn[aria-pressed="true"]::before { background: var(--accent); }
     #mic-btn svg, #voice-btn svg, #voice-cfg svg { position: relative; z-index: 1; }
+    .voice-settings label:has(#vs-tts), .voice-settings input:not([type="checkbox"]), .voice-settings select { min-height: 44px; }
     .sheet-close, .solo-back, .thread-back { min-width: 44px; }
     #view-profile .solo-bar { overflow: hidden; min-width: 0; }
     #view-profile .solo-id { overflow: hidden; }
@@ -1759,6 +1760,7 @@ function eyeOffIcon() {
 }
 function currentBot() { return state.bots.find(b => b.id === state.botId) || null; }
 function syncVoiceSlot(hasText) {
+  const had = document.activeElement;
   const listening = typeof window.voiceListening === "function" && window.voiceListening();
   const mode = typeof window.voiceModeOn === "function" && window.voiceModeOn();
   const mic = document.getElementById("mic-btn");
@@ -1767,6 +1769,10 @@ function syncVoiceSlot(hasText) {
   if (cfg) cfg.hidden = hasText && !mode;
   if (mic) mic.hidden = mode || (hasText && !listening);
   if (voice) voice.hidden = hasText && !mode;
+  if (had && (had === mic || had === voice || had === cfg) && had.hidden) {
+    const send = document.getElementById("send-btn");
+    if (send && !send.hidden) send.focus(); else $("#composer-input").focus();
+  }
 }
 function syncSendEmpty() {
   const input = $("#composer-input");
@@ -6998,6 +7004,14 @@ function speakLocal(synth, text, voices, pref, lang, hooks) {
   return speakWithVoice(synth, text, voice, hooks);
 }
 // voice-tts:end
+function micErrorMessage(name) {
+  if (name === "NotAllowedError" || name === "SecurityError" || name === "not-allowed" || name === "service-not-allowed") return "Microphone access is blocked. Allow the microphone for this page in your browser's site settings, then try again.";
+  if (name === "NotFoundError" || name === "OverconstrainedError" || name === "audio-capture") return "No microphone was found. Connect one and try again.";
+  if (name === "NotReadableError") return "The microphone is in use by another app.";
+  if (name === "mic" || name === "audio") return "This browser can't record audio, so voice input isn't available here.";
+  if (name === "language-not-supported") return "On-device recognition doesn't support this language. Change it in Voice settings.";
+  return "";
+}
 function sttErrorMessage(status) {
   if (status === 403) return "Speech recognition is turned off on this computer.";
   if (status === 415) return "That audio format isn't supported.";
@@ -7035,11 +7049,11 @@ function sttErrorMessage(status) {
     if (typed) return typed;
     return navigator.language || "en-US";
   }
-  function announceVoice(text) {
-    if (!text || v.lastAnn === text) return;
-    v.lastAnn = text;
+  function announceVoice(text, force) {
+    if (!text || (!force && v.lastAnn === text)) return;
     const n = $("#voice-status");
-    if (n) n.textContent = text;
+    if (n) n.textContent = n.textContent === text ? text + "\u00a0" : text;
+    v.lastAnn = text;
   }
   function showVoiceError(text) {
     const n = $("#voice-msg");
@@ -7047,11 +7061,25 @@ function sttErrorMessage(status) {
       n.hidden = !text;
       n.textContent = text || "";
     }
-    if (text) announceVoice(text);
+    v.errorShown = !!text;
+    if (text) announceVoice(text, true);
+  }
+  function voiceHome() {
+    const order = v.mode ? ["#voice-btn", "#composer-input"] : ["#mic-btn", "#voice-btn", "#send-btn", "#composer-input"];
+    for (let i = 0; i < order.length; i++) {
+      const n = $(order[i]);
+      if (n && !n.hidden && n.getClientRects().length) return n;
+    }
+    return $("#composer-input");
+  }
+  function rescueFocus(box) {
+    const a = document.activeElement;
+    if (box && a && box.contains(a)) voiceHome().focus();
   }
   function clearVoiceError() {
     const n = $("#voice-msg");
     if (n) { n.hidden = true; n.textContent = ""; }
+    v.errorShown = false;
   }
   function showPreview(finalText, interim) {
     const fin = $("#vp-final");
@@ -7248,7 +7276,7 @@ function sttErrorMessage(status) {
     writeDictationField(text, "");
     v.finals = "";
     setMicPressed(false);
-    announceVoice("Dictation stopped");
+    if (!v.errorShown) announceVoice("Dictation stopped");
   }
   function stopRec() {
     v.listeningDesired = false;
@@ -7278,7 +7306,7 @@ function sttErrorMessage(status) {
   function onRecError(e) {
     const code = e && e.error;
     if (code === "no-speech" || code === "aborted") return;
-    showVoiceError(sttErrorMessage(0));
+    showVoiceError(micErrorMessage(code) || sttErrorMessage(0));
     if (code === "not-allowed" || code === "service-not-allowed" || code === "language-not-supported") {
       v.listeningDesired = false;
       if (v.mode) stopAll();
@@ -7292,7 +7320,7 @@ function sttErrorMessage(status) {
     if (text) writeDictationField(text, "");
     showPreview("", "");
     setMicPressed(false);
-    announceVoice("Dictation stopped");
+    if (!v.errorShown) announceVoice("Dictation stopped");
   }
   function onRecRestart(next) {
     if (!v.mode || !v.listeningDesired) return;
@@ -7354,7 +7382,8 @@ function sttErrorMessage(status) {
     } catch (err) {
       v.listeningDesired = false;
       setMicPressed(false);
-      showVoiceError(window.isSecureContext === false ? "The microphone needs a secure page." : "The microphone isn't available.");
+      const why = err && (err.name === "Error" ? err.message : err.name);
+      showVoiceError(window.isSecureContext === false ? "The microphone needs a secure page." : (micErrorMessage(why) || "The microphone isn't available."));
     }
   }
   async function resumeListening() {
@@ -7410,6 +7439,7 @@ function sttErrorMessage(status) {
     v.listeningDesired = false;
     v.awaiting = false;
     clearTimeout(v.endT);
+    if (mode && v.rec) v.rec.onend = null;
     stopRec();
     stopCapture(false);
     const synth = window.speechSynthesis;
@@ -7418,11 +7448,15 @@ function sttErrorMessage(status) {
     v.finals = "";
     showPreview("", "");
     const prompt = $("#voice-prompt");
-    if (prompt) prompt.hidden = true;
     const bar = $("#voice-bar");
+    const act = document.activeElement;
+    const lost = !!act && ((bar && bar.contains(act)) || (prompt && prompt.contains(act)));
+    if (prompt) prompt.hidden = true;
     if (bar) bar.hidden = true;
     setMicPressed(false);
     setVoicePressed(false);
+    if (lost) voiceHome().focus();
+    if (v.errorShown) return;
     if (mode) announceVoice("Voice mode off");
     else if (dict) announceVoice("Dictation stopped");
   }
@@ -7441,7 +7475,7 @@ function sttErrorMessage(status) {
     await beginBrowserOrDaemon(false);
   }
   async function toggleMode() {
-    if (v.mode) { stopAll(); return; }
+    if (v.mode) { clearVoiceError(); stopAll(); return; }
     if (!state.botId) { showVoiceError("Choose a bot first."); return; }
     if (v.rec || v.cap) {
       v.listeningDesired = false;
@@ -7554,18 +7588,20 @@ function sttErrorMessage(status) {
   const modeBtn = $("#voice-btn");
   if (modeBtn) modeBtn.addEventListener("click", function () { toggleMode(); });
   const endBtn = $("#voice-end");
-  if (endBtn) endBtn.addEventListener("click", stopAll);
+  if (endBtn) endBtn.addEventListener("click", function () { clearVoiceError(); stopAll(); });
   const yes = $("#voice-pack-yes");
   if (yes) yes.addEventListener("click", async function () {
     const lang = v.pendingLang || currentLang();
     v.consentFor = lang;
     const box = $("#voice-prompt");
+    rescueFocus(box);
     if (box) box.hidden = true;
     await beginBrowserOrDaemon(!!v.mode);
   });
   const no = $("#voice-pack-no");
   if (no) no.addEventListener("click", async function () {
     const box = $("#voice-prompt");
+    rescueFocus(box);
     if (box) box.hidden = true;
     v.consentFor = "";
     await beginDaemonOrUnavailable(!!v.mode);
