@@ -358,7 +358,7 @@ func TestPolicyEmptyPathKeepsSnapshot(t *testing.T) {
 	}
 }
 
-func TestPolicyOverlapKeepsVoice(t *testing.T) {
+func TestPolicyOverlapVoiceOff(t *testing.T) {
 	clearPolicyEnv(t)
 	dir := t.TempDir()
 	home := t.TempDir()
@@ -383,8 +383,8 @@ func TestPolicyOverlapKeepsVoice(t *testing.T) {
 	if _, err := app.policyNow(); err == nil || err.Error() != dataDirHomeErr(link) {
 		t.Fatalf("reload %v", err)
 	}
-	if !app.pol().VoiceEnabled || app.pol().EffectiveBackend() != "ollama" {
-		t.Fatalf("overlap cleared voice %#v", app.pol())
+	if app.pol().VoiceEnabled || app.pol().EffectiveBackend() != "ollama" {
+		t.Fatalf("overlap kept voice %#v", app.pol())
 	}
 }
 

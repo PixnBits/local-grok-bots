@@ -51,7 +51,7 @@ func (a *App) policyNow() (policy.Policy, error) {
 		return pol, err
 	}
 	if err := checkPathOverlaps(a.cfg, pol); err != nil {
-		a.noteGen(gen)
+		a.failVoice(gen)
 		return policy.Policy{}, err
 	}
 	a.consider(gen, pol)
