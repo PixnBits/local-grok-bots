@@ -7316,7 +7316,10 @@ function sttErrorMessage(status) {
     clearVoiceError();
     v.listeningDesired = true;
     const result = await startLocalRecognition(recognitionOpts());
-    if (!v.listeningDesired && !result.needsConsent) return;
+    if (!v.listeningDesired && !result.needsConsent) {
+      if (result && result.rec) { try { result.rec.abort(); } catch (err) {} }
+      return;
+    }
     if (result && result.needsConsent) {
       v.listeningDesired = false;
       showPackPrompt(currentLang());
