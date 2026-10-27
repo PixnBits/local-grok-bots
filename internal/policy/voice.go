@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -245,19 +246,42 @@ func (p Policy) EffectiveVoiceMaxPerHour() int {
 	return n
 }
 
-// RequireLoopbackAddr accepts host:port where host is 127.0.0.0/8 or ::1.
-// localhost and wildcards are rejected.
+// RequireLoopbackAddr accepts host:port where the host is 127.0.0.1 or ::1.
+// An IPv4-mapped IPv6 address is read as its IPv4 form. The port is a number
+// from 0 through 65535. Other addresses, including the rest of 127.0.0.0/8,
+// localhost, and wildcards, are rejected.
 func RequireLoopbackAddr(addr string) error {
 	host, port, err := net.SplitHostPort(strings.TrimSpace(addr))
 	if err != nil {
 		return fmt.Errorf("perm_callback_addr %q: %w", addr, err)
 	}
 	if port == "" {
-		return fmt.Errorf("perm_callback_addr %q: missing port", addr)
+		return fmt.Errorf("perm_callback_addr %q: port must be from 0 through 65535", addr)
 	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("perm_callback_addr %q must be a loopback IP such as 127.0.0.1 or ::1", addr)
+	for _, c := range port {
+		if c < '0' || c > '9' {
+			return fmt.Errorf("perm_callback_addr %q: port must be from 0 through 65535", addr)
+		}
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 0 || n > 65535 {
+		return fmt.Errorf("perm_callback_addr %q: port must be from 0 through 65535", addr)
+	}
+	if !loopbackHost(host) {
+		return fmt.Errorf("perm_callback_addr %q must be 127.0.0.1 or ::1", addr)
 	}
 	return nil
+}
+
+// loopbackHost reports whether host is 127.0.0.1 or ::1.
+// IPv4-mapped IPv6 forms are normalized first.
+func loopbackHost(host string) bool {
+	ip := net.ParseIP(strings.TrimSpace(host))
+	if ip == nil {
+		return false
+	}
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	return ip.Equal(net.ParseIP("127.0.0.1")) || ip.Equal(net.IPv6loopback)
 }

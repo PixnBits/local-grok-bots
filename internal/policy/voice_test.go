@@ -219,13 +219,16 @@ model = "/managed/model.bin"
 }
 
 func TestRequireLoopbackAddr(t *testing.T) {
-	ok := []string{"127.0.0.1:0", "127.0.0.1:8787", "[::1]:0", "[::1]:9"}
+	ok := []string{"127.0.0.1:0", "127.0.0.1:8787", "[::1]:0", "[::1]:9", "[::ffff:127.0.0.1]:9", "127.0.0.1:65535"}
 	for _, addr := range ok {
 		if err := RequireLoopbackAddr(addr); err != nil {
 			t.Errorf("%s: %v", addr, err)
 		}
 	}
-	bad := []string{"0.0.0.0:0", "192.168.1.2:9", "localhost:0", ":0", "[::]:0", "nonsense", "127.0.0.1"}
+	bad := []string{
+		"0.0.0.0:0", "192.168.1.2:9", "localhost:0", ":0", "[::]:0", "nonsense", "127.0.0.1",
+		"127.0.0.2:9", "127.1.2.3:9", "[::ffff:127.0.0.2]:9", "127.0.0.1:65536", "127.0.0.1:-1", "127.0.0.1:abc",
+	}
 	for _, addr := range bad {
 		if err := RequireLoopbackAddr(addr); err == nil {
 			t.Errorf("%s: accepted", addr)

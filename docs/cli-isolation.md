@@ -640,7 +640,10 @@ logged. Policy controls it, and policy beats the environment the same way
 [voice]
 # Off unless set. A disabled POST /api/stt is 403 and still audited.
 enabled = false
-# Absolute paths. Both or neither. A missing file is 503, not another service.
+# Absolute paths. Both or neither. A missing file is 503.
+# The file and its parent must be a regular file or directory, not a symlink,
+# owned by root or the daemon user, and not group- or other-writable.
+# A failed check turns voice off (403). The response does not name the path.
 # bin = "/usr/local/bin/whisper-cli"
 # model = "/var/lib/local-grok-bots/models/ggml-base.en.bin"
 # Defaults: 240 seconds, 8 MiB, 60 requests per user per rolling hour.
@@ -654,7 +657,8 @@ enabled = false
 # tls_cert and tls_key are absolute and must be set as a pair.
 # tls_self_signed cannot be combined with that pair.
 # tls_self_signed = false
-# perm_callback_addr is a loopback IP and a port. localhost and wildcards fail.
+# perm_callback_addr is 127.0.0.1 or ::1 and a numeric port.
+# localhost, other 127/8 addresses, and wildcards fail.
 # perm_callback_addr = "127.0.0.1:0"
 
 [managed]
@@ -676,13 +680,23 @@ variable refuses startup under `conflict_policy = "refuse"`.
 HTTPS, when configured, is `ServeTLS` on the listener `bind` already chose.
 There is no second public listener. `TLS_SELF_SIGNED=1`, or
 `tls_self_signed = true`, writes `DATA_DIR/tls/cert.pem` and `key.pem` mode
-0600, owned by the daemon user.
+0600, owned by the daemon user. The bytes are written to a new file in that
+directory and renamed into place. An existing pair is kept when both paths
+are regular files, the certificate parses, and at least 30 days remain.
+The names on that certificate are `localhost`, `127.0.0.1`, `::1`, and the
+bind IP when the bind address is one specific IP. A supplied key that is a
+symlink or group- or other-readable refuses startup. `listening on` is
+printed after TLS setup succeeds. `POST /api/stt` status codes, the rolling
+hour (counted only for an accepted request), and the binary and model file
+checks are in `docs/voice.md`.
 
 The permission callback is a separate plain-HTTP socket. It listens only
 when the effective backend is Claude, `claude_transport` is `mcp` (including
 an empty value, which is `mcp`), and at least one bot exists. Ollama, Grok,
-`stream_control`, and `none` do not open it. The bind is loopback only
-(`127.0.0.0/8` or `::1`), never `0.0.0.0`. Nothing else uses that socket.
+`stream_control`, and `none` do not open it. The bind is `127.0.0.1` or
+`::1` with a numeric port (`::ffff:127.0.0.1` counts as `127.0.0.1`), never
+`0.0.0.0` or another `127.0.0.0/8` address. A policy reload starts or stops
+that socket to match the new backend and transport. Nothing else uses it.
 On a plain-HTTP daemon, MCP keeps the main listener's origin. On HTTPS, the
 MCP host base is the callback, and it is empty until that listener is up.
 

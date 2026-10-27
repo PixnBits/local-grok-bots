@@ -131,10 +131,28 @@ func (a *App) protectSpecs() []protectSpec {
 	for _, tool := range a.policy.CLITools {
 		add(tool.CredentialHome, true)
 	}
+	if a.policy.VoiceEnabled {
+		bin, model, _, _ := whisperPaths(a.policy, a.cfg)
+		addVoiceProtect(add, bin)
+		addVoiceProtect(add, model)
+	}
 	if p := auditSecretPath(a.policy.AuditLog); p != "" {
 		add(p, false)
 	}
 	return specs
+}
+
+func addVoiceProtect(add func(string, bool), path string) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return
+	}
+	add(path, false)
+	parent := filepath.Dir(path)
+	if parent == "" || parent == "." || parent == path {
+		return
+	}
+	add(parent, false)
 }
 
 func cleanProtectPath(p string) (string, bool) {

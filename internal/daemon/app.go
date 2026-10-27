@@ -145,26 +145,28 @@ type App struct {
 	// an already-fired channel, or a channel the test closes. The stop
 	// function may be nil. A nil field uses time.NewTimer(sttBusyWait).
 	sttBusyTimer func(time.Duration) (<-chan time.Time, func())
-	voiceHits    voiceGate
+	// sttTranscribeTimeout and sttReadTimeout replace the transcription
+	// and body-read limits when non-zero. Tests set a short value.
+	sttTranscribeTimeout time.Duration
+	sttReadTimeout       time.Duration
+	// sttBody bounds how many requests read a body at once.
+	sttBody     chan struct{}
+	sttBodyOnce sync.Once
+	// sttBodyHold, when set, runs after a body-read slot is taken and
+	// before the body is read. Tests use it to observe that bound.
+	sttBodyHold func()
+	// voiceBlock is set when voice is on but a whisper path cannot be used.
+	// The policy flag stays as configured. Requests are refused while this
+	// is non-empty.
+	voiceBlock string
+	voiceHits  voiceGate
 }
 
 // logOut is copied onto each App as the startup writer. Nil means stderr.
 var logOut io.Writer
 
 func New(cfg config.Config, m model.Client) (*App, error) {
-	pol, err := policy.Load(policy.Options{
-		Path:             cfg.PolicyPath,
-		ManagedPath:      os.Getenv("MANAGED_POLICY"),
-		EnvBind:          os.Getenv("BIND_ADDR"),
-		EnvOllamaURL:     os.Getenv("OLLAMA_URL"),
-		EnvOllamaModel:   os.Getenv("OLLAMA_MODEL"),
-		EnvTLSCert:       os.Getenv("TLS_CERT"),
-		EnvTLSKey:        os.Getenv("TLS_KEY"),
-		EnvTLSSelfSigned: os.Getenv("TLS_SELF_SIGNED"),
-		EnvWhisperBin:    os.Getenv("WHISPER_BIN"),
-		EnvWhisperModel:  os.Getenv("WHISPER_MODEL"),
-		EnvPermCallback:  os.Getenv("PERM_CALLBACK_ADDR"),
-	})
+	pol, err := policy.Load(loadPolicyOptions(cfg.PolicyPath))
 	if err != nil {
 		return nil, err
 	}
@@ -301,6 +303,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		cancel()
 		return nil, err
 	}
+	a.applyVoiceRuntime()
 	a.RefreshProtectSnapshot()
 	a.wg.Add(1)
 	go a.timerLoop()
@@ -353,7 +356,6 @@ func (a *App) Run(ctx context.Context) error {
 		a.Shutdown()
 		return err
 	}
-	a.writeStartup("local-grok-bots %s listening on %s\n", a.cfg.Version, ln.Addr().String())
 	srv := &http.Server{
 		Handler:           a.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -364,6 +366,7 @@ func (a *App) Run(ctx context.Context) error {
 		a.Shutdown()
 		return terr
 	}
+	a.writeStartup("local-grok-bots %s listening on %s\n", a.cfg.Version, ln.Addr().String())
 	errCh := make(chan error, 1)
 	go func() {
 		err := serveOnListener(srv, ln, cert, key)

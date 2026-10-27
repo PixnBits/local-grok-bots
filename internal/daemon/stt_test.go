@@ -41,6 +41,12 @@ if [ -z "$out" ]; then
 fi
 printf '%s\n' '` + sttPhrase + `' > "$out.txt"
 `
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -123,6 +129,7 @@ func postSTT(t *testing.T, url, token string, body []byte) (*http.Response, map[
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+	req.Header.Set("Content-Type", "application/octet-stream")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -327,6 +334,7 @@ func callHandleSTT(app *App, ctx context.Context, pcm []byte) (int, map[string]a
 	req := httptest.NewRequest(http.MethodPost, "/api/stt", bytes.NewReader(pcm))
 	req = req.WithContext(ctx)
 	req.Header.Set("Authorization", "Bearer voice-test-token")
+	req.Header.Set("Content-Type", "application/octet-stream")
 	rec := httptest.NewRecorder()
 	app.handleSTT(rec, req)
 	var out map[string]any

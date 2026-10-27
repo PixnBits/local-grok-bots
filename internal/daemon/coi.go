@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/PixnBits/local-grok-bots/internal/coi"
+	"github.com/PixnBits/local-grok-bots/internal/config"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
@@ -23,24 +24,48 @@ func (a *App) coiCounter() *coi.HourCap {
 	return a.coiCap
 }
 
+func loadPolicyOptions(path string) policy.Options {
+	return policy.Options{
+		Path:             path,
+		ManagedPath:      os.Getenv("MANAGED_POLICY"),
+		EnvBind:          os.Getenv("BIND_ADDR"),
+		EnvOllamaURL:     os.Getenv("OLLAMA_URL"),
+		EnvOllamaModel:   os.Getenv("OLLAMA_MODEL"),
+		EnvTLSCert:       os.Getenv("TLS_CERT"),
+		EnvTLSKey:        config.CurrentTLSKey(),
+		EnvTLSSelfSigned: os.Getenv("TLS_SELF_SIGNED"),
+		EnvWhisperBin:    os.Getenv("WHISPER_BIN"),
+		EnvWhisperModel:  os.Getenv("WHISPER_MODEL"),
+		EnvPermCallback:  os.Getenv("PERM_CALLBACK_ADDR"),
+	}
+}
+
 func (a *App) policyNow() (policy.Policy, error) {
 	if a == nil {
 		return policy.Policy{}, errors.New("policy is not available")
 	}
-	pol, err := policy.Load(policy.Options{
-		Path:           a.cfg.PolicyPath,
-		ManagedPath:    os.Getenv("MANAGED_POLICY"),
-		EnvBind:        os.Getenv("BIND_ADDR"),
-		EnvOllamaURL:   os.Getenv("OLLAMA_URL"),
-		EnvOllamaModel: os.Getenv("OLLAMA_MODEL"),
-	})
+	pol, err := policy.Load(loadPolicyOptions(a.cfg.PolicyPath))
 	if err != nil {
 		return pol, err
 	}
 	if err := checkPathOverlaps(a.cfg, pol); err != nil {
 		return policy.Policy{}, err
 	}
+	if pol.Loaded {
+		a.installPolicy(pol)
+	}
 	return pol, nil
+}
+
+// installPolicy keeps the running policy, whisper files, protect paths, and
+// permission callback aligned with a policy file that loaded.
+func (a *App) installPolicy(pol policy.Policy) {
+	a.rtMu.Lock()
+	a.policy = pol
+	a.rtMu.Unlock()
+	a.applyVoiceRuntime()
+	a.RefreshProtectSnapshot()
+	a.notePermCallback()
 }
 
 func coiName(args []string) string {

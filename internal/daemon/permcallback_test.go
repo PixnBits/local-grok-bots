@@ -3,9 +3,12 @@ package daemon
 import (
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/PixnBits/local-grok-bots/internal/config"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
 
@@ -114,6 +117,50 @@ func TestPermCallbackIPv6Loopback(t *testing.T) {
 	addr, on := app.permCallbackOn()
 	if !on || !strings.HasPrefix(addr, "[::1]:") {
 		t.Fatalf("bound %s on %v", addr, on)
+	}
+}
+
+func TestPermCallbackFollowsPolicyReload(t *testing.T) {
+	dir := t.TempDir()
+	if err := chmodDataDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "policy.toml")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("[backend]\nbackend = \"ollama\"\n")
+	app, err := New(config.Config{
+		DataDir: dir, BindAddr: "127.0.0.1:0", OllamaURL: "http://127.0.0.1:9",
+		Model: "test-model", Version: "0.1.0", PolicyPath: path, AuthToken: "perm-test-token",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.noGrokProxy = true
+	t.Cleanup(app.Shutdown)
+	if _, err := app.st.CreateBot("Ada", "", nil, "user"); err != nil {
+		t.Fatal(err)
+	}
+	if addr, on := app.permCallbackOn(); on {
+		t.Fatalf("listened at %s before reload", addr)
+	}
+	write("[backend]\nbackend = \"claude\"\n")
+	if _, err := app.policyNow(); err != nil {
+		t.Fatal(err)
+	}
+	if _, on := app.permCallbackOn(); !on {
+		t.Fatal("callback did not listen")
+	}
+	write("[backend]\nbackend = \"ollama\"\n")
+	if _, err := app.policyNow(); err != nil {
+		t.Fatal(err)
+	}
+	if addr, on := app.permCallbackOn(); on {
+		t.Fatalf("still listening at %s", addr)
 	}
 }
 

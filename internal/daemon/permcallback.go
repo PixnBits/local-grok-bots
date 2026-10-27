@@ -112,13 +112,7 @@ func (a *App) startPermCallback() error {
 	if err != nil {
 		return fmt.Errorf("permission callback listener: %w", err)
 	}
-	host, _, err := net.SplitHostPort(ln.Addr().String())
-	if err != nil {
-		_ = ln.Close()
-		return fmt.Errorf("permission callback listener: %w", err)
-	}
-	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
+	if err := policy.RequireLoopbackAddr(ln.Addr().String()); err != nil {
 		_ = ln.Close()
 		return fmt.Errorf("permission callback bound %s, which is not loopback", ln.Addr().String())
 	}
