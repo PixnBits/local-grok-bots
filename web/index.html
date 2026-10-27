@@ -6913,13 +6913,16 @@ async function startLocalRecognition(opts) {
     if (!SR.prototype || !("processLocally" in SR.prototype) || typeof SR.available !== "function") return {fallback: true};
     const query = {langs: [lang], processLocally: true};
     let status = await SR.available(query);
+    if (typeof opts.stale === "function" && opts.stale()) return {stale: true};
     if (status === "downloadable" || status === "downloading") {
       if (!opts.consent) return {needsConsent: true};
       const installed = await SR.install(query);
       if (installed === false) return {fallback: true};
       status = await SR.available(query);
+      if (typeof opts.stale === "function" && opts.stale()) return {stale: true};
     }
     if (status !== "available") return {fallback: true};
+    if (typeof opts.stale === "function" && opts.stale()) return {stale: true};
     const rec = new SpeechRecognition();
     rec.processLocally = true;
     if (rec.processLocally !== true) return {fallback: true};
@@ -7013,8 +7016,10 @@ function micErrorMessage(name) {
   return "";
 }
 function sttErrorMessage(status) {
+  const reason = arguments.length > 1 ? arguments[1] : "";
   if (status === 403) return "Speech recognition is turned off on this computer.";
   if (status === 415) return "That audio format isn't supported.";
+  if (status === 429 && reason === "limit") return "Speech recognition has reached its hourly limit. Try again later.";
   if (status === 429) return "Speech recognition is busy. Try again in a moment.";
   if (status === 408) return "Speech recognition timed out. Try again.";
   if (status === 503) return "Speech recognition isn't available right now.";
@@ -7039,8 +7044,11 @@ function sttErrorMessage(status) {
   } catch (err) {}
   const v = {
     rec: null, cap: null, finals: "", base: "", mode: false, awaiting: false,
-    speaking: false, listeningDesired: false, consentFor: "", pendingLang: "", lastAnn: ""
+    speaking: false, listeningDesired: false, consentFor: "", pendingLang: "", lastAnn: "",
+    gen: 0, starting: false, keepError: false, ending: false, voiceOff: false,
+    spanStart: 0, spanText: ""
   };
+  function nextGen() { v.gen += 1; return v.gen; }
   function saveCfg() {
     try { localStorage.setItem(KEY, JSON.stringify({tts: cfg.tts, lang: cfg.lang, voice: cfg.voice})); } catch (err) {}
   }
@@ -7077,6 +7085,7 @@ function sttErrorMessage(status) {
     if (box && a && box.contains(a)) voiceHome().focus();
   }
   function clearVoiceError() {
+    if (v.keepError) return;
     const n = $("#voice-msg");
     if (n) { n.hidden = true; n.textContent = ""; }
     v.errorShown = false;
@@ -7108,19 +7117,51 @@ function sttErrorMessage(status) {
     btn.setAttribute("aria-label", on ? "End voice mode" : "Voice mode");
     syncSendEmpty();
   }
+  function rememberSpan() {
+    const input = $("#composer-input");
+    const value = input ? String(input.value || "") : "";
+    let start = value.length;
+    let end = value.length;
+    if (input && typeof input.selectionStart === "number") {
+      start = input.selectionStart;
+      end = typeof input.selectionEnd === "number" ? input.selectionEnd : start;
+    }
+    if (start < 0) start = 0;
+    if (end < start) end = start;
+    v.spanStart = start;
+    v.spanText = value.slice(start, end);
+    v.base = value;
+  }
   function writeDictationField(finalText, interim) {
     const input = $("#composer-input");
     if (!input) return;
     const spoken = (String(finalText || "") + " " + String(interim || "")).trim();
-    const base = String(v.base || "").trim();
-    input.value = base ? (spoken ? base + " " + spoken : base) : spoken;
+    let value = String(input.value || "");
+    let start = v.spanStart || 0;
+    const prev = String(v.spanText || "");
+    if (prev) {
+      if (value.slice(start, start + prev.length) !== prev) {
+        const at = value.indexOf(prev);
+        if (at >= 0) start = at;
+      }
+    } else if (start > value.length) {
+      start = value.length;
+    }
+    const prefix = value.slice(0, start);
+    const suffix = value.slice(start + (value.slice(start, start + prev.length) === prev ? prev.length : 0));
+    let insert = spoken;
+    if (insert && prefix && !/\s$/.test(prefix)) insert = " " + insert;
+    if (insert && suffix && !/^\s/.test(suffix) && !/\s$/.test(insert)) insert = insert + " ";
+    input.value = prefix + insert + suffix;
+    v.spanStart = start;
+    v.spanText = insert;
     fitComposer();
     syncSendEmpty();
   }
   function showPackPrompt(lang) {
     v.pendingLang = lang;
     const p = $("#voice-prompt-text");
-    if (p) p.textContent = "Speech recognition can download a one-time language pack for " + lang + " and keep recognition on this device.";
+    if (p) p.textContent = "Your browser will download a one-time " + lang + " language pack from its maker. Audio stays on this device.";
     const box = $("#voice-prompt");
     if (box) box.hidden = false;
     setMicPressed(false);
@@ -7148,9 +7189,17 @@ function sttErrorMessage(status) {
     if (partial) headers["X-STT-Partial"] = "1";
     if (state.token) headers.Authorization = "Bearer " + state.token;
     const res = await fetch(base() + "/api/stt", {method: "POST", body: pcm, headers: headers});
-    if (res.status === 401) { showAuth(); return {error: ""}; }
-    if (partial && res.status === 429) return {skip: true};
-    if (!res.ok) return {error: sttErrorMessage(res.status)};
+    if (res.status === 401) { showAuth(); return {error: "", auth: true, fatal: true, status: 401}; }
+    if (partial && (res.status === 429 || res.status === 408)) return {skip: true};
+    if (!res.ok) {
+      let reason = "";
+      try {
+        const j = await res.json();
+        reason = j && j.reason;
+      } catch (err) {}
+      const retry = res.status === 429 || res.status === 408;
+      return {error: sttErrorMessage(res.status, reason), retry: retry, fatal: !retry, status: res.status};
+    }
     const j = await res.json().catch(function () { return {}; });
     return {text: cleanTranscript(j && j.text)};
   }
@@ -7187,7 +7236,21 @@ function sttErrorMessage(status) {
     for (let i = 0; i < chunks.length; i++) n += chunks[i].length;
     return n;
   }
-  async function startCapture(voiceMode) {
+  function closeGraph(stream, ctx, proc) {
+    try { if (proc && proc.disconnect) proc.disconnect(); } catch (err) {}
+    try {
+      if (stream && stream.getTracks) stream.getTracks().forEach(function (t) { t.stop(); });
+    } catch (err) {}
+    try {
+      if (ctx && ctx.close) {
+        const done = ctx.close();
+        if (done && typeof done.catch === "function") done.catch(function () {});
+      }
+    } catch (err) {}
+  }
+  function sessionCurrent(gen) { return v.gen === gen && v.listeningDesired; }
+  async function startCapture(voiceMode, gen) {
+    if (gen == null) gen = v.gen;
     if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") throw new Error("mic");
     if (window.isSecureContext === false) throw new Error("insecure");
     const Ctx = window.AudioContext;
@@ -7195,21 +7258,36 @@ function sttErrorMessage(status) {
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true}
     });
-    const ctx = new Ctx();
+    let ctx = null;
+    try { ctx = new Ctx(); } catch (err) {
+      closeGraph(stream, null, null);
+      throw err;
+    }
     if (ctx.state === "suspended" && typeof ctx.resume === "function") await ctx.resume();
+    if (!sessionCurrent(gen)) {
+      closeGraph(stream, ctx, null);
+      return;
+    }
     const src = ctx.createMediaStreamSource(stream);
     const proc = ctx.createScriptProcessor(4096, 1, 1);
     const mute = ctx.createGain();
     mute.gain.value = 0;
+    if (!sessionCurrent(gen)) {
+      try { proc.disconnect(); } catch (err) {}
+      try { src.disconnect(); } catch (err) {}
+      try { mute.disconnect(); } catch (err) {}
+      closeGraph(stream, ctx, proc);
+      return;
+    }
     const ratio = (ctx.sampleRate || 48000) / STT_RATE;
     const cap = {
       stream: stream, ctx: ctx, src: src, proc: proc, mute: mute, chunks: [],
       speech: false, lastVoice: 0, voiceMode: !!voiceMode, busy: false,
-      partials: 0, partialText: ""
+      partials: 0, partialText: "", gen: gen
     };
     v.cap = cap;
     proc.onaudioprocess = function (ev) {
-      if (v.cap !== cap) return;
+      if (v.cap !== cap || v.gen !== gen) return;
       const inp = ev.inputBuffer.getChannelData(0);
       const now = (window.performance && performance.now) ? performance.now() : Date.now();
       if (frameRMS(inp) >= RMS_MIN) {
@@ -7225,12 +7303,20 @@ function sttErrorMessage(status) {
     proc.connect(mute);
     mute.connect(ctx.destination);
     cap.timer = setInterval(async function () {
-      if (v.cap !== cap || !cap.speech || cap.busy || cap.partials >= MAX_PARTIALS) return;
+      if (v.cap !== cap || v.gen !== gen || !v.listeningDesired || !cap.speech || cap.busy || cap.partials >= MAX_PARTIALS) return;
       cap.busy = true;
       cap.partials += 1;
       try {
+        if (v.gen !== gen || !v.listeningDesired) return;
         const got = await daemonTranscribe(joinPCM(cap.chunks), true);
-        if (v.cap === cap && got && !got.skip && !got.error && got.text) {
+        if (v.cap !== cap || v.gen !== gen) return;
+        if (got && got.fatal) {
+          if (got.error) showVoiceError(got.error);
+          if (cap.voiceMode) stopAll();
+          else { v.listeningDesired = false; setMicPressed(false); stopCapture(false); }
+          return;
+        }
+        if (got && !got.skip && !got.error && got.text) {
           cap.partialText = got.text;
           showPreview(got.text, "");
           if (!cap.voiceMode) writeDictationField(got.text, "");
@@ -7241,48 +7327,84 @@ function sttErrorMessage(status) {
   async function stopCapture(transcribe) {
     const cap = v.cap;
     if (!cap) return;
+    const gen = nextGen();
     v.cap = null;
     clearInterval(cap.timer);
     try { cap.proc.disconnect(); } catch (err) {}
     try { cap.src.disconnect(); } catch (err) {}
     try { cap.mute.disconnect(); } catch (err) {}
-    cap.stream.getTracks().forEach(function (t) { t.stop(); });
-    cap.ctx.close().catch(function () {});
-    if (!transcribe || !cap.speech) {
+    try { cap.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (err) {}
+    try {
+      const done = cap.ctx.close();
+      if (done && typeof done.catch === "function") done.catch(function () {});
+    } catch (err) {}
+    if (v.gen !== gen) return;
+    let text = "";
+    let failed = false;
+    if (transcribe && cap.speech) {
+      announceVoice("Transcribing");
+      showPreview(cap.partialText, "");
+      while (cap.busy) await delay(40);
+      if (v.gen !== gen) return;
+      let got = null;
+      try {
+        got = await daemonTranscribe(joinPCM(cap.chunks), false);
+      } catch (err) {
+        got = {error: sttErrorMessage(0), retry: true, fatal: false};
+      }
+      if (v.gen !== gen) return;
+      if (cap.voiceMode && got && got.retry) {
+        await delay(400);
+        if (v.gen !== gen) return;
+        try {
+          got = await daemonTranscribe(joinPCM(cap.chunks), false);
+        } catch (err) {
+          got = {error: sttErrorMessage(0), fatal: true};
+        }
+        if (got && got.retry) got.fatal = true;
+        if (v.gen !== gen) return;
+      }
+      if (got && got.error) {
+        showVoiceError(got.error);
+        failed = true;
+      } else if (got && got.fatal) {
+        failed = true;
+      } else if (got && got.text) {
+        text = got.text;
+      }
+      showPreview("", "");
+      if (cap.voiceMode && (failed || (got && got.fatal))) {
+        stopAll();
+        return;
+      }
+      if (cap.voiceMode) {
+        if (!v.mode) return;
+        if (!text) { resumeListening(); return; }
+        v.finals = text;
+        endUtterance();
+        return;
+      }
+      if (text) writeDictationField(text, "");
+      v.finals = "";
+      setMicPressed(false);
+    } else {
       showPreview("", "");
       if (!cap.voiceMode) setMicPressed(false);
-      if (transcribe && cap.voiceMode && v.mode && v.listeningDesired) resumeListening();
-      return;
+      if (transcribe && cap.voiceMode && v.mode && v.listeningDesired && v.gen === gen) {
+        resumeListening();
+        return;
+      }
+      if (cap.voiceMode) return;
     }
-    announceVoice("Transcribing");
-    showPreview(cap.partialText, "");
-    while (cap.busy) await delay(40);
-    let text = "";
-    try {
-      const got = await daemonTranscribe(joinPCM(cap.chunks), false);
-      if (got && got.error) showVoiceError(got.error);
-      else if (got && got.text) text = got.text;
-    } catch (err) {
-      showVoiceError(sttErrorMessage(0));
-    }
-    showPreview("", "");
-    if (cap.voiceMode) {
-      if (!v.mode) return;
-      if (!text) { resumeListening(); return; }
-      v.finals = text;
-      endUtterance();
-      return;
-    }
-    writeDictationField(text, "");
-    v.finals = "";
-    setMicPressed(false);
     if (!v.errorShown) announceVoice("Dictation stopped");
   }
   function stopRec() {
     v.listeningDesired = false;
     const r = v.rec;
+    if (!r) { nextGen(); return; }
+    if (!v.mode && !v.ending) onRecEnd();
+    nextGen();
     v.rec = null;
-    if (!r) return;
     try { r.stop(); } catch (err) {}
   }
   function onRecResult(e) {
@@ -7322,75 +7444,102 @@ function sttErrorMessage(status) {
     setMicPressed(false);
     if (!v.errorShown) announceVoice("Dictation stopped");
   }
-  function onRecRestart(next) {
-    if (!v.mode || !v.listeningDesired) return;
-    if (next && next.ok) { v.rec = next.rec; return; }
-    v.rec = null;
-    if (next && next.needsConsent) { showPackPrompt(currentLang()); return; }
-    beginDaemonOrUnavailable(true);
-  }
-  function recognitionOpts() {
+  function recognitionOpts(gen) {
+    const box = {rec: null};
+    function current() { return v.gen === gen && v.rec === box.rec; }
     return {
+      box: box,
       lang: currentLang(),
       consent: v.consentFor === currentLang(),
-      voiceMode: function () { return v.mode && v.listeningDesired; },
-      onresult: onRecResult,
-      onerror: onRecError,
-      onEnd: onRecEnd,
-      onRestart: onRecRestart
+      stale: function () { return v.gen !== gen || !v.listeningDesired; },
+      voiceMode: function () { return current() && v.mode && v.listeningDesired; },
+      onresult: function (e) { if (!current()) return; onRecResult(e); },
+      onerror: function (e) { if (!current()) return; onRecError(e); },
+      onEnd: function () { if (!current()) return; onRecEnd(); },
+      onRestart: function (next) {
+        if (v.gen !== gen) {
+          if (next && next.rec) { try { next.rec.abort(); } catch (err) {} }
+          return;
+        }
+        if (!v.mode || !v.listeningDesired) {
+          if (next && next.rec) { try { next.rec.abort(); } catch (err) {} }
+          return;
+        }
+        if (next && next.ok && next.rec) {
+          v.rec = next.rec;
+          box.rec = next.rec;
+          return;
+        }
+        v.rec = null;
+        box.rec = null;
+        if (next && next.needsConsent) { showPackPrompt(currentLang()); return; }
+        beginDaemonOrUnavailable(true, gen);
+      }
     };
   }
   async function beginBrowserOrDaemon(voiceMode) {
-    clearVoiceError();
+    if (!v.keepError) clearVoiceError();
+    const gen = nextGen();
     v.listeningDesired = true;
-    const result = await startLocalRecognition(recognitionOpts());
-    if (!v.listeningDesired && !result.needsConsent) {
-      if (result && result.rec) { try { result.rec.abort(); } catch (err) {} }
-      return;
+    v.starting = true;
+    try {
+      const opts = recognitionOpts(gen);
+      const result = await startLocalRecognition(opts);
+      if ((result && result.stale) || v.gen !== gen || !v.listeningDesired) {
+        if (result && result.rec) { try { result.rec.abort(); } catch (err) {} }
+        return;
+      }
+      if (result && result.needsConsent) {
+        v.listeningDesired = false;
+        showPackPrompt(currentLang());
+        return;
+      }
+      if (result && result.ok) {
+        v.rec = result.rec;
+        opts.box.rec = result.rec;
+        if (voiceMode) { setVoicePressed(true); setVoiceState("Listening"); }
+        else setMicPressed(true);
+        if (!v.keepError) announceVoice("Listening");
+        showPreview("", "Listening…");
+        return;
+      }
+      await beginDaemonOrUnavailable(voiceMode, gen);
+    } finally {
+      if (v.gen === gen) v.starting = false;
     }
-    if (result && result.needsConsent) {
-      v.listeningDesired = false;
-      showPackPrompt(currentLang());
-      return;
-    }
-    if (result && result.ok) {
-      v.rec = result.rec;
-      if (voiceMode) { setVoicePressed(true); setVoiceState("Listening"); }
-      else setMicPressed(true);
-      announceVoice("Listening");
-      showPreview("", "Listening…");
-      return;
-    }
-    await beginDaemonOrUnavailable(voiceMode);
   }
-  async function beginDaemonOrUnavailable(voiceMode) {
+  async function beginDaemonOrUnavailable(voiceMode, gen) {
+    if (gen == null) gen = v.gen;
     const status = await loadStatus();
+    if (v.gen !== gen || !v.listeningDesired) return;
     if (!status) return;
     if (!status.available) {
       v.listeningDesired = false;
       setMicPressed(false);
-      if (voiceMode) setVoiceState("Unavailable");
       showVoiceError(status.enabled ? sttErrorMessage(503) : sttErrorMessage(403));
+      if (voiceMode) stopAll();
       return;
     }
     try {
-      await startCapture(!!voiceMode);
+      await startCapture(!!voiceMode, gen);
+      if (v.gen !== gen || !v.listeningDesired) return;
       if (voiceMode) { setVoicePressed(true); setVoiceState("Listening"); }
       else setMicPressed(true);
-      announceVoice("Listening");
+      if (!v.keepError) announceVoice("Listening");
       showPreview("", "Listening…");
     } catch (err) {
       v.listeningDesired = false;
-      setMicPressed(false);
       const why = err && (err.name === "Error" ? err.message : err.name);
       showVoiceError(window.isSecureContext === false ? "The microphone needs a secure page." : (micErrorMessage(why) || "The microphone isn't available."));
+      if (voiceMode) stopAll();
+      else setMicPressed(false);
     }
   }
   async function resumeListening() {
-    if (!v.mode || v.awaiting || v.rec || v.cap) return;
-    v.listeningDesired = true;
+    if (!v.mode || v.awaiting || v.rec || v.cap || v.starting) return;
+    if (v.errorShown) v.keepError = true;
     setVoiceState("Listening");
-    announceVoice("Listening");
+    if (!v.keepError) announceVoice("Listening");
     await beginBrowserOrDaemon(true);
   }
   async function endUtterance() {
@@ -7435,13 +7584,17 @@ function sttErrorMessage(status) {
   function stopAll() {
     const mode = v.mode;
     const dict = !mode && !!(v.rec || v.cap);
+    v.ending = true;
     v.mode = false;
     v.listeningDesired = false;
+    v.starting = false;
     v.awaiting = false;
+    nextGen();
     clearTimeout(v.endT);
     if (mode && v.rec) v.rec.onend = null;
     stopRec();
     stopCapture(false);
+    v.ending = false;
     const synth = window.speechSynthesis;
     if (synth) { try { synth.cancel(); } catch (err) {} }
     v.speaking = false;
@@ -7461,27 +7614,32 @@ function sttErrorMessage(status) {
     else if (dict) announceVoice("Dictation stopped");
   }
   async function toggleMic() {
-    if (v.mode) return;
-    if (v.rec || v.cap) {
+    if (v.mode || v.voiceOff) return;
+    if (v.starting || v.rec || v.cap) {
       v.listeningDesired = false;
+      v.starting = false;
       if (v.rec) stopRec();
-      else await stopCapture(true);
+      else if (v.cap) await stopCapture(true);
+      else nextGen();
       return;
     }
     const synth = window.speechSynthesis;
     if (synth) { try { synth.cancel(); } catch (err) {} }
     v.finals = "";
-    v.base = ($("#composer-input") && $("#composer-input").value || "").trim();
+    v.keepError = false;
+    rememberSpan();
     await beginBrowserOrDaemon(false);
   }
   async function toggleMode() {
-    if (v.mode) { clearVoiceError(); stopAll(); return; }
+    if (v.voiceOff) return;
+    if (v.mode || v.starting) { v.keepError = false; clearVoiceError(); stopAll(); return; }
     if (!state.botId) { showVoiceError("Choose a bot first."); return; }
     if (v.rec || v.cap) {
       v.listeningDesired = false;
       stopRec();
       await stopCapture(false);
     }
+    v.keepError = false;
     v.mode = true;
     v.awaiting = false;
     v.finals = "";
@@ -7561,6 +7719,8 @@ function sttErrorMessage(status) {
     if (!(v.rec || v.cap || v.mode)) return;
     const mode = v.mode;
     v.listeningDesired = false;
+    v.starting = false;
+    v.keepError = false;
     stopRec();
     await stopCapture(false);
     v.finals = "";
@@ -7588,11 +7748,12 @@ function sttErrorMessage(status) {
   const modeBtn = $("#voice-btn");
   if (modeBtn) modeBtn.addEventListener("click", function () { toggleMode(); });
   const endBtn = $("#voice-end");
-  if (endBtn) endBtn.addEventListener("click", function () { clearVoiceError(); stopAll(); });
+  if (endBtn) endBtn.addEventListener("click", function () { v.keepError = false; clearVoiceError(); stopAll(); });
   const yes = $("#voice-pack-yes");
   if (yes) yes.addEventListener("click", async function () {
     const lang = v.pendingLang || currentLang();
     v.consentFor = lang;
+    v.keepError = false;
     const box = $("#voice-prompt");
     rescueFocus(box);
     if (box) box.hidden = true;
@@ -7604,8 +7765,34 @@ function sttErrorMessage(status) {
     rescueFocus(box);
     if (box) box.hidden = true;
     v.consentFor = "";
+    v.listeningDesired = true;
     await beginDaemonOrUnavailable(!!v.mode);
   });
+  function applyVoiceAvailability(status) {
+    const off = !status || status.enabled !== true;
+    v.voiceOff = off;
+    [["#mic-btn", "Dictate"], ["#voice-btn", "Voice mode"]].forEach(function (pair) {
+      const n = $(pair[0]);
+      if (!n) return;
+      if (off) {
+        n.setAttribute("aria-disabled", "true");
+        n.title = "Speech recognition is turned off on this computer.";
+      } else {
+        n.removeAttribute("aria-disabled");
+        if (n.title === "Speech recognition is turned off on this computer.") n.title = pair[1];
+      }
+    });
+  }
+  let voiceStatusOnce = null;
+  function prefetchVoiceStatus() {
+    if (voiceStatusOnce) return voiceStatusOnce;
+    voiceStatusOnce = loadStatus().then(function (status) {
+      applyVoiceAvailability(status);
+      return status;
+    });
+    return voiceStatusOnce;
+  }
+  prefetchVoiceStatus();
   syncSendEmpty();
 })();
 state.stop = freshStop();

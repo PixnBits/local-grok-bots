@@ -6,8 +6,10 @@ authentication as the other `/api` routes. `GET /api/health` stays open.
 There is no remote speech service. A missing binary, a missing model, or an
 unset pair returns 503 and does not call anything else.
 
-`GET /api/stt/status` uses the same authentication as `POST /api/stt`.
-The JSON body is exactly two booleans and nothing else:
+`GET /api/stt/status` uses the same authentication as `POST /api/stt`,
+and the same `Host`, `Origin`, and `Sec-Fetch-Site` checks. A rejected
+check is 403 `forbidden`. The JSON body is exactly two booleans and
+nothing else:
 
 ```json
 {"enabled": true, "available": true}
@@ -15,13 +17,16 @@ The JSON body is exactly two booleans and nothing else:
 
 `enabled` is true when voice is on in the current policy snapshot and that
 snapshot is not blocked. `available` is true when `enabled` is true, a
-transcriber is configured, and the protected-path snapshot has not tripped.
+transcriber is configured, the binary and model exist and pass the
+exec-time file checks, and the protected-path snapshot has not tripped.
 The handler reads the snapshot already in the process. It does not load
 policy again for the request. `Cache-Control` is `no-store`. The body does
 not include paths, versions, engine names, or limits.
 
-A `POST /api/stt` may send `X-STT-Partial: 1`. The handler treats that
-request the same as any other transcription.
+A `POST /api/stt` may send `X-STT-Partial: 1`. A partial is checked for
+authentication, `Host`, `Origin`, size, and the single in-flight
+transcription, and it is refused with 429 when this hour is already used
+up. It does not take a slot in the hourly count. The final request does.
 
 The request body is raw PCM: 16 kHz, mono, signed 16-bit little-endian.
 `Content-Type` is `application/octet-stream`.
@@ -93,8 +98,12 @@ the request is TLS and `http` otherwise. `localhost` and `127.0.0.1` are
 both accepted, so `Origin: http://localhost:<port>` with
 `Host: 127.0.0.1:<port>` is allowed. Names are compared without case, and
 IP addresses compare as addresses. `allowed_hosts` entries are host names
-or IP addresses only: no scheme, port, wildcard, or brackets. A bad entry
-makes the policy file unusable. The list is fixed at startup.
+or IP addresses only: no scheme, port, wildcard, or brackets. Unspecified
+addresses (`0.0.0.0`, `::`), multicast, the IPv4 broadcast address, an
+IPv4-mapped form, and a name whose last label is all digits are rejected.
+A bad entry makes the policy file unusable. The list is fixed at startup.
+A `Host` header without a port, including one from a proxy on port 443,
+does not match the listener port and is refused.
 
 ## Policy
 
@@ -152,9 +161,16 @@ are not fields.
 
 ## TLS
 
-HTTPS is optional and uses the listener that `BIND_ADDR` or `[daemon] bind`
-already opened. The daemon calls `ServeTLS` on that listener. It does not
-open a second one.
+HTTPS on a loopback bind is optional. A bind that is not loopback,
+including `0.0.0.0` and `::`, needs `TLS_CERT` and `TLS_KEY` or
+`tls_self_signed`, and it needs `AUTH_TOKEN` or `AUTH_TOKENS_FILE` (an
+existing `DATA_DIR/admin-token` file also counts). Otherwise the process
+refuses to start. `[daemon] allow_insecure_lan = true` is an explicit
+opt-out that allows plain HTTP on that bind. It is discouraged, it is
+fixed at startup, and the process logs a warning and writes an audit row
+when it is used. The daemon calls `ServeTLS` on the listener that
+`BIND_ADDR` or `[daemon] bind` already opened. It does not open a second
+one.
 
 `TLS_CERT` and `TLS_KEY` are a pair of PEM files. `TLS_KEY` is a file path.
 `TLS_SELF_SIGNED=1` writes `DATA_DIR/tls/cert.pem` and `DATA_DIR/tls/key.pem`
@@ -184,20 +200,24 @@ generated or reused self-signed files are mode 0600.
 
 ## HTTPS on a LAN or Tailscale
 
-A LAN or Tailscale address can use the same listener. In `policy.toml`:
+A LAN or Tailscale address can use the same listener. Set `AUTH_TOKEN` or
+`AUTH_TOKENS_FILE` in the environment, and set TLS. In `policy.toml`:
 
 ```toml
 [daemon]
 bind = "0.0.0.0:8080"
 tls_self_signed = true
 allowed_hosts = ["192.0.2.10", "100.64.0.10", "myhost.tailnet-example.ts.net"]
+# allow_insecure_lan = true
 ```
 
-The certificate includes those names, along with `localhost`, `127.0.0.1`,
-and `::1`. It is written again at the next start when `allowed_hosts`
-changes. The browser must be told to trust the self-signed certificate.
-Open `https://192.0.2.10:8080`, `https://100.64.0.10:8080`, or
-`https://myhost.tailnet-example.ts.net:8080`.
+`allow_insecure_lan` is the discouraged opt-out for plain HTTP. Leave it
+unset. The certificate includes those names, along with `localhost`,
+`127.0.0.1`, and `::1`. It is written again at the next start when
+`allowed_hosts` changes. The browser must be told to trust the self-signed
+certificate. Open `https://192.0.2.10:8080`, `https://100.64.0.10:8080`, or
+`https://myhost.tailnet-example.ts.net:8080`. A `Host` header without a
+port is refused, so a proxy on port 443 must send the listener port.
 
 ## Permission callback
 
@@ -239,11 +259,17 @@ field, the voice controls, Stop, then Send.
 Browser dictation runs only in on-device mode. The page starts recognition
 only when on-device recognition for the chosen language is already
 available. If a one-time language pack can be downloaded, the page explains
-that and downloads it only after the reader agrees. Any other result does
-not start browser recognition. The page then posts 16 kHz mono PCM to
-`POST /api/stt` when `GET /api/stt/status` says recognition is available.
-Live words appear in the field during dictation. Interim words are not
-announced one by one.
+that and downloads it only after the reader agrees. The browser's maker
+serves that pack. Audio stays on this device. Any other result does
+not start browser recognition. The page asks `GET /api/stt/status` when
+the composer loads. When speech recognition is turned off, the microphone
+and voice-mode controls stay in place and are marked unavailable. The page
+then posts 16 kHz mono PCM to `POST /api/stt` when status says recognition
+is available. Live words replace only the dictated span, so text typed
+during dictation stays. Interim words are not announced one by one.
+A click while dictation is starting or live cancels that session. Voice
+mode stops on an error that will not succeed on a retry, and the message
+stays on screen. A busy response or a timeout may try once more.
 
 Speech-recognition failures are plain sentences. 403 says recognition is
 turned off on this computer. 415 says that audio format is not supported.
