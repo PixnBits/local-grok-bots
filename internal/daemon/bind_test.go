@@ -23,7 +23,7 @@ func TestPolicyBindOverridesLoopbackDefault(t *testing.T) {
 		Model:      "test-model",
 		Version:    "0.1.0",
 		PolicyPath: path,
-		AuthToken:  "bind-override-token",
+		AuthToken:  "bind-override-token-bind-override",
 	}
 	app, err := New(cfg, fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
 		return model.ChatResponse{}, nil

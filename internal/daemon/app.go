@@ -434,6 +434,9 @@ func refuseNonLoopback(cfg config.Config, pol policy.Policy, fileTokens bool) er
 	if cfg.AuthToken == "" && !fileTokens {
 		return fmt.Errorf("refusing to start: BIND_ADDR is not loopback and no token is configured; set AUTH_TOKEN or AUTH_TOKENS_FILE, or use a loopback BIND_ADDR")
 	}
+	if cfg.AuthToken != "" && !printableToken(cfg.AuthToken) {
+		return fmt.Errorf("refusing to start: BIND_ADDR is not loopback and AUTH_TOKEN is shorter than 32 printable characters")
+	}
 	if !tlsReady(cfg) && !pol.AllowInsecureLAN {
 		return fmt.Errorf("refusing to start: BIND_ADDR is not loopback and TLS is not configured; set TLS_CERT and TLS_KEY or tls_self_signed, or allow_insecure_lan, or use a loopback BIND_ADDR")
 	}

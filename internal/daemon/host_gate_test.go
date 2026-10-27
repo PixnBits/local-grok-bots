@@ -15,7 +15,7 @@ func TestNonLoopbackHostGate(t *testing.T) {
 	app, err := New(config.Config{
 		DataDir: dir, BindAddr: "192.0.2.10:9",
 		OllamaURL: "http://127.0.0.1:9", Model: "test-model", Version: "0.1.0",
-		AuthToken: "host-gate-token-host-gate-token", TLSSelfSigned: true,
+		AuthToken: "host-gate-token-host-gate-token-0", TLSSelfSigned: true,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)

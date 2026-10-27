@@ -230,13 +230,13 @@ func TestStartupWarn(t *testing.T) {
 		}
 	})
 	t.Run("token", func(t *testing.T) {
-		_, out := open(t, "192.0.2.10:9", "unit-token", "", "")
+		_, out := open(t, "192.0.2.10:9", "unit-token-unit-token-unit-token-0", "", "")
 		if strings.Contains(out, "local-grok-bots: WARN:") {
 			t.Fatalf("log:\n%s", out)
 		}
 	})
 	t.Run("policy bind", func(t *testing.T) {
-		app, out := open(t, "127.0.0.1:0", "unit-token", "[daemon]\nbind = \"192.0.2.10:9\"\ntls_self_signed = true\n", "")
+		app, out := open(t, "127.0.0.1:0", "unit-token-unit-token-unit-token-0", "[daemon]\nbind = \"192.0.2.10:9\"\ntls_self_signed = true\n", "")
 		if app.cfg.BindAddr != "192.0.2.10:9" || strings.Contains(out, "local-grok-bots: WARN:") {
 			t.Fatalf("bind %s log:\n%s", app.cfg.BindAddr, out)
 		}
@@ -365,7 +365,7 @@ func TestNonLoopbackNoTLSRefused(t *testing.T) {
 		OllamaURL: "http://127.0.0.1:9",
 		Model:     "test-model",
 		Version:   "0.1.0",
-		AuthToken: "unit-token",
+		AuthToken: "unit-token-unit-token-unit-token-0",
 	}, "")
 	if app != nil || err == nil {
 		t.Fatal("started without TLS")
@@ -394,7 +394,7 @@ func TestNonLoopbackInsecureOptOut(t *testing.T) {
 		OllamaURL: "http://127.0.0.1:9",
 		Model:     "test-model",
 		Version:   "0.1.0",
-		AuthToken: "unit-token",
+		AuthToken: "unit-token-unit-token-unit-token-0",
 	}, policyBody)
 	if err != nil || app == nil {
 		t.Fatal(err)
@@ -410,7 +410,7 @@ func TestNonLoopbackInsecureOptOut(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(raw), `"action":"insecure_lan_start"`) || strings.Contains(string(raw), "192.0.2.10") || strings.Contains(string(raw), "unit-token") {
+	if !strings.Contains(string(raw), `"action":"insecure_lan_start"`) || strings.Contains(string(raw), "192.0.2.10") || strings.Contains(string(raw), "unit-token-unit-token-unit-token-0") {
 		t.Fatalf("audit %s", raw)
 	}
 }
@@ -439,4 +439,28 @@ func TestLoopbackUnchanged(t *testing.T) {
 
 func strconvQuote(s string) string {
 	return `"` + strings.ReplaceAll(s, `\`, `\\`) + `"`
+}
+
+func TestNonLoopbackShortTokenRefused(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("AUTH_TOKEN", "")
+	start := func(bind, tok string) (*App, error) {
+		dir := t.TempDir()
+		app, _, err := newStartup(t, config.Config{
+			DataDir: filepath.Join(dir, "data"), BindAddr: bind,
+			OllamaURL: "http://127.0.0.1:9", Model: "test-model", Version: "0.1.0",
+			AuthToken: tok, TLSSelfSigned: true,
+		}, "")
+		return app, err
+	}
+	short := strings.Repeat("s", 31)
+	if app, err := start("192.0.2.10:9", short); app != nil || err == nil || !strings.Contains(err.Error(), "AUTH_TOKEN") {
+		t.Fatalf("short token on a LAN bind: %v", err)
+	}
+	if _, err := start("192.0.2.10:9", strings.Repeat("s", 32)); err != nil {
+		t.Fatalf("32-character token: %v", err)
+	}
+	if _, err := start("127.0.0.1:0", short); err != nil {
+		t.Fatalf("loopback short token: %v", err)
+	}
 }
