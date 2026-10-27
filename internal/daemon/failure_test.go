@@ -37,7 +37,7 @@ func runFailingCLI(t *testing.T, r clisession.Runner, pol policy.Policy) (*App, 
 	app.runner = r
 	app.cliTTY = func() bool { return false }
 	app.rtMu.Lock()
-	app.policy = pol
+	app.setPol(pol)
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Ada", "description": "p"}, "")
@@ -211,8 +211,8 @@ func TestRunNoticeText(t *testing.T) {
 func TestIdleKillSkipsPendingApproval(t *testing.T) {
 	app := newApp(t, t.TempDir(), nil)
 	app.rtMu.Lock()
-	app.policy = cliPolicy()
-	app.policy.Idle = time.Minute
+	app.setPol(cliPolicy())
+	app.editPol(func(p *policy.Policy) { p.Idle = time.Minute })
 	app.rtMu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -119,7 +119,9 @@ type lgbRun struct {
 // returns the env to add (PATH, LGB_SPOOL, LGB_TOKEN). Any failure leaves the
 // bot without lgb; the turn still runs.
 func (a *App) startLGB(ctx context.Context, bot store.Bot, runID, ws string) (*lgbRun, map[string]string, error) {
-	if !a.policy.CLILGB || !lgbSupported {
+	turnPol := a.effPol(bot.ID)
+
+	if !turnPol.CLILGB || !lgbSupported {
 		return nil, nil, nil
 	}
 	root := filepath.Join(ws, lgbDirName)
@@ -422,10 +424,12 @@ var lgbTools = map[string]bool{
 }
 
 func (a *App) lgbExec(ctx context.Context, bot store.Bot, tool string, args map[string]any) (string, error) {
+	turnPol := a.effPol(bot.ID)
+
 	if !lgbTools[tool] {
 		return "", fmt.Errorf("%s is not an lgb tool", tool)
 	}
-	if (tool == "create_bot" || tool == "update_bot") && !a.policy.CLILGBManageBots {
+	if (tool == "create_bot" || tool == "update_bot") && !turnPol.CLILGBManageBots {
 		return "", errors.New("creating and updating bots is off by policy (cli.isolation.lgb_manage_bots)")
 	}
 	if tool == "list_memory" {
@@ -468,7 +472,7 @@ Run each lgb command as its own shell call; a chained command (;, &&, |) asks fo
 
 // lgbUsage appends the bot-timer limits that are actually in force.
 func (a *App) lgbUsage() string {
-	min, perHour := a.policy.BotTimerLimits()
+	min, perHour := a.pol().BotTimerLimits()
 	if min == 0 && perHour == 0 {
 		return lgbHelp
 	}
@@ -488,7 +492,9 @@ func (a *App) lgbUsage() string {
 // turns. Ollama has no limit unless policy sets cli.lgb.*. User-created
 // timers (the HTTP API) are not checked here.
 func (a *App) guardBotTimer(botID string, every time.Duration, onceAt time.Time, oneShot bool) error {
-	min, perHour := a.policy.BotTimerLimits()
+	turnPol := a.effPol(botID)
+
+	min, perHour := turnPol.BotTimerLimits()
 	if !oneShot && min > 0 && every < min {
 		return fmt.Errorf("repeating timer interval %s is shorter than the minimum %s (cli.lgb.min_timer_interval)", prettyDuration(every), prettyDuration(min))
 	}

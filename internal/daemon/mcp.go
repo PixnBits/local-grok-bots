@@ -308,6 +308,8 @@ func (a *App) handleMCPPermission(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) callApprove(w http.ResponseWriter, r *http.Request, id json.RawMessage, params json.RawMessage, bind permBind) {
+	turnPol := a.effPol(bind.botID)
+
 	var call struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -346,7 +348,7 @@ func (a *App) callApprove(w http.ResponseWriter, r *http.Request, id json.RawMes
 	defer cancel()
 	stop := context.AfterFunc(a.ctx, cancel)
 	defer stop()
-	out := a.perm.Evaluate(ctx, a.policy.Permission(), a.withUserRules(bind.botID, permission.Request{
+	out := a.perm.Evaluate(ctx, turnPol.Permission(), a.withUserRules(bind.botID, permission.Request{
 		RunID:     bind.runID,
 		BotID:     bind.botID,
 		SessionID: bind.sessionID,

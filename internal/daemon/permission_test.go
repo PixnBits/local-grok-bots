@@ -23,9 +23,9 @@ func TestMCPRoundTrip(t *testing.T) {
 	app := newApp(t, t.TempDir(), nil)
 	app.cfg.AuthToken = "sekrit"
 	app.rtMu.Lock()
-	app.policy.UIPrompts = true
-	app.policy.PromptTimeout = 5 * time.Second
-	app.policy.AllowSessionGrants = false
+	app.editPol(func(p *policy.Policy) { p.UIPrompts = true })
+	app.editPol(func(p *policy.Policy) { p.PromptTimeout = 5 * time.Second })
+	app.editPol(func(p *policy.Policy) { p.AllowSessionGrants = false })
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	token := app.registerPerm("bot-1", "run-1", "sess-1")
@@ -214,7 +214,7 @@ printf '%s\n' '{"type":"result","result":"continued","session_id":"s","permissio
 	app.audit = lg
 	app.cliTTY = func() bool { return false }
 	app.rtMu.Lock()
-	app.policy = policy.Policy{Backend: "claude", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute, UIPrompts: true}
+	app.setPol(policy.Policy{Backend: "claude", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute, UIPrompts: true})
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	// A host is attached, so a denial Claude reports itself stays source cli.
@@ -265,12 +265,12 @@ func TestFakeClaudePermissionRoundTrip(t *testing.T) {
 	app.audit = lg
 	app.cliTTY = func() bool { return false }
 	app.rtMu.Lock()
-	app.policy = policy.Policy{
+	app.setPol(policy.Policy{
 		Backend: "claude", CLIPermitted: true, TimersEnabled: true,
 		Idle: time.Hour, Imminent: time.Minute,
 		UIPrompts: true, PromptTimeout: 20 * time.Second,
 		ToolAllow: []string{"Read"}, ToolDeny: []string{"Bash(rm *)"},
-	}
+	})
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	app.permBase = srv.URL
@@ -447,11 +447,11 @@ func startPendingRun(t *testing.T, timeout time.Duration) (*App, string, string,
 	app := newApp(t, dir, nil)
 	app.cliTTY = func() bool { return false }
 	app.rtMu.Lock()
-	app.policy = policy.Policy{
+	app.setPol(policy.Policy{
 		Backend: "claude", CLIPermitted: true, TimersEnabled: true,
 		Idle: time.Hour, Imminent: time.Minute,
 		UIPrompts: true, PromptTimeout: timeout,
-	}
+	})
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	app.permBase = srv.URL
@@ -627,11 +627,11 @@ func assertResidualDenied(t *testing.T, uiPrompts, withHost bool, source string)
 	app.audit = lg
 	app.cliTTY = func() bool { return false }
 	app.rtMu.Lock()
-	app.policy = policy.Policy{
+	app.setPol(policy.Policy{
 		Backend: "claude", CLIPermitted: true, TimersEnabled: true,
 		Idle: time.Hour, Imminent: time.Minute,
 		UIPrompts: uiPrompts,
-	}
+	})
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	if withHost {

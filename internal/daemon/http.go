@@ -52,6 +52,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/bots/{id}/dms", a.handleDMs)
 	mux.HandleFunc("GET /api/dms/{bot_a}/{bot_b}", a.handleDMThread)
 	mux.HandleFunc("GET /api/log", a.handleLog)
+	mux.HandleFunc("POST /api/stt", a.handleSTT)
 	mux.HandleFunc("GET /login", a.handleLogin)
 	mux.HandleFunc("GET /", a.handleIndex)
 	mux.HandleFunc("GET /index.html", a.handleIndex)
@@ -285,6 +286,7 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	a.notePermCallback()
 	writeJSON(w, http.StatusCreated, a.decorateBot(b))
 }
 
@@ -514,6 +516,7 @@ func (a *App) handleDeleteBot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.dropResume(id)
+	a.notePermCallback()
 	w.WriteHeader(http.StatusNoContent)
 }
 

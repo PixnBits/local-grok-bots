@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"strings"
 	"testing"
 	"time"
@@ -9,8 +10,8 @@ import (
 
 func TestSendDMCountsTowardHourlyTurnCap(t *testing.T) {
 	app := newApp(t, "", &scriptModel{})
-	app.policy.LGBMaxSchedSet = true
-	app.policy.LGBMaxSchedPerHour = 3
+	app.editPol(func(p *policy.Policy) { p.LGBMaxSchedSet = true })
+	app.editPol(func(p *policy.Policy) { p.LGBMaxSchedPerHour = 3 })
 	now := time.Date(2026, 10, 15, 8, 0, 0, 0, time.UTC)
 	c := app.turnCounter()
 	c.mu.Lock()

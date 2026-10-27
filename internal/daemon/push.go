@@ -29,6 +29,8 @@ type pushSpec struct {
 // handleGitPush rebuilds the push on the host from a mirror. Hard denies
 // return before Evaluate. A push that is still allowed always asks.
 func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *gitHubGate, cwd string, args []string) sandbox.PushResult {
+	turnPol := a.effPol(bot.ID)
+
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -46,7 +48,7 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	repos := []string(nil)
 	ws := ""
 	if a != nil {
-		repos = a.policy.EffectiveGitHubRepos(bot.GitHubAllow)
+		repos = turnPol.EffectiveGitHubRepos(bot.GitHubAllow)
 		ws = a.ws
 	}
 	owner, repo, reason := pushTarget(parsed, repos)
@@ -62,7 +64,7 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	}
 	tokenFile := ""
 	if a != nil {
-		tokenFile = a.policy.GitHub.TokenFile
+		tokenFile = turnPol.GitHub.TokenFile
 	}
 	if _, err := readGitHubToken(tokenFile); err != nil {
 		return a.pushDenied(bot, owner, repo, claimedFrom, "token")
@@ -133,11 +135,11 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	if err != nil {
 		return a.pushDenied(bot, owner, repo, claimedFrom, "mirror")
 	}
-	ectx, cancel := context.WithTimeout(parent, a.policy.EffectivePromptTimeout())
+	ectx, cancel := context.WithTimeout(parent, turnPol.EffectivePromptTimeout())
 	defer cancel()
 	stop := context.AfterFunc(pctx, cancel)
 	defer stop()
-	out := a.perm.Evaluate(ectx, a.policy.Permission(), a.withUserRules(bot.ID, permission.Request{
+	out := a.perm.Evaluate(ectx, turnPol.Permission(), a.withUserRules(bot.ID, permission.Request{
 		RunID:     a.loopRunID(bot.ID),
 		BotID:     bot.ID,
 		Tool:      "git_push",
@@ -214,7 +216,8 @@ func (a *App) refusePushAuthors(pctx context.Context, bot store.Bot, gate *gitHu
 	if a == nil || gate == nil || gate.px == nil {
 		return "author"
 	}
-	name, email, err := github.CommitAuthor(bot.Name, a.policy.GitHub.AuthorName, a.policy.GitHub.AuthorEmail)
+	turnPol := a.effPol(bot.ID)
+	name, email, err := github.CommitAuthor(bot.Name, turnPol.GitHub.AuthorName, turnPol.GitHub.AuthorEmail)
 	if err != nil || name == "" || email == "" {
 		return "author"
 	}

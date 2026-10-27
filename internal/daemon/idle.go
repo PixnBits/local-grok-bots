@@ -10,7 +10,7 @@ import (
 
 func (a *App) idleTimeout() time.Duration {
 	a.rtMu.Lock()
-	d := a.policy.Idle
+	d := a.pol().Idle
 	a.rtMu.Unlock()
 	if d > 0 {
 		return d
@@ -20,7 +20,7 @@ func (a *App) idleTimeout() time.Duration {
 
 func (a *App) imminentWindow() time.Duration {
 	a.rtMu.Lock()
-	d := a.policy.Imminent
+	d := a.pol().Imminent
 	a.rtMu.Unlock()
 	if d > 0 {
 		return d

@@ -30,10 +30,10 @@ func TestGrokVersionRefusedAudited(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	app := newApp(t, dir, nil)
 	app.rtMu.Lock()
-	app.policy = policy.Policy{
+	app.setPol(policy.Policy{
 		Backend: "grok", CLIPermitted: true, TimersEnabled: true,
 		Idle: time.Hour, Imminent: time.Minute,
-	}
+	})
 	app.rtMu.Unlock()
 	auditPath := filepath.Join(dir, "audit.log")
 	lg, err := audit.Open(auditPath)

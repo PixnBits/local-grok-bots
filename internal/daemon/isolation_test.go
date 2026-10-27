@@ -26,11 +26,11 @@ func isolationApp(t *testing.T, backend, overrides string) (*App, string, store.
 	t.Setenv("ANTHROPIC_API_KEY", "sk-test")
 	app := newApp(t, dir, nil)
 	app.rtMu.Lock()
-	app.policy = policy.Policy{
+	app.setPol(policy.Policy{
 		Backend: backend, CLIPermitted: true, TimersEnabled: true, Idle: time.Hour,
 		Imminent: 2 * time.Minute, ConflictPolicy: "refuse", CLIOverrides: overrides,
 		CLIHome: policy.HomeIsolated, PermissionMode: "default",
-	}
+	})
 	app.rtMu.Unlock()
 	bot, err := app.st.CreateBot("Iso", "", nil, "user")
 	if err != nil {

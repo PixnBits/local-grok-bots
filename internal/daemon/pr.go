@@ -15,6 +15,8 @@ import (
 )
 
 func (a *App) toolCreatePR(ctx context.Context, bot store.Bot, args map[string]any) (string, error) {
+	turnPol := a.effPol(bot.ID)
+
 	bot = a.freshBot(bot)
 	in, owner, repo, reason := parseCreatePR(args)
 	if reason != "" {
@@ -26,10 +28,10 @@ func (a *App) toolCreatePR(ctx context.Context, bot store.Bot, args map[string]a
 	if !granted(bot.Grants, "github") {
 		return a.prDeny(bot, "github_pr_denied", owner, repo, "missing grant")
 	}
-	if !repoAllowed(a.policy.EffectiveGitHubRepos(bot.GitHubAllow), owner, repo) {
+	if !repoAllowed(turnPol.EffectiveGitHubRepos(bot.GitHubAllow), owner, repo) {
 		return a.prDeny(bot, "github_pr_denied", owner, repo, "allowlist")
 	}
-	if _, err := readGitHubToken(a.policy.GitHub.TokenFile); err != nil {
+	if _, err := readGitHubToken(turnPol.GitHub.TokenFile); err != nil {
 		return a.prDeny(bot, "github_pr_denied", owner, repo, "token")
 	}
 	px, err := a.openGitHubReadProxy(bot)
@@ -44,7 +46,7 @@ func (a *App) toolCreatePR(ctx context.Context, bot store.Bot, args map[string]a
 	if strings.EqualFold(in.Head, def) {
 		return a.prDeny(bot, "github_pr_denied", owner, repo, "default branch")
 	}
-	out := a.perm.Evaluate(ctx, a.policy.Permission(), a.withUserRules(bot.ID, permission.Request{
+	out := a.perm.Evaluate(ctx, turnPol.Permission(), a.withUserRules(bot.ID, permission.Request{
 		RunID:     a.loopRunID(bot.ID),
 		BotID:     bot.ID,
 		Tool:      "create_pr",
@@ -95,6 +97,8 @@ func (a *App) toolCreatePR(ctx context.Context, bot store.Bot, args map[string]a
 }
 
 func (a *App) toolPRStatus(ctx context.Context, bot store.Bot, args map[string]any) (string, error) {
+	turnPol := a.effPol(bot.ID)
+
 	bot = a.freshBot(bot)
 	owner, repo, number, reason := parsePRStatus(args)
 	if reason != "" {
@@ -106,10 +110,10 @@ func (a *App) toolPRStatus(ctx context.Context, bot store.Bot, args map[string]a
 	if !granted(bot.Grants, "github") {
 		return a.prDeny(bot, "github_pr_status_denied", owner, repo, "missing grant")
 	}
-	if !repoAllowed(a.policy.EffectiveGitHubRepos(bot.GitHubAllow), owner, repo) {
+	if !repoAllowed(turnPol.EffectiveGitHubRepos(bot.GitHubAllow), owner, repo) {
 		return a.prDeny(bot, "github_pr_status_denied", owner, repo, "allowlist")
 	}
-	if _, err := readGitHubToken(a.policy.GitHub.TokenFile); err != nil {
+	if _, err := readGitHubToken(turnPol.GitHub.TokenFile); err != nil {
 		return a.prDeny(bot, "github_pr_status_denied", owner, repo, "token")
 	}
 	px, err := a.openGitHubReadProxy(bot)

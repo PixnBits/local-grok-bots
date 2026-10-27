@@ -47,18 +47,38 @@ type loopState struct {
 type App struct {
 	cfg config.Config
 	// logw receives startup lines. Nil means stderr.
-	logw   io.Writer
-	st     *store.Store
-	model  model.Client
-	ws     string
-	bus    *Bus
-	policy policy.Policy
-	perm   *permission.Broker
+	logw  io.Writer
+	st    *store.Store
+	model model.Client
+	ws    string
+	bus   *Bus
+	// startPol is the policy captured at startup.
+	startPol policy.Policy
+	// polCur is the published snapshot. Readers use pol.
+	polCur atomic.Pointer[policy.Policy]
+	// installMu publishes polCur together with voiceBlock and stt.
+	installMu    sync.Mutex
+	loadGen      atomic.Uint64
+	installedGen uint64
+	restartSig   string
+	permErr      string
+	// envWhisper is true when whisper paths came from the environment
+	// rather than the startup policy file.
+	envWhisper bool
+	turnMu     sync.Mutex
+	turnHeld   map[string]turnSnap
+	perm       *permission.Broker
 	// permBase is the HTTP origin the CLI calls back, such as http://127.0.0.1:8787.
 	// Empty means there is no permission host. A headless prompt still fails closed.
-	permBase   string
-	permMu     sync.Mutex
-	permTokens map[string]permBind
+	// The permission callback listener does not replace this except when the
+	// main listener is TLS: then MCP uses permCallbackBase.
+	permBase         string
+	permSrv          *http.Server
+	permLn           net.Listener
+	permCallbackBase string
+	permCbMu         sync.Mutex
+	permMu           sync.Mutex
+	permTokens       map[string]permBind
 	// lgbLive holds per-run lgb tokens until that run's spool stops.
 	// They are not the admin token and cannot decide a permission card.
 	// The value is the bot and run the token was issued for.
@@ -129,19 +149,38 @@ type App struct {
 	activity     map[string]time.Time
 	closing      bool
 	wg           sync.WaitGroup
+
+	stt STT
+	// sttSlot is a capacity-1 semaphore. Sending takes the one transcription.
+	// The buffer starts empty. sttSlotOnce builds it if New did not.
+	sttSlot     chan struct{}
+	sttSlotOnce sync.Once
+	// sttBusyTimer replaces the busy-wait clock when non-nil. Tests return
+	// an already-fired channel, or a channel the test closes. The stop
+	// function may be nil. A nil field uses time.NewTimer(sttBusyWait).
+	sttBusyTimer func(time.Duration) (<-chan time.Time, func())
+	// sttTranscribeTimeout and sttReadTimeout replace the transcription
+	// and body-read limits when non-zero. Tests set a short value.
+	sttTranscribeTimeout time.Duration
+	sttReadTimeout       time.Duration
+	// sttBody bounds how many requests read a body at once.
+	sttBody     chan struct{}
+	sttBodyOnce sync.Once
+	// sttBodyHold, when set, runs after a body-read slot is taken and
+	// before the body is read. Tests use it to observe that bound.
+	sttBodyHold func()
+	// voiceBlock is set when voice is on but a whisper path cannot be used.
+	// The policy flag stays as configured. Requests are refused while this
+	// is non-empty.
+	voiceBlock string
+	voiceHits  voiceGate
 }
 
 // logOut is copied onto each App as the startup writer. Nil means stderr.
 var logOut io.Writer
 
 func New(cfg config.Config, m model.Client) (*App, error) {
-	pol, err := policy.Load(policy.Options{
-		Path:           cfg.PolicyPath,
-		ManagedPath:    os.Getenv("MANAGED_POLICY"),
-		EnvBind:        os.Getenv("BIND_ADDR"),
-		EnvOllamaURL:   os.Getenv("OLLAMA_URL"),
-		EnvOllamaModel: os.Getenv("OLLAMA_MODEL"),
-	})
+	pol, err := policy.Load(loadPolicyOptions(cfg.PolicyPath))
 	if err != nil {
 		return nil, err
 	}
@@ -159,6 +198,23 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	}
 	if pol.HasOllamaModel {
 		cfg.Model = pol.OllamaModel
+	}
+	if pol.HasTLS {
+		cfg.TLSCert = pol.TLSCert
+		cfg.TLSKey = pol.TLSKey
+		cfg.TLSSelfSigned = pol.TLSSelfSigned
+	}
+	envWhisper := !pol.HasWhisper && (strings.TrimSpace(cfg.WhisperBin) != "" || strings.TrimSpace(cfg.WhisperModel) != "")
+	if pol.HasWhisper {
+		cfg.WhisperBin = pol.WhisperBin
+		cfg.WhisperModel = pol.WhisperModel
+	}
+	if pol.HasPermCallback {
+		cfg.PermCallbackAddr = pol.PermCallbackAddr
+	}
+	stt, err := sttFromConfig(cfg.WhisperBin, cfg.WhisperModel)
+	if err != nil {
+		return nil, err
 	}
 	// Every start, including an existing admin token, AUTH_TOKEN, and
 	// Ollama-only. ensureAdminToken returns before this check when a token
@@ -220,7 +276,8 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		model:      m,
 		ws:         cfg.Workspace(),
 		bus:        NewBus(),
-		policy:     pol,
+		startPol:   pol,
+		envWhisper: envWhisper,
 		audit:      aud,
 		ctx:        ctx,
 		cancel:     cancel,
@@ -230,7 +287,10 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		activity:   map[string]time.Time{},
 		permTokens: map[string]permBind{},
 		permBase:   httpBase(cfg.BindAddr),
+		stt:        stt,
+		sttSlot:    make(chan struct{}, 1),
 	}
+	a.setPol(pol)
 	if len(fileTokens) > 0 {
 		a.authTokens.Store(&authTokenSet{toks: fileTokens})
 	}
@@ -260,6 +320,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		cancel()
 		return nil, err
 	}
+	a.applyVoiceRuntime()
 	a.RefreshProtectSnapshot()
 	a.wg.Add(1)
 	go a.timerLoop()
@@ -272,6 +333,10 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		if b.Status != "paused" {
 			a.kick(b.ID)
 		}
+	}
+	if err := a.syncPermCallback(); err != nil {
+		a.Shutdown()
+		return nil, err
 	}
 	return a, nil
 }
@@ -291,6 +356,7 @@ func (a *App) Shutdown() {
 	a.rtMu.Unlock()
 	a.cancel()
 	a.wg.Wait()
+	a.stopPermCallback()
 	a.closeGrokProxy()
 	_ = a.st.FailRunning("shutdown")
 	_ = a.st.AddLog("", "daemon_stop", map[string]any{})
@@ -307,14 +373,20 @@ func (a *App) Run(ctx context.Context) error {
 		a.Shutdown()
 		return err
 	}
-	a.writeStartup("local-grok-bots %s listening on %s\n", a.cfg.Version, ln.Addr().String())
 	srv := &http.Server{
 		Handler:           a.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	cert, key, terr := a.tlsFiles()
+	if terr != nil {
+		_ = ln.Close()
+		a.Shutdown()
+		return terr
+	}
+	a.writeStartup("local-grok-bots %s listening on %s\n", a.cfg.Version, ln.Addr().String())
 	errCh := make(chan error, 1)
 	go func() {
-		err := srv.Serve(ln)
+		err := serveOnListener(srv, ln, cert, key)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
@@ -380,7 +452,7 @@ func (a *App) fireDue() {
 		return
 	}
 	a.rtMu.Lock()
-	enabled := a.policy.TimersEnabled
+	enabled := a.pol().TimersEnabled
 	a.rtMu.Unlock()
 	if !enabled {
 		return

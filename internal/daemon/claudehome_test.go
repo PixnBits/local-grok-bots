@@ -96,7 +96,7 @@ func TestClaudeHomeExplicitSettingsAndEnvToken(t *testing.T) {
 	os.Unsetenv("ANTHROPIC_API_KEY")
 	t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "oat-SECRET-123")
 	app.rtMu.Lock()
-	app.policy.CLIClaudeHome = policy.HomeIsolated
+	app.editPol(func(p *policy.Policy) { p.CLIClaudeHome = policy.HomeIsolated })
 	app.rtMu.Unlock()
 	postAndWait(t, app, bot.ID)
 	if env := readArgv(t, envLog); !strings.Contains(env, "CLAUDE_CONFIG_DIR=") {

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"io"
 	"net"
 	"net/http"
@@ -80,10 +81,10 @@ func TestGitPushHostApproval(t *testing.T) {
 		}})
 		app.githubGitBase = upstream.URL
 		app.githubAPIBase = upstream.URL
-		app.policy.GitHub.Repos = []string{"acme/widgets"}
-		app.policy.GitHub.TokenFile = "/etc/local-grok-bots/github.token"
-		app.policy.UIPrompts = true
-		app.policy.PromptTimeout = 20 * time.Second
+		app.editPol(func(p *policy.Policy) { p.GitHub.Repos = []string{"acme/widgets"} })
+		app.editPol(func(p *policy.Policy) { p.GitHub.TokenFile = "/etc/local-grok-bots/github.token" })
+		app.editPol(func(p *policy.Policy) { p.UIPrompts = true })
+		app.editPol(func(p *policy.Policy) { p.PromptTimeout = 20 * time.Second })
 		auditPath := filepath.Join(t.TempDir(), "audit.log")
 		lg, err := audit.Open(auditPath)
 		if err != nil {
@@ -212,7 +213,7 @@ echo PUSH_DONE
 
 	t.Run("bypass still asks", func(t *testing.T) {
 		app, evals, auditPath := newPushApp(t)
-		app.policy.PermissionMode = "bypassPermissions"
+		app.editPol(func(p *policy.Policy) { p.PermissionMode = "bypassPermissions" })
 		out, err := runPush(t, app, auditPath, []string{"acme/widgets"}, feature("feature-bypass", "note-bypass", "git push https://github.com/acme/widgets.git feature-bypass"), true)
 		if err != nil || !strings.Contains(out, "git push sent") || evals.Load() == 0 {
 			t.Fatalf("bypass skipped the card: %v evals=%d\n%s", err, evals.Load(), out)
@@ -221,7 +222,7 @@ echo PUSH_DONE
 
 	t.Run("managed allow still asks", func(t *testing.T) {
 		app, evals, auditPath := newPushApp(t)
-		app.policy.ToolAllow = []string{"git_push"}
+		app.editPol(func(p *policy.Policy) { p.ToolAllow = []string{"git_push"} })
 		out, err := runPush(t, app, auditPath, []string{"acme/widgets"}, feature("feature-allow", "note-allow", "git push https://github.com/acme/widgets.git feature-allow"), true)
 		if err != nil || !strings.Contains(out, "git push sent") || evals.Load() == 0 {
 			t.Fatalf("managed allow skipped the card: %v evals=%d\n%s", err, evals.Load(), out)
@@ -432,7 +433,7 @@ echo PUSH_DONE
 
 	t.Run("prompts off", func(t *testing.T) {
 		app, evals, auditPath := newPushApp(t)
-		app.policy.UIPrompts = false
+		app.editPol(func(p *policy.Policy) { p.UIPrompts = false })
 		before := packs.Load()
 		out, err := runPush(t, app, auditPath, []string{"acme/widgets"}, feature("feature-ui", "note-ui", "git push https://github.com/acme/widgets.git feature-ui"), false)
 		if err == nil || strings.Contains(out, "PUSH_DONE") || !strings.Contains(out, "denied") {
@@ -666,13 +667,13 @@ func TestGitPushAuthorRange(t *testing.T) {
 	}})
 	app.githubGitBase = upstream.URL
 	app.githubAPIBase = upstream.URL
-	app.policy.GitHub.Repos = []string{"acme/widgets"}
-	app.policy.GitHub.TokenFile = filepath.Join(t.TempDir(), "github.token")
-	if err := os.WriteFile(app.policy.GitHub.TokenFile, []byte(pushSecret+"\n"), 0o600); err != nil {
+	app.editPol(func(p *policy.Policy) { p.GitHub.Repos = []string{"acme/widgets"} })
+	app.editPol(func(p *policy.Policy) { p.GitHub.TokenFile = filepath.Join(t.TempDir(), "github.token") })
+	if err := os.WriteFile(app.pol().GitHub.TokenFile, []byte(pushSecret+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	app.policy.UIPrompts = true
-	app.policy.PromptTimeout = 20 * time.Second
+	app.editPol(func(p *policy.Policy) { p.UIPrompts = true })
+	app.editPol(func(p *policy.Policy) { p.PromptTimeout = 20 * time.Second })
 	auditPath := filepath.Join(t.TempDir(), "audit.log")
 	lg, err := audit.Open(auditPath)
 	if err != nil {

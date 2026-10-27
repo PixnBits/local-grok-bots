@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,8 +72,8 @@ func TestGitAuthorFromPolicy(t *testing.T) {
 		app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
 			return model.ChatResponse{Content: "no"}, nil
 		}})
-		app.policy.GitHub.AuthorName = "ci-bot"
-		app.policy.GitHub.AuthorEmail = "{name}@users.noreply.example.com"
+		app.editPol(func(p *policy.Policy) { p.GitHub.AuthorName = "ci-bot" })
+		app.editPol(func(p *policy.Policy) { p.GitHub.AuthorEmail = "{name}@users.noreply.example.com" })
 		srv := serve(t, app)
 		bot := createGrantedBot(t, srv.URL, "Ada", []string{"git"})
 		out, err := app.dispatchTool(ctx, bot, "run_shell", map[string]any{"command": gitAuthorScript})

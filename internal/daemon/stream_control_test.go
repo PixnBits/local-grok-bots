@@ -412,11 +412,11 @@ func TestClaudeTransportNoneSkipsHost(t *testing.T) {
 	app.audit = lg
 	app.cliTTY = func() bool { return false }
 	app.rtMu.Lock()
-	app.policy = policy.Policy{
+	app.setPol(policy.Policy{
 		Backend: "claude", CLIPermitted: true, TimersEnabled: true,
 		Idle: time.Hour, Imminent: time.Minute,
 		UIPrompts: true, ClaudeTransport: policy.TransportNone,
-	}
+	})
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	app.permBase = srv.URL
@@ -465,11 +465,11 @@ func TestDaemonUnknownClaudeTransportDoesNotSpawn(t *testing.T) {
 	app := newApp(t, dir, nil)
 	app.cliTTY = func() bool { return false }
 	app.rtMu.Lock()
-	app.policy = policy.Policy{
+	app.setPol(policy.Policy{
 		Backend: "claude", CLIPermitted: true, TimersEnabled: true,
 		Idle: time.Hour, Imminent: time.Minute,
 		UIPrompts: true, ClaudeTransport: "stdio",
-	}
+	})
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Ada", "description": "p"}, "")
@@ -559,7 +559,7 @@ func newStreamTurn(t *testing.T, mode string, pol policy.Policy, withGate, promp
 		pol.ClaudeTransport = policy.TransportStreamControl
 	}
 	app.rtMu.Lock()
-	app.policy = pol
+	app.setPol(pol)
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	app.permBase = srv.URL

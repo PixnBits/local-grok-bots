@@ -22,9 +22,9 @@ import (
 
 func setPolicy(app *App, fn func(*policy.Policy)) {
 	app.rtMu.Lock()
-	p := app.policy
+	p := app.pol()
 	fn(&p)
-	app.policy = p
+	app.setPol(p)
 	app.rtMu.Unlock()
 }
 
@@ -778,7 +778,7 @@ func TestProdModelTimeoutAllowsSlowFirstToken(t *testing.T) {
 	ol.SetClock(&model.Clock{Now: clk.Now, AfterFunc: clk.AfterFunc})
 	app := newApp(t, "", ol)
 	app.rtMu.Lock()
-	app.policy = pol
+	app.setPol(pol)
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	bot := createBot(t, srv.URL, "Ada")
@@ -954,7 +954,7 @@ func ollamaPolicyApp(t *testing.T, body string, ol *model.Ollama) (*App, *httpte
 	}
 	app := newApp(t, "", ol)
 	app.rtMu.Lock()
-	app.policy = pol
+	app.setPol(pol)
 	app.rtMu.Unlock()
 	return app, serve(t, app), pol
 }

@@ -84,6 +84,8 @@ func snapshotAdds(path string, have map[string]struct{}) (added []sandbox.Protec
 // A required path must exist. An optional path may be created later.
 // An unconfigured path is omitted. This does not create directories.
 func (a *App) protectSpecs() []protectSpec {
+	turnPol := a.pol()
+
 	if a == nil {
 		return nil
 	}
@@ -116,25 +118,43 @@ func (a *App) protectSpecs() []protectSpec {
 			add(filepath.Join(data, name), false)
 		}
 	}
-	if p := strings.TrimSpace(a.cfg.PolicyPath); p != "" && a.policy.Loaded {
+	if p := strings.TrimSpace(a.cfg.PolicyPath); p != "" && turnPol.Loaded {
 		add(p, true)
 	}
 	if p := strings.TrimSpace(a.cfg.AuthTokensFile); p != "" {
 		add(p, true)
 	}
-	if p := strings.TrimSpace(a.policy.GitHub.TokenFile); p != "" {
+	if p := strings.TrimSpace(turnPol.GitHub.TokenFile); p != "" {
 		add(p, true)
 	}
 	if key := a.sshKeyPath(); protectPathExists(key) {
 		add(key, true)
 	}
-	for _, tool := range a.policy.CLITools {
+	for _, tool := range turnPol.CLITools {
 		add(tool.CredentialHome, true)
 	}
-	if p := auditSecretPath(a.policy.AuditLog); p != "" {
+	if turnPol.VoiceEnabled {
+		bin, model, _, _ := whisperPaths(turnPol, a.cfg)
+		addVoiceProtect(add, bin)
+		addVoiceProtect(add, model)
+	}
+	if p := auditSecretPath(turnPol.AuditLog); p != "" {
 		add(p, false)
 	}
 	return specs
+}
+
+func addVoiceProtect(add func(string, bool), path string) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return
+	}
+	add(path, false)
+	parent := filepath.Dir(path)
+	if parent == "" || parent == "." || parent == path {
+		return
+	}
+	add(parent, false)
 }
 
 func cleanProtectPath(p string) (string, bool) {

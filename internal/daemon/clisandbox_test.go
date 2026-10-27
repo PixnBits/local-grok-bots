@@ -344,7 +344,7 @@ func TestAuthTokensFileSymlinkIsDenied(t *testing.T) {
 		t.Fatalf("lgb %v set=%v err=%v", run, run != nil && run.protectSet, err)
 	}
 	t.Cleanup(run.stop)
-	roots := run.argRoots(app.policy)
+	roots := run.argRoots(app.pol())
 	if !coiListed(roots, linkAbs) || !coiListed(roots, resolved) {
 		t.Fatalf("argRoots %v lack %s and %s", roots, linkAbs, resolved)
 	}
@@ -396,7 +396,7 @@ func TestWorkspaceSymlinkToSecretIsDenied(t *testing.T) {
 		t.Fatalf("lgb %v set=%v err=%v", run, run != nil && run.protectSet, err)
 	}
 	t.Cleanup(run.stop)
-	roots := run.argRoots(app.policy)
+	roots := run.argRoots(app.pol())
 	if !coiListed(roots, admin) {
 		t.Fatalf("argRoots %v lack %s", roots, admin)
 	}
@@ -563,7 +563,7 @@ func TestGrokUserHomeUsesFailClosedProfile(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(home, ".grok", "auth.json"), []byte("{}"), 0o600)
 	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))
 	app.rtMu.Lock()
-	app.policy.CLIHome = policy.HomeUser
+	app.editPol(func(p *policy.Policy) { p.CLIHome = policy.HomeUser })
 	app.rtMu.Unlock()
 	ws := filepath.Join(dir, "ws")
 	_ = os.MkdirAll(ws, 0o755)
@@ -624,7 +624,7 @@ func TestGrokDarwinNetworkIsWarned(t *testing.T) {
 	app.audit = lg
 	app.runner = okRunner{}
 	app.rtMu.Lock()
-	app.policy = policy.Policy{Backend: "grok", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute}
+	app.setPol(policy.Policy{Backend: "grok", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute})
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	r, w, err := os.Pipe()
@@ -677,7 +677,7 @@ func TestGrokNetworkWarnSkipsLinuxAndNetGrant(t *testing.T) {
 	app := newApp(t, dir, nil)
 	app.runner = okRunner{}
 	app.rtMu.Lock()
-	app.policy = policy.Policy{Backend: "grok", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute}
+	app.setPol(policy.Policy{Backend: "grok", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute})
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Geo", "description": "g"}, "")
@@ -732,7 +732,7 @@ func TestGrokSandboxFailureIsAudited(t *testing.T) {
 	app.audit = lg
 	app.runner = sandboxFailRunner{}
 	app.rtMu.Lock()
-	app.policy = policy.Policy{Backend: "grok", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute}
+	app.setPol(policy.Policy{Backend: "grok", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute})
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Geo", "description": "g"}, "")
@@ -777,7 +777,7 @@ func TestGrokBridgeRefusalIsAudited(t *testing.T) {
 	app.audit = lg
 	app.runner = bridgeFailRunner{}
 	app.rtMu.Lock()
-	app.policy = policy.Policy{Backend: "grok", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute}
+	app.setPol(policy.Policy{Backend: "grok", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute})
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Geo", "description": "g"}, "")
@@ -807,7 +807,7 @@ func TestGrokBridgeRefusalIsAudited(t *testing.T) {
 func TestCLIPreambleStatesTheRealBoundary(t *testing.T) {
 	dir := t.TempDir()
 	app := newCLIApp(t, dir, writeCLIPolicy(t, dir))
-	got := app.cliBoundary()
+	got := app.cliBoundary("")
 	for _, want := range []string{"Claude Code's sandbox", "not inside the daemon's jail", "run_shell"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("claude boundary lacks %q: %s", want, got)
@@ -816,8 +816,8 @@ func TestCLIPreambleStatesTheRealBoundary(t *testing.T) {
 	if strings.Contains(got, "your own sandbox is the boundary") {
 		t.Fatalf("old wording: %s", got)
 	}
-	app.policy.Backend = "grok"
-	if g := app.cliBoundary(); !strings.Contains(g, "Grok's sandbox") {
+	app.editPol(func(p *policy.Policy) { p.Backend = "grok" })
+	if g := app.cliBoundary(""); !strings.Contains(g, "Grok's sandbox") {
 		t.Fatalf("grok boundary: %s", g)
 	}
 }

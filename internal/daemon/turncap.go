@@ -46,14 +46,14 @@ func (c *botTurns) take(botID string, limit int, force bool) bool {
 // noteScheduledTurn counts a timer-fired turn toward the bot's hourly cap.
 // Timers are already capped when created, so this never refuses.
 func (a *App) noteScheduledTurn(botID string) {
-	_, perHour := a.policy.BotTimerLimits()
+	_, perHour := a.pol().BotTimerLimits()
 	a.turnCounter().take(botID, perHour, true)
 }
 
 // allowBotTurn reports whether another bot may start a turn for botID. Over
 // the cap it logs and audits bot_turn_cap and returns an error for the sender.
 func (a *App) allowBotTurn(fromID, botID, via string) error {
-	_, perHour := a.policy.BotTimerLimits()
+	_, perHour := a.pol().BotTimerLimits()
 	if a.turnCounter().take(botID, perHour, false) {
 		return nil
 	}

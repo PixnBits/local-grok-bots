@@ -18,6 +18,26 @@ var heldAuth string
 // needs the path in order to read the file. The tokens stay in the file.
 var heldTokensFile string
 
+// heldTLSKey is the TLS_KEY path kept after the environment scrub.
+// The name contains KEY, so the scrub drops it. The value is a file path.
+var heldTLSKey string
+
+// CurrentTLSKey is the TLS key path from the hold, or from the environment
+// when the process has not scrubbed yet.
+func CurrentTLSKey() string {
+	if heldTLSKey != "" {
+		return heldTLSKey
+	}
+	return os.Getenv("TLS_KEY")
+}
+
+// holdTLSKey records TLS_KEY before a scrub drops it.
+func holdTLSKey() {
+	if heldTLSKey == "" {
+		heldTLSKey = os.Getenv("TLS_KEY")
+	}
+}
+
 var secretKeys = map[string]bool{
 	"AUTH_TOKEN":              true,
 	"XAI_API_KEY":             true,
@@ -71,6 +91,7 @@ func scrubbedEnvironMarker(env []string, token, marker string) []string {
 }
 
 func unsetSecrets(token string) {
+	holdTLSKey()
 	for _, kv := range os.Environ() {
 		k, v, ok := strings.Cut(kv, "=")
 		if !ok || !dropEnv(k, v, token) {

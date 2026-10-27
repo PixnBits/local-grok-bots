@@ -244,6 +244,8 @@ func (a *App) execTool(ctx context.Context, bot store.Bot, name string, args map
 }
 
 func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args map[string]any) (string, error) {
+	turnPol := a.effPol(bot.ID)
+
 	switch name {
 	case "list_bots":
 		bots, err := a.st.ListBots()
@@ -328,6 +330,7 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		if err != nil {
 			return "", err
 		}
+		a.notePermCallback()
 		return mustJSON(map[string]any{"id": created.ID, "name": created.Name}), nil
 	case "update_bot":
 		who := strArg(args, "id")
@@ -468,7 +471,7 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			timerMu.Unlock()
 		}()
 		ghSock, ghRepos := "", []string(nil)
-		author, email, aerr := github.CommitAuthor(current.Name, a.policy.GitHub.AuthorName, a.policy.GitHub.AuthorEmail)
+		author, email, aerr := github.CommitAuthor(current.Name, turnPol.GitHub.AuthorName, turnPol.GitHub.AuthorEmail)
 		if aerr != nil {
 			author, email = "", ""
 		}
@@ -481,14 +484,14 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 				px = opened
 				defer px.Close()
 				ghSock = px.Sock()
-				ghRepos = a.policy.EffectiveGitHubRepos(current.GitHubAllow)
+				ghRepos = turnPol.EffectiveGitHubRepos(current.GitHubAllow)
 				a.noteGitHubSock(current.ID, ghSock)
 				defer a.noteGitHubSock(current.ID, "")
 			}
 		}
 		gate := &gitHubGate{px: px}
 		a.observeProtectBaseline()
-		protect := a.shellProtect()
+		protect := a.shellProtectBot(current.ID)
 		binds := a.cfg.BuildBinds
 		if granted(current.Grants, "build") {
 			var blocked []sandbox.Event
@@ -514,7 +517,7 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			GitAuthorEmail:  email,
 			GitAuthorRefuse: aerr != nil,
 			OnPushStart: func() {
-				armShell(a.policy.EffectivePromptTimeout() + 15*time.Second)
+				armShell(turnPol.EffectivePromptTimeout() + 15*time.Second)
 			},
 			OnPush: func(pctx context.Context, cwd string, pushArgs []string) sandbox.PushResult {
 				return a.handleGitPush(pctx, ctx, current, gate, cwd, pushArgs)

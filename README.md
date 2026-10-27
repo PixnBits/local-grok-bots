@@ -18,6 +18,12 @@ go build -o local-grok-bots ./cmd/local-grok-bots
 | `AUTH_TOKEN` | unset | If set, every route except `GET /api/health` requires `Authorization: Bearer <token>` (or the cookie from `/login?token=`). It is accepted under the name `default`. With a CLI backend and no `AUTH_TOKEN`, a token is generated at `DATA_DIR/admin-token` (0600) and used the same way; see [docs/cli-isolation.md](docs/cli-isolation.md#daemon-api) |
 | `AUTH_TOKENS_FILE` | unset | Path of a file of named access tokens, one `name:token` per line. Read at startup. SIGHUP reloads it when set, and is otherwise ignored (logged). See below. |
 | `SANDBOX_BUILD_BINDS` | unset | Colon-separated absolute paths. With the `build` grant, each path is a read-only bind in the shell jail. |
+| `TLS_CERT` | unset | PEM certificate for HTTPS on the existing listener. Set with `TLS_KEY`. `[daemon]` `tls_*` in policy replaces both. See [docs/voice.md](docs/voice.md) |
+| `TLS_KEY` | unset | PEM private key paired with `TLS_CERT` |
+| `TLS_SELF_SIGNED` | unset | `1` writes `DATA_DIR/tls/cert.pem` and `key.pem` mode 0600. Not combined with `TLS_CERT` |
+| `WHISPER_BIN` | unset | Absolute path of a local whisper.cpp CLI. Set with `WHISPER_MODEL`. `POST /api/stt` stays disabled until `[voice] enabled = true` |
+| `WHISPER_MODEL` | unset | Absolute path of the local whisper model |
+| `PERM_CALLBACK_ADDR` | `127.0.0.1:0` | Loopback address for the Claude MCP permission callback. Opened only when that transport has a bot |
 
 `AUTH_TOKENS_FILE` adds named tokens to the same gate as `AUTH_TOKEN`. Blank lines and lines whose first character after ASCII space, tab, and line-ending trim is `#` are ignored. A name is 1–64 characters from `[A-Za-z0-9._-]`. The token is the remainder of the line after the first `:`, trimmed, at least 32 characters, and each byte must be printable ASCII (`0x21`–`0x7E`: no spaces, control bytes, or non-ASCII). Only ASCII spaces, tabs and line endings are trimmed; any other character is part of the token and must be printable ASCII. Generate one with `openssl rand -hex 32`. The name `default` is reserved. `AUTH_TOKEN`, or the generated admin token, joins the set under that name, and a file entry named `default` is refused even when both are unset. Duplicate names or duplicate tokens, including a copy of the default token, refuse startup. A file that is empty, or that contains only blank lines and comments, refuses startup.
 

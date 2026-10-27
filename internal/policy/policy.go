@@ -191,6 +191,51 @@ type Policy struct {
 	githubLocalBad   bool
 	githubManagedBad bool
 
+	// Voice is local speech-to-text. Off unless a policy file sets enabled.
+	// Numeric limits of zero mean unset; Effective* applies the default, then
+	// the managed ceiling. Ceilings are zero when managed policy set none.
+	VoiceEnabled       bool
+	VoiceMaxAudio      int
+	VoiceMaxAudioSet   bool
+	VoiceMaxBody       int64
+	VoiceMaxBodySet    bool
+	VoiceMaxPerHour    int
+	VoiceMaxPerHourSet bool
+	// local* is the policy.toml value. managed*Set means the managed file
+	// replaced that key, so a ceiling warning is not repeated.
+	localVoiceAudio, localVoiceBody int64
+	localVoicePerHour               int
+	localVoiceAudioSet              bool
+	localVoiceBodySet               bool
+	localVoicePerHourSet            bool
+	managedVoiceAudioSet            bool
+	managedVoiceBodySet             bool
+	managedVoicePerHourSet          bool
+	MaxVoiceAudio                   int
+	MaxVoiceBody                    int64
+	MaxVoicePerHour                 int
+	// WhisperBin and WhisperModel are absolute paths. HasWhisper means
+	// policy replaced WHISPER_BIN and WHISPER_MODEL.
+	WhisperBin     string
+	WhisperModel   string
+	HasWhisper     bool
+	managedWhisper bool
+	// TLS is the daemon listener certificate. HasTLS means policy replaced
+	// TLS_CERT, TLS_KEY, and TLS_SELF_SIGNED as one setting.
+	TLSCert       string
+	TLSKey        string
+	TLSSelfSigned bool
+	HasTLS        bool
+	managedTLS    bool
+	// PermCallbackAddr is the loopback plain-HTTP permission callback.
+	// HasPermCallback means policy replaced PERM_CALLBACK_ADDR.
+	PermCallbackAddr    string
+	HasPermCallback     bool
+	managedPermCallback bool
+	// AllowedHosts are extra names accepted for the speech route.
+	// Empty means only the built-in names. The list is fixed at startup.
+	AllowedHosts []string
+
 	managedBind  bool
 	managedHost  bool
 	managedModel bool
@@ -199,11 +244,17 @@ type Policy struct {
 // Options selects the files and the user-level environment to compare
 // against managed settings.
 type Options struct {
-	Path           string
-	ManagedPath    string
-	EnvBind        string
-	EnvOllamaURL   string
-	EnvOllamaModel string
+	Path             string
+	ManagedPath      string
+	EnvBind          string
+	EnvOllamaURL     string
+	EnvOllamaModel   string
+	EnvTLSCert       string
+	EnvTLSKey        string
+	EnvTLSSelfSigned string
+	EnvWhisperBin    string
+	EnvWhisperModel  string
+	EnvPermCallback  string
 }
 
 // Defaults is the built-in policy: Ollama, daemon jail on, CLI allowed only
@@ -343,6 +394,31 @@ func (p *Policy) noteEnvOverride(opts Options) {
 	if p.HasOllamaModel && opts.EnvOllamaModel != "" && opts.EnvOllamaModel != p.OllamaModel {
 		p.Warnings = append(p.Warnings, fmt.Sprintf("OLLAMA_MODEL overridden by policy model %s", p.OllamaModel))
 	}
+	if p.HasTLS && tlsEnvDiffers(p, opts) {
+		p.Warnings = append(p.Warnings, "TLS_CERT, TLS_KEY, and TLS_SELF_SIGNED overridden by policy")
+	}
+	if p.HasWhisper && opts.EnvWhisperBin != "" && opts.EnvWhisperBin != p.WhisperBin {
+		p.Warnings = append(p.Warnings, fmt.Sprintf("WHISPER_BIN overridden by policy bin %s", p.WhisperBin))
+	}
+	if p.HasWhisper && opts.EnvWhisperModel != "" && opts.EnvWhisperModel != p.WhisperModel {
+		p.Warnings = append(p.Warnings, fmt.Sprintf("WHISPER_MODEL overridden by policy model %s", p.WhisperModel))
+	}
+	if p.HasPermCallback && opts.EnvPermCallback != "" && opts.EnvPermCallback != p.PermCallbackAddr {
+		p.Warnings = append(p.Warnings, fmt.Sprintf("PERM_CALLBACK_ADDR overridden by policy %s", p.PermCallbackAddr))
+	}
+}
+
+func tlsEnvDiffers(p *Policy, opts Options) bool {
+	if opts.EnvTLSCert != "" && opts.EnvTLSCert != p.TLSCert {
+		return true
+	}
+	if opts.EnvTLSKey != "" && opts.EnvTLSKey != p.TLSKey {
+		return true
+	}
+	if opts.EnvTLSSelfSigned != "" && (opts.EnvTLSSelfSigned == "1") != p.TLSSelfSigned {
+		return true
+	}
+	return false
 }
 
 func (p *Policy) conflicts(opts Options) error {
@@ -356,6 +432,19 @@ func (p *Policy) conflicts(opts Options) error {
 		{"BIND_ADDR", opts.EnvBind, p.Bind, p.managedBind},
 		{"OLLAMA_URL", opts.EnvOllamaURL, p.OllamaHost, p.managedHost},
 		{"OLLAMA_MODEL", opts.EnvOllamaModel, p.OllamaModel, p.managedModel},
+		{"TLS_CERT", opts.EnvTLSCert, p.TLSCert, p.managedTLS},
+		{"TLS_KEY", opts.EnvTLSKey, p.TLSKey, p.managedTLS},
+		{"WHISPER_BIN", opts.EnvWhisperBin, p.WhisperBin, p.managedWhisper},
+		{"WHISPER_MODEL", opts.EnvWhisperModel, p.WhisperModel, p.managedWhisper},
+		{"PERM_CALLBACK_ADDR", opts.EnvPermCallback, p.PermCallbackAddr, p.managedPermCallback},
+	}
+	if p.managedTLS && opts.EnvTLSSelfSigned != "" && (opts.EnvTLSSelfSigned == "1") != p.TLSSelfSigned {
+		checks = append(checks, item{
+			name: "TLS_SELF_SIGNED",
+			env:  opts.EnvTLSSelfSigned,
+			got:  strconv.FormatBool(p.TLSSelfSigned),
+			set:  true,
+		})
 	}
 	var msgs []string
 	for _, c := range checks {
@@ -1142,10 +1231,16 @@ type document struct {
 	Managed  managedDoc  `toml:"managed" json:"managed"`
 	Tools    toolsDoc    `toml:"tools" json:"tools"`
 	GitHub   *githubDoc  `toml:"github" json:"github"`
+	Voice    voiceDoc    `toml:"voice" json:"voice"`
 }
 
 type daemonDoc struct {
-	Bind *string `toml:"bind" json:"bind"`
+	Bind             *string   `toml:"bind" json:"bind"`
+	TLSCert          *string   `toml:"tls_cert" json:"tls_cert"`
+	TLSKey           *string   `toml:"tls_key" json:"tls_key"`
+	TLSSelfSigned    *bool     `toml:"tls_self_signed" json:"tls_self_signed"`
+	PermCallbackAddr *string   `toml:"perm_callback_addr" json:"perm_callback_addr"`
+	AllowedHosts     *[]string `toml:"allowed_hosts" json:"allowed_hosts"`
 }
 
 type backendDoc struct {
@@ -1229,7 +1324,10 @@ type securityDoc struct {
 }
 
 type managedDoc struct {
-	Path *string `toml:"managed_path" json:"managed_path"`
+	Path                    *string `toml:"managed_path" json:"managed_path"`
+	MaxVoiceAudioSeconds    *int    `toml:"max_voice_audio_seconds" json:"max_voice_audio_seconds"`
+	MaxVoiceBodyBytes       *int64  `toml:"max_voice_body_bytes" json:"max_voice_body_bytes"`
+	MaxVoiceRequestsPerHour *int    `toml:"max_voice_requests_per_hour" json:"max_voice_requests_per_hour"`
 }
 
 // flexText accepts a TOML/JSON string or number for turn_timeout.
@@ -1553,6 +1651,15 @@ func (p *Policy) apply(doc document, trusted bool) error {
 		return err
 	}
 	p.takeGitHub(doc.GitHub, trusted)
+	if err := p.applyDaemonExtra(doc.Daemon, trusted); err != nil {
+		return err
+	}
+	if err := p.applyVoice(doc.Voice, trusted); err != nil {
+		return err
+	}
+	if err := p.applyVoiceCeilings(doc.Managed, trusted); err != nil {
+		return err
+	}
 	if doc.Managed.Path != nil {
 		v := strings.TrimSpace(*doc.Managed.Path)
 		if v != "" && !filepath.IsAbs(v) {
@@ -1828,6 +1935,7 @@ func (p *Policy) warnClampedCeilings() {
 	if p.localRetriesSet && !p.managedRetriesSet && p.MaxOllamaStallRetriesSet && p.localRetries > p.MaxOllamaStallRetries {
 		p.Warnings = append(p.Warnings, fmt.Sprintf("ollama.stall_retries %d lowered to managed max_stall_retries %d", p.localRetries, p.MaxOllamaStallRetries))
 	}
+	p.warnVoiceCeilings()
 }
 
 // shortDuration is the warning form: 5m, 1h30m, 45s.

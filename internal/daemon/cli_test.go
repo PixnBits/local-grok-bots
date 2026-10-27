@@ -29,11 +29,11 @@ func TestCLIResumeAndScheduledPrompt(t *testing.T) {
 		return model.ChatResponse{}, nil
 	}})
 	app.rtMu.Lock()
-	app.policy = policy.Policy{
+	app.setPol(policy.Policy{
 		Backend: "claude", CLIPermitted: true, DaemonJail: false,
 		TimersEnabled: true, Idle: time.Hour, Imminent: 2 * time.Minute,
 		ConflictPolicy: "refuse",
-	}
+	})
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Ada", "description": "local"}, "")
@@ -113,10 +113,10 @@ func TestCLIIdleKillKeepsSession(t *testing.T) {
 	t.Setenv("LGB_CHILD", filepath.Join(dir, "child"))
 	app := newApp(t, dir, nil)
 	app.rtMu.Lock()
-	app.policy = policy.Policy{
+	app.setPol(policy.Policy{
 		Backend: "claude", CLIPermitted: true, TimersEnabled: true,
 		Idle: 20 * time.Millisecond, Imminent: 2 * time.Minute,
-	}
+	})
 	app.rtMu.Unlock()
 	bot, err := app.st.CreateBot("Ada", "local", nil, "user")
 	if err != nil {
@@ -192,7 +192,7 @@ func TestCLITruncatedStreamIsInterrupted(t *testing.T) {
 	t.Setenv("LGB_CLI_MODE", "trunc")
 	app := newApp(t, dir, nil)
 	app.rtMu.Lock()
-	app.policy = policy.Policy{Backend: "grok", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute}
+	app.setPol(policy.Policy{Backend: "grok", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute})
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Bea", "description": "g"}, "")
@@ -234,7 +234,7 @@ func TestCLIPermissionPromptNeedsTTY(t *testing.T) {
 	app := newApp(t, dir, nil)
 	app.cliTTY = func() bool { return false }
 	app.rtMu.Lock()
-	app.policy = policy.Policy{Backend: "claude", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute}
+	app.setPol(policy.Policy{Backend: "claude", CLIPermitted: true, TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute})
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Dee", "description": "p"}, "")
@@ -514,10 +514,10 @@ func TestOllamaModelAllowList(t *testing.T) {
 		return model.ChatResponse{Content: "nope"}, nil
 	}})
 	app.rtMu.Lock()
-	app.policy = policy.Policy{
+	app.setPol(policy.Policy{
 		Backend: "ollama", CLIPermitted: true, DaemonJail: true, TimersEnabled: true,
 		OllamaModels: []string{"llama3.1"},
-	}
+	})
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Cam", "description": "o"}, "")

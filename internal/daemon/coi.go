@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/PixnBits/local-grok-bots/internal/coi"
+	"github.com/PixnBits/local-grok-bots/internal/config"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
 )
@@ -23,23 +24,37 @@ func (a *App) coiCounter() *coi.HourCap {
 	return a.coiCap
 }
 
+func loadPolicyOptions(path string) policy.Options {
+	return policy.Options{
+		Path:             path,
+		ManagedPath:      os.Getenv("MANAGED_POLICY"),
+		EnvBind:          os.Getenv("BIND_ADDR"),
+		EnvOllamaURL:     os.Getenv("OLLAMA_URL"),
+		EnvOllamaModel:   os.Getenv("OLLAMA_MODEL"),
+		EnvTLSCert:       os.Getenv("TLS_CERT"),
+		EnvTLSKey:        config.CurrentTLSKey(),
+		EnvTLSSelfSigned: os.Getenv("TLS_SELF_SIGNED"),
+		EnvWhisperBin:    os.Getenv("WHISPER_BIN"),
+		EnvWhisperModel:  os.Getenv("WHISPER_MODEL"),
+		EnvPermCallback:  os.Getenv("PERM_CALLBACK_ADDR"),
+	}
+}
+
 func (a *App) policyNow() (policy.Policy, error) {
 	if a == nil {
 		return policy.Policy{}, errors.New("policy is not available")
 	}
-	pol, err := policy.Load(policy.Options{
-		Path:           a.cfg.PolicyPath,
-		ManagedPath:    os.Getenv("MANAGED_POLICY"),
-		EnvBind:        os.Getenv("BIND_ADDR"),
-		EnvOllamaURL:   os.Getenv("OLLAMA_URL"),
-		EnvOllamaModel: os.Getenv("OLLAMA_MODEL"),
-	})
+	gen := a.nextGen()
+	pol, err := policy.Load(loadPolicyOptions(a.cfg.PolicyPath))
 	if err != nil {
+		a.failVoice(gen)
 		return pol, err
 	}
 	if err := checkPathOverlaps(a.cfg, pol); err != nil {
+		a.failVoice(gen)
 		return policy.Policy{}, err
 	}
+	a.consider(gen, pol)
 	return pol, nil
 }
 
@@ -72,8 +87,8 @@ func (r *lgbRun) execCOI(ctx context.Context, args []string) (int, string) {
 		name = name[:64]
 	}
 	rest := append([]string(nil), args[1:]...)
-	pol, err := r.a.policyNow()
-	if err != nil || (strings.TrimSpace(r.a.cfg.PolicyPath) != "" && !pol.Loaded) {
+	pol, ok := r.a.secretPol(r.bot.ID)
+	if !ok {
 		r.auditCOI(name, rest, coi.StatusDenied, "policy is not available", "", nil, 0, false)
 		return 1, "coi: policy is not available"
 	}

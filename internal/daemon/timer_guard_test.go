@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"strings"
 	"testing"
 	"time"
@@ -12,8 +13,8 @@ import (
 func cliTimerApp(t *testing.T) (*App, store.Bot) {
 	t.Helper()
 	app, bot := timerApp(t)
-	app.policy.Backend = "claude"
-	app.policy.CLIPermitted = true
+	app.editPol(func(p *policy.Policy) { p.Backend = "claude" })
+	app.editPol(func(p *policy.Policy) { p.CLIPermitted = true })
 	return app, bot
 }
 
@@ -111,10 +112,10 @@ func TestOllamaTimerUnchangedUnlessPolicy(t *testing.T) {
 		t.Fatalf("ollama help mentions a floor: %v\n%s", err, help)
 	}
 
-	app.policy.LGBMinTimerSet = true
-	app.policy.LGBMinTimer = 2 * time.Minute
-	app.policy.LGBMaxSchedSet = true
-	app.policy.LGBMaxSchedPerHour = 4
+	app.editPol(func(p *policy.Policy) { p.LGBMinTimerSet = true })
+	app.editPol(func(p *policy.Policy) { p.LGBMinTimer = 2 * time.Minute })
+	app.editPol(func(p *policy.Policy) { p.LGBMaxSchedSet = true })
+	app.editPol(func(p *policy.Policy) { p.LGBMaxSchedPerHour = 4 })
 	other, err := app.st.CreateBot("Other", "", nil, "user")
 	if err != nil {
 		t.Fatal(err)
@@ -127,10 +128,10 @@ func TestOllamaTimerUnchangedUnlessPolicy(t *testing.T) {
 	}
 
 	app, bot = cliTimerApp(t)
-	app.policy.LGBMinTimerSet = true
-	app.policy.LGBMinTimer = 0
-	app.policy.LGBMaxSchedSet = true
-	app.policy.LGBMaxSchedPerHour = 0
+	app.editPol(func(p *policy.Policy) { p.LGBMinTimerSet = true })
+	app.editPol(func(p *policy.Policy) { p.LGBMinTimer = 0 })
+	app.editPol(func(p *policy.Policy) { p.LGBMaxSchedSet = true })
+	app.editPol(func(p *policy.Policy) { p.LGBMaxSchedPerHour = 0 })
 	if err := setEvery(t, app, bot, "1s"); err != nil {
 		t.Fatalf("cli opt-out: %v", err)
 	}

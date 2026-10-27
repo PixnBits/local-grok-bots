@@ -9,5 +9,6 @@ import "os"
 func ReexecIfNeeded() {
 	heldAuth = os.Getenv("AUTH_TOKEN")
 	heldTokensFile = os.Getenv("AUTH_TOKENS_FILE")
+	holdTLSKey()
 	unsetSecrets(heldAuth)
 }
