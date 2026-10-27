@@ -6,6 +6,23 @@ authentication as the other `/api` routes. `GET /api/health` stays open.
 There is no remote speech service. A missing binary, a missing model, or an
 unset pair returns 503 and does not call anything else.
 
+`GET /api/stt/status` uses the same authentication as `POST /api/stt`.
+The JSON body is exactly two booleans and nothing else:
+
+```json
+{"enabled": true, "available": true}
+```
+
+`enabled` is true when voice is on in the current policy snapshot and that
+snapshot is not blocked. `available` is true when `enabled` is true, a
+transcriber is configured, and the protected-path snapshot has not tripped.
+The handler reads the snapshot already in the process. It does not load
+policy again for the request. `Cache-Control` is `no-store`. The body does
+not include paths, versions, engine names, or limits.
+
+A `POST /api/stt` may send `X-STT-Partial: 1`. The handler treats that
+request the same as any other transcription.
+
 The request body is raw PCM: 16 kHz, mono, signed 16-bit little-endian.
 `Content-Type` is `application/octet-stream`.
 A success response is JSON `{"text":"..."}`. The transcript is the response
@@ -188,3 +205,34 @@ The callback accepts only `POST /api/mcp/permission` and
 the main listener is plain HTTP, MCP keeps using that listener's origin.
 While it is HTTPS, MCP uses the callback origin, which is empty until the
 listener is up.
+
+## Composer
+
+The composer shows a microphone when the message field is empty, Send when
+the field has text, and Stop while a run is active. While the microphone is
+listening, that button is a pressed stop-dictation control. At a narrow
+width the voice controls have a 44px hit area. Tab order is the message
+field, the voice controls, Stop, then Send.
+
+Browser dictation runs only in on-device mode. The page starts recognition
+only when on-device recognition for the chosen language is already
+available. If a one-time language pack can be downloaded, the page explains
+that and downloads it only after the reader agrees. Any other result does
+not start browser recognition. The page then posts 16 kHz mono PCM to
+`POST /api/stt` when `GET /api/stt/status` says recognition is available.
+Live words appear in the field during dictation. Interim words are not
+announced one by one.
+
+Speech-recognition failures are plain sentences. 403 says recognition is
+turned off on this computer. 415 says that audio format is not supported.
+429 says recognition is busy. 408 says recognition timed out. 503 says
+recognition is not available right now. Any other failure uses one generic
+sentence. Status codes are not shown. Listening, stopped, transcribing,
+errors, and voice mode on or off are announced in one visually hidden
+polite status region.
+
+Voice mode listens, sends the utterance, speaks the reply, and listens
+again. Ending voice mode stops the microphone, recognition, and speech.
+Spoken replies are a setting that defaults to on, and they play only in
+voice mode. Speech uses a voice that is local to the device. If none is
+available, the reply stays on screen and nothing is spoken.
