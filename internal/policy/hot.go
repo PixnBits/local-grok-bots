@@ -160,6 +160,9 @@ func RestartKeys(start, fresh Policy) []string {
 	if !reflect.DeepEqual(start.AllowedHosts, fresh.AllowedHosts) {
 		keys = append(keys, "allowed_hosts")
 	}
+	if start.AllowInsecureLAN != fresh.AllowInsecureLAN {
+		keys = append(keys, "allow_insecure_lan")
+	}
 	sort.Strings(keys)
 	if keys == nil {
 		keys = []string{}
@@ -173,6 +176,9 @@ func ValidHostName(h string) error {
 		return fmt.Errorf("allowed_hosts entry %q is not a host name", h)
 	}
 	if ip := net.ParseIP(h); ip != nil {
+		if !acceptableHostIP(ip, h) {
+			return fmt.Errorf("allowed_hosts entry %q is not a host name", h)
+		}
 		return nil
 	}
 	if strings.ContainsAny(h, ":[]") {
@@ -181,7 +187,8 @@ func ValidHostName(h string) error {
 	if len(h) > 253 {
 		return fmt.Errorf("allowed_hosts entry %q is not a host name", h)
 	}
-	for _, lab := range strings.Split(h, ".") {
+	labs := strings.Split(h, ".")
+	for _, lab := range labs {
 		if lab == "" || len(lab) > 63 || lab[0] == '-' || lab[len(lab)-1] == '-' {
 			return fmt.Errorf("allowed_hosts entry %q is not a host name", h)
 		}
@@ -191,7 +198,30 @@ func ValidHostName(h string) error {
 			}
 		}
 	}
+	last := labs[len(labs)-1]
+	digits := last != ""
+	for _, c := range last {
+		if c < '0' || c > '9' {
+			digits = false
+			break
+		}
+	}
+	if digits {
+		return fmt.Errorf("allowed_hosts entry %q is not a host name", h)
+	}
 	return nil
+}
+
+// acceptableHostIP keeps loopback, private, and global unicast addresses.
+// Unspecified, multicast, broadcast, and IPv4-mapped forms are rejected.
+func acceptableHostIP(ip net.IP, raw string) bool {
+	if ip == nil || ip.IsUnspecified() || ip.IsMulticast() || ip.Equal(net.IPv4bcast) {
+		return false
+	}
+	if ip.To4() != nil && strings.Contains(raw, ":") {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsGlobalUnicast()
 }
 
 // NormalizeHosts checks each entry. nil in is nil out.

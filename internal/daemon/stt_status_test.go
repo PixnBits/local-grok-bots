@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -132,4 +134,65 @@ func TestSTTStatusSnapshot(t *testing.T) {
 	app.latchProtect(marker, "protected path changed: "+marker)
 	code, hdr, raw = getSTTStatus(t, srv.URL, "voice-test-token")
 	assertSTTStatus(t, code, hdr, raw, true, false, append(hidden, marker)...)
+}
+
+func TestSTTStatusOrigin(t *testing.T) {
+	dir := t.TempDir()
+	bin, model := writeWhisperScript(t, dir)
+	app := newVoiceApp(t, voicePolicy(true, bin, model, 240, 1<<20, 60))
+	srv := serve(t, app)
+	code, hdr, raw := getSTTStatus(t, srv.URL, "voice-test-token")
+	assertSTTStatus(t, code, hdr, raw, true, true)
+
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/api/stt/status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer voice-test-token")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusForbidden || !strings.Contains(string(b), "forbidden") {
+		t.Fatalf("cross-site %d %s", res.StatusCode, b)
+	}
+
+	req, err = http.NewRequest(http.MethodGet, srv.URL+"/api/stt/status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer voice-test-token")
+	req.Host = "other.example:9"
+	res, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ = io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("host %d %s", res.StatusCode, b)
+	}
+}
+
+func TestSTTStatusFiles(t *testing.T) {
+	dir := t.TempDir()
+	bin, model := writeWhisperScript(t, dir)
+	missing := filepath.Join(dir, "missing-bin")
+	app := newVoiceApp(t, voicePolicy(true, missing, model, 240, 1<<20, 60))
+	srv := serve(t, app)
+	code, hdr, raw := getSTTStatus(t, srv.URL, "voice-test-token")
+	assertSTTStatus(t, code, hdr, raw, true, false)
+
+	good := newVoiceApp(t, voicePolicy(true, bin, model, 240, 1<<20, 60))
+	goodSrv := serve(t, good)
+	code, hdr, raw = getSTTStatus(t, goodSrv.URL, "voice-test-token")
+	assertSTTStatus(t, code, hdr, raw, true, true)
+	if err := os.Chmod(model, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	code, hdr, raw = getSTTStatus(t, goodSrv.URL, "voice-test-token")
+	assertSTTStatus(t, code, hdr, raw, true, false, model)
 }

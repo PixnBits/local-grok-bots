@@ -123,6 +123,54 @@ func TestSTTMissingPathStaysOutOfResponse(t *testing.T) {
 	}
 }
 
+func TestSTTPartialSkipsQuota(t *testing.T) {
+	dir := t.TempDir()
+	bin, model := writeWhisperScript(t, dir)
+	app := newVoiceApp(t, voicePolicy(true, bin, model, 240, 1<<20, 1))
+	pcm := make([]byte, 3200)
+	partial := func(r *http.Request) { r.Header.Set("X-STT-Partial", "1") }
+	for i := 0; i < 3; i++ {
+		code, out, _ := callSTT(app, nil, bytes.NewReader(pcm), partial)
+		if code != http.StatusOK || out["text"] != sttPhrase {
+			t.Fatalf("partial %d %v", code, out)
+		}
+	}
+	if n := len(app.voiceHits.hits["default"]); n != 0 {
+		t.Fatalf("partials counted %d", n)
+	}
+	code, out, _ := callSTT(app, nil, bytes.NewReader(pcm), nil)
+	if code != http.StatusOK || out["text"] != sttPhrase {
+		t.Fatalf("final %d %v", code, out)
+	}
+	if n := len(app.voiceHits.hits["default"]); n != 1 {
+		t.Fatalf("final counted %d", n)
+	}
+	code, out, _ = callSTT(app, nil, bytes.NewReader(pcm), nil)
+	if code != http.StatusTooManyRequests || out["error"] != "speech recognition rate limit exceeded" || out["reason"] != "limit" {
+		t.Fatalf("limit %d %v", code, out)
+	}
+	code, out, _ = callSTT(app, nil, bytes.NewReader(pcm), partial)
+	if code != http.StatusTooManyRequests || out["reason"] != "limit" {
+		t.Fatalf("partial over limit %d %v", code, out)
+	}
+	if n := len(app.voiceHits.hits["default"]); n != 1 {
+		t.Fatalf("over-limit counted %d", n)
+	}
+
+	busy := newVoiceApp(t, voicePolicy(true, bin, model, 240, 1<<20, 60))
+	busy.sttSlot = make(chan struct{}, 1)
+	busy.sttSlot <- struct{}{}
+	busy.sttBusyTimer = func(time.Duration) (<-chan time.Time, func()) {
+		ch := make(chan time.Time)
+		close(ch)
+		return ch, func() {}
+	}
+	code, out, _ = callSTT(busy, nil, bytes.NewReader(pcm), partial)
+	if code != http.StatusTooManyRequests || out["reason"] != "busy" {
+		t.Fatalf("busy %d %v", code, out)
+	}
+}
+
 func TestSTTQuotaSkipsRejected(t *testing.T) {
 	dir := t.TempDir()
 	bin, model := writeWhisperScript(t, dir)

@@ -265,6 +265,9 @@ func TestSuppliedTLSKeyRefused(t *testing.T) {
 	if err := os.WriteFile(link, []byte("key"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(link, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := app.tlsFiles(); err == nil || !strings.Contains(err.Error(), "TLS_KEY") || !strings.Contains(err.Error(), "readable") {
 		t.Fatalf("mode %v", err)
 	}
@@ -288,6 +291,9 @@ func TestListeningAfterTLS(t *testing.T) {
 	if err := os.WriteFile(key, []byte("key"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(key, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	app.cfg.TLSCert = cert
 	app.cfg.TLSKey = key
 	buf := &safeBuf{}
@@ -298,6 +304,37 @@ func TestListeningAfterTLS(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "listening on") {
 		t.Fatalf("logged listen before tls: %s", buf.String())
+	}
+}
+
+func TestSelfSignedMismatchRegenerates(t *testing.T) {
+	app := newApp(t, "", nil)
+	app.cfg.TLSSelfSigned = true
+	cert, key, err := app.tlsFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherDir := t.TempDir()
+	otherKey := filepath.Join(otherDir, "key.pem")
+	if err := GenerateSelfSigned(filepath.Join(otherDir, "cert.pem"), otherKey, time.Now(), app.cfg.BindAddr, nil); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(otherKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(key, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := reuseSelfSigned(cert, key, time.Now(), app.cfg.BindAddr, nil)
+	if err != nil || ok {
+		t.Fatalf("mismatched pair reused ok=%v err=%v", ok, err)
+	}
+	if _, _, err := app.tlsFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tls.LoadX509KeyPair(cert, key); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -445,7 +482,7 @@ func TestOriginAllowedOnListenerPort(t *testing.T) {
 			t.Fatalf("port %s", entry)
 		}
 	}
-	if app.originAllowed(originReq("bad_name!:8080", "http://bad_name!:8080", false)) {
+	if app.originAllowed(originReq("bad_name!:8080", "http://"+"bad_name!:8080", false)) {
 		t.Fatal("accepted bad_name!")
 	}
 }

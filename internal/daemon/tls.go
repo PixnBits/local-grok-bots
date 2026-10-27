@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
@@ -103,7 +104,8 @@ func checkSuppliedTLSKey(path, name string) error {
 
 // reuseSelfSigned reports whether cert and key are regular files that can be kept.
 // Symlinks are not followed. A certificate with fewer than 30 days left, one
-// that cannot be parsed, or one whose names differ, is not reused.
+// that cannot be parsed, one whose names differ, or a key that does not match
+// the certificate, is not reused.
 func reuseSelfSigned(cert, key string, now time.Time, bind string, hosts []string) (bool, error) {
 	if !regularFile(cert) || !regularFile(key) {
 		return false, nil
@@ -112,6 +114,9 @@ func reuseSelfSigned(cert, key string, now time.Time, bind string, hosts []strin
 		return false, nil
 	}
 	if !selfSignedNamesMatch(cert, bind, hosts) {
+		return false, nil
+	}
+	if _, err := tls.LoadX509KeyPair(cert, key); err != nil {
 		return false, nil
 	}
 	if err := tightenTLSFiles(cert, key); err != nil {
