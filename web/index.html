@@ -976,6 +976,31 @@ window.addEventListener("storage", function (ev) {
     background: var(--text); color: var(--bg); font-size: 12px; line-height: 16px; padding: 4px 8px; border-radius: 6px; white-space: nowrap;
   }
   .stop-btn:hover .tip, .stop-btn:focus-visible .tip { display: block; }
+  .voice-bar, .voice-settings, .voice-preview, .voice-prompt {
+    margin: 0 0 8px; border-radius: 14px; padding: 8px 12px; font-size: 13px; line-height: 18px;
+  }
+  .voice-bar {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    background: var(--accent-soft); color: var(--accent-text);
+  }
+  .voice-settings, .voice-preview, .voice-prompt { background: var(--surface-2); color: var(--text); }
+  .voice-settings { display: grid; gap: 8px; border: 1px solid var(--border); }
+  .voice-settings label { display: flex; gap: 8px; align-items: center; }
+  .voice-settings input[type="checkbox"] { width: auto; flex: none; margin: 0; }
+  .voice-preview .interim { color: var(--muted); font-style: italic; }
+  .voice-prompt { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .voice-prompt p { margin: 0; flex: 1 1 100%; }
+  .voice-msg { margin: 0 0 8px; min-height: 0; font-size: 13px; line-height: 18px; color: var(--danger-text); }
+  .voice-bar[hidden], .voice-settings[hidden], .voice-preview[hidden], .voice-prompt[hidden], .voice-msg[hidden] { display: none !important; }
+  #mic-btn, #voice-btn, #voice-cfg {
+    width: 36px; height: 36px; min-width: 36px; min-height: 36px; padding: 0; border: 0; border-radius: 99px;
+    display: inline-grid; place-items: center; position: relative; flex: none;
+    background: transparent; color: var(--text);
+  }
+  #mic-btn[hidden], #voice-btn[hidden], #voice-cfg[hidden], #send-btn[hidden] { display: none !important; }
+  #mic-btn.is-listening { background: var(--danger); color: var(--on-danger); }
+  #voice-btn[aria-pressed="true"] { background: var(--accent); color: var(--on-accent); }
+  #voice-end { height: 32px; min-height: 32px; padding: 0 10px; border-radius: 99px; background: var(--surface); color: var(--text); }
   .sr { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
   .routine { display: grid; gap: 4px; padding: 8px 0; border-top: 1px solid var(--border); }
   .routine .meta { color: var(--muted); font-size: 12px; }
@@ -1077,6 +1102,18 @@ window.addEventListener("storage", function (ev) {
     #send-btn.is-empty::before { background: var(--surface-3); }
     .stop-btn svg, #send-btn svg, .stop-btn .stop-spin { position: relative; z-index: 1; }
     .stop-btn .tip { display: none !important; }
+    #mic-btn, #voice-btn, #voice-cfg {
+      width: 44px; height: 44px; min-width: 44px; min-height: 44px; background: transparent;
+    }
+    #mic-btn::before, #voice-btn::before, #voice-cfg::before {
+      content: ""; position: absolute; width: 36px; height: 36px; border-radius: 99px;
+    }
+    #mic-btn.is-listening { color: var(--on-danger); background: transparent; }
+    #mic-btn.is-listening::before { background: var(--danger); }
+    #voice-btn[aria-pressed="true"] { color: var(--on-accent); background: transparent; }
+    #voice-btn[aria-pressed="true"]::before { background: var(--accent); }
+    #mic-btn svg, #voice-btn svg, #voice-cfg svg { position: relative; z-index: 1; }
+    .voice-settings label:has(#vs-tts), .voice-settings input:not([type="checkbox"]), .voice-settings select { min-height: 44px; }
     .sheet-close, .solo-back, .thread-back { min-width: 44px; }
     #view-profile .solo-bar { overflow: hidden; min-width: 0; }
     #view-profile .solo-id { overflow: hidden; }
@@ -1188,11 +1225,28 @@ window.addEventListener("storage", function (ev) {
         <div class="note" id="run-note" hidden></div>
         <div id="a11y-status" class="sr" aria-live="polite"></div>
         <div class="composer-wrap">
+        <div class="voice-bar" id="voice-bar" hidden><span id="voice-state">Listening</span><button type="button" id="voice-end">End voice</button></div>
+        <div class="voice-settings" id="voice-settings" hidden>
+          <label><input type="checkbox" id="vs-tts"> Speak replies in voice mode</label>
+          <label>Language <input type="text" id="vs-lang" autocomplete="off" aria-label="Recognition language"></label>
+          <label>Voice <select id="vs-voice" aria-label="Speaking voice"></select></label>
+        </div>
+        <div class="voice-prompt" id="voice-prompt" hidden>
+          <p id="voice-prompt-text"></p>
+          <button type="button" id="voice-pack-yes">Download language pack</button>
+          <button type="button" id="voice-pack-no">Not now</button>
+        </div>
+        <div class="voice-preview" id="voice-preview" hidden><span class="final" id="vp-final"></span> <span class="interim" id="vp-interim"></span></div>
+        <p class="voice-msg" id="voice-msg" hidden></p>
+        <div id="voice-status" class="sr" role="status" aria-live="polite"></div>
         <form class="composer" id="composer" hidden>
           <textarea id="composer-input" rows="1" placeholder="Message" aria-label="Message"></textarea>
           <div class="composer-slot">
+            <button type="button" id="voice-cfg" aria-label="Voice settings" aria-expanded="false" title="Voice settings"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M4 8h16M4 16h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="9" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="15" cy="16" r="2.2" fill="none" stroke="currentColor" stroke-width="2"/></svg></button>
+            <button type="button" id="mic-btn" aria-label="Dictate" aria-pressed="false" title="Dictate"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><rect x="9" y="3" width="6" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="2"/><path d="M6 11a6 6 0 0 0 12 0M12 17v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+            <button type="button" id="voice-btn" aria-label="Voice mode" aria-pressed="false" title="Voice mode"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M4 10v4M8 7v10M12 4v16M16 8v8M20 11v2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
             <button type="button" class="stop-btn" id="stop-btn" hidden aria-label="Stop run"><svg class="stop-sq" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><rect x="7" y="7" width="10" height="10" rx="1" fill="currentColor"/></svg><span class="stop-spin" aria-hidden="true"></span><span class="tip">Stop · Esc</span></button>
-            <button class="primary is-empty" type="submit" id="send-btn" aria-label="Send"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M12 19V5M6 11l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+            <button class="primary is-empty" type="submit" id="send-btn" hidden aria-label="Send"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M12 19V5M6 11l6-6 6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
           </div>
         </form>
         <p class="composer-hint" id="composer-hint" hidden></p>
@@ -1705,11 +1759,29 @@ function eyeOffIcon() {
   return svg;
 }
 function currentBot() { return state.bots.find(b => b.id === state.botId) || null; }
+function syncVoiceSlot(hasText) {
+  const had = document.activeElement;
+  const listening = typeof window.voiceListening === "function" && window.voiceListening();
+  const mode = typeof window.voiceModeOn === "function" && window.voiceModeOn();
+  const mic = document.getElementById("mic-btn");
+  const voice = document.getElementById("voice-btn");
+  const cfg = document.getElementById("voice-cfg");
+  if (cfg) cfg.hidden = hasText && !mode;
+  if (mic) mic.hidden = mode || (hasText && !listening);
+  if (voice) voice.hidden = hasText && !mode;
+  if (had && (had === mic || had === voice || had === cfg) && had.hidden) {
+    const send = document.getElementById("send-btn");
+    if (send && !send.hidden) send.focus(); else $("#composer-input").focus();
+  }
+}
 function syncSendEmpty() {
   const input = $("#composer-input");
   const send = $("#send-btn");
   if (!send || !input) return;
-  send.classList.toggle("is-empty", !String(input.value || "").trim());
+  const text = String(input.value || "").trim() !== "";
+  send.classList.toggle("is-empty", !text);
+  send.hidden = !text;
+  syncVoiceSlot(text);
 }
 function syncComposer() {
   const on = !!(state.botId && currentBot());
@@ -2292,6 +2364,7 @@ function goHome(push = true) {
   state.loadedFor = null;
   state.hasMore = false;
   stopStream();
+  if (window.voiceStop) window.voiceStop();
   if (push) commitLevel({ view: "bots", bot: null }, "push");
   $("#thread-name").textContent = "No bot selected";
   $("#thread-mark").hidden = true;
@@ -2343,6 +2416,7 @@ async function openBot(id, push = true) {
     return;
   }
   if (state.botId !== id) {
+    if (window.voiceStop) window.voiceStop();
     stopStream();
     state.loadedFor = null;
     closeState();
@@ -3058,15 +3132,17 @@ function fitComposer() {
   t.style.overflowY = t.scrollHeight + 2 > max ? "auto" : "hidden";
 }
 $("#composer-input").addEventListener("input", () => { fitComposer(); syncSendEmpty(); });
-async function send() {
+async function send(override) {
   const input = $("#composer-input");
-  const content = input.value.trim();
-  if (!content || !state.botId) return;
+  const fromField = typeof override !== "string";
+  const content = (fromField ? input.value : override).trim();
+  if (!content || !state.botId) return false;
   const runningBefore = !!(state.streaming || (currentBot() && currentBot().status === "running") || (state.stop && (state.stop.phase === "running" || state.stop.phase === "stopping")));
   const duringRun = state.streaming || (state.stop && state.stop.runId) || "";
   input.value = "";
   fitComposer();
   syncSendEmpty();
+  if (window.voiceOnSend) window.voiceOnSend(content);
   if (state.stopNote !== "failed") $("#run-note").hidden = true;
   try {
     const data = await api("/api/bots/" + state.botId + "/thread/messages", {
@@ -3085,8 +3161,11 @@ async function send() {
       if (noteRunStarted(state.bots, state.botId)) renderBots();
       follow(data.run_id);
     } else pollActive();
+    return true;
   } catch (err) {
     showRunError(err.message);
+    if (window.voiceOnRunEnd) window.voiceOnRunEnd("", true);
+    return false;
   }
 }
 function focusAfterTimeoutNote() {
@@ -3712,6 +3791,7 @@ async function follow(runId) {
   // Each model round's text gets its own bubble. A tool call closes the
   // current bubble, so the next round's tokens start a new one.
   let acc = "";
+  let voiceText = "";
   let bubble = null, text = null;
   const newBubble = () => {
     acc = "";
@@ -3763,6 +3843,7 @@ async function follow(runId) {
         } else if (event === "stream_reset") {
           if (typeof streamResetApplies !== "function" || streamResetApplies(payload.run_id, runId)) {
             acc = "";
+            voiceText = "";
             if (bubble && bubble.remove) bubble.remove();
             bubble = null;
             text = null;
@@ -3777,6 +3858,7 @@ async function follow(runId) {
             newBubble();
           }
           acc += payload.text || "";
+          voiceText += payload.text || "";
           renderMarkdown(acc, text);
           placeCaret(bubble, text);
           if (!bubble.parentNode) live.append(bubble);
@@ -3846,6 +3928,10 @@ async function follow(runId) {
             await refreshBot();
           }
           if (event === "done") pollActive();
+          if (window.voiceOnRunEnd) {
+            const speakFail = event !== "done" || status === "cancelled" || status === "stopped" || status === "error" || status === "timeout";
+            window.voiceOnRunEnd(speakFail ? "" : voiceText, speakFail);
+          }
           return;
         }
       }
@@ -3853,6 +3939,7 @@ async function follow(runId) {
   } catch (err) {
     if (err.name === "AbortError") return;
     setWorking(false);
+    if (window.voiceOnRunEnd) window.voiceOnRunEnd("", true);
     await loadThread();
   } finally {
     if (state.streaming === runId) {
@@ -6816,6 +6903,903 @@ async function refreshDaemon() {
     syncRetryButton();
   }
 }
+// voice-sr:begin
+async function startLocalRecognition(opts) {
+  opts = opts || {};
+  const lang = typeof opts.lang === "string" ? opts.lang : "";
+  try {
+    if (typeof window === "undefined" || typeof window.SpeechRecognition !== "function") return {fallback: true};
+    const SR = window.SpeechRecognition;
+    if (!SR.prototype || !("processLocally" in SR.prototype) || typeof SR.available !== "function") return {fallback: true};
+    const query = {langs: [lang], processLocally: true};
+    let status = await SR.available(query);
+    if (typeof opts.stale === "function" && opts.stale()) return {stale: true};
+    if (status === "downloadable" || status === "downloading") {
+      if (!opts.consent) return {needsConsent: true};
+      const installed = await SR.install(query);
+      if (installed === false) return {fallback: true};
+      status = await SR.available(query);
+      if (typeof opts.stale === "function" && opts.stale()) return {stale: true};
+    }
+    if (status !== "available") return {fallback: true};
+    if (typeof opts.stale === "function" && opts.stale()) return {stale: true};
+    const rec = new SpeechRecognition();
+    rec.processLocally = true;
+    if (rec.processLocally !== true) return {fallback: true};
+    rec.lang = lang;
+    rec.continuous = true;
+    rec.interimResults = true;
+    if (typeof opts.onresult === "function") rec.onresult = opts.onresult;
+    if (typeof opts.onerror === "function") rec.onerror = opts.onerror;
+    rec.onend = function () {
+      let restart = false;
+      try { restart = typeof opts.voiceMode === "function" && !!opts.voiceMode(); }
+      catch (err) { restart = false; }
+      if (restart) {
+        return startLocalRecognition(opts).then(function (next) {
+          if (typeof opts.onRestart === "function") {
+            try { opts.onRestart(next); } catch (err) {}
+          }
+          return next;
+        });
+      }
+      if (typeof opts.onEnd === "function") {
+        try { opts.onEnd(); } catch (err) {}
+      }
+    };
+    rec.start();
+    return {ok: true, rec: rec};
+  } catch (err) {
+    return {fallback: true};
+  }
+}
+// voice-sr:end
+// voice-tts:begin
+function speakableText(md) {
+  return String(md || "")
+    .replace(/```[\s\S]*?```/g, " (code omitted) ")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/[*_~]{1,3}([^*_~]+)[*_~]{1,3}/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+function localVoiceList(list) {
+  const out = [];
+  const all = list || [];
+  for (let i = 0; i < all.length; i++) {
+    if (all[i] && all[i].localService === true) out.push(all[i]);
+  }
+  return out;
+}
+function pickLocalVoice(list, pref, lang) {
+  const local = localVoiceList(list);
+  const want = String(pref || "");
+  for (let i = 0; i < local.length; i++) {
+    if (want && local[i].voiceURI === want) return local[i];
+  }
+  const prefix = String(lang || "").slice(0, 2).toLowerCase();
+  if (prefix) {
+    for (let i = 0; i < local.length; i++) {
+      const code = String(local[i].lang || "").toLowerCase();
+      if (code.indexOf(prefix) === 0) return local[i];
+    }
+  }
+  return local.length ? local[0] : null;
+}
+function speakWithVoice(synth, text, voice, hooks) {
+  if (!synth || typeof synth.speak !== "function" || !text || !voice || voice.localService !== true) return false;
+  if (typeof SpeechSynthesisUtterance !== "function") return false;
+  const u = new SpeechSynthesisUtterance(text);
+  u.voice = voice;
+  if (voice.lang) u.lang = voice.lang;
+  if (hooks && typeof hooks.onend === "function") u.onend = hooks.onend;
+  if (hooks && typeof hooks.onerror === "function") u.onerror = hooks.onerror;
+  synth.speak(u);
+  return true;
+}
+function speakLocal(synth, text, voices, pref, lang, hooks) {
+  const voice = pickLocalVoice(voices, pref, lang);
+  if (!voice || voice.localService !== true) return false;
+  return speakWithVoice(synth, text, voice, hooks);
+}
+// voice-tts:end
+function micErrorMessage(name) {
+  if (name === "NotAllowedError" || name === "SecurityError" || name === "not-allowed" || name === "service-not-allowed") return "Microphone access is blocked. Allow the microphone for this page in your browser's site settings, then try again.";
+  if (name === "NotFoundError" || name === "OverconstrainedError" || name === "audio-capture") return "No microphone was found. Connect one and try again.";
+  if (name === "NotReadableError") return "The microphone is in use by another app.";
+  if (name === "mic" || name === "audio") return "This browser can't record audio, so voice input isn't available here.";
+  if (name === "language-not-supported") return "On-device recognition doesn't support this language. Change it in Voice settings.";
+  return "";
+}
+function sttErrorMessage(status) {
+  const reason = arguments.length > 1 ? arguments[1] : "";
+  if (status === 403) return "Speech recognition is turned off on this computer.";
+  if (status === 415) return "That audio format isn't supported.";
+  if (status === 429 && reason === "limit") return "Speech recognition has reached its hourly limit. Try again later.";
+  if (status === 429) return "Speech recognition is busy. Try again in a moment.";
+  if (status === 408) return "Speech recognition timed out. Try again.";
+  if (status === 503) return "Speech recognition isn't available right now.";
+  return "Speech recognition didn't work. Try again.";
+}
+(function voiceInit() {
+  const KEY = "lgb.voice";
+  const STT_RATE = 16000;
+  const RMS_MIN = 0.012;
+  const HANGOVER_MS = 900;
+  const PARTIAL_MS = 1500;
+  const MAX_PARTIALS = 4;
+  const MAX_SAMPLES = STT_RATE * 240;
+  const cfg = {tts: true, lang: "", voice: ""};
+  try {
+    const saved = JSON.parse(localStorage.getItem(KEY) || "{}");
+    if (saved && typeof saved === "object") {
+      if (typeof saved.tts === "boolean") cfg.tts = saved.tts;
+      if (typeof saved.lang === "string") cfg.lang = saved.lang;
+      if (typeof saved.voice === "string") cfg.voice = saved.voice;
+    }
+  } catch (err) {}
+  const v = {
+    rec: null, cap: null, finals: "", base: "", mode: false, awaiting: false,
+    speaking: false, listeningDesired: false, consentFor: "", pendingLang: "", lastAnn: "",
+    gen: 0, starting: false, keepError: false, ending: false, voiceOff: false,
+    spanStart: 0, spanText: ""
+  };
+  function nextGen() { v.gen += 1; return v.gen; }
+  function saveCfg() {
+    try { localStorage.setItem(KEY, JSON.stringify({tts: cfg.tts, lang: cfg.lang, voice: cfg.voice})); } catch (err) {}
+  }
+  function currentLang() {
+    const typed = String(cfg.lang || "").trim();
+    if (typed) return typed;
+    return navigator.language || "en-US";
+  }
+  function announceVoice(text, force) {
+    if (!text || (!force && v.lastAnn === text)) return;
+    const n = $("#voice-status");
+    if (n) n.textContent = n.textContent === text ? text + "\u00a0" : text;
+    v.lastAnn = text;
+  }
+  function showVoiceError(text) {
+    const n = $("#voice-msg");
+    if (n) {
+      n.hidden = !text;
+      n.textContent = text || "";
+    }
+    v.errorShown = !!text;
+    if (text) announceVoice(text, true);
+  }
+  function voiceHome() {
+    const order = v.mode ? ["#voice-btn", "#composer-input"] : ["#mic-btn", "#voice-btn", "#send-btn", "#composer-input"];
+    for (let i = 0; i < order.length; i++) {
+      const n = $(order[i]);
+      if (n && !n.hidden && n.getClientRects().length) return n;
+    }
+    return $("#composer-input");
+  }
+  function rescueFocus(box) {
+    const a = document.activeElement;
+    if (box && a && box.contains(a)) voiceHome().focus();
+  }
+  function clearVoiceError() {
+    if (v.keepError) return;
+    const n = $("#voice-msg");
+    if (n) { n.hidden = true; n.textContent = ""; }
+    v.errorShown = false;
+  }
+  function showPreview(finalText, interim) {
+    const fin = $("#vp-final");
+    const mid = $("#vp-interim");
+    const box = $("#voice-preview");
+    if (fin) fin.textContent = finalText || "";
+    if (mid) mid.textContent = interim || "";
+    if (box) box.hidden = !(finalText || interim);
+  }
+  function setVoiceState(text) {
+    const n = $("#voice-state");
+    if (n) n.textContent = text || "";
+  }
+  function setMicPressed(on) {
+    const mic = $("#mic-btn");
+    if (!mic) return;
+    mic.classList.toggle("is-listening", !!on);
+    mic.setAttribute("aria-pressed", on ? "true" : "false");
+    mic.setAttribute("aria-label", on ? "Stop dictation" : "Dictate");
+    syncSendEmpty();
+  }
+  function setVoicePressed(on) {
+    const btn = $("#voice-btn");
+    if (!btn) return;
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+    btn.setAttribute("aria-label", on ? "End voice mode" : "Voice mode");
+    syncSendEmpty();
+  }
+  function rememberSpan() {
+    const input = $("#composer-input");
+    const value = input ? String(input.value || "") : "";
+    let start = value.length;
+    let end = value.length;
+    if (input && typeof input.selectionStart === "number") {
+      start = input.selectionStart;
+      end = typeof input.selectionEnd === "number" ? input.selectionEnd : start;
+    }
+    if (start < 0) start = 0;
+    if (end < start) end = start;
+    v.spanStart = start;
+    v.spanText = value.slice(start, end);
+    v.base = value;
+  }
+  function writeDictationField(finalText, interim) {
+    const input = $("#composer-input");
+    if (!input) return;
+    const spoken = (String(finalText || "") + " " + String(interim || "")).trim();
+    let value = String(input.value || "");
+    let start = v.spanStart || 0;
+    const prev = String(v.spanText || "");
+    if (prev) {
+      if (value.slice(start, start + prev.length) !== prev) {
+        const at = value.indexOf(prev);
+        if (at >= 0) start = at;
+      }
+    } else if (start > value.length) {
+      start = value.length;
+    }
+    const prefix = value.slice(0, start);
+    const suffix = value.slice(start + (value.slice(start, start + prev.length) === prev ? prev.length : 0));
+    let insert = spoken;
+    if (insert && prefix && !/\s$/.test(prefix)) insert = " " + insert;
+    if (insert && suffix && !/^\s/.test(suffix) && !/\s$/.test(insert)) insert = insert + " ";
+    input.value = prefix + insert + suffix;
+    v.spanStart = start;
+    v.spanText = insert;
+    fitComposer();
+    syncSendEmpty();
+  }
+  function showPackPrompt(lang) {
+    v.pendingLang = lang;
+    const p = $("#voice-prompt-text");
+    if (p) p.textContent = "Your browser will download a one-time " + lang + " language pack from its maker. Audio stays on this device.";
+    const box = $("#voice-prompt");
+    if (box) box.hidden = false;
+    setMicPressed(false);
+    announceVoice("A language pack download needs your OK.");
+  }
+  function cleanTranscript(text) {
+    return String(text || "").replace(/\[(BLANK_AUDIO|MUSIC|NOISE)[^\]]*\]/gi, "").replace(/\s+/g, " ").trim();
+  }
+  function delay(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+  async function loadStatus() {
+    try {
+      const headers = {};
+      if (state.token) headers.Authorization = "Bearer " + state.token;
+      const res = await fetch(base() + "/api/stt/status", {headers: headers, cache: "no-store"});
+      if (res.status === 401) { showAuth(); return null; }
+      if (!res.ok) return {enabled: false, available: false};
+      const j = await res.json();
+      return {enabled: j && j.enabled === true, available: j && j.available === true};
+    } catch (err) {
+      return {enabled: false, available: false};
+    }
+  }
+  async function daemonTranscribe(pcm, partial) {
+    const headers = {"Content-Type": "application/octet-stream"};
+    if (partial) headers["X-STT-Partial"] = "1";
+    if (state.token) headers.Authorization = "Bearer " + state.token;
+    const res = await fetch(base() + "/api/stt", {method: "POST", body: pcm, headers: headers});
+    if (res.status === 401) { showAuth(); return {error: "", auth: true, fatal: true, status: 401}; }
+    if (partial && (res.status === 429 || res.status === 408)) return {skip: true};
+    if (!res.ok) {
+      let reason = "";
+      try {
+        const j = await res.json();
+        reason = j && j.reason;
+      } catch (err) {}
+      const retry = res.status === 429 || res.status === 408;
+      return {error: sttErrorMessage(res.status, reason), retry: retry, fatal: !retry, status: res.status};
+    }
+    const j = await res.json().catch(function () { return {}; });
+    return {text: cleanTranscript(j && j.text)};
+  }
+  function frameRMS(input) {
+    let sum = 0;
+    const n = input.length || 1;
+    for (let i = 0; i < input.length; i++) sum += input[i] * input[i];
+    return Math.sqrt(sum / n);
+  }
+  function downsample(input, ratio) {
+    const n = Math.max(1, Math.floor(input.length / ratio));
+    const out = new Int16Array(n);
+    for (let i = 0; i < n; i++) {
+      let s = input[Math.floor(i * ratio)] || 0;
+      if (s > 1) s = 1;
+      else if (s < -1) s = -1;
+      out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    }
+    return out;
+  }
+  function joinPCM(chunks) {
+    let n = 0;
+    for (let i = 0; i < chunks.length; i++) n += chunks[i].length;
+    const out = new Int16Array(n);
+    let o = 0;
+    for (let i = 0; i < chunks.length; i++) {
+      out.set(chunks[i], o);
+      o += chunks[i].length;
+    }
+    return out.buffer;
+  }
+  function sampleCount(chunks) {
+    let n = 0;
+    for (let i = 0; i < chunks.length; i++) n += chunks[i].length;
+    return n;
+  }
+  function closeGraph(stream, ctx, proc) {
+    try { if (proc && proc.disconnect) proc.disconnect(); } catch (err) {}
+    try {
+      if (stream && stream.getTracks) stream.getTracks().forEach(function (t) { t.stop(); });
+    } catch (err) {}
+    try {
+      if (ctx && ctx.close) {
+        const done = ctx.close();
+        if (done && typeof done.catch === "function") done.catch(function () {});
+      }
+    } catch (err) {}
+  }
+  function sessionCurrent(gen) { return v.gen === gen && v.listeningDesired; }
+  async function startCapture(voiceMode, gen) {
+    if (gen == null) gen = v.gen;
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") throw new Error("mic");
+    if (window.isSecureContext === false) throw new Error("insecure");
+    const Ctx = window.AudioContext;
+    if (typeof Ctx !== "function") throw new Error("audio");
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true}
+    });
+    let ctx = null;
+    try { ctx = new Ctx(); } catch (err) {
+      closeGraph(stream, null, null);
+      throw err;
+    }
+    if (ctx.state === "suspended" && typeof ctx.resume === "function") await ctx.resume();
+    if (!sessionCurrent(gen)) {
+      closeGraph(stream, ctx, null);
+      return;
+    }
+    const src = ctx.createMediaStreamSource(stream);
+    const proc = ctx.createScriptProcessor(4096, 1, 1);
+    const mute = ctx.createGain();
+    mute.gain.value = 0;
+    if (!sessionCurrent(gen)) {
+      try { proc.disconnect(); } catch (err) {}
+      try { src.disconnect(); } catch (err) {}
+      try { mute.disconnect(); } catch (err) {}
+      closeGraph(stream, ctx, proc);
+      return;
+    }
+    const ratio = (ctx.sampleRate || 48000) / STT_RATE;
+    const cap = {
+      stream: stream, ctx: ctx, src: src, proc: proc, mute: mute, chunks: [],
+      speech: false, lastVoice: 0, voiceMode: !!voiceMode, busy: false,
+      partials: 0, partialText: "", gen: gen
+    };
+    v.cap = cap;
+    proc.onaudioprocess = function (ev) {
+      if (v.cap !== cap || v.gen !== gen) return;
+      const inp = ev.inputBuffer.getChannelData(0);
+      const now = (window.performance && performance.now) ? performance.now() : Date.now();
+      if (frameRMS(inp) >= RMS_MIN) {
+        cap.lastVoice = now;
+        cap.speech = true;
+      }
+      cap.chunks.push(downsample(inp, ratio));
+      if (!cap.speech && cap.chunks.length > 4) cap.chunks.shift();
+      if (sampleCount(cap.chunks) >= MAX_SAMPLES) { stopCapture(true); return; }
+      if (cap.speech && cap.voiceMode && cap.lastVoice && now - cap.lastVoice > HANGOVER_MS) stopCapture(true);
+    };
+    src.connect(proc);
+    proc.connect(mute);
+    mute.connect(ctx.destination);
+    cap.timer = setInterval(async function () {
+      if (v.cap !== cap || v.gen !== gen || !v.listeningDesired || !cap.speech || cap.busy || cap.partials >= MAX_PARTIALS) return;
+      cap.busy = true;
+      cap.partials += 1;
+      try {
+        if (v.gen !== gen || !v.listeningDesired) return;
+        const got = await daemonTranscribe(joinPCM(cap.chunks), true);
+        if (v.cap !== cap || v.gen !== gen) return;
+        if (got && got.fatal) {
+          if (got.error) showVoiceError(got.error);
+          if (cap.voiceMode) stopAll();
+          else { v.listeningDesired = false; setMicPressed(false); stopCapture(false); }
+          return;
+        }
+        if (got && !got.skip && !got.error && got.text) {
+          cap.partialText = got.text;
+          showPreview(got.text, "");
+          if (!cap.voiceMode) writeDictationField(got.text, "");
+        }
+      } catch (err) {} finally { cap.busy = false; }
+    }, PARTIAL_MS);
+  }
+  async function stopCapture(transcribe) {
+    const cap = v.cap;
+    if (!cap) return;
+    const gen = nextGen();
+    v.cap = null;
+    clearInterval(cap.timer);
+    try { cap.proc.disconnect(); } catch (err) {}
+    try { cap.src.disconnect(); } catch (err) {}
+    try { cap.mute.disconnect(); } catch (err) {}
+    try { cap.stream.getTracks().forEach(function (t) { t.stop(); }); } catch (err) {}
+    try {
+      const done = cap.ctx.close();
+      if (done && typeof done.catch === "function") done.catch(function () {});
+    } catch (err) {}
+    if (v.gen !== gen) return;
+    let text = "";
+    let failed = false;
+    if (transcribe && cap.speech) {
+      announceVoice("Transcribing");
+      showPreview(cap.partialText, "");
+      while (cap.busy) await delay(40);
+      if (v.gen !== gen) return;
+      let got = null;
+      try {
+        got = await daemonTranscribe(joinPCM(cap.chunks), false);
+      } catch (err) {
+        got = {error: sttErrorMessage(0), retry: true, fatal: false};
+      }
+      if (v.gen !== gen) return;
+      if (cap.voiceMode && got && got.retry) {
+        await delay(400);
+        if (v.gen !== gen) return;
+        try {
+          got = await daemonTranscribe(joinPCM(cap.chunks), false);
+        } catch (err) {
+          got = {error: sttErrorMessage(0), fatal: true};
+        }
+        if (got && got.retry) got.fatal = true;
+        if (v.gen !== gen) return;
+      }
+      if (got && got.error) {
+        showVoiceError(got.error);
+        failed = true;
+      } else if (got && got.fatal) {
+        failed = true;
+      } else if (got && got.text) {
+        text = got.text;
+      }
+      showPreview("", "");
+      if (cap.voiceMode && (failed || (got && got.fatal))) {
+        stopAll();
+        return;
+      }
+      if (cap.voiceMode) {
+        if (!v.mode) return;
+        if (!text) { resumeListening(); return; }
+        v.finals = text;
+        endUtterance();
+        return;
+      }
+      if (text) writeDictationField(text, "");
+      v.finals = "";
+      setMicPressed(false);
+    } else {
+      showPreview("", "");
+      if (!cap.voiceMode) setMicPressed(false);
+      if (transcribe && cap.voiceMode && v.mode && v.listeningDesired && v.gen === gen) {
+        resumeListening();
+        return;
+      }
+      if (cap.voiceMode) return;
+    }
+    if (!v.errorShown) announceVoice("Dictation stopped");
+  }
+  function stopRec() {
+    v.listeningDesired = false;
+    const r = v.rec;
+    if (!r) { nextGen(); return; }
+    if (!v.mode && !v.ending) onRecEnd();
+    nextGen();
+    v.rec = null;
+    try { r.stop(); } catch (err) {}
+  }
+  function onRecResult(e) {
+    let interim = "";
+    const results = e && e.results;
+    if (!results) return;
+    const from = typeof e.resultIndex === "number" ? e.resultIndex : 0;
+    for (let i = from; i < results.length; i++) {
+      const res = results[i];
+      const bit = res && res[0] ? String(res[0].transcript || "") : "";
+      if (res && res.isFinal) v.finals = (v.finals + " " + bit).trim();
+      else interim += bit;
+    }
+    showPreview(v.finals, interim);
+    if (!v.mode) writeDictationField(v.finals, interim);
+    if (v.mode) {
+      clearTimeout(v.endT);
+      if (v.finals && !interim) v.endT = setTimeout(endUtterance, HANGOVER_MS);
+    }
+  }
+  function onRecError(e) {
+    const code = e && e.error;
+    if (code === "no-speech" || code === "aborted") return;
+    showVoiceError(micErrorMessage(code) || sttErrorMessage(0));
+    if (code === "not-allowed" || code === "service-not-allowed" || code === "language-not-supported") {
+      v.listeningDesired = false;
+      if (v.mode) stopAll();
+      else setMicPressed(false);
+    }
+  }
+  function onRecEnd() {
+    if (v.mode) return;
+    v.rec = null;
+    v.listeningDesired = false;
+    const text = String(v.finals || "").trim();
+    v.finals = "";
+    if (text) writeDictationField(text, "");
+    showPreview("", "");
+    setMicPressed(false);
+    if (!v.errorShown) announceVoice("Dictation stopped");
+  }
+  function recognitionOpts(gen) {
+    const box = {rec: null};
+    function current() { return v.gen === gen && v.rec === box.rec; }
+    return {
+      box: box,
+      lang: currentLang(),
+      consent: v.consentFor === currentLang(),
+      stale: function () { return v.gen !== gen || !v.listeningDesired; },
+      voiceMode: function () { return current() && v.mode && v.listeningDesired; },
+      onresult: function (e) { if (!current()) return; onRecResult(e); },
+      onerror: function (e) { if (!current()) return; onRecError(e); },
+      onEnd: function () { if (!current()) return; onRecEnd(); },
+      onRestart: function (next) {
+        if (v.gen !== gen) {
+          if (next && next.rec) { try { next.rec.abort(); } catch (err) {} }
+          return;
+        }
+        if (!v.mode || !v.listeningDesired) {
+          if (next && next.rec) { try { next.rec.abort(); } catch (err) {} }
+          return;
+        }
+        if (next && next.ok && next.rec) {
+          v.rec = next.rec;
+          box.rec = next.rec;
+          return;
+        }
+        v.rec = null;
+        box.rec = null;
+        if (next && next.needsConsent) { showPackPrompt(currentLang()); return; }
+        beginDaemonOrUnavailable(true, gen);
+      }
+    };
+  }
+  async function beginBrowserOrDaemon(voiceMode) {
+    if (!v.keepError) clearVoiceError();
+    const gen = nextGen();
+    v.listeningDesired = true;
+    v.starting = true;
+    try {
+      const opts = recognitionOpts(gen);
+      const result = await startLocalRecognition(opts);
+      if ((result && result.stale) || v.gen !== gen || !v.listeningDesired) {
+        if (result && result.rec) { try { result.rec.abort(); } catch (err) {} }
+        return;
+      }
+      if (result && result.needsConsent) {
+        v.listeningDesired = false;
+        showPackPrompt(currentLang());
+        return;
+      }
+      if (result && result.ok) {
+        v.rec = result.rec;
+        opts.box.rec = result.rec;
+        if (voiceMode) { setVoicePressed(true); setVoiceState("Listening"); }
+        else setMicPressed(true);
+        if (!v.keepError) announceVoice("Listening");
+        showPreview("", "Listening…");
+        return;
+      }
+      await beginDaemonOrUnavailable(voiceMode, gen);
+    } finally {
+      if (v.gen === gen) v.starting = false;
+    }
+  }
+  async function beginDaemonOrUnavailable(voiceMode, gen) {
+    if (gen == null) gen = v.gen;
+    const status = await loadStatus();
+    if (v.gen !== gen || !v.listeningDesired) return;
+    if (!status) return;
+    if (!status.available) {
+      v.listeningDesired = false;
+      setMicPressed(false);
+      showVoiceError(status.enabled ? sttErrorMessage(503) : sttErrorMessage(403));
+      if (voiceMode) stopAll();
+      return;
+    }
+    try {
+      await startCapture(!!voiceMode, gen);
+      if (v.gen !== gen || !v.listeningDesired) return;
+      if (voiceMode) { setVoicePressed(true); setVoiceState("Listening"); }
+      else setMicPressed(true);
+      if (!v.keepError) announceVoice("Listening");
+      showPreview("", "Listening…");
+    } catch (err) {
+      v.listeningDesired = false;
+      const why = err && (err.name === "Error" ? err.message : err.name);
+      showVoiceError(window.isSecureContext === false ? "The microphone needs a secure page." : (micErrorMessage(why) || "The microphone isn't available."));
+      if (voiceMode) stopAll();
+      else setMicPressed(false);
+    }
+  }
+  async function resumeListening() {
+    if (!v.mode || v.awaiting || v.rec || v.cap || v.starting) return;
+    if (v.errorShown) v.keepError = true;
+    setVoiceState("Listening");
+    if (!v.keepError) announceVoice("Listening");
+    await beginBrowserOrDaemon(true);
+  }
+  async function endUtterance() {
+    const text = String(v.finals || "").trim();
+    v.finals = "";
+    if (!text) {
+      if (v.mode && !v.awaiting) resumeListening();
+      return;
+    }
+    if (v.awaiting) return;
+    v.awaiting = true;
+    v.listeningDesired = false;
+    stopRec();
+    showPreview("", "");
+    setVoiceState("Thinking");
+    const ok = await send(text);
+    if (!v.mode) { v.awaiting = false; return; }
+    if (!ok || !state.streaming) {
+      v.awaiting = false;
+      resumeListening();
+    }
+  }
+  function speakReply(text, then) {
+    const synth = window.speechSynthesis;
+    const spoken = speakableText(text);
+    const voices = synth && typeof synth.getVoices === "function" ? synth.getVoices() : [];
+    if (!synth || !spoken) return false;
+    const voice = pickLocalVoice(voices, cfg.voice, currentLang());
+    if (!voice) {
+      showVoiceError("No on-device voice is available, so this reply stays on screen.");
+      return false;
+    }
+    try { synth.cancel(); } catch (err) {}
+    v.speaking = true;
+    const ok = speakWithVoice(synth, spoken, voice, {
+      onend: function () { v.speaking = false; if (then) then(); },
+      onerror: function () { v.speaking = false; if (then) then(); }
+    });
+    if (!ok) v.speaking = false;
+    return ok;
+  }
+  function stopAll() {
+    const mode = v.mode;
+    const dict = !mode && !!(v.rec || v.cap);
+    v.ending = true;
+    v.mode = false;
+    v.listeningDesired = false;
+    v.starting = false;
+    v.awaiting = false;
+    nextGen();
+    clearTimeout(v.endT);
+    if (mode && v.rec) v.rec.onend = null;
+    stopRec();
+    stopCapture(false);
+    v.ending = false;
+    const synth = window.speechSynthesis;
+    if (synth) { try { synth.cancel(); } catch (err) {} }
+    v.speaking = false;
+    v.finals = "";
+    showPreview("", "");
+    const prompt = $("#voice-prompt");
+    const bar = $("#voice-bar");
+    const act = document.activeElement;
+    const lost = !!act && ((bar && bar.contains(act)) || (prompt && prompt.contains(act)));
+    if (prompt) prompt.hidden = true;
+    if (bar) bar.hidden = true;
+    setMicPressed(false);
+    setVoicePressed(false);
+    if (lost) voiceHome().focus();
+    if (v.errorShown) return;
+    if (mode) announceVoice("Voice mode off");
+    else if (dict) announceVoice("Dictation stopped");
+  }
+  async function toggleMic() {
+    if (v.voiceOff) { showVoiceError(sttErrorMessage(403)); return; }
+    if (v.mode) return;
+    if (v.starting || v.rec || v.cap) {
+      v.listeningDesired = false;
+      v.starting = false;
+      if (v.rec) stopRec();
+      else if (v.cap) await stopCapture(true);
+      else nextGen();
+      return;
+    }
+    const synth = window.speechSynthesis;
+    if (synth) { try { synth.cancel(); } catch (err) {} }
+    v.finals = "";
+    v.keepError = false;
+    rememberSpan();
+    await beginBrowserOrDaemon(false);
+  }
+  async function toggleMode() {
+    if (v.voiceOff) { showVoiceError(sttErrorMessage(403)); return; }
+    if (v.mode || v.starting) { v.keepError = false; clearVoiceError(); stopAll(); return; }
+    if (!state.botId) { showVoiceError("Choose a bot first."); return; }
+    if (v.rec || v.cap) {
+      v.listeningDesired = false;
+      stopRec();
+      await stopCapture(false);
+    }
+    v.keepError = false;
+    v.mode = true;
+    v.awaiting = false;
+    v.finals = "";
+    v.base = "";
+    const bar = $("#voice-bar");
+    if (bar) bar.hidden = false;
+    setVoicePressed(true);
+    setVoiceState("Listening");
+    announceVoice("Voice mode on");
+    await beginBrowserOrDaemon(true);
+  }
+  function renderSettings() {
+    const tts = $("#vs-tts");
+    const lang = $("#vs-lang");
+    const sel = $("#vs-voice");
+    if (tts) tts.checked = cfg.tts !== false;
+    if (lang && document.activeElement !== lang) lang.value = cfg.lang || currentLang();
+    if (!sel) return;
+    const synth = window.speechSynthesis;
+    const local = localVoiceList(synth && typeof synth.getVoices === "function" ? synth.getVoices() : []);
+    sel.replaceChildren();
+    const auto = document.createElement("option");
+    auto.value = "";
+    auto.textContent = local.length ? "Auto (on-device)" : "No on-device voices";
+    sel.append(auto);
+    for (let i = 0; i < local.length; i++) {
+      const o = document.createElement("option");
+      o.value = local[i].voiceURI || "";
+      o.textContent = (local[i].name || "Voice") + " (" + (local[i].lang || "") + ")";
+      sel.append(o);
+    }
+    sel.value = cfg.voice;
+    if (sel.value !== cfg.voice) sel.value = "";
+  }
+  window.voiceListening = function () { return !v.mode && !!(v.rec || v.cap); };
+  window.voiceModeOn = function () { return !!v.mode; };
+  window.voiceStop = stopAll;
+  window.voiceOnSend = function () {
+    const synth = window.speechSynthesis;
+    if (synth) { try { synth.cancel(); } catch (err) {} }
+    v.speaking = false;
+  };
+  window.voiceOnRunEnd = function (text, failed) {
+    if (!v.mode) return;
+    v.awaiting = false;
+    if (failed || !text || cfg.tts === false) {
+      resumeListening();
+      return;
+    }
+    v.listeningDesired = false;
+    setVoiceState("Speaking");
+    announceVoice("Speaking");
+    const spoke = speakReply(text, function () {
+      if (v.mode) resumeListening();
+    });
+    if (!spoke && v.mode) resumeListening();
+  };
+  const cfgBtn = $("#voice-cfg");
+  if (cfgBtn) cfgBtn.addEventListener("click", function () {
+    const s = $("#voice-settings");
+    if (!s) return;
+    const opening = !!s.hidden;
+    s.hidden = !opening;
+    cfgBtn.setAttribute("aria-expanded", opening ? "true" : "false");
+    if (opening) renderSettings();
+  });
+  const ttsBox = $("#vs-tts");
+  if (ttsBox) ttsBox.addEventListener("change", function () {
+    cfg.tts = !!ttsBox.checked;
+    saveCfg();
+  });
+  const langBox = $("#vs-lang");
+  if (langBox) langBox.addEventListener("change", async function () {
+    cfg.lang = langBox.value.trim();
+    v.consentFor = "";
+    saveCfg();
+    if (!(v.rec || v.cap || v.mode)) return;
+    const mode = v.mode;
+    v.listeningDesired = false;
+    v.starting = false;
+    v.keepError = false;
+    stopRec();
+    await stopCapture(false);
+    v.finals = "";
+    if (mode) {
+      v.mode = true;
+      const bar = $("#voice-bar");
+      if (bar) bar.hidden = false;
+    }
+    await beginBrowserOrDaemon(mode);
+  });
+  const voiceSel = $("#vs-voice");
+  if (voiceSel) voiceSel.addEventListener("change", function () {
+    cfg.voice = voiceSel.value;
+    saveCfg();
+  });
+  const synth = window.speechSynthesis;
+  if (synth && typeof synth.addEventListener === "function") {
+    synth.addEventListener("voiceschanged", function () {
+      const s = $("#voice-settings");
+      if (s && !s.hidden) renderSettings();
+    });
+  }
+  const mic = $("#mic-btn");
+  if (mic) mic.addEventListener("click", function () { toggleMic(); });
+  const modeBtn = $("#voice-btn");
+  if (modeBtn) modeBtn.addEventListener("click", function () { toggleMode(); });
+  const endBtn = $("#voice-end");
+  if (endBtn) endBtn.addEventListener("click", function () { v.keepError = false; clearVoiceError(); stopAll(); });
+  const yes = $("#voice-pack-yes");
+  if (yes) yes.addEventListener("click", async function () {
+    const lang = v.pendingLang || currentLang();
+    v.consentFor = lang;
+    v.keepError = false;
+    const box = $("#voice-prompt");
+    rescueFocus(box);
+    if (box) box.hidden = true;
+    await beginBrowserOrDaemon(!!v.mode);
+  });
+  const no = $("#voice-pack-no");
+  if (no) no.addEventListener("click", async function () {
+    const box = $("#voice-prompt");
+    rescueFocus(box);
+    if (box) box.hidden = true;
+    v.consentFor = "";
+    v.listeningDesired = true;
+    await beginDaemonOrUnavailable(!!v.mode);
+  });
+  function applyVoiceAvailability(status) {
+    const off = !status || status.enabled !== true;
+    v.voiceOff = off;
+    [["#mic-btn", "Dictate"], ["#voice-btn", "Voice mode"]].forEach(function (pair) {
+      const n = $(pair[0]);
+      if (!n) return;
+      if (off) {
+        n.setAttribute("aria-disabled", "true");
+        n.title = "Speech recognition is turned off on this computer.";
+      } else {
+        n.removeAttribute("aria-disabled");
+        if (n.title === "Speech recognition is turned off on this computer.") n.title = pair[1];
+      }
+    });
+  }
+  let voiceStatusOnce = null;
+  function prefetchVoiceStatus() {
+    if (voiceStatusOnce) return voiceStatusOnce;
+    const headers = {};
+    if (state.token) headers.Authorization = "Bearer " + state.token;
+    voiceStatusOnce = fetch(base() + "/api/stt/status", {headers: headers, cache: "no-store"})
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (j) { if (j && j.enabled === false) applyVoiceAvailability(j); return j; })
+      .catch(function () { return null; });
+    return voiceStatusOnce;
+  }
+  prefetchVoiceStatus();
+  syncSendEmpty();
+})();
 state.stop = freshStop();
 ensureHistory();
 paintHealth();

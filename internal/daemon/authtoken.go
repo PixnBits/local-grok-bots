@@ -31,21 +31,24 @@ var adminTokenTempPath = func(dir string) (string, error) {
 	return filepath.Join(dir, adminTokenFile+".tmp-"+hex.EncodeToString(buf[:])), nil
 }
 
-// ensureAdminToken returns the token the HTTP API requires. AUTH_TOKEN wins.
-// With a CLI backend and no AUTH_TOKEN, a token is generated once and kept
-// 0600 in DATA_DIR, so a CLI's shell on this host can't drive the API
-// (approve its own permissions, edit bots). Ollama-only setups keep the old
-// behavior: no token unless one is set. A file that exists but is unusable
-// is an error; it is not replaced.
+// ensureAdminToken returns the token the HTTP API requires.
+// An existing admin-token file is always read. AUTH_TOKEN wins when it
+// is set. A new file is written only for a CLI backend with no AUTH_TOKEN.
+// A file that exists but is unusable is an error; it is not replaced.
 func ensureAdminToken(dataDir, envToken string, usesCLI bool) (token, path string, err error) {
+	path = filepath.Join(dataDir, adminTokenFile)
+	t, ok, rerr := readAdminToken(path)
+	if rerr != nil {
+		return "", "", rerr
+	}
+	if ok {
+		if envToken != "" {
+			return envToken, "", nil
+		}
+		return t, path, nil
+	}
 	if envToken != "" || !usesCLI {
 		return envToken, "", nil
-	}
-	path = filepath.Join(dataDir, adminTokenFile)
-	if t, ok, rerr := readAdminToken(path); rerr != nil {
-		return "", "", rerr
-	} else if ok {
-		return t, path, nil
 	}
 	if err := prepareAdminDir(dataDir); err != nil {
 		return "", "", err

@@ -216,9 +216,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Every start, including an existing admin token, AUTH_TOKEN, and
-	// Ollama-only. ensureAdminToken returns before this check when a token
-	// is already present.
+	// Every start checks DATA_DIR before the admin token file is read.
 	if err := prepareAdminDir(cfg.DataDir); err != nil {
 		return nil, err
 	}
@@ -228,7 +226,9 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	}
 	if tokPath != "" {
 		cfg.AuthToken = tok
-		fmt.Fprintf(os.Stderr, "local-grok-bots: a CLI backend is enabled, so the API requires a token; it is in %s. Open /login?token=<token> once per browser.\n", tokPath)
+		if pol.UsesCLI() {
+			fmt.Fprintf(os.Stderr, "local-grok-bots: a CLI backend is enabled, so the API requires a token; it is in %s. Open /login?token=<token> once per browser.\n", tokPath)
+		}
 	}
 	fileTokens, err := readAuthTokenSet(cfg, cfg.AuthToken)
 	if err != nil {
@@ -241,12 +241,19 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	if logw == nil {
 		logw = os.Stderr
 	}
-	if cfg.AuthToken == "" && len(fileTokens) == 0 && !loopbackBind(cfg.BindAddr) {
-		fmt.Fprint(logw, bindWarn)
+	if err := refuseNonLoopback(cfg, pol, len(fileTokens) > 0); err != nil {
+		return nil, err
+	}
+	insecureLAN := !loopbackBind(cfg.BindAddr) && !tlsReady(cfg) && pol.AllowInsecureLAN
+	if insecureLAN {
+		fmt.Fprint(logw, insecureLANWarn)
 	}
 	aud, err := audit.Open(pol.AuditLog)
 	if err != nil {
 		return nil, err
+	}
+	if insecureLAN {
+		aud.Write(map[string]any{"action": "insecure_lan_start"})
 	}
 	st, err := store.Open(cfg.DBPath())
 	if err != nil {
@@ -414,9 +421,34 @@ func (a *App) writeStartup(format string, args ...any) {
 	fmt.Fprintf(w, format, args...)
 }
 
-// bindWarn is the one startup line for a non-loopback bind when neither
-// AUTH_TOKEN, the generated admin token, nor AUTH_TOKENS_FILE supplies a token.
-const bindWarn = "local-grok-bots: WARN: the API is reachable beyond this machine without AUTH_TOKEN or AUTH_TOKENS_FILE; set AUTH_TOKEN, AUTH_TOKENS_FILE, or a loopback BIND_ADDR\n"
+// insecureLANWarn is the startup line when a non-loopback listener is plain HTTP
+// because allow_insecure_lan is set.
+const insecureLANWarn = "local-grok-bots: WARN: plain HTTP on a non-loopback address because allow_insecure_lan is set\n"
+
+// refuseNonLoopback rejects a bind that is not loopback when no token is
+// configured, and when TLS is not configured unless allow_insecure_lan is set.
+func refuseNonLoopback(cfg config.Config, pol policy.Policy, fileTokens bool) error {
+	if loopbackBind(cfg.BindAddr) {
+		return nil
+	}
+	if cfg.AuthToken == "" && !fileTokens {
+		return fmt.Errorf("refusing to start: BIND_ADDR is not loopback and no token is configured; set AUTH_TOKEN or AUTH_TOKENS_FILE, or use a loopback BIND_ADDR")
+	}
+	if cfg.AuthToken != "" && !printableToken(cfg.AuthToken) {
+		return fmt.Errorf("refusing to start: BIND_ADDR is not loopback and AUTH_TOKEN is shorter than 32 printable characters")
+	}
+	if !tlsReady(cfg) && !pol.AllowInsecureLAN {
+		return fmt.Errorf("refusing to start: BIND_ADDR is not loopback and TLS is not configured; set TLS_CERT and TLS_KEY or tls_self_signed, or allow_insecure_lan, or use a loopback BIND_ADDR")
+	}
+	return nil
+}
+
+func tlsReady(cfg config.Config) bool {
+	if cfg.TLSSelfSigned {
+		return true
+	}
+	return cfg.TLSCert != "" && cfg.TLSKey != ""
+}
 
 // loopbackBind reports whether addr's host is 127.0.0.0/8, ::1, or localhost.
 // An empty host is not loopback.

@@ -52,6 +52,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/bots/{id}/dms", a.handleDMs)
 	mux.HandleFunc("GET /api/dms/{bot_a}/{bot_b}", a.handleDMThread)
 	mux.HandleFunc("GET /api/log", a.handleLog)
+	mux.HandleFunc("GET /api/stt/status", a.handleSTTStatus)
 	mux.HandleFunc("POST /api/stt", a.handleSTT)
 	mux.HandleFunc("GET /login", a.handleLogin)
 	mux.HandleFunc("GET /", a.handleIndex)
@@ -63,6 +64,10 @@ func (a *App) Handler() http.Handler {
 
 func (a *App) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if a.remoteHostDenied(r) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+			return
+		}
 		// A live lgb token or MCP permission token must not decide a card,
 		// including when the admin token is unset. Other routes stay 401.
 		if permissionDecisionPath(r) || pendingPermissionsPath(r) || durablePermissionPath(r) {
@@ -84,6 +89,30 @@ func (a *App) withAuth(next http.Handler) http.Handler {
 		}
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 	})
+}
+
+// remoteHostDenied applies the host allowlist on a non-loopback bind.
+// Loopback binds keep the previous behaviour. The body is a generic 403.
+func (a *App) remoteHostDenied(r *http.Request) bool {
+	if a == nil || r == nil || r.URL == nil || loopbackBind(a.cfg.BindAddr) {
+		return false
+	}
+	path := r.URL.Path
+	if path != "/login" && !strings.HasPrefix(path, "/api/") {
+		return false
+	}
+	host, port, ok := splitListenHost(r.Host)
+	if !ok || !hostAllowed(host, a.pol().AllowedHosts, a.bindHost()) {
+		return true
+	}
+	listenPort := a.listenerPort()
+	if listenPort == "" {
+		listenPort = port
+	}
+	if listenPort == "" || port != listenPort {
+		return true
+	}
+	return false
 }
 
 // mcpPermissionOpen is the permission MCP route. The path token and the

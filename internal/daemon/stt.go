@@ -213,6 +213,17 @@ func (g *voiceGate) allow(user string, limit int, now time.Time) bool {
 	return ok
 }
 
+// room reports whether another accepted request would fit in the hour.
+// It does not reserve a slot.
+func (g *voiceGate) room(user string, limit int, now time.Time) bool {
+	if limit <= 0 {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return len(g.kept(user, now)) < limit
+}
+
 func (g *voiceGate) begin(user string, limit int, now time.Time) (uint64, bool) {
 	if limit <= 0 {
 		return 0, false
@@ -461,6 +472,45 @@ func (a *App) transcribeTimeout() time.Duration {
 	return sttTranscribeTimeout
 }
 
+// handleSTTStatus reports the voice snapshot for this process.
+// enabled is voice on in policy and not blocked. available also needs a
+// transcriber, files that pass the exec-time checks, and a protect snapshot
+// that has not tripped. The body is those two booleans. Paths, versions,
+// and engine names stay off it.
+func (a *App) handleSTTStatus(w http.ResponseWriter, r *http.Request) {
+	if sttCrossSite(r) || !a.originAllowed(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
+	snap := a.voicePolicy()
+	enabled := snap.enabled
+	available := enabled && snap.stt != nil && a.protectBlockReason() == "" && sttFilesReady(snap.stt)
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]bool{
+		"enabled":   enabled,
+		"available": available,
+	})
+}
+
+// sttFilesReady is true when a whisper pair exists and passes the exec-time
+// file checks. Other transcribers are ready when they are non-nil.
+func sttFilesReady(stt STT) bool {
+	w, ok := stt.(WhisperCLI)
+	if !ok {
+		return stt != nil
+	}
+	if w.Bin == "" || w.Model == "" {
+		return false
+	}
+	if _, err := os.Lstat(w.Bin); err != nil {
+		return false
+	}
+	if _, err := os.Lstat(w.Model); err != nil {
+		return false
+	}
+	return voiceExecProblem(w.Bin, w.Model, w.binKey(), w.modelKey(), os.Geteuid()) == ""
+}
+
 func (a *App) handleSTT(w http.ResponseWriter, r *http.Request) {
 	pol := a.voicePolicy()
 	who := a.requestActor(r)
@@ -479,11 +529,28 @@ func (a *App) handleSTT(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 		return
 	}
-	id, ok := a.voiceHits.begin(who, pol.perHour, a.voiceNow())
-	if !ok {
-		a.auditSTT(who, 0, 0, http.StatusTooManyRequests, false)
-		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "speech recognition rate limit exceeded"})
-		return
+	partial := strings.TrimSpace(r.Header.Get("X-STT-Partial")) == "1"
+	var id uint64
+	if partial {
+		if !a.voiceHits.room(who, pol.perHour, a.voiceNow()) {
+			a.auditSTT(who, 0, 0, http.StatusTooManyRequests, false)
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{
+				"error":  "speech recognition rate limit exceeded",
+				"reason": "limit",
+			})
+			return
+		}
+	} else {
+		var ok bool
+		id, ok = a.voiceHits.begin(who, pol.perHour, a.voiceNow())
+		if !ok {
+			a.auditSTT(who, 0, 0, http.StatusTooManyRequests, false)
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{
+				"error":  "speech recognition rate limit exceeded",
+				"reason": "limit",
+			})
+			return
+		}
 	}
 	accepted := false
 	defer func() { a.voiceHits.finish(who, id, accepted) }()
@@ -546,11 +613,15 @@ func (a *App) handleSTT(w http.ResponseWriter, r *http.Request) {
 	release, waitCode := a.acquireSTT(ctx)
 	if release == nil {
 		msg := sttBusyMsg
+		body := map[string]string{"error": msg}
 		if waitCode == http.StatusRequestTimeout {
 			msg = sttWaitEndedMsg
+			body["error"] = msg
+		} else {
+			body["reason"] = "busy"
 		}
 		a.auditSTT(who, len(pcm), dur, waitCode, true)
-		writeJSON(w, waitCode, map[string]string{"error": msg})
+		writeJSON(w, waitCode, body)
 		return
 	}
 	defer release()

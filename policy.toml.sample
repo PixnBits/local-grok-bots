@@ -16,6 +16,10 @@ bind = "127.0.0.1:8787"
 # tls_cert = "/var/lib/local-grok-bots/tls/cert.pem"
 # tls_key = "/var/lib/local-grok-bots/tls/key.pem"
 # tls_self_signed = false
+# A bind that is not loopback needs a token (AUTH_TOKEN or
+# AUTH_TOKENS_FILE) and TLS. allow_insecure_lan is a discouraged opt-out
+# for plain HTTP on that bind. It is fixed at startup. Leave it unset.
+# allow_insecure_lan = false
 # Plain HTTP origin for the Claude MCP permission tool. Loopback IP and a
 # port only (127.0.0.1 or ::1). localhost, 0.0.0.0, and :: are rejected.
 # The socket is opened only when the backend is claude, claude_transport
@@ -23,8 +27,9 @@ bind = "127.0.0.1:8787"
 # perm_callback_addr = "127.0.0.1:0"
 # Extra names for POST /api/stt, besides localhost, 127.0.0.1, ::1, and
 # the bind address. Host names or IP addresses only. No scheme, port,
-# wildcard, or brackets. Fixed at startup. See docs/voice.md.
-# allowed_hosts = ["voice.example"]
+# wildcard, or brackets. Those names are also written into the self-signed
+# certificate. Fixed at startup. See docs/voice.md.
+# allowed_hosts = ["192.0.2.10", "100.64.0.10", "myhost.tailnet-example.ts.net"]
 
 # systemd unit should run as a non-root system user.
 # user = "local-grok-bots"

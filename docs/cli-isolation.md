@@ -627,7 +627,8 @@ either. On macOS the names are unset; original startup memory is unchanged.
 Without the token a CLI's shell can't call the API, including
 `POST .../permissions/{id}`. `GET /api/health` stays open, as does the
 per-run MCP permission route, which only asks the broker. Ollama-only
-setups need no token unless `AUTH_TOKEN` is set.
+setups need no token unless `AUTH_TOKEN` is set or `DATA_DIR/admin-token`
+already exists. An existing admin-token file is read on every start.
 
 ## Voice, TLS, and the permission callback
 
@@ -663,6 +664,7 @@ enabled = false
 # localhost, other 127/8 addresses, and wildcards fail.
 # perm_callback_addr = "127.0.0.1:0"
 # allowed_hosts adds names for POST /api/stt. Host names or IPs only.
+# Those names are also written into the self-signed certificate.
 # allowed_hosts = ["voice.example"]
 
 [managed]
@@ -686,9 +688,10 @@ There is no second public listener. `TLS_SELF_SIGNED=1`, or
 `tls_self_signed = true`, writes `DATA_DIR/tls/cert.pem` and `key.pem` mode
 0600, owned by the daemon user. The bytes are written to a new file in that
 directory and renamed into place. An existing pair is kept when both paths
-are regular files, the certificate parses, and at least 30 days remain.
-The names on that certificate are `localhost`, `127.0.0.1`, `::1`, and the
-bind IP when the bind address is one specific IP. A supplied key that is a
+are regular files, the certificate parses, at least 30 days remain, and
+the names are the same set. The names on that certificate are `localhost`,
+`127.0.0.1`, `::1`, the bind IP when the bind address is one specific IP,
+and each `allowed_hosts` entry. A supplied key that is a
 symlink or group- or other-readable refuses startup. `listening on` is
 printed after TLS setup succeeds. `POST /api/stt` status codes, the rolling
 hour (counted only for an accepted request), and the binary and model file
@@ -714,9 +717,9 @@ policy file copies only these settings onto that startup policy:
 - managed voice ceilings (`max_voice_audio_seconds`, `max_voice_body_bytes`, `max_voice_requests_per_hour`)
 - `[cli.permission]` `claude_transport`
 
-These take effect only after a restart: `backend` (and the CLI permission and token requirement that follow from it), `bind`, `tls_cert`, `tls_key`, `tls_self_signed`, `perm_callback_addr`, `audit_log`, and `allowed_hosts`. Other settings, including the Ollama host and model, permission mode, tool rules, and jail settings, also stay as they were at startup. When a read differs in one of the restart settings, the daemon logs and audits `policy_restart_required` with the setting names, once per distinct set of names. It does not log the values. A read that cannot use the file turns voice off and leaves the restart settings as they were at startup. The next successful read applies `[voice]` and `claude_transport` again.
+These take effect only after a restart: `backend` (and the CLI permission and token requirement that follow from it), `bind`, `tls_cert`, `tls_key`, `tls_self_signed`, `allow_insecure_lan`, `perm_callback_addr`, `audit_log`, and `allowed_hosts`. Other settings, including the Ollama host and model, permission mode, tool rules, and jail settings, also stay as they were at startup. When a read differs in one of the restart settings, the daemon logs and audits `policy_restart_required` with the setting names, once per distinct set of names. It does not log the values. A read that cannot use the file turns voice off and leaves the restart settings as they were at startup. The next successful read applies `[voice]` and `claude_transport` again.
 
-`POST /api/stt` allowlists `Host` and, when present, `Origin`. Built-in names are `localhost`, `127.0.0.1`, `::1`, and the listener's bind address when that address is one specific IP. `[daemon] allowed_hosts` adds names. Entries are host names or IP addresses: no scheme, port, or wildcard. An invalid entry makes the file unusable. The `Origin` port must be the listener port, and the scheme must match the request (`https` under TLS). File checks for the whisper binary, model, parents, and `lib*.so*` files next to the binary run again before each execution. Output from that binary is read up to 1 MiB. Details are in `docs/voice.md`.
+`POST /api/stt` and `GET /api/stt/status` allowlist `Host` and, when present, `Origin`. Built-in names are `localhost`, `127.0.0.1`, `::1`, and the listener's bind address when that address is one specific IP. `[daemon] allowed_hosts` adds names. Entries are host names or IP addresses: no scheme, port, or wildcard. Unspecified, multicast, broadcast, IPv4-mapped, and all-digit last labels are rejected. An invalid entry makes the file unusable. The `Origin` port must be the listener port, and the scheme must match the request (`https` under TLS). A `Host` header without a port is refused, including a proxy that listens on 443 and omits the port. When the bind is not loopback, the same host allowlist applies to every `/api` route and to `/login`. A non-loopback bind also needs a token and TLS unless `[daemon] allow_insecure_lan` is set. That key is fixed at startup. File checks for the whisper binary, model, parents, and `lib*.so*` files next to the binary run again before each execution. Output from that binary is read up to 1 MiB. Details are in `docs/voice.md`.
 
 ## Ollama run_shell on macOS
 

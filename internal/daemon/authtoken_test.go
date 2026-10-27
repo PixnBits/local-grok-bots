@@ -101,6 +101,77 @@ func TestExplicitAuthTokenWins(t *testing.T) {
 	}
 }
 
+func TestInvalidPolicyKeepsAdminToken(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tok := strings.Repeat("b", 64)
+	if err := os.WriteFile(filepath.Join(dir, adminTokenFile), []byte(tok+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "policy.toml")
+	body := "[backend]\nbackend = \"claude\"\n[daemon]\nallowed_hosts = [\"*.tailnet-example.ts.net\"]\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app, err := New(config.Config{
+		DataDir: dir, BindAddr: "127.0.0.1:0",
+		OllamaURL: "http://127.0.0.1:9", Model: "test-model", Version: "0.1.0",
+		PolicyPath: path,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Shutdown)
+	if app.cfg.AuthToken != tok {
+		t.Fatalf("token %q", app.cfg.AuthToken)
+	}
+	srv := serve(t, app)
+	for _, path := range []string{"/api/bots", "/api/stt/status"} {
+		if res, b := do(t, "GET", srv.URL+path, nil, ""); res.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("%s without token %d %s", path, res.StatusCode, b)
+		}
+		if res, b := do(t, "GET", srv.URL+path, nil, tok); res.StatusCode != http.StatusOK {
+			t.Fatalf("%s with token %d %s", path, res.StatusCode, b)
+		}
+	}
+}
+
+func TestOllamaKeepsAdminToken(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tok := strings.Repeat("c", 64)
+	if err := os.WriteFile(filepath.Join(dir, adminTokenFile), []byte(tok), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "policy.toml")
+	if err := os.WriteFile(path, []byte("[backend]\nbackend = \"ollama\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app, err := New(config.Config{
+		DataDir: dir, BindAddr: "127.0.0.1:0",
+		OllamaURL: "http://127.0.0.1:9", Model: "test-model", Version: "0.1.0",
+		PolicyPath: path,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Shutdown)
+	if app.cfg.AuthToken != tok {
+		t.Fatalf("token %q", app.cfg.AuthToken)
+	}
+	srv := serve(t, app)
+	if res, b := do(t, "GET", srv.URL+"/api/bots", nil, ""); res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("without token %d %s", res.StatusCode, b)
+	}
+	if res, b := do(t, "GET", srv.URL+"/api/bots", nil, tok); res.StatusCode != http.StatusOK {
+		t.Fatalf("with token %d %s", res.StatusCode, b)
+	}
+}
+
 func TestCLIEnvNeverCarriesAdminToken(t *testing.T) {
 	t.Setenv("AUTH_TOKEN", "")
 	dir := t.TempDir()
@@ -133,6 +204,9 @@ func TestAdminTokenSymlinkIsRefused(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "elsewhere")
 	if err := os.WriteFile(target, []byte(strings.Repeat("a", 64)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(target, filepath.Join(dir, adminTokenFile)); err != nil {

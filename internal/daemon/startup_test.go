@@ -188,10 +188,6 @@ func loggedAddr(out string) (string, bool) {
 }
 
 func TestStartupWarn(t *testing.T) {
-	const wantWarn = "local-grok-bots: WARN: the API is reachable beyond this machine without AUTH_TOKEN or AUTH_TOKENS_FILE; set AUTH_TOKEN, AUTH_TOKENS_FILE, or a loopback BIND_ADDR\n"
-	if bindWarn != wantWarn || !strings.Contains(bindWarn, "AUTH_TOKEN") || !strings.Contains(bindWarn, "AUTH_TOKENS_FILE") {
-		t.Fatalf("bindWarn %q", bindWarn)
-	}
 	t.Setenv("MANAGED_POLICY", "")
 	t.Setenv("BIND_ADDR", "")
 	t.Setenv("AUTH_TOKEN", "")
@@ -207,6 +203,7 @@ func TestStartupWarn(t *testing.T) {
 			Version:        "0.1.0",
 			AuthToken:      token,
 			AuthTokensFile: tokensFile,
+			TLSSelfSigned:  true,
 		}
 		if policy != "" {
 			path := filepath.Join(dir, "policy.toml")
@@ -226,12 +223,6 @@ func TestStartupWarn(t *testing.T) {
 		return app, buf.String()
 	}
 
-	t.Run("non-loopback", func(t *testing.T) {
-		_, out := open(t, "192.168.1.5:9", "", "", "")
-		if out != bindWarn || strings.Count(out, "local-grok-bots: WARN:") != 1 {
-			t.Fatalf("log:\n%s", out)
-		}
-	})
 	t.Run("loopback", func(t *testing.T) {
 		_, out := open(t, "127.0.0.1:0", "", "", "")
 		if strings.Contains(out, "local-grok-bots: WARN:") {
@@ -239,25 +230,25 @@ func TestStartupWarn(t *testing.T) {
 		}
 	})
 	t.Run("token", func(t *testing.T) {
-		_, out := open(t, "192.168.1.5:9", "unit-token", "", "")
+		_, out := open(t, "192.0.2.10:9", "unit-token-unit-token-unit-token-0", "", "")
 		if strings.Contains(out, "local-grok-bots: WARN:") {
 			t.Fatalf("log:\n%s", out)
 		}
 	})
 	t.Run("policy bind", func(t *testing.T) {
-		app, out := open(t, "127.0.0.1:0", "", "[daemon]\nbind = \"192.168.1.5:9\"\n", "")
-		if app.cfg.BindAddr != "192.168.1.5:9" || out != bindWarn {
+		app, out := open(t, "127.0.0.1:0", "unit-token-unit-token-unit-token-0", "[daemon]\nbind = \"192.0.2.10:9\"\ntls_self_signed = true\n", "")
+		if app.cfg.BindAddr != "192.0.2.10:9" || strings.Contains(out, "local-grok-bots: WARN:") {
 			t.Fatalf("bind %s log:\n%s", app.cfg.BindAddr, out)
 		}
 	})
 	t.Run("policy loopback", func(t *testing.T) {
-		app, out := open(t, "192.168.1.5:9", "", "[daemon]\nbind = \"127.0.0.1:0\"\n", "")
+		app, out := open(t, "192.0.2.10:9", "", "[daemon]\nbind = \"127.0.0.1:0\"\n", "")
 		if app.cfg.BindAddr != "127.0.0.1:0" || strings.Contains(out, "local-grok-bots: WARN:") {
 			t.Fatalf("bind %s log:\n%s", app.cfg.BindAddr, out)
 		}
 	})
 	t.Run("generated token", func(t *testing.T) {
-		app, out := open(t, "192.168.1.5:9", "", "[daemon]\nbind = \"192.168.1.5:9\"\n\n[backend]\nbackend = \"claude\"\n", "")
+		app, out := open(t, "192.0.2.10:9", "", "[daemon]\nbind = \"192.0.2.10:9\"\ntls_self_signed = true\n\n[backend]\nbackend = \"claude\"\n", "")
 		if app.cfg.AuthToken == "" || strings.Contains(out, "local-grok-bots: WARN:") {
 			t.Fatalf("token %q log:\n%s", app.cfg.AuthToken, out)
 		}
@@ -272,7 +263,7 @@ func TestStartupWarn(t *testing.T) {
 		if err := os.Chmod(path, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		_, out := open(t, "192.168.1.5:9", "", "", path)
+		_, out := open(t, "192.0.2.10:9", "", "", path)
 		if strings.Contains(out, "local-grok-bots: WARN:") || strings.Contains(out, tok) {
 			t.Fatalf("log:\n%s", out)
 		}
@@ -289,11 +280,12 @@ func TestStartupWarn(t *testing.T) {
 		data := filepath.Join(dir, "data")
 		cfg := config.Config{
 			DataDir:        data,
-			BindAddr:       "192.168.1.5:9",
+			BindAddr:       "192.0.2.10:9",
 			OllamaURL:      "http://127.0.0.1:9",
 			Model:          "test-model",
 			Version:        "0.1.0",
 			AuthTokensFile: path,
+			TLSSelfSigned:  true,
 		}
 		buf := captureStartup(t)
 		app, err := New(cfg, fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
@@ -303,8 +295,172 @@ func TestStartupWarn(t *testing.T) {
 			app.Shutdown()
 		}
 		out := buf.String()
-		if err == nil || !strings.Contains(err.Error(), "AUTH_TOKENS_FILE") || strings.Contains(err.Error(), "# none") || out == bindWarn || strings.Contains(out, "WARN:") {
+		if err == nil || !strings.Contains(err.Error(), "AUTH_TOKENS_FILE") || strings.Contains(err.Error(), "# none") || strings.Contains(out, "WARN:") {
 			t.Fatalf("err %v log:\n%s", err, out)
 		}
 	})
+}
+
+func newStartup(t *testing.T, cfg config.Config, policyBody string) (*App, string, error) {
+	t.Helper()
+	dir := filepath.Dir(cfg.DataDir)
+	if cfg.DataDir == "" {
+		dir = t.TempDir()
+		cfg.DataDir = filepath.Join(dir, "data")
+	}
+	if policyBody != "" {
+		path := filepath.Join(dir, "policy.toml")
+		if err := os.WriteFile(path, []byte(policyBody), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		cfg.PolicyPath = path
+	}
+	buf := captureStartup(t)
+	app, err := New(cfg, fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{}, nil
+	}})
+	if app != nil {
+		t.Cleanup(app.Shutdown)
+	}
+	return app, buf.String(), err
+}
+
+func TestNonLoopbackNoTokenRefused(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("AUTH_TOKEN", "")
+	for _, bind := range []string{"192.0.2.10:9", "0.0.0.0:9", "[::]:9"} {
+		t.Run(bind, func(t *testing.T) {
+			dir := t.TempDir()
+			app, out, err := newStartup(t, config.Config{
+				DataDir:       filepath.Join(dir, "data"),
+				BindAddr:      bind,
+				OllamaURL:     "http://127.0.0.1:9",
+				Model:         "test-model",
+				Version:       "0.1.0",
+				TLSSelfSigned: true,
+			}, "")
+			if app != nil || err == nil {
+				t.Fatalf("started: %v", err)
+			}
+			msg := err.Error()
+			for _, part := range []string{"AUTH_TOKEN", "AUTH_TOKENS_FILE", "BIND_ADDR", "loopback"} {
+				if !strings.Contains(msg, part) {
+					t.Fatalf("missing %s in %s", part, msg)
+				}
+			}
+			if strings.Contains(out, "WARN:") {
+				t.Fatalf("log:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestNonLoopbackNoTLSRefused(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("AUTH_TOKEN", "")
+	dir := t.TempDir()
+	app, out, err := newStartup(t, config.Config{
+		DataDir:   filepath.Join(dir, "data"),
+		BindAddr:  "192.0.2.10:9",
+		OllamaURL: "http://127.0.0.1:9",
+		Model:     "test-model",
+		Version:   "0.1.0",
+		AuthToken: "unit-token-unit-token-unit-token-0",
+	}, "")
+	if app != nil || err == nil {
+		t.Fatal("started without TLS")
+	}
+	msg := err.Error()
+	for _, part := range []string{"TLS_CERT", "TLS_KEY", "tls_self_signed", "allow_insecure_lan", "BIND_ADDR"} {
+		if !strings.Contains(msg, part) {
+			t.Fatalf("missing %s in %s", part, msg)
+		}
+	}
+	if strings.Contains(out, "WARN:") {
+		t.Fatalf("log:\n%s", out)
+	}
+}
+
+func TestNonLoopbackInsecureOptOut(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("AUTH_TOKEN", "")
+	dir := t.TempDir()
+	data := filepath.Join(dir, "data")
+	auditPath := filepath.Join(dir, "audit.log")
+	policyBody := "[daemon]\nbind = \"192.0.2.10:9\"\nallow_insecure_lan = true\n\n[security]\naudit_log = " + strconvQuote(auditPath) + "\n"
+	app, out, err := newStartup(t, config.Config{
+		DataDir:   data,
+		BindAddr:  "127.0.0.1:9",
+		OllamaURL: "http://127.0.0.1:9",
+		Model:     "test-model",
+		Version:   "0.1.0",
+		AuthToken: "unit-token-unit-token-unit-token-0",
+	}, policyBody)
+	if err != nil || app == nil {
+		t.Fatal(err)
+	}
+	if app.cfg.BindAddr != "192.0.2.10:9" {
+		t.Fatalf("bind %s", app.cfg.BindAddr)
+	}
+	if strings.Count(out, insecureLANWarn) != 1 || strings.Contains(out, "192.0.2.10") {
+		t.Fatalf("log:\n%s", out)
+	}
+	app.Shutdown()
+	raw, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"action":"insecure_lan_start"`) || strings.Contains(string(raw), "192.0.2.10") || strings.Contains(string(raw), "unit-token-unit-token-unit-token-0") {
+		t.Fatalf("audit %s", raw)
+	}
+}
+
+func TestLoopbackUnchanged(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("AUTH_TOKEN", "")
+	dir := t.TempDir()
+	app, out, err := newStartup(t, config.Config{
+		DataDir:   filepath.Join(dir, "data"),
+		BindAddr:  "127.0.0.1:0",
+		OllamaURL: "http://127.0.0.1:9",
+		Model:     "test-model",
+		Version:   "0.1.0",
+	}, "")
+	if err != nil || app == nil {
+		t.Fatal(err)
+	}
+	if app.cfg.AuthToken != "" || strings.Contains(out, "WARN:") {
+		t.Fatalf("token %q log:\n%s", app.cfg.AuthToken, out)
+	}
+	if _, err := os.Lstat(filepath.Join(app.cfg.DataDir, adminTokenFile)); !os.IsNotExist(err) {
+		t.Fatalf("admin token created: %v", err)
+	}
+}
+
+func strconvQuote(s string) string {
+	return `"` + strings.ReplaceAll(s, `\`, `\\`) + `"`
+}
+
+func TestNonLoopbackShortTokenRefused(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("AUTH_TOKEN", "")
+	start := func(bind, tok string) (*App, error) {
+		dir := t.TempDir()
+		app, _, err := newStartup(t, config.Config{
+			DataDir: filepath.Join(dir, "data"), BindAddr: bind,
+			OllamaURL: "http://127.0.0.1:9", Model: "test-model", Version: "0.1.0",
+			AuthToken: tok, TLSSelfSigned: true,
+		}, "")
+		return app, err
+	}
+	short := strings.Repeat("s", 31)
+	if app, err := start("192.0.2.10:9", short); app != nil || err == nil || !strings.Contains(err.Error(), "AUTH_TOKEN") {
+		t.Fatalf("short token on a LAN bind: %v", err)
+	}
+	if _, err := start("192.0.2.10:9", strings.Repeat("s", 32)); err != nil {
+		t.Fatalf("32-character token: %v", err)
+	}
+	if _, err := start("127.0.0.1:0", short); err != nil {
+		t.Fatalf("loopback short token: %v", err)
+	}
 }
