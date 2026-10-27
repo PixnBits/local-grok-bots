@@ -16,6 +16,10 @@ bind = "127.0.0.1:8787"
 # tls_cert = "/var/lib/local-grok-bots/tls/cert.pem"
 # tls_key = "/var/lib/local-grok-bots/tls/key.pem"
 # tls_self_signed = false
+# A bind that is not loopback needs a token (AUTH_TOKEN or
+# AUTH_TOKENS_FILE) and TLS. allow_insecure_lan is a discouraged opt-out
+# for plain HTTP on that bind. It is fixed at startup. Leave it unset.
+# allow_insecure_lan = false
 # Plain HTTP origin for the Claude MCP permission tool. Loopback IP and a
 # port only (127.0.0.1 or ::1). localhost, 0.0.0.0, and :: are rejected.
 # The socket is opened only when the backend is claude, claude_transport

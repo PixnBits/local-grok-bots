@@ -9,6 +9,9 @@ ExecStart=/usr/local/bin/local-grok-bots
 WorkingDirectory=/var/lib/local-grok-bots
 Environment=DATA_DIR=/var/lib/local-grok-bots
 Environment=BIND_ADDR=0.0.0.0:8080
+# This bind is not loopback, so set AUTH_TOKEN (or AUTH_TOKENS_FILE) and TLS.
+# allow_insecure_lan in policy.toml is a discouraged opt-out and is not set here.
+Environment=TLS_SELF_SIGNED=1
 Environment=OLLAMA_URL=http://127.0.0.1:11434
 Environment=OLLAMA_MODEL=llama3.2
 # Timer replies and the model's clock use this zone.

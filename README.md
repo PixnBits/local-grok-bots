@@ -78,7 +78,7 @@ Set `OLLAMA_MODEL` in the installed unit to a model `ollama list` actually shows
 
 For a user unit, change `WantedBy` to `default.target`, put the unit in `~/.config/systemd/user/`, and run `systemctl --user enable --now local-grok-bots`.
 
-The page is plain HTTP on the LAN. The browser warning is expected. Do not port-forward it.
+A loopback bind can use plain HTTP. A LAN bind needs `AUTH_TOKEN` or `AUTH_TOKENS_FILE`, and TLS (`TLS_SELF_SIGNED=1` or a cert pair). `allow_insecure_lan` in policy is an explicit, discouraged opt-out for plain HTTP on that bind. Do not port-forward the page.
 
 ## launchd (macOS)
 

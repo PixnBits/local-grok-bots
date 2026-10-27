@@ -235,6 +235,9 @@ type Policy struct {
 	// AllowedHosts are extra names accepted for the speech route.
 	// Empty means only the built-in names. The list is fixed at startup.
 	AllowedHosts []string
+	// AllowInsecureLAN lets a non-loopback listener use plain HTTP.
+	// It is fixed at startup. The default is false.
+	AllowInsecureLAN bool
 
 	managedBind  bool
 	managedHost  bool
@@ -1241,6 +1244,7 @@ type daemonDoc struct {
 	TLSSelfSigned    *bool     `toml:"tls_self_signed" json:"tls_self_signed"`
 	PermCallbackAddr *string   `toml:"perm_callback_addr" json:"perm_callback_addr"`
 	AllowedHosts     *[]string `toml:"allowed_hosts" json:"allowed_hosts"`
+	AllowInsecureLAN *bool     `toml:"allow_insecure_lan" json:"allow_insecure_lan"`
 }
 
 type backendDoc struct {
