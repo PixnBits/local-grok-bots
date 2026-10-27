@@ -56,7 +56,7 @@ func FromEnv() Config {
 		BuildBinds:       splitList(os.Getenv("SANDBOX_BUILD_BINDS")),
 		PolicyPath:       getenv("POLICY_PATH", "policy.toml"),
 		TLSCert:          os.Getenv("TLS_CERT"),
-		TLSKey:           os.Getenv("TLS_KEY"),
+		TLSKey:           CurrentTLSKey(),
 		TLSSelfSigned:    os.Getenv("TLS_SELF_SIGNED") == "1",
 		WhisperBin:       os.Getenv("WHISPER_BIN"),
 		WhisperModel:     os.Getenv("WHISPER_MODEL"),

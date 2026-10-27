@@ -304,6 +304,32 @@ func TestReadReadyAuthChecksPipeAndNonce(t *testing.T) {
 	}
 }
 
+func TestReadyAuthHoldsTLSKey(t *testing.T) {
+	prev := heldTLSKey
+	t.Cleanup(func() { heldTLSKey = prev })
+	heldTLSKey = ""
+	const nonce = "0123456789abcdef0123456789abcdef"
+	const key = "/var/lib/lgb/from-pipe.key"
+	tok := "unit-token"
+	r, w := mustPipe(t)
+	defer r.Close()
+	tlsKey := key
+	if err := json.NewEncoder(w).Encode(secretPayload{AuthToken: &tok, TLSKey: &tlsKey, Nonce: nonce}); err != nil {
+		t.Fatal(err)
+	}
+	_ = w.Close()
+	if _, _, err := readReadyAuth(nonce + "." + strconv.Itoa(int(r.Fd()))); err != nil {
+		t.Fatal(err)
+	}
+	if heldTLSKey != key || CurrentTLSKey() != key {
+		t.Fatalf("held %q", heldTLSKey)
+	}
+	t.Setenv("TLS_KEY", "")
+	if FromEnv().TLSKey != key {
+		t.Fatalf("config %q", FromEnv().TLSKey)
+	}
+}
+
 func mustPipe(t *testing.T) (*os.File, *os.File) {
 	t.Helper()
 	r, w, err := os.Pipe()

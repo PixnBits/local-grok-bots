@@ -24,6 +24,7 @@ type secretPayload struct {
 	AuthToken  *string `json:"t"`
 	Nonce      string  `json:"n"`
 	TokensFile *string `json:"f,omitempty"`
+	TLSKey     *string `json:"k,omitempty"`
 }
 
 // ReexecIfNeeded replaces this process once so /proc/self/environ no longer
@@ -43,6 +44,7 @@ func ReexecIfNeeded() {
 	}
 	heldAuth = os.Getenv("AUTH_TOKEN")
 	heldTokensFile = os.Getenv("AUTH_TOKENS_FILE")
+	holdTLSKey()
 	reexecWithAuth(heldAuth, heldTokensFile)
 }
 
@@ -59,7 +61,8 @@ func reexecWithAuth(token, tokensFile string) {
 	if err != nil {
 		fail()
 	}
-	payload := secretPayload{AuthToken: &token, TokensFile: &tokensFile, Nonce: nonce}
+	tlsKey := CurrentTLSKey()
+	payload := secretPayload{AuthToken: &token, TokensFile: &tokensFile, TLSKey: &tlsKey, Nonce: nonce}
 	if err := json.NewEncoder(w).Encode(payload); err != nil {
 		fail()
 	}
@@ -119,6 +122,9 @@ func readReadyAuth(marker string) (string, string, error) {
 	file := ""
 	if p.TokensFile != nil {
 		file = *p.TokensFile
+	}
+	if p.TLSKey != nil {
+		heldTLSKey = *p.TLSKey
 	}
 	return *p.AuthToken, file, nil
 }
