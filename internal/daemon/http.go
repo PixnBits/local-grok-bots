@@ -54,7 +54,6 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/log", a.handleLog)
 	mux.HandleFunc("GET /api/stt/status", a.handleSTTStatus)
 	mux.HandleFunc("POST /api/stt", a.handleSTT)
-	mux.HandleFunc("GET /api/policy", a.handlePolicy)
 	mux.HandleFunc("GET /login", a.handleLogin)
 	mux.HandleFunc("GET /", a.handleIndex)
 	mux.HandleFunc("GET /index.html", a.handleIndex)
@@ -114,16 +113,6 @@ func (a *App) remoteHostDenied(r *http.Request) bool {
 		return true
 	}
 	return false
-}
-
-// handlePolicy reports the effective backend and whether policy loaded.
-// It does not include paths or tokens.
-func (a *App) handlePolicy(w http.ResponseWriter, r *http.Request) {
-	pol := a.pol()
-	writeJSON(w, http.StatusOK, map[string]any{
-		"backend": pol.EffectiveBackend(),
-		"loaded":  pol.Loaded,
-	})
 }
 
 // mcpPermissionOpen is the permission MCP route. The path token and the

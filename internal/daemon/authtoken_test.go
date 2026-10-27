@@ -128,7 +128,7 @@ func TestInvalidPolicyKeepsAdminToken(t *testing.T) {
 		t.Fatalf("token %q", app.cfg.AuthToken)
 	}
 	srv := serve(t, app)
-	for _, path := range []string{"/api/bots", "/api/policy"} {
+	for _, path := range []string{"/api/bots", "/api/stt/status"} {
 		if res, b := do(t, "GET", srv.URL+path, nil, ""); res.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("%s without token %d %s", path, res.StatusCode, b)
 		}

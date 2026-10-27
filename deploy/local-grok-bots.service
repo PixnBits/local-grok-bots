@@ -16,6 +16,7 @@ Environment=OLLAMA_URL=http://127.0.0.1:11434
 Environment=OLLAMA_MODEL=llama3.2
 # Timer replies and the model's clock use this zone.
 Environment=TZ=America/Phoenix
+# Required for this bind: set AUTH_TOKEN (or AUTH_TOKENS_FILE), or the service will not start.
 # Environment=AUTH_TOKEN=replace-me
 Restart=on-failure
 RestartSec=2

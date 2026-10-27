@@ -7614,7 +7614,8 @@ function sttErrorMessage(status) {
     else if (dict) announceVoice("Dictation stopped");
   }
   async function toggleMic() {
-    if (v.mode || v.voiceOff) return;
+    if (v.voiceOff) { showVoiceError(sttErrorMessage(403)); return; }
+    if (v.mode) return;
     if (v.starting || v.rec || v.cap) {
       v.listeningDesired = false;
       v.starting = false;
@@ -7631,7 +7632,7 @@ function sttErrorMessage(status) {
     await beginBrowserOrDaemon(false);
   }
   async function toggleMode() {
-    if (v.voiceOff) return;
+    if (v.voiceOff) { showVoiceError(sttErrorMessage(403)); return; }
     if (v.mode || v.starting) { v.keepError = false; clearVoiceError(); stopAll(); return; }
     if (!state.botId) { showVoiceError("Choose a bot first."); return; }
     if (v.rec || v.cap) {
@@ -7786,10 +7787,12 @@ function sttErrorMessage(status) {
   let voiceStatusOnce = null;
   function prefetchVoiceStatus() {
     if (voiceStatusOnce) return voiceStatusOnce;
-    voiceStatusOnce = loadStatus().then(function (status) {
-      applyVoiceAvailability(status);
-      return status;
-    });
+    const headers = {};
+    if (state.token) headers.Authorization = "Bearer " + state.token;
+    voiceStatusOnce = fetch(base() + "/api/stt/status", {headers: headers, cache: "no-store"})
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (j) { if (j && j.enabled === false) applyVoiceAvailability(j); return j; })
+      .catch(function () { return null; });
     return voiceStatusOnce;
   }
   prefetchVoiceStatus();

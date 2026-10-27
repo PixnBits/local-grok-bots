@@ -55,7 +55,7 @@ func TestNonLoopbackHostGate(t *testing.T) {
 		}
 	}
 	ok("/api/bots", "192.0.2.10:9", http.StatusOK)
-	ok("/api/policy", "192.0.2.10:9", http.StatusOK)
+	ok("/api/stt/status", "192.0.2.10:9", http.StatusOK)
 	ok("/api/health", "192.0.2.10:9", http.StatusOK)
 	ok("/api/bots", "192.0.2.10", http.StatusForbidden)
 	ok("/api/bots", "other.example:9", http.StatusForbidden)
