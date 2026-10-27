@@ -14,9 +14,9 @@ body only. It is not written to the log or the audit sink.
 | Result | When |
 | --- | --- |
 | 401 | A token is configured and the request has none |
-| 403 | Voice is disabled, or a configured binary or model path failed its file check. An audit row is still written |
+| 403 | Voice is disabled, the protected-path snapshot has tripped, or a binary, model, parent, or `lib*.so*` check failed. The message is `speech recognition is disabled`. An audit row is still written. The hour does not count it |
 | 415 | `Content-Type` is not `application/octet-stream` |
-| 403 | `Sec-Fetch-Site` is present and is not `same-origin` or `none`, or `Origin` is present and is not this request's scheme and host. An audit row is written. The message is `forbidden` |
+| 403 | `Sec-Fetch-Site` is present and is not `same-origin` or `none`, or `Host` or `Origin` is not on the allowlist below. An audit row is written. The message is `forbidden` |
 | 413 | The body exceeds `max_body_bytes`, or the PCM is longer than `max_audio_seconds` |
 | 400 | The body is shorter than one sample, or its length is odd |
 | 429 | That user is over `max_requests_per_hour`. The message is `speech recognition rate limit exceeded` |
@@ -24,7 +24,7 @@ body only. It is not written to the log or the audit sink.
 | 408 | The body was not fully read before the read deadline (30 seconds), or the request context ended while waiting to read it |
 | 408 | The request context ended while waiting for the transcription slot (the client went away, or the 60 second limit elapsed). Whisper is not started. The status is 408 Request Timeout |
 | 503 | Whisper is unset, or the binary or model file is missing. The message is `speech recognition is not available` |
-| 502 | The local binary ran and failed. The message is `speech recognition failed` |
+| 502 | The local binary ran and failed, or the text file it wrote is larger than 1 MiB. The message is `speech recognition failed` |
 
 The request must send `Content-Type: application/octet-stream`. The body is
 read only after the enabled, content-type, site, and rate-limit checks. At
@@ -54,6 +54,31 @@ directories are included in the protected-path snapshot. Error responses do
 not include server paths. A missing binary or model is logged on the daemon
 log only.
 
+The same checks run again immediately before each execution, including a
+file that was missing at load and created later. That pass also checks
+every `lib*.so*` entry in the binary's directory. A regular file must pass
+the same owner and mode rules. A symlink is accepted when its target
+resolves inside that directory and the target passes those rules. Any
+failure returns 403 `speech recognition is disabled`, writes an audit row,
+and logs the reason on the daemon log only. A tripped protected-path
+snapshot returns that same 403, including a request already past the rate
+limit check, and the hour does not count it. After the process exits,
+including exit 0, the daemon signals its process group. The text file
+named by `-of` is read up to 1 MiB. A larger file, or a read error, is
+502 `speech recognition failed`.
+
+`Host` must be an allowlisted name. The list is `localhost`, `127.0.0.1`,
+`::1`, the listener's bind address when that address is one specific IP,
+and `[daemon] allowed_hosts`. `0.0.0.0` and `::` are not added from a
+wildcard bind. When `Origin` is present, its host must be on that list,
+its port must be the listener port, and its scheme must be `https` when
+the request is TLS and `http` otherwise. `localhost` and `127.0.0.1` are
+both accepted, so `Origin: http://localhost:<port>` with
+`Host: 127.0.0.1:<port>` is allowed. Names are compared without case, and
+IP addresses compare as addresses. `allowed_hosts` entries are host names
+or IP addresses only: no scheme, port, wildcard, or brackets. A bad entry
+makes the policy file unusable. The list is fixed at startup.
+
 ## Policy
 
 Precedence matches the rest of the daemon: managed settings, then
@@ -72,6 +97,12 @@ Precedence matches the rest of the daemon: managed settings, then
 or an empty string makes the file unparseable. Environment `WHISPER_BIN` and
 `WHISPER_MODEL` are the same pair. When policy sets either path, both
 environment values are replaced and a warning names the override.
+
+`[voice]` and `claude_transport` are applied when a later read of the policy
+file succeeds. Clearing `bin` and `model`, or turning `enabled` off, drops
+the previous transcriber. A read that cannot use the file turns voice off
+until a later read succeeds. Other settings, including `[daemon] allowed_hosts`,
+stay as they were at startup. See `docs/cli-isolation.md`.
 
 Managed policy may set ceilings in `[managed]`:
 
@@ -145,11 +176,12 @@ or `::1`. An IPv4-mapped IPv6 address is read as its IPv4 form, so
 is a number from 0 through 65535. Other addresses, including the rest of
 `127.0.0.0/8`, `localhost`, `0.0.0.0`, and `::`, are rejected. After the
 socket is bound, an address outside that rule closes it and the error is
-returned. Creating or deleting a bot starts or stops the listener. Reloading
-a policy file does the same when the effective backend or transport changes.
-A bind failure at startup, when a matching bot already exists, refuses
-startup. A bind failure while creating a bot is logged as
-`perm_callback_error` and the bot is still created.
+returned. Creating or deleting a bot starts or stops the listener. A later
+read of the policy file starts or stops it when `claude_transport` changes.
+The backend does not change on that read. A bind failure at startup, when a
+matching bot already exists, refuses startup. A bind failure while creating
+a bot, or while applying a later `claude_transport`, is logged as
+`perm_callback_error` once per distinct error text. The bot is still created.
 
 The callback accepts only `POST /api/mcp/permission` and
 `POST /api/mcp/permission/{token}`. Other paths and methods are 404. While

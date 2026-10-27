@@ -75,10 +75,10 @@ func TestDurableAllowAutoAllowsReadOnly(t *testing.T) {
 	}
 
 	app.rtMu.Lock()
-	app.policy.UIPrompts = true
-	app.policy.PromptTimeout = 30 * time.Millisecond
+	app.editPol(func(p *policy.Policy) { p.UIPrompts = true })
+	app.editPol(func(p *policy.Policy) { p.PromptTimeout = 30 * time.Millisecond })
 	app.rtMu.Unlock()
-	pol := app.policy.Permission()
+	pol := app.pol().Permission()
 	allow := app.perm.Evaluate(context.Background(), pol, app.withUserRules(bot.ID, permission.Request{
 		ID: "r1", RunID: "run-1", BotID: bot.ID, Tool: "Bash",
 		Args: map[string]any{"command": "pwd"},
@@ -135,12 +135,12 @@ func TestUserRulesDoNotWidenCLI(t *testing.T) {
 	cap := &captureRunner{}
 	app.runner = cap
 	app.rtMu.Lock()
-	app.policy = policy.Policy{
+	app.setPol(policy.Policy{
 		Backend: "claude", CLIPermitted: true, DaemonJail: false,
 		TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute,
 		ToolAllow: []string{"Read"},
 		ToolDeny:  []string{"Bash(rm *)"},
-	}
+	})
 	app.rtMu.Unlock()
 	bot, err := app.st.CreateBot("rules", "", nil, "user")
 	if err != nil {

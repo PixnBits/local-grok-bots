@@ -52,8 +52,8 @@ func TestLiveCLISmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(app.Shutdown)
-	if app.policy.DaemonJail || !app.policy.UsesCLI() {
-		t.Fatalf("CLI turn would use the daemon jail: backend %s jail %v", app.policy.EffectiveBackend(), app.policy.DaemonJail)
+	if app.pol().DaemonJail || !app.pol().UsesCLI() {
+		t.Fatalf("CLI turn would use the daemon jail: backend %s jail %v", app.pol().EffectiveBackend(), app.pol().DaemonJail)
 	}
 	srv := serve(t, app)
 	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Smoke", "description": "live"}, "")
@@ -118,12 +118,12 @@ func TestLiveClaudeStreamControl(t *testing.T) {
 	}
 	t.Cleanup(app.Shutdown)
 	app.rtMu.Lock()
-	app.policy.Backend = "claude"
-	app.policy.CLIPermitted = true
-	app.policy.DaemonJail = false
-	app.policy.ClaudeTransport = policy.TransportStreamControl
-	app.policy.UIPrompts = false
-	app.policy.Allow = nil
+	app.editPol(func(p *policy.Policy) { p.Backend = "claude" })
+	app.editPol(func(p *policy.Policy) { p.CLIPermitted = true })
+	app.editPol(func(p *policy.Policy) { p.DaemonJail = false })
+	app.editPol(func(p *policy.Policy) { p.ClaudeTransport = policy.TransportStreamControl })
+	app.editPol(func(p *policy.Policy) { p.UIPrompts = false })
+	app.editPol(func(p *policy.Policy) { p.Allow = nil })
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Smoke", "description": "live"}, "")

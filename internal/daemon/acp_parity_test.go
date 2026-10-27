@@ -91,7 +91,7 @@ func prepareACP(t *testing.T, mode string, pol policy.Policy) *acpFix {
 		pol.Imminent = time.Minute
 	}
 	app.rtMu.Lock()
-	app.policy = pol
+	app.setPol(pol)
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	app.permBase = srv.URL
@@ -763,12 +763,12 @@ func TestUserRulesDoNotWidenGrokArgv(t *testing.T) {
 	cap := &captureRunner{}
 	app.runner = cap
 	app.rtMu.Lock()
-	app.policy = policy.Policy{
+	app.setPol(policy.Policy{
 		Backend: "grok", CLIPermitted: true, DaemonJail: false,
 		TimersEnabled: true, Idle: time.Hour, Imminent: time.Minute,
 		ToolAllow: []string{"Read"},
 		ToolDeny:  []string{"Bash(rm *)"},
-	}
+	})
 	app.rtMu.Unlock()
 	bot, err := app.st.CreateBot("rules", "", nil, "user")
 	if err != nil {

@@ -29,17 +29,19 @@ import (
 )
 
 func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
-	backend := a.policy.EffectiveBackend()
+	turnPol := a.effPol(bot.ID)
+
+	backend := turnPol.EffectiveBackend()
 	a.takePending(runID)
 	a.dropResume(bot.ID)
 	defer a.clearCLIPID(bot.ID, runID)
 	defer a.forgetRunPerms(runID)
-	if !a.policy.AllowsBackend(backend) {
+	if !turnPol.AllowsBackend(backend) {
 		a.failCLI(bot.ID, runID, backend, fmt.Errorf("cli backend %q is not allowed by policy", backend))
 		return
 	}
 	// Empty is mcp. An unknown value is the same config error Load fail-closes on.
-	transport, err := policy.NormClaudeTransport(a.policy.ClaudeTransport)
+	transport, err := policy.NormClaudeTransport(turnPol.ClaudeTransport)
 	if err != nil {
 		a.failCLI(bot.ID, runID, backend, err)
 		return
@@ -102,12 +104,12 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	if lgbEnv != nil {
 		iso.Env = withLGBEnv(iso.Env, filepath.Join(ws, lgbDirName, "bin"), lgbEnv)
 	}
-	turnTimeout := a.policy.EffectiveTurnTimeout()
+	turnTimeout := turnPol.EffectiveTurnTimeout()
 	turnCtx, turnCancel := context.WithTimeout(ctx, turnTimeout)
 	defer turnCancel()
 	a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "working"})
 	var runner clisession.Runner = clisession.ExecRunner{
-		Policy: a.policy,
+		Policy: turnPol,
 		HasTTY: a.cliTTY,
 		PinLog: func(backend, path, result string) {
 			a.log(bot.ID, "cli_pin", map[string]any{"backend": backend, "path": path, "result": result})
@@ -119,15 +121,15 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	var streamed bool
 	var redactStream audit.Stream
 	var pid int
-	mode := a.policy.PermissionMode
-	if policy.IsBypassMode(mode) && !a.policy.ManagedBypass {
+	mode := turnPol.PermissionMode
+	if policy.IsBypassMode(mode) && !turnPol.ManagedBypass {
 		mode = ""
 	}
 	spec := clisession.Spec{
 		Backend: backend, SessionID: sessionID, Fresh: fresh,
 		Prompt: prompt, Workspace: ws, PermissionMode: mode,
-		AllowRules: append(append([]string(nil), a.policy.ToolAllow...), lgbAllow(lgbEnv)...),
-		DenyRules:  append([]string(nil), a.policy.ToolDeny...),
+		AllowRules: append(append([]string(nil), turnPol.ToolAllow...), lgbAllow(lgbEnv)...),
+		DenyRules:  append([]string(nil), turnPol.ToolDeny...),
 		Isolate:    iso,
 		Marker:     runID,
 		OnStart: func(child int) {
@@ -187,8 +189,8 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	case transport == policy.TransportNone:
 		spec.PermissionPrompts = "none"
 		eventTransport = policy.TransportNone
-		cliDenySource = cliNoHostSource(a.policy.UIPrompts)
-	case a.policy.UIPrompts && host:
+		cliDenySource = cliNoHostSource(turnPol.UIPrompts)
+	case turnPol.UIPrompts && host:
 		tok := a.registerPerm(bot.ID, runID, sessionID)
 		defer a.unregisterPerm(tok)
 		cfgPath, werr := a.writePermMCP(bot.ID, runID, permOrigin, tok)
@@ -203,13 +205,13 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		// The permission tool call blocks until the user answers. Claude's
 		// MCP client must not give up before the daemon's prompt timeout.
 		if iso != nil {
-			ms := (a.policy.EffectivePromptTimeout() + time.Minute).Milliseconds()
+			ms := (turnPol.EffectivePromptTimeout() + time.Minute).Milliseconds()
 			iso.Env = append(iso.Env, fmt.Sprintf("MCP_TOOL_TIMEOUT=%d", ms))
 		}
 	default:
 		spec.PermissionPrompts = "none"
 		eventTransport = policy.TransportNone
-		cliDenySource = cliNoHostSource(a.policy.UIPrompts)
+		cliDenySource = cliNoHostSource(turnPol.UIPrompts)
 	}
 	a.warnGrokDarwinNetwork(bot, runID, backend)
 	trace := &cliTrace{a: a, botID: bot.ID, runID: runID}
@@ -393,13 +395,15 @@ func (a *App) finishCLIInterrupted(botID, runID, text string) {
 // file under overrides = "refuse", fails the turn closed. Each detection is
 // audited.
 func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisession.Isolation, error) {
+	turnPol := a.effPol(bot.ID)
+
 	botID := bot.ID
-	isolated := a.policy.CLIHome != policy.HomeUser
+	isolated := turnPol.CLIHome != policy.HomeUser
 	found := clisession.ScanOverrides(ws)
 	if len(found) > 0 {
 		var blocked []string
 		for _, f := range found {
-			if a.policy.CLIOverrides == policy.OverridesRefuse || !clisession.Neutralized(backend, f, isolated) {
+			if turnPol.CLIOverrides == policy.OverridesRefuse || !clisession.Neutralized(backend, f, isolated) {
 				blocked = append(blocked, f)
 			}
 		}
@@ -407,7 +411,7 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 		if len(blocked) > 0 {
 			action = "refuse"
 		}
-		fields := map[string]any{"backend": backend, "files": found, "action": action, "mode": a.policy.CLIOverrides}
+		fields := map[string]any{"backend": backend, "files": found, "action": action, "mode": turnPol.CLIOverrides}
 		if len(blocked) > 0 {
 			fields["blocked"] = blocked
 		}
@@ -429,13 +433,13 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 		StateDir:  state,
 		Workspace: ws,
 		Base:      os.Environ(),
-		Extra:     a.policy.CLIEnv,
+		Extra:     turnPol.CLIEnv,
 		Secrets:   a.authSecrets(),
 		Grants:    botGrants(bot),
-		Protect:   a.daemonSecrets(),
+		Protect:   a.secretList(bot.ID),
 		CredRoot:  a.cfg.DataDir,
 	}
-	if strings.EqualFold(backend, "claude") && a.policy.CLIClaudeSandbox != policy.SandboxOff {
+	if strings.EqualFold(backend, "claude") && turnPol.CLIClaudeSandbox != policy.SandboxOff {
 		if missing := claudeSandboxMissing(); len(missing) > 0 {
 			return nil, a.sandboxUnavailable(botID, "missing "+strings.Join(missing, ", "))
 		}
@@ -445,7 +449,7 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 	if a.botDeleted(bot.ID) {
 		return nil, fmt.Errorf("bot was deleted")
 	}
-	if herr := clisession.RefuseHostConfig(a.policy.CLITrustSystemConfig, clisession.HostConfigPaths); herr != nil {
+	if herr := clisession.RefuseHostConfig(turnPol.CLITrustSystemConfig, clisession.HostConfigPaths); herr != nil {
 		var untrusted *clisession.UntrustedConfigError
 		if errors.As(herr, &untrusted) {
 			a.auditUntrustedConfig(botID, runID, backend, "host", untrusted.Names)
@@ -477,7 +481,7 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 	if strings.EqualFold(backend, "claude") {
 		// On macOS Claude's login is in the Keychain, found through the real
 		// HOME and default config dir; claude_home = auto keeps both there.
-		ownHome = !a.policy.ClaudeUsesUserHome(cliGOOS)
+		ownHome = !turnPol.ClaudeUsesUserHome(cliGOOS)
 	}
 	if ownHome {
 		opts.Home = filepath.Join(state, "home")
@@ -731,10 +735,21 @@ func (a *App) auditEgress(botID, runID string, ev sandbox.EgressEvent) {
 }
 
 func (a *App) egressPorts() []int {
+	return a.egressFor("")
+}
+
+func (a *App) egressFor(botID string) []int {
 	if a == nil {
 		return policy.DefaultEgressPorts()
 	}
-	pol := a.policy
+	if s, ok := a.held(botID); ok {
+		pol := s.eff
+		if s.freshOK {
+			pol = s.secret
+		}
+		return pol.EgressPorts()
+	}
+	pol := a.pol()
 	if fresh, err := a.policyNow(); err == nil && (strings.TrimSpace(a.cfg.PolicyPath) == "" || fresh.Loaded) {
 		pol = fresh
 	}
@@ -771,8 +786,8 @@ func (a *App) serverToolsFor(botID string) ([]string, string) {
 	if a == nil {
 		return []string{}, "default"
 	}
-	pol, err := a.policyNow()
-	if err != nil || (strings.TrimSpace(a.cfg.PolicyPath) != "" && !pol.Loaded) {
+	pol, ok := a.secretPol(botID)
+	if !ok {
 		return []string{}, "default"
 	}
 	var botList []string
@@ -937,7 +952,7 @@ func (a *App) attachGrokBridge(iso *clisession.Isolation, bot store.Bot, runID s
 		}
 		egress, err = sandbox.StartHTTPAllowProxy(parent, sandbox.EgressConfig{
 			Allow: grants.NetAllow,
-			Ports: a.egressPorts(),
+			Ports: a.egressFor(bot.ID),
 			Audit: func(ev sandbox.EgressEvent) {
 				a.auditEgress(bot.ID, runID, ev)
 			},
@@ -1088,7 +1103,40 @@ var secretDirNames = []string{"cli", "coi", "cli-proxy", "cli-egress", "sandbox"
 // read for this call. The workspace is not included. The secret directories
 // are created so Grok, which only denies paths that exist, still binds them.
 func (a *App) daemonSecrets() []string {
-	pol := a.policy
+	return a.secretList("")
+}
+
+// secretPol is the fresh policy for one call. A held turn reuses the copy
+// taken at the start of that turn.
+func (a *App) secretPol(botID string) (policy.Policy, bool) {
+	if a == nil {
+		return policy.Policy{}, false
+	}
+	if s, ok := a.held(botID); ok {
+		if !s.freshOK {
+			return policy.Policy{}, false
+		}
+		return s.secret, true
+	}
+	fresh, err := a.policyNow()
+	if err != nil || (strings.TrimSpace(a.cfg.PolicyPath) != "" && !fresh.Loaded) {
+		return policy.Policy{}, false
+	}
+	return fresh, true
+}
+
+func (a *App) secretList(botID string) []string {
+	if a == nil {
+		return nil
+	}
+	if s, ok := a.held(botID); ok {
+		pol := s.eff
+		if s.freshOK {
+			pol = s.secret
+		}
+		return a.secretsFrom(pol)
+	}
+	pol := a.pol()
 	if fresh, err := a.policyNow(); err == nil && (strings.TrimSpace(a.cfg.PolicyPath) == "" || fresh.Loaded) {
 		pol = fresh
 	}
@@ -1099,6 +1147,10 @@ func (a *App) daemonSecrets() []string {
 // plus DATA_DIR itself, raw and resolved. Blank, ".", and "/" are dropped.
 // An empty result fails closed in guardBuildBinds and in the sandbox.
 func (a *App) shellProtect() []string {
+	return a.shellProtectBot("")
+}
+
+func (a *App) shellProtectBot(botID string) []string {
 	if a == nil {
 		return nil
 	}
@@ -1115,7 +1167,7 @@ func (a *App) shellProtect() []string {
 		seen[p] = struct{}{}
 		out = append(out, p)
 	}
-	for _, p := range a.daemonSecrets() {
+	for _, p := range a.secretList(botID) {
 		add(p)
 	}
 	for _, p := range pathForms(a.cfg.DataDir) {
@@ -1204,6 +1256,18 @@ func rawSecretPaths(cfg config.Config, pol policy.Policy, includeHomes bool) []s
 	if p := strings.TrimSpace(pol.GitHub.TokenFile); p != "" {
 		if abs, err := filepath.Abs(p); err == nil {
 			out = append(out, filepath.Clean(abs))
+		}
+	}
+	if pol.VoiceEnabled {
+		bin, model, _, _ := whisperPaths(pol, cfg)
+		for _, p := range []string{bin, model} {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				continue
+			}
+			if abs, err := filepath.Abs(p); err == nil {
+				out = append(out, filepath.Clean(abs))
+			}
 		}
 	}
 	if includeHomes {
@@ -1443,7 +1507,9 @@ func cliWorkspace(root, botID string) (string, error) {
 }
 
 func (a *App) screenDLP(ctx context.Context, botID, runID, backend, content string) error {
-	err := dlp.Scan(ctx, a.policy, content)
+	turnPol := a.effPol(botID)
+
+	err := dlp.Scan(ctx, turnPol, content)
 	if err == nil {
 		return nil
 	}
@@ -1463,6 +1529,8 @@ func cliNoHostSource(ui bool) string {
 }
 
 func (a *App) decideStreamControl(ctx context.Context, botID, runID, sessionID string, ask clisession.ControlAsk) clisession.ControlDecision {
+	turnPol := a.effPol(botID)
+
 	req := permission.Request{
 		RunID: runID, BotID: botID, SessionID: sessionID,
 		Tool: ask.Tool, Args: ask.Args, ToolUseID: ask.ToolUseID,
@@ -1477,7 +1545,7 @@ func (a *App) decideStreamControl(ctx context.Context, botID, runID, sessionID s
 		return clisession.ControlDecision{Silent: true}
 	}
 	req = a.withUserRules(botID, req)
-	out := a.perm.Evaluate(ctx, a.policy.Permission(), req)
+	out := a.perm.Evaluate(ctx, turnPol.Permission(), req)
 	if out.Source == "cancel" {
 		return clisession.ControlDecision{Silent: true}
 	}
@@ -1504,6 +1572,8 @@ func (a *App) decideStreamControl(ctx context.Context, botID, runID, sessionID s
 }
 
 func (a *App) decideGrokACP(ctx context.Context, botID, runID, sessionID string, ask clisession.ACPAsk, grokHome string) (clisession.ACPDecision, error) {
+	turnPol := a.effPol(botID)
+
 	// Prefer the id Grok returned. A fresh turn starts under a daemon id and
 	// then stores Grok's id; a grant under the daemon id would not match the
 	// next turn.
@@ -1531,7 +1601,7 @@ func (a *App) decideGrokACP(ctx context.Context, botID, runID, sessionID string,
 		return clisession.ACPDecision{}, nil
 	}
 	req = a.withUserRules(botID, req)
-	out := a.perm.Evaluate(ctx, a.policy.Permission(), req)
+	out := a.perm.Evaluate(ctx, turnPol.Permission(), req)
 	if out.Behavior == permission.Allow {
 		return clisession.ACPDecision{Allow: true}, nil
 	}
@@ -1722,6 +1792,8 @@ func (a *App) failCLI(botID, runID, backend string, err error) {
 }
 
 func (a *App) cliPrompt(bot store.Bot, fresh bool, inputs []store.Message) (string, error) {
+	turnPol := a.effPol(bot.ID)
+
 	var b strings.Builder
 	if fresh {
 		if err := a.writeCLIPreamble(&b, bot); err != nil {
@@ -1736,7 +1808,7 @@ func (a *App) cliPrompt(bot store.Bot, fresh bool, inputs []store.Message) (stri
 		b.WriteString("Continue.\n")
 		return b.String(), nil
 	}
-	grok := strings.EqualFold(a.policy.EffectiveBackend(), "grok")
+	grok := strings.EqualFold(turnPol.EffectiveBackend(), "grok")
 	for i, m := range inputs {
 		if grok && clisession.SlashPrompt(m.Content) {
 			return "", clisession.ErrSlash
@@ -1751,17 +1823,19 @@ func (a *App) cliPrompt(bot store.Bot, fresh bool, inputs []store.Message) (stri
 
 // cliBoundary tells a CLI bot what actually confines it. The daemon's own
 // jail and tools (run_shell, timers, memory, other bots) are not available.
-func (a *App) cliBoundary() string {
+func (a *App) cliBoundary(botID string) string {
+	turnPol := a.effPol(botID)
+
 	tail := "You run directly on the host, not inside the daemon's jail, and the daemon's own tools (run_shell, timers, memory, other bots) are not available to you. Some actions need the user's approval; a denied action is final for this turn.\n"
-	if a.policy.CLILGB && lgbSupported {
+	if turnPol.CLILGB && lgbSupported {
 		tail = "You run directly on the host, not inside the daemon's jail; the daemon's run_shell, read_file, and write_file are not available. Some actions need the user's approval; a denied action is final for this turn.\n" +
 			"For timers, your memory notes, other bots, and direct messages, run the lgb command in your shell (run `lgb help` for usage), for example `lgb timer in 5m Remind the user to stretch` or `lgb memory set favorite_color blue`. Run each lgb command as its own shell call, with nothing chained (no ;, &&, pipes, or $?), so it is approved without asking. lgb works only during this turn.\n"
 	}
-	switch a.policy.EffectiveBackend() {
+	switch turnPol.EffectiveBackend() {
 	case "grok":
 		return "Use your own tools. Grok's sandbox confines them: files are readable and writable in your workspace and temp directories, credential paths are denied, and network access is blocked unless the user granted it (Grok can't block it on macOS). " + tail
 	default:
-		if a.policy.CLIClaudeSandbox == policy.SandboxOff {
+		if turnPol.CLIClaudeSandbox == policy.SandboxOff {
 			return "Use your own tools. Shell commands run under your organization's Claude sandbox settings, if any. Reads outside your workspace, credential files, web tools, git push, and ssh are denied unless the user granted them. " + tail
 		}
 		return "Use your own tools. Shell commands run in Claude Code's sandbox: writes go only to your workspace and temp directories, and network reaches only hosts the user granted. File tools can't read outside your workspace or touch credential files, and web tools, git push, and ssh are denied unless granted. " + tail
@@ -1794,7 +1868,7 @@ func (a *App) writeCLIPreamble(b *strings.Builder, bot store.Bot) error {
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
-	b.WriteString(a.cliBoundary())
+	b.WriteString(a.cliBoundary(bot.ID))
 	b.WriteString("Scheduled prompts are prefixed with [scheduled]. Direct messages from other bots are prefixed with [DM from Name].\n\n")
 	return nil
 }

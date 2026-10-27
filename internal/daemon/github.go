@@ -21,13 +21,15 @@ var readGitHubToken = github.ReadToken
 // openGitHubProxy listens on a private socket for this shell. The token
 // stays in the proxy. A nil proxy means GitHub fetch is unavailable.
 func (a *App) openGitHubProxy(bot store.Bot) (*github.Proxy, error) {
+	turnPol := a.effPol(bot.ID)
+
 	if a == nil || !granted(bot.Grants, "github") {
 		return nil, nil
 	}
-	repos := a.policy.EffectiveGitHubRepos(bot.GitHubAllow)
+	repos := turnPol.EffectiveGitHubRepos(bot.GitHubAllow)
 	p, err := github.New(github.Config{
 		Repos:   repos,
-		Token:   func() (string, error) { return readGitHubToken(a.policy.GitHub.TokenFile) },
+		Token:   func() (string, error) { return readGitHubToken(turnPol.GitHub.TokenFile) },
 		GitBase: a.githubGitBase,
 		APIBase: a.githubAPIBase,
 		Audit:   func(ev github.Audit) { a.auditGitHub(bot.ID, ev) },
@@ -261,13 +263,15 @@ func (a *App) openGitHubReadProxy(bot store.Bot) (*github.Proxy, error) {
 // The second result is the gate secret. It belongs in the X-LGB-Gate header,
 // not in a URL.
 func (a *App) openGitHubWriteGate(bot store.Bot, win github.Window) (string, string, func(), error) {
+	turnPol := a.effPol(bot.ID)
+
 	noop := func() {}
 	if a == nil {
 		return "", "", noop, errors.New("proxy unavailable")
 	}
 	p, err := github.New(github.Config{
-		Repos:   a.policy.EffectiveGitHubRepos(bot.GitHubAllow),
-		Token:   func() (string, error) { return readGitHubToken(a.policy.GitHub.TokenFile) },
+		Repos:   turnPol.EffectiveGitHubRepos(bot.GitHubAllow),
+		Token:   func() (string, error) { return readGitHubToken(turnPol.GitHub.TokenFile) },
 		GitBase: a.githubGitBase,
 		APIBase: a.githubAPIBase,
 		Audit:   func(ev github.Audit) { a.auditGitHub(bot.ID, ev) },

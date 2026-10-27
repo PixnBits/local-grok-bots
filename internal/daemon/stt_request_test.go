@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -191,8 +192,8 @@ func TestSTTQuotaSkipsRejected(t *testing.T) {
 	t.Run("busy", func(t *testing.T) {
 		app, fake, release := newBlockingVoice(t)
 		app.rtMu.Lock()
-		app.policy.VoiceMaxPerHour = 2
-		app.policy.VoiceMaxPerHourSet = true
+		app.editPol(func(p *policy.Policy) { p.VoiceMaxPerHour = 2 })
+		app.editPol(func(p *policy.Policy) { p.VoiceMaxPerHourSet = true })
 		app.rtMu.Unlock()
 		var arms atomic.Int32
 		idle := make(chan time.Time)

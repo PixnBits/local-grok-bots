@@ -331,8 +331,9 @@ func callHandleSTT(app *App, ctx context.Context, pcm []byte) (int, map[string]a
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	req := httptest.NewRequest(http.MethodPost, "/api/stt", bytes.NewReader(pcm))
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8787/api/stt", bytes.NewReader(pcm))
 	req = req.WithContext(ctx)
+	req.Host = "127.0.0.1:8787"
 	req.Header.Set("Authorization", "Bearer voice-test-token")
 	req.Header.Set("Content-Type", "application/octet-stream")
 	rec := httptest.NewRecorder()
@@ -526,8 +527,8 @@ max_audio_seconds = 15
 	if app.cfg.TLSSelfSigned || app.cfg.TLSCert != "" || app.cfg.WhisperBin != "/policy/whisper-cli" || app.cfg.WhisperModel != "/policy/model.bin" {
 		t.Fatalf("cfg tls %v %s whisper %s", app.cfg.TLSSelfSigned, app.cfg.TLSCert, app.cfg.WhisperBin)
 	}
-	if !app.policy.VoiceEnabled || app.policy.EffectiveVoiceMaxAudio() != 15 {
-		t.Fatalf("voice %+v", app.policy.VoiceEnabled)
+	if !app.pol().VoiceEnabled || app.pol().EffectiveVoiceMaxAudio() != 15 {
+		t.Fatalf("voice %+v", app.pol().VoiceEnabled)
 	}
 }
 

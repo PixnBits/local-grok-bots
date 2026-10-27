@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,7 +201,7 @@ func TestOffAllowlistPushAuditsOnce(t *testing.T) {
 	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
 		return model.ChatResponse{Content: "no"}, nil
 	}})
-	app.policy.GitHub.Repos = []string{"acme/widgets"}
+	app.editPol(func(p *policy.Policy) { p.GitHub.Repos = []string{"acme/widgets"} })
 	auditPath := filepath.Join(t.TempDir(), "audit.log")
 	lg, err := audit.Open(auditPath)
 	if err != nil {
@@ -247,7 +248,7 @@ func TestDeniedForceURLIgnoresParsedArgs(t *testing.T) {
 	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
 		return model.ChatResponse{Content: "no"}, nil
 	}})
-	app.policy.GitHub.Repos = []string{"acme/widgets"}
+	app.editPol(func(p *policy.Policy) { p.GitHub.Repos = []string{"acme/widgets"} })
 	bot := store.Bot{
 		ID: "bot_1", Grants: []string{"git", "github"}, GitHubAllow: []string{"acme/widgets"},
 	}
@@ -272,7 +273,7 @@ func TestForceAndTagDenialNamesTheRepo(t *testing.T) {
 	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
 		return model.ChatResponse{Content: "no"}, nil
 	}})
-	app.policy.GitHub.Repos = []string{"acme/widgets"}
+	app.editPol(func(p *policy.Policy) { p.GitHub.Repos = []string{"acme/widgets"} })
 	evals := 0
 	app.perm.AddHook(func(req permission.Request) permission.HookResult {
 		if req.Tool == "git_push" {
@@ -325,7 +326,7 @@ func TestDeniedPushNamesConfigRemote(t *testing.T) {
 	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
 		return model.ChatResponse{Content: "no"}, nil
 	}})
-	app.policy.GitHub.Repos = []string{"acme/widgets"}
+	app.editPol(func(p *policy.Policy) { p.GitHub.Repos = []string{"acme/widgets"} })
 	writeGitRemote(t, app.ws, "https://github.com/other/lib.git")
 	bot := store.Bot{
 		ID: "bot_1", Grants: []string{"git", "github"}, GitHubAllow: []string{"acme/widgets"},

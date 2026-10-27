@@ -14,6 +14,44 @@ import (
 	"time"
 )
 
+func TestWhisperExitStopsGroup(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	child := filepath.Join(dir, "child.pid")
+	bin := filepath.Join(dir, "whisper-cli")
+	model := filepath.Join(dir, "model.bin")
+	script := "#!/bin/sh\n" +
+		"out=\nprev=\n" +
+		"for arg in \"$@\"; do\n" +
+		"  if [ \"$prev\" = \"-of\" ]; then\n" +
+		"    out=$arg\n" +
+		"  fi\n" +
+		"  prev=$arg\n" +
+		"done\n" +
+		"sleep 30 &\n" +
+		"echo $! > " + shQuote(child) + "\n" +
+		"printf 'ok\\n' > \"$out.txt\"\n" +
+		"exit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(model, []byte("model"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { killOwned(child, false) })
+	app := newVoiceApp(t, voicePolicy(true, bin, model, 240, 1<<20, 60))
+	code, out, _ := callSTT(app, nil, bytesReader(make([]byte, 3200)), nil)
+	if code != 200 || out["text"] != "ok" {
+		t.Fatalf("transcribe %d %v", code, out)
+	}
+	pid := readPID(child)
+	if pid <= 1 || !waitESRCH(pid, 2*time.Second) {
+		t.Fatalf("child %d still running", pid)
+	}
+}
+
 func TestWhisperProcessGroupEnds(t *testing.T) {
 	t.Run("deadline releases slot", func(t *testing.T) {
 		app, child := blockingWhisperApp(t)

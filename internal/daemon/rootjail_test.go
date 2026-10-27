@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"errors"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"io"
 	"os"
 	"os/exec"
@@ -101,7 +102,7 @@ func TestRootWithoutBwrapRefusesGitHubTools(t *testing.T) {
 	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
 		return model.ChatResponse{Content: "no"}, nil
 	}})
-	app.policy.GitHub.Repos = []string{"acme/widgets"}
+	app.editPol(func(p *policy.Policy) { p.GitHub.Repos = []string{"acme/widgets"} })
 	var asked atomic.Bool
 	app.perm.AddHook(func(req permission.Request) permission.HookResult {
 		if req.Tool == "create_pr" || req.Tool == "pr_status" {

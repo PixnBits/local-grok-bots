@@ -74,7 +74,11 @@ func (a *App) tlsFiles() (string, string, error) {
 }
 
 func tlsKeySetting(a *App) string {
-	if a != nil && a.policy.HasTLS && a.policy.TLSKey != "" && a.policy.TLSKey == a.cfg.TLSKey {
+	if a == nil {
+		return "TLS_KEY"
+	}
+	pol := a.pol()
+	if pol.HasTLS && pol.TLSKey != "" && pol.TLSKey == a.cfg.TLSKey {
 		return "tls_key"
 	}
 	return "TLS_KEY"

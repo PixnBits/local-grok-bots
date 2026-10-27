@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -27,6 +28,8 @@ const (
 	sttReadTimeout       = 30 * time.Second
 	sttWaitDelay         = 2 * time.Second
 	sttBodySlots         = 2
+	// sttOutputCap is the maximum whisper output file this process reads.
+	sttOutputCap = 1 << 20
 )
 
 // sttBusyMsg is the 429 when that wait elapses. The hourly cap uses a
@@ -89,6 +92,16 @@ func (w WhisperCLI) waitDelay() time.Duration {
 	return sttWaitDelay
 }
 
+// voiceDisabledError is a file check that refused transcription.
+// The HTTP body stays generic. Reason is for the daemon log.
+type voiceDisabledError struct {
+	Reason string
+}
+
+func (e *voiceDisabledError) Error() string {
+	return "speech recognition is disabled"
+}
+
 func (w WhisperCLI) Transcribe(ctx context.Context, pcm []byte) (string, error) {
 	if w.Bin == "" || w.Model == "" {
 		return "", errSTTUnavailable
@@ -98,6 +111,9 @@ func (w WhisperCLI) Transcribe(ctx context.Context, pcm []byte) (string, error) 
 	}
 	if _, err := os.Lstat(w.Model); err != nil {
 		return "", &sttMissingError{Key: w.modelKey(), Path: w.Model}
+	}
+	if msg := voiceExecProblem(w.Bin, w.Model, w.binKey(), w.modelKey(), os.Geteuid()); msg != "" {
+		return "", &voiceDisabledError{Reason: msg}
 	}
 	dir, err := os.MkdirTemp("", "lgb-stt-")
 	if err != nil {
@@ -116,14 +132,28 @@ func (w WhisperCLI) Transcribe(ctx context.Context, pcm []byte) (string, error) 
 	cmd.Stderr = nil
 	cmd.WaitDelay = w.waitDelay()
 	configureWhisperProc(cmd)
-	if err := cmd.Run(); err != nil {
+	runErr := cmd.Run()
+	killWhisperGroup(cmd)
+	if runErr != nil {
 		return "", errors.New("speech recognition failed")
 	}
-	b, err := os.ReadFile(out + ".txt")
+	f, err := os.Open(out + ".txt")
 	if err != nil {
 		return "", errors.New("speech recognition failed")
 	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, sttOutputCap+1))
+	if err != nil || len(b) > sttOutputCap {
+		return "", errors.New("speech recognition failed")
+	}
 	return strings.TrimSpace(string(b)), nil
+}
+
+func killWhisperGroup(cmd *exec.Cmd) {
+	if cmd == nil || cmd.Process == nil || cmd.Process.Pid <= 1 {
+		return
+	}
+	_ = killWhisperGroupOS(cmd.Process.Pid)
 }
 
 func writeWAV(path string, pcm []byte, rate int) error {
@@ -277,27 +307,136 @@ func sttContentTypeOK(r *http.Request) bool {
 	return err == nil && strings.EqualFold(media, "application/octet-stream")
 }
 
-// sttCrossSite is true when the browser says the request came from another
-// site, or when Origin is not this listener's own scheme and host.
+// sttCrossSite is true when the browser says the request came from another site.
 func sttCrossSite(r *http.Request) bool {
-	if site := strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")); site != "" {
-		if !strings.EqualFold(site, "same-origin") && !strings.EqualFold(site, "none") {
-			return true
-		}
+	site := strings.TrimSpace(r.Header.Get("Sec-Fetch-Site"))
+	if site == "" {
+		return false
+	}
+	return !strings.EqualFold(site, "same-origin") && !strings.EqualFold(site, "none")
+}
+
+// originAllowed reports whether Host and, when present, Origin name an
+// allowed host and the listener port.
+func (a *App) originAllowed(r *http.Request) bool {
+	if a == nil || r == nil {
+		return false
+	}
+	hostport := r.Host
+	if hostport == "" && r.URL != nil {
+		hostport = r.URL.Host
+	}
+	host, port, ok := splitListenHost(hostport)
+	names := a.pol().AllowedHosts
+	bind := a.bindHost()
+	if !ok || !hostAllowed(host, names, bind) {
+		return false
+	}
+	listenPort := a.listenerPort()
+	if listenPort == "" {
+		listenPort = port
+	}
+	if listenPort == "" || port != listenPort {
+		return false
 	}
 	origin := strings.TrimSpace(r.Header.Get("Origin"))
 	if origin == "" {
+		return true
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Host == "" || u.User != nil {
+		return false
+	}
+	if u.Path != "" && u.Path != "/" {
 		return false
 	}
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	host := r.Host
-	if host == "" {
-		host = r.URL.Host
+	if !strings.EqualFold(u.Scheme, scheme) {
+		return false
 	}
-	return origin != scheme+"://"+host
+	oHost, oPort, ok := splitListenHost(u.Host)
+	if !ok || oPort != listenPort || !hostAllowed(oHost, names, bind) {
+		return false
+	}
+	return true
+}
+
+func (a *App) listenerPort() string {
+	if a == nil {
+		return ""
+	}
+	_, port, err := net.SplitHostPort(strings.TrimSpace(a.cfg.BindAddr))
+	if err != nil || port == "" || port == "0" {
+		return ""
+	}
+	return port
+}
+
+func hostAllowed(host string, names []string, bind string) bool {
+	if host == "" {
+		return false
+	}
+	for _, name := range []string{"localhost", "127.0.0.1", "::1"} {
+		if hostEqual(name, host) {
+			return true
+		}
+	}
+	if bind != "" && hostEqual(bind, host) {
+		return true
+	}
+	for _, name := range names {
+		if hostEqual(name, host) {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) bindHost() string {
+	if a == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(a.cfg.BindAddr))
+	if err != nil {
+		host = strings.TrimSpace(a.cfg.BindAddr)
+	}
+	host = strings.Trim(host, "[]")
+	if host == "" {
+		return ""
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		return ""
+	}
+	return host
+}
+
+func hostEqual(a, b string) bool {
+	if strings.EqualFold(a, b) {
+		return true
+	}
+	ai, bi := net.ParseIP(a), net.ParseIP(b)
+	return ai != nil && bi != nil && ai.Equal(bi)
+}
+
+func splitListenHost(hostport string) (host, port string, ok bool) {
+	hostport = strings.TrimSpace(hostport)
+	if hostport == "" {
+		return "", "", false
+	}
+	h, p, err := net.SplitHostPort(hostport)
+	if err != nil {
+		if ip := net.ParseIP(hostport); ip != nil {
+			return ip.String(), "", true
+		}
+		if strings.Contains(hostport, ":") {
+			return "", "", false
+		}
+		return hostport, "", true
+	}
+	return h, p, h != ""
 }
 
 func sttTimedOut(err error) bool {
@@ -325,7 +464,7 @@ func (a *App) transcribeTimeout() time.Duration {
 func (a *App) handleSTT(w http.ResponseWriter, r *http.Request) {
 	pol := a.voicePolicy()
 	who := a.requestActor(r)
-	if !pol.enabled {
+	if !pol.enabled || a.protectBlockReason() != "" {
 		a.auditSTT(who, 0, 0, http.StatusForbidden, false)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "speech recognition is disabled"})
 		return
@@ -335,7 +474,7 @@ func (a *App) handleSTT(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "content type must be application/octet-stream"})
 		return
 	}
-	if sttCrossSite(r) {
+	if sttCrossSite(r) || !a.originAllowed(r) {
 		a.auditSTT(who, 0, 0, http.StatusForbidden, false)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 		return
@@ -395,9 +534,7 @@ func (a *App) handleSTT(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "audio longer than the configured limit"})
 		return
 	}
-	a.rtMu.Lock()
-	stt := a.stt
-	a.rtMu.Unlock()
+	stt := pol.stt
 	if stt == nil {
 		accepted = true
 		a.auditSTT(who, len(pcm), dur, http.StatusServiceUnavailable, true)
@@ -417,11 +554,25 @@ func (a *App) handleSTT(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer release()
+	if a.protectBlockReason() != "" {
+		a.auditSTT(who, len(pcm), dur, http.StatusForbidden, true)
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "speech recognition is disabled"})
+		return
+	}
 	accepted = true
 	text, err := stt.Transcribe(ctx, pcm)
 	if err != nil {
 		code := http.StatusBadGateway
 		msg := "speech recognition failed"
+		var denied *voiceDisabledError
+		if errors.As(err, &denied) {
+			accepted = false
+			code = http.StatusForbidden
+			msg = denied.Error()
+			if denied.Reason != "" {
+				a.log("", "voice_path", map[string]any{"warning": denied.Reason})
+			}
+		}
 		if errors.Is(err, errSTTUnavailable) {
 			code = http.StatusServiceUnavailable
 			msg = errSTTUnavailable.Error()
@@ -505,13 +656,18 @@ func (a *App) acquireSTT(ctx context.Context) (release func(), code int) {
 }
 
 func (a *App) voicePolicy() policySnap {
-	a.rtMu.Lock()
-	defer a.rtMu.Unlock()
+	if a == nil {
+		return policySnap{}
+	}
+	a.installMu.Lock()
+	defer a.installMu.Unlock()
+	pol := a.pol()
 	return policySnap{
-		enabled: a.policy.VoiceEnabled && a.voiceBlock == "",
-		audio:   a.policy.EffectiveVoiceMaxAudio(),
-		body:    a.policy.EffectiveVoiceMaxBody(),
-		perHour: a.policy.EffectiveVoiceMaxPerHour(),
+		enabled: pol.VoiceEnabled && a.voiceBlock == "",
+		audio:   pol.EffectiveVoiceMaxAudio(),
+		body:    pol.EffectiveVoiceMaxBody(),
+		perHour: pol.EffectiveVoiceMaxPerHour(),
+		stt:     a.stt,
 	}
 }
 
@@ -522,4 +678,5 @@ type policySnap struct {
 	audio   int
 	body    int64
 	perHour int
+	stt     STT
 }

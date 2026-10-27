@@ -24,9 +24,7 @@ func (a *App) permCallbackListenAddr() string {
 
 // usesMCPTransport reports whether Claude turns on this daemon ask over MCP.
 func (a *App) usesMCPTransport() bool {
-	a.rtMu.Lock()
-	pol := a.policy
-	a.rtMu.Unlock()
+	pol := a.pol()
 	if !strings.EqualFold(pol.EffectiveBackend(), "claude") {
 		return false
 	}
@@ -55,9 +53,7 @@ func (a *App) syncPermCallback() error {
 // notePermCallback starts or stops the callback after a bot change.
 // The bot change itself does not depend on the listener.
 func (a *App) notePermCallback() {
-	if err := a.syncPermCallback(); err != nil {
-		a.log("", "perm_callback_error", map[string]any{"error": err.Error()})
-	}
+	a.notePermErr(a.syncPermCallback())
 }
 
 // mcpHostBase is the origin written into mcp.json. Plain HTTP keeps permBase.
@@ -123,7 +119,7 @@ func (a *App) startPermCallback() error {
 	a.permCallbackBase = "http://" + bound
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			a.log("", "perm_callback_error", map[string]any{"error": err.Error()})
+			a.notePermErr(err)
 		}
 	}()
 	a.log("", "perm_callback_listen", map[string]any{"addr": bound})

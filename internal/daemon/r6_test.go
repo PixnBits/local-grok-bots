@@ -25,8 +25,8 @@ func TestHostConfigRefusesUntilTrusted(t *testing.T) {
 	clisession.HostConfigPaths = []string{path}
 	t.Cleanup(func() { clisession.HostConfigPaths = old })
 	app.rtMu.Lock()
-	app.policy.Backend = "grok"
-	app.policy.CLIPermitted = true
+	app.editPol(func(p *policy.Policy) { p.Backend = "grok" })
+	app.editPol(func(p *policy.Policy) { p.CLIPermitted = true })
 	app.rtMu.Unlock()
 	auditPath := filepath.Join(dir, "audit.log")
 	lg, err := audit.Open(auditPath)
@@ -47,8 +47,8 @@ func TestHostConfigRefusesUntilTrusted(t *testing.T) {
 		t.Fatalf("error names the file: %v", err)
 	}
 	app.rtMu.Lock()
-	app.policy.CLITrustSystemConfig = true
-	app.policy.CLIClaudeSandbox = policy.SandboxOff
+	app.editPol(func(p *policy.Policy) { p.CLITrustSystemConfig = true })
+	app.editPol(func(p *policy.Policy) { p.CLIClaudeSandbox = policy.SandboxOff })
 	app.rtMu.Unlock()
 	if _, err := app.cliIsolation(store.Bot{ID: "b1"}, "claude", ws, "run-2"); err != nil {
 		t.Fatal(err)
@@ -70,8 +70,8 @@ func TestPlantedGrokHomeRefusesTurn(t *testing.T) {
 	dir := t.TempDir()
 	app := newApp(t, dir, nil)
 	app.rtMu.Lock()
-	app.policy.Backend = "grok"
-	app.policy.CLIPermitted = true
+	app.editPol(func(p *policy.Policy) { p.Backend = "grok" })
+	app.editPol(func(p *policy.Policy) { p.CLIPermitted = true })
 	app.rtMu.Unlock()
 	auditPath := filepath.Join(dir, "audit.log")
 	lg, err := audit.Open(auditPath)

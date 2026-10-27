@@ -15,10 +15,17 @@ func configureWhisperProc(cmd *exec.Cmd) {
 		if cmd.Process == nil {
 			return os.ErrProcessDone
 		}
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		if errors.Is(err, syscall.ESRCH) {
-			return nil
-		}
-		return err
+		return killWhisperGroupOS(cmd.Process.Pid)
 	}
+}
+
+func killWhisperGroupOS(pid int) error {
+	if pid <= 1 {
+		return nil
+	}
+	err := syscall.Kill(-pid, syscall.SIGKILL)
+	if errors.Is(err, syscall.ESRCH) {
+		return nil
+	}
+	return err
 }

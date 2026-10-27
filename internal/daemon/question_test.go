@@ -255,7 +255,7 @@ func TestRunTokenCannotDecide(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.rtMu.Lock()
-	app.policy.CLILGB = true
+	app.editPol(func(p *policy.Policy) { p.CLILGB = true })
 	app.rtMu.Unlock()
 	run, _, err := app.startLGB(context.Background(), bot, "run1", ws)
 	if err != nil || run == nil || run.token == "" {
@@ -327,7 +327,7 @@ func TestRunTokenCannotDecide(t *testing.T) {
 		t.Fatal(err)
 	}
 	open.rtMu.Lock()
-	open.policy.CLILGB = true
+	open.editPol(func(p *policy.Policy) { p.CLILGB = true })
 	open.rtMu.Unlock()
 	openRun, _, err := open.startLGB(context.Background(), openBot, "run1", openWS)
 	if err != nil || openRun == nil {
@@ -392,13 +392,13 @@ func startQuestion(t *testing.T, transport, mode, input string, timeout time.Dur
 	app.audit = lg
 	app.cliTTY = func() bool { return false }
 	app.rtMu.Lock()
-	app.policy = policy.Policy{
+	app.setPol(policy.Policy{
 		Backend: "claude", CLIPermitted: true, TimersEnabled: true,
 		Idle: time.Hour, Imminent: time.Minute, CLILGB: true,
 		UIPrompts: true, PromptTimeout: timeout, AllowSessionGrants: true,
 		ClaudeTransport: transport, PermissionMode: "bypassPermissions",
 		ToolAllow: []string{"AskUserQuestion"},
-	}
+	})
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	app.permBase = srv.URL

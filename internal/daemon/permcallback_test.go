@@ -14,9 +14,9 @@ import (
 
 func setClaudeMCP(app *App, transport string) {
 	app.rtMu.Lock()
-	app.policy.Backend = "claude"
-	app.policy.CLIPermitted = true
-	app.policy.ClaudeTransport = transport
+	app.editPol(func(p *policy.Policy) { p.Backend = "claude" })
+	app.editPol(func(p *policy.Policy) { p.CLIPermitted = true })
+	app.editPol(func(p *policy.Policy) { p.ClaudeTransport = transport })
 	app.rtMu.Unlock()
 }
 
@@ -33,7 +33,7 @@ func TestPermCallbackAbsentWithoutMCPBot(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.rtMu.Lock()
-	app.policy.Backend = "ollama"
+	app.editPol(func(p *policy.Policy) { p.Backend = "ollama" })
 	app.rtMu.Unlock()
 	if err := app.syncPermCallback(); err != nil {
 		t.Fatal(err)
@@ -132,7 +132,7 @@ func TestPermCallbackFollowsPolicyReload(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write("[backend]\nbackend = \"ollama\"\n")
+	write("[backend]\nbackend = \"claude\"\n[cli.permission]\nclaude_transport = \"mcp\"\n")
 	app, err := New(config.Config{
 		DataDir: dir, BindAddr: "127.0.0.1:0", OllamaURL: "http://127.0.0.1:9",
 		Model: "test-model", Version: "0.1.0", PolicyPath: path, AuthToken: "perm-test-token",
@@ -145,22 +145,88 @@ func TestPermCallbackFollowsPolicyReload(t *testing.T) {
 	if _, err := app.st.CreateBot("Ada", "", nil, "user"); err != nil {
 		t.Fatal(err)
 	}
-	if addr, on := app.permCallbackOn(); on {
-		t.Fatalf("listened at %s before reload", addr)
+	app.notePermCallback()
+	if _, on := app.permCallbackOn(); !on {
+		t.Fatal("callback did not listen")
 	}
-	write("[backend]\nbackend = \"claude\"\n")
+	write("[backend]\nbackend = \"claude\"\n[cli.permission]\nclaude_transport = \"stream_control\"\n")
+	if _, err := app.policyNow(); err != nil {
+		t.Fatal(err)
+	}
+	if addr, on := app.permCallbackOn(); on {
+		t.Fatalf("stream_control listened at %s", addr)
+	}
+	write("[backend]\nbackend = \"claude\"\n[cli.permission]\nclaude_transport = \"mcp\"\n")
 	if _, err := app.policyNow(); err != nil {
 		t.Fatal(err)
 	}
 	if _, on := app.permCallbackOn(); !on {
-		t.Fatal("callback did not listen")
+		t.Fatal("mcp did not listen again")
 	}
-	write("[backend]\nbackend = \"ollama\"\n")
+	write("[backend]\nbackend = \"ollama\"\n[cli.permission]\nclaude_transport = \"mcp\"\n")
 	if _, err := app.policyNow(); err != nil {
 		t.Fatal(err)
 	}
-	if addr, on := app.permCallbackOn(); on {
-		t.Fatalf("still listening at %s", addr)
+	if app.pol().EffectiveBackend() != "claude" {
+		t.Fatalf("backend %s", app.pol().EffectiveBackend())
+	}
+	if _, on := app.permCallbackOn(); !on {
+		t.Fatal("backend edit stopped the callback")
+	}
+	n, err := app.st.LogCount("policy_restart_required")
+	if err != nil || n != 1 {
+		t.Fatalf("restart log %d %v", n, err)
+	}
+	if _, err := app.policyNow(); err != nil {
+		t.Fatal(err)
+	}
+	if n, err = app.st.LogCount("policy_restart_required"); err != nil || n != 1 {
+		t.Fatalf("restart log again %d %v", n, err)
+	}
+}
+
+func TestPermCallbackErrorOnce(t *testing.T) {
+	app := newApp(t, "", nil)
+	setClaudeMCP(app, policy.TransportMCP)
+	if _, err := app.st.CreateBot("Ada", "", nil, "user"); err != nil {
+		t.Fatal(err)
+	}
+	ln1, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln1.Close() })
+	ln2, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ln2.Close() })
+	app.cfg.PermCallbackAddr = ln1.Addr().String()
+	app.notePermCallback()
+	app.notePermCallback()
+	app.notePermCallback()
+	n, err := app.st.LogCount("perm_callback_error")
+	if err != nil || n != 1 {
+		t.Fatalf("first error %d %v", n, err)
+	}
+	app.cfg.PermCallbackAddr = ln2.Addr().String()
+	app.notePermCallback()
+	if n, err = app.st.LogCount("perm_callback_error"); err != nil || n != 2 {
+		t.Fatalf("second error %d %v", n, err)
+	}
+	app.cfg.PermCallbackAddr = "127.0.0.1:0"
+	app.notePermCallback()
+	if n, err = app.st.LogCount("perm_callback_error"); err != nil || n != 2 {
+		t.Fatalf("success %d %v", n, err)
+	}
+	if _, on := app.permCallbackOn(); !on {
+		t.Fatal("free port did not listen")
+	}
+	app.stopPermCallback()
+	app.cfg.PermCallbackAddr = ln1.Addr().String()
+	app.notePermCallback()
+	if n, err = app.st.LogCount("perm_callback_error"); err != nil || n != 3 {
+		t.Fatalf("repeat %d %v", n, err)
 	}
 }
 

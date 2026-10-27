@@ -232,6 +232,9 @@ type Policy struct {
 	PermCallbackAddr    string
 	HasPermCallback     bool
 	managedPermCallback bool
+	// AllowedHosts are extra names accepted for the speech route.
+	// Empty means only the built-in names. The list is fixed at startup.
+	AllowedHosts []string
 
 	managedBind  bool
 	managedHost  bool
@@ -1232,11 +1235,12 @@ type document struct {
 }
 
 type daemonDoc struct {
-	Bind             *string `toml:"bind" json:"bind"`
-	TLSCert          *string `toml:"tls_cert" json:"tls_cert"`
-	TLSKey           *string `toml:"tls_key" json:"tls_key"`
-	TLSSelfSigned    *bool   `toml:"tls_self_signed" json:"tls_self_signed"`
-	PermCallbackAddr *string `toml:"perm_callback_addr" json:"perm_callback_addr"`
+	Bind             *string   `toml:"bind" json:"bind"`
+	TLSCert          *string   `toml:"tls_cert" json:"tls_cert"`
+	TLSKey           *string   `toml:"tls_key" json:"tls_key"`
+	TLSSelfSigned    *bool     `toml:"tls_self_signed" json:"tls_self_signed"`
+	PermCallbackAddr *string   `toml:"perm_callback_addr" json:"perm_callback_addr"`
+	AllowedHosts     *[]string `toml:"allowed_hosts" json:"allowed_hosts"`
 }
 
 type backendDoc struct {

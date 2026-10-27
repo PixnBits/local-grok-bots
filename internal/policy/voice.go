@@ -35,6 +35,13 @@ func (p *Policy) applyDaemonExtra(d daemonDoc, trusted bool) error {
 	if err := p.applyTLS(d, trusted); err != nil {
 		return err
 	}
+	if d.AllowedHosts != nil {
+		hosts, err := NormalizeHosts(*d.AllowedHosts)
+		if err != nil {
+			return err
+		}
+		p.AllowedHosts = hosts
+	}
 	if d.PermCallbackAddr == nil {
 		return nil
 	}

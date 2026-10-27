@@ -643,6 +643,8 @@ enabled = false
 # Absolute paths. Both or neither. A missing file is 503.
 # The file and its parent must be a regular file or directory, not a symlink,
 # owned by root or the daemon user, and not group- or other-writable.
+# The same checks run again before each execution, including lib*.so* files
+# next to the binary. A failed check is 403. Output larger than 1 MiB is 502.
 # A failed check turns voice off (403). The response does not name the path.
 # bin = "/usr/local/bin/whisper-cli"
 # model = "/var/lib/local-grok-bots/models/ggml-base.en.bin"
@@ -660,6 +662,8 @@ enabled = false
 # perm_callback_addr is 127.0.0.1 or ::1 and a numeric port.
 # localhost, other 127/8 addresses, and wildcards fail.
 # perm_callback_addr = "127.0.0.1:0"
+# allowed_hosts adds names for POST /api/stt. Host names or IPs only.
+# allowed_hosts = ["voice.example"]
 
 [managed]
 # Only the managed file can set these. The same keys in policy.toml are
@@ -695,10 +699,24 @@ when the effective backend is Claude, `claude_transport` is `mcp` (including
 an empty value, which is `mcp`), and at least one bot exists. Ollama, Grok,
 `stream_control`, and `none` do not open it. The bind is `127.0.0.1` or
 `::1` with a numeric port (`::ffff:127.0.0.1` counts as `127.0.0.1`), never
-`0.0.0.0` or another `127.0.0.0/8` address. A policy reload starts or stops
-that socket to match the new backend and transport. Nothing else uses it.
+`0.0.0.0` or another `127.0.0.0/8` address. A later read of the policy file
+starts or stops that socket when `claude_transport` changes. The backend
+stays the one chosen at startup. Nothing else uses it.
 On a plain-HTTP daemon, MCP keeps the main listener's origin. On HTTPS, the
 MCP host base is the callback, and it is empty until that listener is up.
+
+## Policy file reads after startup
+
+A running daemon keeps the policy it loaded at startup. A later read of the
+policy file copies only these settings onto that startup policy:
+
+- `[voice]` `enabled`, `bin`, `model`, `max_audio_seconds`, `max_body_bytes`, and `max_requests_per_hour`
+- managed voice ceilings (`max_voice_audio_seconds`, `max_voice_body_bytes`, `max_voice_requests_per_hour`)
+- `[cli.permission]` `claude_transport`
+
+These take effect only after a restart: `backend` (and the CLI permission and token requirement that follow from it), `bind`, `tls_cert`, `tls_key`, `tls_self_signed`, `perm_callback_addr`, `audit_log`, and `allowed_hosts`. Other settings, including the Ollama host and model, permission mode, tool rules, and jail settings, also stay as they were at startup. When a read differs in one of the restart settings, the daemon logs and audits `policy_restart_required` with the setting names, once per distinct set of names. It does not log the values. A read that cannot use the file turns voice off and leaves the restart settings as they were at startup. The next successful read applies `[voice]` and `claude_transport` again.
+
+`POST /api/stt` allowlists `Host` and, when present, `Origin`. Built-in names are `localhost`, `127.0.0.1`, `::1`, and the listener's bind address when that address is one specific IP. `[daemon] allowed_hosts` adds names. Entries are host names or IP addresses: no scheme, port, or wildcard. An invalid entry makes the file unusable. The `Origin` port must be the listener port, and the scheme must match the request (`https` under TLS). File checks for the whisper binary, model, parents, and `lib*.so*` files next to the binary run again before each execution. Output from that binary is read up to 1 MiB. Details are in `docs/voice.md`.
 
 ## Ollama run_shell on macOS
 

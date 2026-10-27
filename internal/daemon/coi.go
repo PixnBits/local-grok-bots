@@ -44,28 +44,18 @@ func (a *App) policyNow() (policy.Policy, error) {
 	if a == nil {
 		return policy.Policy{}, errors.New("policy is not available")
 	}
+	gen := a.nextGen()
 	pol, err := policy.Load(loadPolicyOptions(a.cfg.PolicyPath))
 	if err != nil {
+		a.failVoice(gen)
 		return pol, err
 	}
 	if err := checkPathOverlaps(a.cfg, pol); err != nil {
+		a.noteGen(gen)
 		return policy.Policy{}, err
 	}
-	if pol.Loaded {
-		a.installPolicy(pol)
-	}
+	a.consider(gen, pol)
 	return pol, nil
-}
-
-// installPolicy keeps the running policy, whisper files, protect paths, and
-// permission callback aligned with a policy file that loaded.
-func (a *App) installPolicy(pol policy.Policy) {
-	a.rtMu.Lock()
-	a.policy = pol
-	a.rtMu.Unlock()
-	a.applyVoiceRuntime()
-	a.RefreshProtectSnapshot()
-	a.notePermCallback()
 }
 
 func coiName(args []string) string {
@@ -97,8 +87,8 @@ func (r *lgbRun) execCOI(ctx context.Context, args []string) (int, string) {
 		name = name[:64]
 	}
 	rest := append([]string(nil), args[1:]...)
-	pol, err := r.a.policyNow()
-	if err != nil || (strings.TrimSpace(r.a.cfg.PolicyPath) != "" && !pol.Loaded) {
+	pol, ok := r.a.secretPol(r.bot.ID)
+	if !ok {
 		r.auditCOI(name, rest, coi.StatusDenied, "policy is not available", "", nil, 0, false)
 		return 1, "coi: policy is not available"
 	}

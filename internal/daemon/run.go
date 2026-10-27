@@ -24,15 +24,19 @@ const (
 )
 
 func (a *App) execute(botID, runID string) {
+	endTurn := a.holdTurn(botID)
+	defer endTurn()
+	turnPol := a.effPol(botID)
+
 	// A CLI turn gets its deadline (cli.turn_timeout) in executeCLI so a
 	// timeout is told apart from a cancel. An Ollama run uses
 	// ollama.run_timeout.
 	var ctx context.Context
 	var cancel context.CancelFunc
-	if a.policy.UsesCLI() {
+	if turnPol.UsesCLI() {
 		ctx, cancel = context.WithCancel(a.ctx)
 	} else {
-		ctx, cancel = context.WithTimeout(a.ctx, a.policy.EffectiveOllamaRunTimeout())
+		ctx, cancel = context.WithTimeout(a.ctx, turnPol.EffectiveOllamaRunTimeout())
 	}
 	a.rtMu.Lock()
 	if st := a.loops[botID]; st != nil {
@@ -55,11 +59,11 @@ func (a *App) execute(botID, runID string) {
 	if bot.Model != nil && *bot.Model != "" {
 		modelName = *bot.Model
 	}
-	if a.policy.UsesCLI() {
+	if turnPol.UsesCLI() {
 		a.executeCLI(ctx, bot, runID)
 		return
 	}
-	if !a.policy.AllowsBackend("ollama") {
+	if !turnPol.AllowsBackend("ollama") {
 		a.takePending(runID)
 		a.dropResume(bot.ID)
 		msg := "ollama backend is not allowed by policy"
@@ -67,7 +71,7 @@ func (a *App) execute(botID, runID string) {
 		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": msg})
 		return
 	}
-	if err := a.policy.AllowsModel(modelName); err != nil {
+	if err := turnPol.AllowsModel(modelName); err != nil {
 		a.takePending(runID)
 		a.dropResume(bot.ID)
 		_, _ = a.finishRun(runID, "error", err.Error())
@@ -103,7 +107,7 @@ func (a *App) execute(botID, runID string) {
 	through := run.StartedAt
 
 	parseRetried := false
-	retriesLeft := a.policy.EffectiveOllamaStallRetries()
+	retriesLeft := turnPol.EffectiveOllamaStallRetries()
 	retried := 0
 	var lastFirst time.Duration
 	for round := 0; round < maxToolRounds; round++ {
@@ -124,9 +128,9 @@ func (a *App) execute(botID, runID string) {
 			if a.finishOllamaCtx(bot, runID, ctx, msgs, "", retried, lastFirst) {
 				return
 			}
-			modelCap := a.policy.EffectiveOllamaModelTimeout()
-			firstLim := a.policy.EffectiveOllamaFirstOutputTimeout()
-			stallLim := a.policy.EffectiveOllamaStallTimeout()
+			modelCap := turnPol.EffectiveOllamaModelTimeout()
+			firstLim := turnPol.EffectiveOllamaFirstOutputTimeout()
+			stallLim := turnPol.EffectiveOllamaStallTimeout()
 			// A silence limit at least as long as the per-call cap expires
 			// with that cap. Arming it would win the check in Chat and
 			// retry a timeout that is not retryable. Leave it off so only
@@ -145,7 +149,7 @@ func (a *App) execute(botID, runID string) {
 				Tools:              toolDefs(),
 				FirstOutputTimeout: firstLim,
 				StallTimeout:       stallLim,
-				KeepAlive:          a.policy.EffectiveOllamaKeepAlive(),
+				KeepAlive:          turnPol.EffectiveOllamaKeepAlive(),
 			}, func(tok string) {
 				roundText.WriteString(tok)
 				a.bus.Publish(runID, "token", map[string]string{"text": tok})
@@ -175,7 +179,7 @@ func (a *App) execute(botID, runID string) {
 				shown := partial
 				if a.ctx.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 					limit = "run_timeout"
-					limitValue = compactDuration(a.policy.EffectiveOllamaRunTimeout())
+					limitValue = compactDuration(turnPol.EffectiveOllamaRunTimeout())
 					shown = bestPartial
 				}
 				errLogged := err
@@ -188,7 +192,7 @@ func (a *App) execute(botID, runID string) {
 			}
 			if te != nil && (te.Limit == "first_output_timeout" || te.Limit == "stall_timeout") {
 				willRetry := retriesLeft > 0
-				a.logOllamaCall(bot.ID, modelName, false, attempt, willRetry, first, te, 0, te.Limit, compactDuration(a.limitDuration(te.Limit)))
+				a.logOllamaCall(bot.ID, modelName, false, attempt, willRetry, first, te, 0, te.Limit, compactDuration(a.limitDuration(bot.ID, te.Limit)))
 				if willRetry {
 					retriesLeft--
 					retried++
@@ -200,7 +204,7 @@ func (a *App) execute(botID, runID string) {
 				return
 			}
 			if te != nil && te.Limit == "model_timeout" {
-				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, te, 0, "model_timeout", compactDuration(a.policy.EffectiveOllamaModelTimeout()))
+				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, te, 0, "model_timeout", compactDuration(turnPol.EffectiveOllamaModelTimeout()))
 				a.finishOllamaTimeout(bot, runID, msgs, "model_timeout", bestPartial, retried, first)
 				return
 			}
@@ -387,7 +391,7 @@ func (a *App) finishOllamaCtx(bot store.Bot, runID string, ctx context.Context, 
 // timeout. Continue is offered only when some text was kept. errText on the
 // run is the notice without "Notice: ".
 func (a *App) finishOllamaTimeout(bot store.Bot, runID string, msgs []model.Message, limit, partial string, retried int, first time.Duration) {
-	dur := a.limitDuration(limit)
+	dur := a.limitDuration(bot.ID, limit)
 	kept := ""
 	if t := strings.TrimSpace(partial); t != "" {
 		kept = clip(t, maxReplyBytes)
@@ -431,16 +435,17 @@ func (a *App) modelCallContext(parent context.Context, d time.Duration) (context
 	return context.WithTimeout(parent, d)
 }
 
-func (a *App) limitDuration(limit string) time.Duration {
+func (a *App) limitDuration(botID, limit string) time.Duration {
+	turnPol := a.effPol(botID)
 	switch limit {
 	case "first_output_timeout":
-		return a.policy.EffectiveOllamaFirstOutputTimeout()
+		return turnPol.EffectiveOllamaFirstOutputTimeout()
 	case "stall_timeout":
-		return a.policy.EffectiveOllamaStallTimeout()
+		return turnPol.EffectiveOllamaStallTimeout()
 	case "model_timeout":
-		return a.policy.EffectiveOllamaModelTimeout()
+		return turnPol.EffectiveOllamaModelTimeout()
 	default:
-		return a.policy.EffectiveOllamaRunTimeout()
+		return turnPol.EffectiveOllamaRunTimeout()
 	}
 }
 

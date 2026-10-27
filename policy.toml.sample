@@ -21,6 +21,10 @@ bind = "127.0.0.1:8787"
 # The socket is opened only when the backend is claude, claude_transport
 # is mcp, and at least one bot exists. Default 127.0.0.1:0.
 # perm_callback_addr = "127.0.0.1:0"
+# Extra names for POST /api/stt, besides localhost, 127.0.0.1, ::1, and
+# the bind address. Host names or IP addresses only. No scheme, port,
+# wildcard, or brackets. Fixed at startup. See docs/voice.md.
+# allowed_hosts = ["voice.example"]
 
 # systemd unit should run as a non-root system user.
 # user = "local-grok-bots"

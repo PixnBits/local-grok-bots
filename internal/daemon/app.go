@@ -47,13 +47,27 @@ type loopState struct {
 type App struct {
 	cfg config.Config
 	// logw receives startup lines. Nil means stderr.
-	logw   io.Writer
-	st     *store.Store
-	model  model.Client
-	ws     string
-	bus    *Bus
-	policy policy.Policy
-	perm   *permission.Broker
+	logw  io.Writer
+	st    *store.Store
+	model model.Client
+	ws    string
+	bus   *Bus
+	// startPol is the policy captured at startup.
+	startPol policy.Policy
+	// polCur is the published snapshot. Readers use pol.
+	polCur atomic.Pointer[policy.Policy]
+	// installMu publishes polCur together with voiceBlock and stt.
+	installMu    sync.Mutex
+	loadGen      atomic.Uint64
+	installedGen uint64
+	restartSig   string
+	permErr      string
+	// envWhisper is true when whisper paths came from the environment
+	// rather than the startup policy file.
+	envWhisper bool
+	turnMu     sync.Mutex
+	turnHeld   map[string]turnSnap
+	perm       *permission.Broker
 	// permBase is the HTTP origin the CLI calls back, such as http://127.0.0.1:8787.
 	// Empty means there is no permission host. A headless prompt still fails closed.
 	// The permission callback listener does not replace this except when the
@@ -190,6 +204,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		cfg.TLSKey = pol.TLSKey
 		cfg.TLSSelfSigned = pol.TLSSelfSigned
 	}
+	envWhisper := !pol.HasWhisper && (strings.TrimSpace(cfg.WhisperBin) != "" || strings.TrimSpace(cfg.WhisperModel) != "")
 	if pol.HasWhisper {
 		cfg.WhisperBin = pol.WhisperBin
 		cfg.WhisperModel = pol.WhisperModel
@@ -261,7 +276,8 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		model:      m,
 		ws:         cfg.Workspace(),
 		bus:        NewBus(),
-		policy:     pol,
+		startPol:   pol,
+		envWhisper: envWhisper,
 		audit:      aud,
 		ctx:        ctx,
 		cancel:     cancel,
@@ -274,6 +290,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		stt:        stt,
 		sttSlot:    make(chan struct{}, 1),
 	}
+	a.setPol(pol)
 	if len(fileTokens) > 0 {
 		a.authTokens.Store(&authTokenSet{toks: fileTokens})
 	}
@@ -435,7 +452,7 @@ func (a *App) fireDue() {
 		return
 	}
 	a.rtMu.Lock()
-	enabled := a.policy.TimersEnabled
+	enabled := a.pol().TimersEnabled
 	a.rtMu.Unlock()
 	if !enabled {
 		return

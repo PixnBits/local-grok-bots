@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"errors"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -70,10 +71,10 @@ func TestCreatePRAndStatus(t *testing.T) {
 			return model.ChatResponse{Content: "no"}, nil
 		}})
 		app.githubAPIBase = upstream.URL
-		app.policy.GitHub.Repos = []string{"acme/widgets"}
-		app.policy.GitHub.TokenFile = "/etc/local-grok-bots/github.token"
-		app.policy.UIPrompts = true
-		app.policy.PromptTimeout = 20 * time.Second
+		app.editPol(func(p *policy.Policy) { p.GitHub.Repos = []string{"acme/widgets"} })
+		app.editPol(func(p *policy.Policy) { p.GitHub.TokenFile = "/etc/local-grok-bots/github.token" })
+		app.editPol(func(p *policy.Policy) { p.UIPrompts = true })
+		app.editPol(func(p *policy.Policy) { p.PromptTimeout = 20 * time.Second })
 		auditPath := filepath.Join(t.TempDir(), "audit.log")
 		lg, err := audit.Open(auditPath)
 		if err != nil {
@@ -152,7 +153,7 @@ func TestCreatePRAndStatus(t *testing.T) {
 
 	t.Run("bypass still asks", func(t *testing.T) {
 		env := newPRApp(t)
-		env.app.policy.PermissionMode = "bypassPermissions"
+		env.app.editPol(func(p *policy.Policy) { p.PermissionMode = "bypassPermissions" })
 		bot := allow(t, env.app, []string{"acme/widgets"})
 		done := approveCard(env.app, bot.ID, "create_pr")
 		out, err := env.app.dispatchTool(t.Context(), bot, "create_pr", map[string]any{
@@ -174,7 +175,7 @@ func TestCreatePRAndStatus(t *testing.T) {
 
 	t.Run("managed allow still asks", func(t *testing.T) {
 		env := newPRApp(t)
-		env.app.policy.ToolAllow = []string{"create_pr"}
+		env.app.editPol(func(p *policy.Policy) { p.ToolAllow = []string{"create_pr"} })
 		bot := allow(t, env.app, []string{"acme/widgets"})
 		done := approveCard(env.app, bot.ID, "create_pr")
 		_, err := env.app.dispatchTool(t.Context(), bot, "create_pr", map[string]any{
@@ -281,7 +282,7 @@ func TestCreatePRAndStatus(t *testing.T) {
 	})
 	t.Run("prompts off", func(t *testing.T) {
 		env := newPRApp(t)
-		env.app.policy.UIPrompts = false
+		env.app.editPol(func(p *policy.Policy) { p.UIPrompts = false })
 		bot := allow(t, env.app, []string{"acme/widgets"})
 		before := posts.Load()
 		out, err := env.app.dispatchTool(t.Context(), bot, "create_pr", args)
