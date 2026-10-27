@@ -461,6 +461,21 @@ func (a *App) transcribeTimeout() time.Duration {
 	return sttTranscribeTimeout
 }
 
+// handleSTTStatus reports the voice snapshot for this process.
+// enabled is voice on in policy and not blocked. available also needs a
+// transcriber and a protect snapshot that has not tripped. The body is
+// those two booleans. Paths, versions, and engine names stay off it.
+func (a *App) handleSTTStatus(w http.ResponseWriter, r *http.Request) {
+	snap := a.voicePolicy()
+	enabled := snap.enabled
+	available := enabled && snap.stt != nil && a.protectBlockReason() == ""
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]bool{
+		"enabled":   enabled,
+		"available": available,
+	})
+}
+
 func (a *App) handleSTT(w http.ResponseWriter, r *http.Request) {
 	pol := a.voicePolicy()
 	who := a.requestActor(r)

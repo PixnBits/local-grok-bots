@@ -52,6 +52,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/bots/{id}/dms", a.handleDMs)
 	mux.HandleFunc("GET /api/dms/{bot_a}/{bot_b}", a.handleDMThread)
 	mux.HandleFunc("GET /api/log", a.handleLog)
+	mux.HandleFunc("GET /api/stt/status", a.handleSTTStatus)
 	mux.HandleFunc("POST /api/stt", a.handleSTT)
 	mux.HandleFunc("GET /login", a.handleLogin)
 	mux.HandleFunc("GET /", a.handleIndex)
