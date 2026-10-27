@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/config"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"golang.org/x/sys/unix"
 )
 
@@ -60,13 +61,14 @@ func (a *App) tlsFiles() (string, string, error) {
 	dir := filepath.Join(c.DataDir, "tls")
 	cert, key := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
 	now := time.Now()
-	if reuse, err := reuseSelfSigned(cert, key, now); err != nil {
+	hosts := a.startPol.AllowedHosts
+	if reuse, err := reuseSelfSigned(cert, key, now, c.BindAddr, hosts); err != nil {
 		return "", "", err
 	} else if reuse {
 		a.log("", "tls_enabled", map[string]any{"mode": "self_signed", "cert": cert, "generated": false})
 		return cert, key, nil
 	}
-	if err := GenerateSelfSigned(cert, key, now, c.BindAddr); err != nil {
+	if err := GenerateSelfSigned(cert, key, now, c.BindAddr, hosts); err != nil {
 		return "", "", err
 	}
 	a.log("", "tls_enabled", map[string]any{"mode": "self_signed", "cert": cert, "generated": true})
@@ -100,13 +102,16 @@ func checkSuppliedTLSKey(path, name string) error {
 }
 
 // reuseSelfSigned reports whether cert and key are regular files that can be kept.
-// Symlinks are not followed. A certificate with fewer than 30 days left, or one
-// that cannot be parsed, is not reused.
-func reuseSelfSigned(cert, key string, now time.Time) (bool, error) {
+// Symlinks are not followed. A certificate with fewer than 30 days left, one
+// that cannot be parsed, or one whose names differ, is not reused.
+func reuseSelfSigned(cert, key string, now time.Time, bind string, hosts []string) (bool, error) {
 	if !regularFile(cert) || !regularFile(key) {
 		return false, nil
 	}
 	if !selfSignedFresh(cert, now) {
+		return false, nil
+	}
+	if !selfSignedNamesMatch(cert, bind, hosts) {
 		return false, nil
 	}
 	if err := tightenTLSFiles(cert, key); err != nil {
@@ -147,9 +152,9 @@ func tightenTLSFiles(cert, key string) error {
 }
 
 // GenerateSelfSigned writes an ECDSA P-256 cert for localhost, 127.0.0.1, and ::1.
-// bind is included when it is one specific IP. The cert and key are mode 0600
-// and owned by the current user.
-func GenerateSelfSigned(certPath, keyPath string, now time.Time, bind string) error {
+// bind is included when it is one specific IP. hosts add further DNS names and
+// IP addresses. The cert and key are mode 0600 and owned by the current user.
+func GenerateSelfSigned(certPath, keyPath string, now time.Time, bind string, hosts []string) error {
 	if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
 		return err
 	}
@@ -168,8 +173,8 @@ func GenerateSelfSigned(certPath, keyPath string, now time.Time, bind string) er
 		NotAfter:     now.AddDate(1, 0, 0),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:     []string{"localhost"},
-		IPAddresses:  selfSignedIPs(bind),
+		DNSNames:     selfSignedDNS(hosts),
+		IPAddresses:  selfSignedIPs(bind, hosts),
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
 	if err != nil {
@@ -185,29 +190,131 @@ func GenerateSelfSigned(certPath, keyPath string, now time.Time, bind string) er
 	return writeTLSFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
 
-// selfSignedIPs is 127.0.0.1, ::1, and bind when bind is one non-wildcard IP.
-func selfSignedIPs(bind string) []net.IP {
-	ips := []net.IP{net.ParseIP("127.0.0.1"), net.IPv6loopback}
+// selfSignedDNS is localhost plus host names from hosts.
+func selfSignedDNS(hosts []string) []string {
+	names := []string{"localhost"}
+	seen := map[string]struct{}{"localhost": {}}
+	for _, h := range hosts {
+		h = strings.TrimSpace(h)
+		if h == "" || net.ParseIP(h) != nil || policy.ValidHostName(h) != nil {
+			continue
+		}
+		key := strings.ToLower(h)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		names = append(names, h)
+	}
+	return names
+}
+
+// selfSignedIPs is 127.0.0.1, ::1, bind when bind is one non-wildcard IP, and IP hosts.
+func selfSignedIPs(bind string, hosts []string) []net.IP {
+	ips := []net.IP{canonIP(net.ParseIP("127.0.0.1")), canonIP(net.IPv6loopback)}
+	add := func(ip net.IP) {
+		ip = canonIP(ip)
+		if ip == nil {
+			return
+		}
+		for _, have := range ips {
+			if have.Equal(ip) {
+				return
+			}
+		}
+		ips = append(ips, ip)
+	}
+	if ip, ok := specificBindIP(bind); ok {
+		add(ip)
+	}
+	for _, h := range hosts {
+		ip := net.ParseIP(strings.TrimSpace(h))
+		if ip == nil {
+			continue
+		}
+		add(ip)
+	}
+	return ips
+}
+
+func specificBindIP(bind string) (net.IP, bool) {
 	host := strings.TrimSpace(bind)
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
 	ip := net.ParseIP(host)
+	if ip == nil || ip.IsUnspecified() {
+		return nil, false
+	}
+	return ip, true
+}
+
+func canonIP(ip net.IP) net.IP {
 	if ip == nil {
-		return ips
+		return nil
 	}
 	if v4 := ip.To4(); v4 != nil {
-		ip = v4
+		out := make(net.IP, net.IPv4len)
+		copy(out, v4)
+		return out
 	}
-	if ip.IsUnspecified() {
-		return ips
+	v6 := ip.To16()
+	if v6 == nil {
+		return nil
 	}
-	for _, have := range ips {
-		if have.Equal(ip) {
-			return ips
+	out := make(net.IP, net.IPv6len)
+	copy(out, v6)
+	return out
+}
+
+func selfSignedNamesMatch(path, bind string, hosts []string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	block, _ := pem.Decode(b)
+	if block == nil {
+		return false
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return false
+	}
+	return sameSet(dnsKeys(cert.DNSNames), dnsKeys(selfSignedDNS(hosts))) &&
+		sameSet(ipKeys(cert.IPAddresses), ipKeys(selfSignedIPs(bind, hosts)))
+}
+
+func dnsKeys(names []string) map[string]struct{} {
+	m := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		n = strings.ToLower(strings.TrimSpace(n))
+		m[n] = struct{}{}
+	}
+	return m
+}
+
+func ipKeys(ips []net.IP) map[string]struct{} {
+	m := make(map[string]struct{}, len(ips))
+	for _, ip := range ips {
+		ip = canonIP(ip)
+		if ip == nil {
+			continue
+		}
+		m[ip.String()] = struct{}{}
+	}
+	return m
+}
+
+func sameSet(a, b map[string]struct{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k := range a {
+		if _, ok := b[k]; !ok {
+			return false
 		}
 	}
-	return append(ips, ip)
+	return true
 }
 
 // writeTLSFile replaces path with body. The bytes land in a new file in the

@@ -78,3 +78,35 @@ func TestAllowedHostsFailClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestAllowedHostsRejectsBadEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.toml")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, bad := range []string{"*", "bad_name!", "host:8080"} {
+		write("[daemon]\nallowed_hosts = [\"" + bad + "\"]\n")
+		p, err := Load(Options{Path: path})
+		if err != nil {
+			t.Fatalf("%q returned %v", bad, err)
+		}
+		if p.Loaded || p.CLIPermitted {
+			t.Fatalf("%q loaded %v permitted %v", bad, p.Loaded, p.CLIPermitted)
+		}
+		if err := ValidHostName(bad); err == nil {
+			t.Fatalf("%q accepted", bad)
+		}
+	}
+	write("[daemon]\nallowed_hosts = [\"100.64.0.10\", \"2001:db8::10\", \"myhost.tailnet-example.ts.net\"]\n")
+	p, err := Load(Options{Path: path})
+	if err != nil || !p.Loaded || !p.CLIPermitted {
+		t.Fatalf("placeholders loaded %v permitted %v err %v", p.Loaded, p.CLIPermitted, err)
+	}
+	if strings.Join(p.AllowedHosts, ",") != "100.64.0.10,2001:db8::10,myhost.tailnet-example.ts.net" {
+		t.Fatalf("hosts %#v", p.AllowedHosts)
+	}
+}

@@ -160,14 +160,19 @@ open a second one.
 `TLS_SELF_SIGNED=1` writes `DATA_DIR/tls/cert.pem` and `DATA_DIR/tls/key.pem`
 as mode 0600, owned by the daemon user. The write uses a new file in that
 directory and then renames it into place. An existing pair is reused only
-when both paths are regular files, the certificate parses, and it has at
-least 30 days left. A shorter or unparseable certificate is written again.
-Reused files are tightened to 0600. Symlinks are not reused. A cert without
-a key, or a key without a cert, refuses startup. A supplied `tls_key` or
-`TLS_KEY` that is a symlink, or that is group- or other-readable, refuses
-startup and the error names that setting. Self-signed mode is not combined
-with a cert pair. The certificate names are `localhost`, `127.0.0.1`, and
-`::1`, plus the bind address when that address is one specific IP. The
+when both paths are regular files, the certificate parses, it has at
+least 30 days left, and its names are the same set that would be written
+for this process. A shorter certificate, an unparseable certificate, or a
+different name list is written again. Reordering the list leaves the pair
+in place. Reused files are tightened to 0600. Symlinks are not reused. A
+cert without a key, or a key without a cert, refuses startup. A supplied
+`tls_key` or `TLS_KEY` that is a symlink, or that is group- or
+other-readable, refuses startup and the error names that setting.
+Self-signed mode is not combined with a cert pair. The certificate names
+are `localhost`, `127.0.0.1`, and `::1`, plus the bind address when that
+address is one specific IP, plus each `[daemon] allowed_hosts` entry. An
+IP entry is an IP name. A host name is a DNS name. Repeated names are
+written once. `0.0.0.0` and `::` are not added from a wildcard bind. The
 process prints `listening on` only after this TLS setup has succeeded.
 
 `[daemon]` may set `tls_cert`, `tls_key`, and `tls_self_signed`. Any one of
@@ -176,6 +181,23 @@ or false. Policy wins over the environment and warns. Managed policy that
 disagrees with a non-empty `TLS_CERT`, `TLS_KEY`, or `TLS_SELF_SIGNED`
 refuses startup. Operator-supplied cert files are not chmodded. Only the
 generated or reused self-signed files are mode 0600.
+
+## HTTPS on a LAN or Tailscale
+
+A LAN or Tailscale address can use the same listener. In `policy.toml`:
+
+```toml
+[daemon]
+bind = "0.0.0.0:8080"
+tls_self_signed = true
+allowed_hosts = ["192.0.2.10", "100.64.0.10", "myhost.tailnet-example.ts.net"]
+```
+
+The certificate includes those names, along with `localhost`, `127.0.0.1`,
+and `::1`. It is written again at the next start when `allowed_hosts`
+changes. The browser must be told to trust the self-signed certificate.
+Open `https://192.0.2.10:8080`, `https://100.64.0.10:8080`, or
+`https://myhost.tailnet-example.ts.net:8080`.
 
 ## Permission callback
 

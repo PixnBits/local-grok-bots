@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"golang.org/x/sys/unix"
 )
 
@@ -33,7 +34,7 @@ func assertOwnerMode(t *testing.T, path string, mode os.FileMode) {
 func TestGenerateSelfSignedModeAndOwner(t *testing.T) {
 	dir := t.TempDir()
 	cert, key := filepath.Join(dir, "tls", "cert.pem"), filepath.Join(dir, "tls", "key.pem")
-	if err := GenerateSelfSigned(cert, key, time.Now(), ""); err != nil {
+	if err := GenerateSelfSigned(cert, key, time.Now(), "", nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := tls.LoadX509KeyPair(cert, key); err != nil {
@@ -71,7 +72,7 @@ func TestServeTLSUsesProvidedListener(t *testing.T) {
 	dir := t.TempDir()
 	cert := filepath.Join(dir, "cert.pem")
 	key := filepath.Join(dir, "key.pem")
-	if err := GenerateSelfSigned(cert, key, time.Now(), ""); err != nil {
+	if err := GenerateSelfSigned(cert, key, time.Now(), "", nil); err != nil {
 		t.Fatal(err)
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -126,7 +127,7 @@ func loadCert(t *testing.T, path string) *x509.Certificate {
 func TestSelfSignedSANs(t *testing.T) {
 	dir := t.TempDir()
 	cert, key := filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
-	if err := GenerateSelfSigned(cert, key, time.Now(), "192.0.2.10:8443"); err != nil {
+	if err := GenerateSelfSigned(cert, key, time.Now(), "192.0.2.10:8443", nil); err != nil {
 		t.Fatal(err)
 	}
 	got := loadCert(t, cert)
@@ -150,7 +151,7 @@ func TestSelfSignedSANs(t *testing.T) {
 	}
 
 	wild, wildKey := filepath.Join(dir, "wild.pem"), filepath.Join(dir, "wild.key")
-	if err := GenerateSelfSigned(wild, wildKey, time.Now(), "0.0.0.0:443"); err != nil {
+	if err := GenerateSelfSigned(wild, wildKey, time.Now(), "0.0.0.0:443", nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, ip := range loadCert(t, wild).IPAddresses {
@@ -159,7 +160,7 @@ func TestSelfSignedSANs(t *testing.T) {
 		}
 	}
 	v6, v6Key := filepath.Join(dir, "v6.pem"), filepath.Join(dir, "v6.key")
-	if err := GenerateSelfSigned(v6, v6Key, time.Now(), "[::]:443"); err != nil {
+	if err := GenerateSelfSigned(v6, v6Key, time.Now(), "[::]:443", nil); err != nil {
 		t.Fatal(err)
 	}
 	for _, ip := range loadCert(t, v6).IPAddresses {
@@ -175,7 +176,7 @@ func TestSelfSignedRenewsWhenSoon(t *testing.T) {
 	cert := filepath.Join(app.cfg.DataDir, "tls", "cert.pem")
 	key := filepath.Join(app.cfg.DataDir, "tls", "key.pem")
 	old := time.Now().Add(-340 * 24 * time.Hour)
-	if err := GenerateSelfSigned(cert, key, old, app.cfg.BindAddr); err != nil {
+	if err := GenerateSelfSigned(cert, key, old, app.cfg.BindAddr, nil); err != nil {
 		t.Fatal(err)
 	}
 	before := loadCert(t, cert).SerialNumber.String()
@@ -298,4 +299,164 @@ func TestListeningAfterTLS(t *testing.T) {
 	if strings.Contains(buf.String(), "listening on") {
 		t.Fatalf("logged listen before tls: %s", buf.String())
 	}
+}
+
+func assertExactSANs(t *testing.T, cert *x509.Certificate, dns, ips []string) {
+	t.Helper()
+	gotDNS := map[string]int{}
+	for _, n := range cert.DNSNames {
+		gotDNS[strings.ToLower(n)]++
+	}
+	if len(gotDNS) != len(dns) || len(cert.DNSNames) != len(dns) {
+		t.Fatalf("dns %v", cert.DNSNames)
+	}
+	for _, n := range dns {
+		if gotDNS[strings.ToLower(n)] != 1 {
+			t.Fatalf("dns %v missing %s", cert.DNSNames, n)
+		}
+	}
+	gotIP := map[string]int{}
+	for _, ip := range cert.IPAddresses {
+		gotIP[ip.String()]++
+	}
+	if len(gotIP) != len(ips) || len(cert.IPAddresses) != len(ips) {
+		t.Fatalf("ips %v", cert.IPAddresses)
+	}
+	for _, ip := range ips {
+		if gotIP[ip] != 1 {
+			t.Fatalf("ips %v missing %s", cert.IPAddresses, ip)
+		}
+	}
+}
+
+func selfSignedFromStartup(t *testing.T, bind string, hosts []string) *x509.Certificate {
+	t.Helper()
+	app := newApp(t, "", nil)
+	app.cfg.TLSSelfSigned = true
+	app.cfg.BindAddr = bind
+	app.startPol.AllowedHosts = append([]string(nil), hosts...)
+	cert, _, err := app.tlsFiles()
+	if err != nil || cert == "" {
+		t.Fatalf("cert %q %v", cert, err)
+	}
+	return loadCert(t, cert)
+}
+
+func TestSelfSignedIncludesAllowedHosts(t *testing.T) {
+	hosts := []string{
+		"100.64.0.10",
+		"2001:db8::10",
+		"myhost.tailnet-example.ts.net",
+		"100.64.0.10",
+		"localhost",
+		"127.0.0.1",
+		"2001:0db8:0000:0000:0000:0000:0000:0010",
+	}
+	dns := []string{"localhost", "myhost.tailnet-example.ts.net"}
+	withBind := selfSignedFromStartup(t, "192.0.2.10:8080", hosts)
+	assertExactSANs(t, withBind, dns, []string{"127.0.0.1", "::1", "192.0.2.10", "100.64.0.10", "2001:db8::10"})
+	host, _ := os.Hostname()
+	for _, name := range withBind.DNSNames {
+		if host != "" && host != "localhost" && strings.EqualFold(name, host) {
+			t.Fatalf("hostname %s in cert", host)
+		}
+	}
+	wild := selfSignedFromStartup(t, "0.0.0.0:8080", hosts)
+	assertExactSANs(t, wild, dns, []string{"127.0.0.1", "::1", "100.64.0.10", "2001:db8::10"})
+	for _, ip := range wild.IPAddresses {
+		if ip.IsUnspecified() || ip.String() == "0.0.0.0" || ip.String() == "192.0.2.10" {
+			t.Fatalf("bind ip %s", ip)
+		}
+	}
+}
+
+func TestSelfSignedReuseFollowsHostList(t *testing.T) {
+	app := newApp(t, "", nil)
+	app.cfg.TLSSelfSigned = true
+	app.cfg.BindAddr = "192.0.2.10:8080"
+	full := []string{"100.64.0.10", "2001:db8::10", "myhost.tailnet-example.ts.net"}
+	setHosts := func(hosts []string) {
+		t.Helper()
+		app.startPol.AllowedHosts = append([]string(nil), hosts...)
+	}
+	setHosts(full)
+	cert, _, err := app.tlsFiles()
+	if err != nil || cert == "" {
+		t.Fatalf("cert %q %v", cert, err)
+	}
+	serial := loadCert(t, cert).SerialNumber.String()
+	if _, _, err = app.tlsFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadCert(t, cert).SerialNumber.String(); got != serial {
+		t.Fatalf("unchanged list rewrote %s", got)
+	}
+	setHosts([]string{"2001:0db8:0000:0000:0000:0000:0000:0010", "myhost.tailnet-example.ts.net", "100.64.0.10"})
+	if _, _, err = app.tlsFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadCert(t, cert).SerialNumber.String(); got != serial {
+		t.Fatalf("reordered list rewrote %s", got)
+	}
+	setHosts([]string{"100.64.0.10", "myhost.tailnet-example.ts.net"})
+	if _, _, err = app.tlsFiles(); err != nil {
+		t.Fatal(err)
+	}
+	removed := loadCert(t, cert).SerialNumber.String()
+	if removed == serial {
+		t.Fatal("removed name kept the pair")
+	}
+	setHosts([]string{"100.64.0.10", "myhost.tailnet-example.ts.net", "2001:db8::10"})
+	if _, _, err = app.tlsFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadCert(t, cert).SerialNumber.String(); got == removed {
+		t.Fatal("added name kept the pair")
+	}
+}
+
+func TestOriginAllowedOnListenerPort(t *testing.T) {
+	app := &App{}
+	app.cfg.BindAddr = "0.0.0.0:8080"
+	app.setPol(policy.Policy{AllowedHosts: []string{
+		"100.64.0.10",
+		"2001:db8::10",
+		"myhost.tailnet-example.ts.net",
+	}})
+	entries := []string{"100.64.0.10", "[2001:db8::10]", "myhost.tailnet-example.ts.net"}
+	for _, entry := range entries {
+		host := entry + ":8080"
+		if !app.originAllowed(originReq(host, "", false)) {
+			t.Fatalf("host %s", host)
+		}
+		if !app.originAllowed(originReq(host, "http://"+entry+":8080", false)) {
+			t.Fatalf("http %s", entry)
+		}
+		if !app.originAllowed(originReq(host, "https://"+entry+":8080", true)) {
+			t.Fatalf("https %s", entry)
+		}
+		if app.originAllowed(originReq(host, "https://"+entry+":8080", false)) {
+			t.Fatalf("https on plain %s", entry)
+		}
+		if app.originAllowed(originReq(host, "http://"+entry+":8080", true)) {
+			t.Fatalf("http on tls %s", entry)
+		}
+		if app.originAllowed(originReq(entry+":9", "", false)) {
+			t.Fatalf("port %s", entry)
+		}
+	}
+	if app.originAllowed(originReq("bad_name!:8080", "http://bad_name!:8080", false)) {
+		t.Fatal("accepted bad_name!")
+	}
+}
+
+func originReq(host, origin string, tlsOn bool) *http.Request {
+	r := &http.Request{Host: host, Header: make(http.Header)}
+	if origin != "" {
+		r.Header.Set("Origin", origin)
+	}
+	if tlsOn {
+		r.TLS = &tls.ConnectionState{}
+	}
+	return r
 }

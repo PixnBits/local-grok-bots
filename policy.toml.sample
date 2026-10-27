@@ -23,8 +23,9 @@ bind = "127.0.0.1:8787"
 # perm_callback_addr = "127.0.0.1:0"
 # Extra names for POST /api/stt, besides localhost, 127.0.0.1, ::1, and
 # the bind address. Host names or IP addresses only. No scheme, port,
-# wildcard, or brackets. Fixed at startup. See docs/voice.md.
-# allowed_hosts = ["voice.example"]
+# wildcard, or brackets. Those names are also written into the self-signed
+# certificate. Fixed at startup. See docs/voice.md.
+# allowed_hosts = ["192.0.2.10", "100.64.0.10", "myhost.tailnet-example.ts.net"]
 
 # systemd unit should run as a non-root system user.
 # user = "local-grok-bots"

@@ -663,6 +663,7 @@ enabled = false
 # localhost, other 127/8 addresses, and wildcards fail.
 # perm_callback_addr = "127.0.0.1:0"
 # allowed_hosts adds names for POST /api/stt. Host names or IPs only.
+# Those names are also written into the self-signed certificate.
 # allowed_hosts = ["voice.example"]
 
 [managed]
@@ -686,9 +687,10 @@ There is no second public listener. `TLS_SELF_SIGNED=1`, or
 `tls_self_signed = true`, writes `DATA_DIR/tls/cert.pem` and `key.pem` mode
 0600, owned by the daemon user. The bytes are written to a new file in that
 directory and renamed into place. An existing pair is kept when both paths
-are regular files, the certificate parses, and at least 30 days remain.
-The names on that certificate are `localhost`, `127.0.0.1`, `::1`, and the
-bind IP when the bind address is one specific IP. A supplied key that is a
+are regular files, the certificate parses, at least 30 days remain, and
+the names are the same set. The names on that certificate are `localhost`,
+`127.0.0.1`, `::1`, the bind IP when the bind address is one specific IP,
+and each `allowed_hosts` entry. A supplied key that is a
 symlink or group- or other-readable refuses startup. `listening on` is
 printed after TLS setup succeeds. `POST /api/stt` status codes, the rolling
 hour (counted only for an accepted request), and the binary and model file
