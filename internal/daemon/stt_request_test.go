@@ -21,9 +21,9 @@ func callSTT(app *App, ctx context.Context, body io.Reader, hdr func(*http.Reque
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	req := httptest.NewRequest(http.MethodPost, "http://example.com/api/stt", body)
+	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8787/api/stt", body)
 	req = req.WithContext(ctx)
-	req.Host = "example.com"
+	req.Host = "127.0.0.1:8787"
 	req.Header.Set("Authorization", "Bearer voice-test-token")
 	req.Header.Set("Content-Type", "application/octet-stream")
 	if hdr != nil {
@@ -68,7 +68,7 @@ func TestSTTContentTypeAndSite(t *testing.T) {
 	}
 
 	code, out, _ = callSTT(app, nil, bytes.NewReader(make([]byte, 3200)), func(r *http.Request) {
-		r.Header.Set("Origin", "http://evil.example")
+		r.Header.Set("Origin", "http://127.0.0.2:8787")
 	})
 	if code != http.StatusForbidden || out["error"] != "forbidden" {
 		t.Fatalf("origin %d %v", code, out)
@@ -76,7 +76,7 @@ func TestSTTContentTypeAndSite(t *testing.T) {
 
 	code, out, _ = callSTT(app, nil, bytes.NewReader(make([]byte, 3200)), func(r *http.Request) {
 		r.TLS = &tls.ConnectionState{}
-		r.Header.Set("Origin", "http://example.com")
+		r.Header.Set("Origin", "http://127.0.0.1:8787")
 	})
 	if code != http.StatusForbidden || out["error"] != "forbidden" {
 		t.Fatalf("scheme %d %v", code, out)
@@ -84,7 +84,7 @@ func TestSTTContentTypeAndSite(t *testing.T) {
 
 	code, out, _ = callSTT(app, nil, pcm, func(r *http.Request) {
 		r.Header.Set("Sec-Fetch-Site", "same-origin")
-		r.Header.Set("Origin", "http://example.com")
+		r.Header.Set("Origin", "http://127.0.0.1:8787")
 	})
 	if code != http.StatusOK || out["text"] != sttPhrase {
 		t.Fatalf("same origin %d %v", code, out)
