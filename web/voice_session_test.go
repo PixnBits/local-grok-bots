@@ -514,3 +514,59 @@ console.log(JSON.stringify({
 		t.Fatalf("%#v", got)
 	}
 }
+
+// A browser recognizer that ends on its own (error or silence) frees the mic,
+// so the next press starts a new session and a repeated error is announced again.
+func TestVoiceRecognizerEndFreesMic(t *testing.T) {
+	got := runVoice(t, `
+SpeechRecognition.mode = "available";
+loadPage();
+await flush();
+micBtn().click();
+await flush();
+await flush();
+const first = liveRecs()[0];
+if (!first) throw new Error("no recognizer");
+first.onerror({ error: "not-allowed" });
+first.onend();
+await flush();
+const afterError = { msg: msg().textContent, status: statusEl().textContent };
+micBtn().click();
+await flush();
+await flush();
+const second = SpeechRecognition.live[SpeechRecognition.live.length - 1];
+const afterRetry = { built: SpeechRecognition.constructed, pressed: micBtn().attrs["aria-pressed"] || "false", mid: statusEl().textContent };
+second.onerror({ error: "not-allowed" });
+second.onend();
+await flush();
+const again = statusEl().textContent;
+micBtn().click();
+await flush();
+await flush();
+const third = SpeechRecognition.live[SpeechRecognition.live.length - 1];
+third.onend();
+await flush();
+micBtn().click();
+await flush();
+await flush();
+console.log(JSON.stringify({
+  errMsg: afterError.msg, errStatus: afterError.status,
+  built: afterRetry.built, pressed: afterRetry.pressed, mid: afterRetry.mid,
+  again: again, builtEnd: SpeechRecognition.constructed,
+  pressedEnd: micBtn().attrs["aria-pressed"] || "false"
+}));
+`)
+	blocked := "Microphone access is blocked. Allow the microphone for this page in your browser's site settings, then try again."
+	if got["errMsg"] != blocked || got["errStatus"] != blocked {
+		t.Fatalf("error %#v", got)
+	}
+	if num(t, got, "built") != 2 || got["pressed"] != "true" {
+		t.Fatalf("press after a recognizer error did not start a new session %#v", got)
+	}
+	if got["mid"] != "Listening" || strings.TrimSpace(got["again"].(string)) != blocked {
+		t.Fatalf("repeated error not announced %#v", got)
+	}
+	if num(t, got, "builtEnd") != 4 || got["pressedEnd"] != "true" {
+		t.Fatalf("press after a natural end did not start a new session %#v", got)
+	}
+}
