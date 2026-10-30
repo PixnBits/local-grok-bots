@@ -93,6 +93,11 @@ grant=@@GRANT@@
 bridge=@@BRIDGE@@
 author_name=@@NAME@@
 author_email=@@EMAIL@@
+if [ "$bridge" = 1 ]; then
+  export GIT_ALLOW_PROTOCOL=https:ssh:http
+else
+  export GIT_ALLOW_PROTOCOL=https:ssh
+fi
 sub=
 prev=
 for arg in "$@"; do
@@ -201,6 +206,53 @@ ensure_bridge() {
   return 0
 }
 run() {
+  if [ "$sub" = diff ] || [ "$sub" = log ] || [ "$sub" = show ]; then
+    if [ -x /bin/bash ]; then
+      exec /bin/bash --norc --noprofile -c '
+real=$1
+name=$2
+email=$3
+port=$4
+sub=$5
+shift 5
+args=()
+prev=
+ins=0
+for arg in "$@"; do
+  if [ -n "$prev" ]; then
+    args+=("$arg")
+    prev=
+    continue
+  fi
+  case "$arg" in
+    -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path)
+      args+=("$arg")
+      prev=1
+      continue
+      ;;
+    --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*|--upload-pack=*)
+      args+=("$arg")
+      continue
+      ;;
+    -*)
+      args+=("$arg")
+      continue
+      ;;
+  esac
+  args+=("$arg")
+  if [ "$ins" = 0 ]; then
+    args+=(--no-ext-diff --no-textconv)
+    ins=1
+  fi
+done
+cargs=(-c user.name="$name" -c user.email="$email" -c commit.gpgsign=false -c core.sshCommand=/bin/false -c core.hooksPath=/dev/null -c diff.external= -c core.pager=cat -c core.fsmonitor= -c core.fsmonitorHookVersion=)
+if [ -n "$port" ]; then
+  exec "$real" "${cargs[@]}" -c http.proxy= -c "url.http://127.0.0.1:${port}/github/.insteadOf=https://github.com/" -c "url.http://127.0.0.1:${port}/api/.insteadOf=https://api.github.com/" "${args[@]}"
+fi
+exec "$real" "${cargs[@]}" "${args[@]}"
+' bash "$real" "$author_name" "$author_email" "$GHPORT" "$sub" "$@"
+    fi
+  fi
   if [ -n "$GHPORT" ]; then
     exec "$real" \
       -c user.name="$author_name" \
@@ -210,6 +262,8 @@ run() {
       -c core.hooksPath=/dev/null \
       -c diff.external= \
       -c core.pager=cat \
+      -c core.fsmonitor= \
+      -c core.fsmonitorHookVersion= \
       -c http.proxy= \
       -c "url.http://127.0.0.1:${GHPORT}/github/.insteadOf=https://github.com/" \
       -c "url.http://127.0.0.1:${GHPORT}/api/.insteadOf=https://api.github.com/" \
@@ -223,6 +277,8 @@ run() {
     -c core.hooksPath=/dev/null \
     -c diff.external= \
     -c core.pager=cat \
+    -c core.fsmonitor= \
+    -c core.fsmonitorHookVersion= \
     "$@"
 }
 case "$sub" in

@@ -20,19 +20,20 @@ func (b brokerAudit) Record(row permbroker.AuditRow) {
 		return
 	}
 	b.a.audit.Write(map[string]any{
-		"event":      "permbroker",
-		"bot_id":     row.BotID,
-		"session_id": row.SessionID,
-		"run_id":     row.RunID,
-		"decision":   row.Decision,
-		"actor":      row.Actor,
-		"tool":       row.Tool,
-		"level":      string(row.Level),
-		"pending_id": row.PendingID,
-		"rule_id":    row.RuleID,
-		"input_hash": row.InputHash,
-		"ruleset":    row.RulesetVersion,
-		"classifier": row.Classifier,
+		"event":         "permbroker",
+		"bot_id":        row.BotID,
+		"session_id":    row.SessionID,
+		"run_id":        row.RunID,
+		"decision":      row.Decision,
+		"actor":         row.Actor,
+		"tool":          row.Tool,
+		"level":         string(row.Level),
+		"pending_id":    row.PendingID,
+		"rule_id":       row.RuleID,
+		"input_hash":    row.InputHash,
+		"ruleset":       row.RulesetVersion,
+		"classifier":    row.Classifier,
+		"table_version": row.TableVersion,
 	})
 }
 
@@ -122,6 +123,9 @@ func (a *App) prepareBrokerHook(bot store.Bot, ws, home string) string {
 		return ""
 	}
 	a.setBrokerOn(bot.ID, true)
+	if a.broker != nil {
+		a.broker.SetBotContext(bot.ID, a.ws, a.effPol(bot.ID).EffectiveGitHubRepos(bot.GitHubAllow))
+	}
 	return permbroker.HookCommand(bin, sock)
 }
 
@@ -175,6 +179,13 @@ func (a *App) clearBotSession(botID, sessionID string) {
 	if a.broker != nil && sessionID != "" {
 		a.broker.CancelSession(botID, sessionID)
 	}
+}
+
+func (a *App) noteUserMessage(botID, msgID string) {
+	if a == nil || a.broker == nil || msgID == "" || !a.effPol(botID).BrokerHook(botID) {
+		return
+	}
+	a.broker.NoteUserMessage(botID, msgID)
 }
 
 func lastUserTask(inputs []store.Message) string {
@@ -239,8 +250,11 @@ func (a *App) gateShell(ctx context.Context, bot store.Bot, command string) (boo
 	if err != nil {
 		return false, errors.New("denied")
 	}
+	repos := a.effPol(bot.ID).EffectiveGitHubRepos(bot.GitHubAllow)
+	a.broker.SetBotContext(bot.ID, a.ws, repos)
 	d := a.broker.Evaluate(ctx, permbroker.Request{
-		BotID: bot.ID, SessionID: "shell:" + bot.ID, Cwd: a.ws,
+		BotID: bot.ID, SessionID: "shell:" + bot.ID, TaskID: a.broker.UserTask(bot.ID),
+		Cwd: a.ws, Workspace: a.ws, Repos: repos,
 		ToolName: "run_shell", ToolInput: raw,
 	})
 	if d.Verdict != permbroker.VerdictAllow {

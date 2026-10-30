@@ -345,6 +345,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		cancel()
 		return nil, err
 	}
+	a.broker.SnapshotGit(a.ws)
 	a.applyVoiceRuntime()
 	a.RefreshProtectSnapshot()
 	a.wg.Add(1)

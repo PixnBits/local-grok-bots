@@ -1,6 +1,7 @@
 package permbroker
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -49,6 +50,8 @@ type Request struct {
 	RunID     string
 	TaskID    string
 	Cwd       string
+	Workspace string
+	Repos     []string
 	ToolName  string
 	ToolInput json.RawMessage
 	ToolUseID string
@@ -115,6 +118,8 @@ type pendingItem struct {
 	Level      Level
 	Eligible   bool
 	Compound   bool
+	HardAsk    bool
+	Parts      []Part
 	CreatedAt  time.Time
 	Ruleset    int
 	Classifier string
@@ -173,6 +178,26 @@ type Engine struct {
 	tokens []token
 	grants []grant
 	active map[string]Turn
+
+	// resolver maps argv0 to an absolute allowlisted binary. Nil uses
+	// the pinned root-owned PATH. The rule key stays the literal argv.
+	resolver func(string) (string, bool)
+	bots     map[string]botCtx
+	userTask map[string]string
+
+	snapSet    bool
+	snapWS     string
+	snapGit    []byte
+	snapGitOK  bool
+	snapAttr   []byte
+	snapAttrOK bool
+}
+
+// botCtx is the workspace and configured repos for one bot. The socket
+// does not receive those on the wire.
+type botCtx struct {
+	Workspace string
+	Repos     []string
 }
 
 // Open loads rules and the audit chain from dir. risks are policy
@@ -209,6 +234,9 @@ func Open(dir string, risks []RiskEntry, auditor Auditor) (*Engine, error) {
 		denied:     map[string]struct{}{},
 		dead:       map[string]struct{}{},
 		active:     map[string]Turn{},
+		resolver:   resolvePinned,
+		bots:       map[string]botCtx{},
+		userTask:   map[string]string{},
 	}
 	return e, nil
 }
@@ -270,6 +298,122 @@ func (e *Engine) RuleCount() int {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return len(e.rules.Rules)
+}
+
+// SetBotContext stores the workspace and configured repos the socket
+// uses for one bot. An empty repos slice means an explicit repo flag
+// is not eligible.
+func (e *Engine) SetBotContext(bot, workspace string, repos []string) {
+	if e == nil || bot == "" {
+		return
+	}
+	e.mu.Lock()
+	e.bots[bot] = botCtx{Workspace: workspace, Repos: append([]string(nil), repos...)}
+	e.mu.Unlock()
+}
+
+// UserTask is the latest user-message id for the bot.
+func (e *Engine) UserTask(bot string) string {
+	if e == nil {
+		return ""
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.userTask[bot]
+}
+
+// NoteUserMessage records a user message. A new id ends grants and
+// pending items for the previous task of this bot, in every session.
+func (e *Engine) NoteUserMessage(bot, task string) {
+	if e == nil || bot == "" || task == "" {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	prev := e.userTask[bot]
+	e.userTask[bot] = task
+	if cur, ok := e.active[bot]; ok && cur.Task != task {
+		cur.Task = task
+		e.active[bot] = cur
+	}
+	if prev != "" && prev != task {
+		e.endTaskLocked(bot, task)
+	}
+}
+
+// SnapshotGit records .git/config and .gitattributes for the Claude
+// path. A later change makes a Claude git command ask. The daemon
+// calls this once, after the workspace exists. run_shell does not use
+// the snapshot; the jail git wrapper forces its own config.
+func (e *Engine) SnapshotGit(workspace string) {
+	if e == nil || strings.TrimSpace(workspace) == "" {
+		return
+	}
+	gitData, gitOK := readGitBaseline(workspace)
+	attrData, attrOK := readBaselineFile(filepath.Join(workspace, ".gitattributes"))
+	e.mu.Lock()
+	e.snapSet = true
+	e.snapWS = workspace
+	e.snapGit = gitData
+	e.snapGitOK = gitOK
+	e.snapAttr = attrData
+	e.snapAttrOK = attrOK
+	e.mu.Unlock()
+}
+
+// SaveRule stores an exact argv rule. Critical, compounds, and commands
+// that are not rule-eligible are refused. High and unclassified cannot
+// be global. The ruleset version bumps, which cancels pending items,
+// tokens, and grants. The change is audited.
+func (e *Engine) SaveRule(rule Rule) (Rule, error) {
+	if e == nil {
+		return Rule{}, ErrScope
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	rule.Tool = normTool(rule.Tool)
+	rule.Argv = append([]string(nil), rule.Argv...)
+	if rule.Tool != ToolShell || len(rule.Argv) == 0 {
+		return Rule{}, ErrScope
+	}
+	switch rule.Effect {
+	case EffectAllow, EffectAsk, EffectDeny:
+	default:
+		return Rule{}, ErrScope
+	}
+	if rule.Scope != ScopeBot && rule.Scope != ScopeGlobal {
+		return Rule{}, ErrScope
+	}
+	if rule.Scope == ScopeBot && strings.TrimSpace(rule.BotID) == "" {
+		return Rule{}, ErrScope
+	}
+	if rule.Scope == ScopeGlobal {
+		rule.BotID = ""
+	}
+	cls := classifyArgv(rule.Argv, "", "", nil, e.resolver)
+	lvl := maxLevel(e.table.level(ToolShell, rule.Argv), cls.Level)
+	if cls.Hard || !cls.Eligible || lvl == LevelCritical || cls.Level == LevelCritical {
+		return Rule{}, ErrScope
+	}
+	if !scopeAllowed(lvl, true, false, false, rule.Scope) {
+		return Rule{}, ErrScope
+	}
+	rule.ID = newID("r_")
+	rule.CreatedAt = e.now()
+	rule.Uses = 0
+	rule.LastUsedAt = time.Time{}
+	next := e.rules
+	next.Version++
+	next.Rules = append(append([]Rule(nil), e.rules.Rules...), rule)
+	if err := saveRules(e.rulesPath, next); err != nil {
+		return Rule{}, err
+	}
+	e.rules = next
+	e.invalidateLocked()
+	e.auditDecision(Request{BotID: rule.BotID}, inspected{
+		Eligible: true, Argv: rule.Argv, Hash: hashParts(ToolShell, rule.Argv), Level: lvl, ClassNote: "none",
+	}, rule.Effect, "rule", "", "human", rule.ID)
+	return rule, nil
 }
 
 // NoteTurn records the session the hook must use. A new task id ends
@@ -354,6 +498,22 @@ func (e *Engine) cancelSessionLocked(bot, session string) {
 	}
 }
 
+func (e *Engine) endTaskLocked(bot, keepTask string) {
+	for id, item := range e.byID {
+		if item.BotID == bot && item.TaskID != keepTask {
+			e.dead[id] = struct{}{}
+			delete(e.byID, id)
+			delete(e.byKey, collapseKey(item))
+		}
+	}
+	e.grants = filterGrants(e.grants, func(g grant) bool {
+		if g.BotID != bot {
+			return true
+		}
+		return g.TaskID == keepTask
+	})
+}
+
 func (e *Engine) dropTaskLocked(bot, session, keepTask string) {
 	for id, item := range e.byID {
 		if item.BotID == bot && item.SessionID == session && item.TaskID != "" && item.TaskID != keepTask {
@@ -381,7 +541,7 @@ func (e *Engine) Evaluate(ctx context.Context, req Request) Decision {
 	if strings.TrimSpace(req.BotID) == "" || strings.TrimSpace(req.SessionID) == "" {
 		return e.finish(req, in, VerdictDeny, "denied", "", "fail-closed", "")
 	}
-	if rule := e.match(req.BotID, in, EffectDeny); rule != nil {
+	if rule := e.matchDeny(req.BotID, in); rule != nil {
 		e.touch(rule)
 		return e.finish(req, in, VerdictDeny, "denied by rule "+rule.ID, "", rule.ID, rule.ID)
 	}
@@ -441,6 +601,8 @@ func (e *Engine) ask(req Request, in inspected) Decision {
 		Level:      in.Level,
 		Eligible:   in.Eligible,
 		Compound:   in.Compound,
+		HardAsk:    in.HardAsk,
+		Parts:      append([]Part(nil), in.Parts...),
 		CreatedAt:  e.now(),
 		Ruleset:    e.rules.Version,
 		Classifier: in.ClassNote,
@@ -521,16 +683,29 @@ func (e *Engine) Decide(id, decision, scope string) error {
 		}, VerdictDeny, "denied", "", "human", "")
 		return nil
 	case "approve":
-		if !scopeAllowed(item.Level, item.Eligible, item.Compound, scope) {
+		if !scopeAllowed(item.Level, item.Eligible, item.Compound, item.HardAsk, scope) {
 			return ErrScope
 		}
 		switch scope {
 		case ScopeOnce:
 			e.tokens = append(e.tokens, token{BotID: item.BotID, SessionID: item.SessionID, Hash: item.InputHash, Cwd: item.Cwd})
 		case ScopeTask:
+			exp := e.now().Add(TaskGrantCap)
+			if len(item.Parts) > 0 {
+				for _, p := range item.Parts {
+					if p.Hash == "" {
+						return ErrScope
+					}
+					e.grants = append(e.grants, grant{
+						BotID: item.BotID, SessionID: item.SessionID, TaskID: item.TaskID,
+						Hash: p.Hash, Cwd: item.Cwd, Expires: exp,
+					})
+				}
+				break
+			}
 			e.grants = append(e.grants, grant{
 				BotID: item.BotID, SessionID: item.SessionID, TaskID: item.TaskID,
-				Hash: item.InputHash, Cwd: item.Cwd, Expires: e.now().Add(TaskGrantCap),
+				Hash: item.InputHash, Cwd: item.Cwd, Expires: exp,
 			})
 		case ScopeBot, ScopeGlobal:
 			if err := e.addRuleLocked(item, scope); err != nil {
@@ -642,10 +817,13 @@ func (e *Engine) consumeToken(req Request, hash string) bool {
 }
 
 func (e *Engine) grantCovers(req Request, in inspected) bool {
+	if in.HardAsk || in.Level == LevelCritical {
+		return false
+	}
 	now := e.now()
 	if len(in.Parts) > 0 {
 		for _, part := range in.Parts {
-			if !e.grantHas(req, part.Hash, now) {
+			if part.Hash == "" || !e.grantHas(req, part.Hash, now) {
 				return false
 			}
 		}
@@ -661,6 +839,18 @@ func (e *Engine) grantHas(req Request, hash string, now time.Time) bool {
 		}
 	}
 	return false
+}
+
+func (e *Engine) matchDeny(bot string, in inspected) *Rule {
+	if in.Eligible {
+		return e.match(bot, in, EffectDeny)
+	}
+	for _, p := range in.Parts {
+		if rule := e.match(bot, inspected{Eligible: true, Argv: p.Argv}, EffectDeny); rule != nil {
+			return rule
+		}
+	}
+	return nil
 }
 
 func (e *Engine) match(bot string, in inspected, effect string) *Rule {
@@ -709,6 +899,7 @@ func (e *Engine) matchScoped(bot string, in inspected, scope string) *Rule {
 type inspected struct {
 	Eligible  bool
 	Compound  bool
+	HardAsk   bool
 	Argv      []string
 	Raw       string
 	Hash      string
@@ -719,20 +910,70 @@ type inspected struct {
 
 func (e *Engine) inspect(ctx context.Context, req Request) inspected {
 	in := inspected{}
+	ws, repos := e.contextOf(req)
 	if isShellTool(req.ToolName) {
 		raw, _ := commandOf(req.ToolInput)
 		in.Raw = raw
 		parsed := ParseCommand(raw)
-		in.Eligible = parsed.Eligible
 		in.Compound = parsed.Compound
-		in.Argv = parsed.Argv
-		in.Parts = parsed.Parts
-		if parsed.Eligible {
-			in.Hash = hashParts("shell", parsed.Argv)
-			in.Level = e.table.level(ToolShell, parsed.Argv)
-		} else {
+		in.Argv = append([]string(nil), parsed.Argv...)
+		cwd := req.Cwd
+		grantable := parsed.Grantable
+		if parsed.LeadingCD != "" {
+			if !resolvesInside(parsed.LeadingCD, cwd, ws) {
+				grantable = false
+			} else if cwd != "" {
+				cwd = filepath.Join(cwd, parsed.LeadingCD)
+			}
+		}
+		parts := parsed.Parts
+		if parsed.LeadingCD != "" && len(parts) > 0 && len(parts[0].Argv) > 0 && baseName(parts[0].Argv[0]) == "cd" {
+			parts = parts[1:]
+		}
+		max := LevelUnclassified
+		for _, p := range parts {
+			cls := classifyArgv(p.Argv, cwd, ws, repos, e.resolver)
+			lvl := maxLevel(e.table.level(ToolShell, p.Argv), cls.Level)
+			if Rank(lvl) > Rank(max) {
+				max = lvl
+			}
+			p.Hash = hashParts(ToolShell, p.Argv)
+			in.Parts = append(in.Parts, p)
+			if cls.Hard || !cls.Eligible || lvl == LevelCritical {
+				grantable = false
+			}
+		}
+		if parsed.Eligible && len(parsed.Argv) > 0 {
+			cls := classifyArgv(parsed.Argv, cwd, ws, repos, e.resolver)
+			in.Level = maxLevel(e.table.level(ToolShell, parsed.Argv), cls.Level)
+			in.Eligible = cls.Eligible && !cls.Hard && in.Level != LevelCritical
+			in.HardAsk = !in.Eligible
+			in.Hash = hashParts(ToolShell, parsed.Argv)
+		} else if len(in.Parts) > 0 {
+			if Rank(max) < Rank(LevelMedium) {
+				max = LevelMedium
+			}
+			in.Level = max
+			in.Eligible = false
+			in.HardAsk = !grantable || in.Level == LevelCritical
 			in.Hash = hashRaw(req.ToolName, raw)
+		} else {
+			in.Eligible = false
+			in.HardAsk = true
 			in.Level = LevelUnclassified
+			if len(parsed.Argv) > 0 {
+				cls := classifyArgv(parsed.Argv, cwd, ws, repos, e.resolver)
+				in.Level = maxLevel(e.table.level(ToolShell, parsed.Argv), cls.Level)
+			}
+			in.Hash = hashRaw(req.ToolName, raw)
+		}
+		if in.Level == LevelCritical {
+			in.Eligible = false
+			in.HardAsk = true
+		}
+		if e.gitDrift(req, ws, parsed) {
+			in.Eligible = false
+			in.HardAsk = true
 		}
 	} else {
 		canon, ok := canonicalJSON(req.ToolInput)
@@ -741,7 +982,21 @@ func (e *Engine) inspect(ctx context.Context, req Request) inspected {
 		}
 		in.Raw = canon
 		in.Hash = hashRaw(req.ToolName, canon)
-		in.Level = LevelUnclassified
+		paths := toolPaths(req.ToolInput)
+		in.Level = maxLevel(e.table.level(req.ToolName, paths), otherBuiltin(req.ToolName, paths))
+		in.Eligible = false
+		in.HardAsk = false
+		for _, p := range paths {
+			if ws != "" && !resolvesInside(p, req.Cwd, ws) {
+				if Rank(in.Level) < Rank(LevelHigh) {
+					in.Level = LevelHigh
+				}
+				in.HardAsk = true
+			}
+		}
+		if in.Level == LevelCritical {
+			in.HardAsk = true
+		}
 	}
 	if e.classifier == nil {
 		e.classifier = NopClassifier{}
@@ -760,7 +1015,154 @@ func (e *Engine) inspect(ctx context.Context, req Request) inspected {
 	if in.ClassNote == "" {
 		in.ClassNote = "none"
 	}
+	if in.Level == LevelCritical {
+		in.Eligible = false
+		in.HardAsk = true
+	}
 	return in
+}
+
+func (e *Engine) contextOf(req Request) (string, []string) {
+	ws := req.Workspace
+	repos := req.Repos
+	if b, ok := e.bots[req.BotID]; ok {
+		if ws == "" {
+			ws = b.Workspace
+		}
+		if repos == nil {
+			repos = b.Repos
+		}
+	}
+	if ws == "" {
+		ws = req.Cwd
+	}
+	return ws, repos
+}
+
+func (e *Engine) gitDrift(req Request, ws string, parsed Parse) bool {
+	if !e.snapSet || !claudeBash(req.ToolName) || !commandUsesGit(parsed) {
+		return false
+	}
+	if ws == "" {
+		return true
+	}
+	gitData, gitOK := readGitBaseline(ws)
+	if baselineDrift(e.snapGit, e.snapGitOK, gitData, gitOK) {
+		return true
+	}
+	attr, attrOK := readBaselineFile(filepath.Join(ws, ".gitattributes"))
+	if baselineDrift(e.snapAttr, e.snapAttrOK, attr, attrOK) {
+		return true
+	}
+	return subdirGit(req.Cwd, ws)
+}
+
+func baselineDrift(prev []byte, prevOK bool, cur []byte, curOK bool) bool {
+	if prevOK != curOK {
+		return true
+	}
+	return !bytes.Equal(prev, cur)
+}
+
+func commandUsesGit(p Parse) bool {
+	if len(p.Argv) > 0 && baseName(p.Argv[0]) == "git" {
+		return true
+	}
+	for _, part := range p.Parts {
+		if len(part.Argv) > 0 && baseName(part.Argv[0]) == "git" {
+			return true
+		}
+	}
+	return false
+}
+
+func claudeBash(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), "bash")
+}
+
+func readGitBaseline(ws string) ([]byte, bool) {
+	p := filepath.Join(ws, ".git")
+	st, err := os.Lstat(p)
+	if err != nil {
+		return nil, false
+	}
+	if st.Mode()&os.ModeSymlink != 0 {
+		target, err := os.Readlink(p)
+		if err != nil {
+			return []byte("symlink"), true
+		}
+		return []byte("symlink:" + target), true
+	}
+	if st.Mode().IsRegular() {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return []byte("unreadable"), true
+		}
+		return b, true
+	}
+	if st.IsDir() {
+		return readBaselineFile(filepath.Join(p, "config"))
+	}
+	return []byte("other"), true
+}
+
+func readBaselineFile(path string) ([]byte, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false
+		}
+		return []byte("unreadable"), true
+	}
+	return b, true
+}
+
+func subdirGit(cwd, ws string) bool {
+	if cwd == "" || ws == "" {
+		return false
+	}
+	cwd = filepath.Clean(cwd)
+	ws = filepath.Clean(ws)
+	if cwd == ws || !lexicalInside(cwd, ws) {
+		return false
+	}
+	for _, rel := range []string{".git", ".gitattributes", filepath.Join(".git", "config")} {
+		if _, err := os.Lstat(filepath.Join(cwd, rel)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func toolPaths(raw json.RawMessage) []string {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil
+	}
+	var out []string
+	var walk func(any)
+	walk = func(n any) {
+		switch x := n.(type) {
+		case map[string]any:
+			for _, key := range []string{"file_path", "path", "notebook_path"} {
+				if s, ok := x[key].(string); ok && s != "" {
+					out = append(out, s)
+				}
+			}
+			for _, child := range x {
+				walk(child)
+			}
+		case []any:
+			for _, child := range x {
+				walk(child)
+			}
+		}
+	}
+	walk(v)
+	return out
 }
 
 func (e *Engine) finish(req Request, in inspected, verdict, reason, pendingID, actor, ruleID string) Decision {

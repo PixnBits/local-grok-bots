@@ -14,6 +14,10 @@ func TestParseLiteralSimpleCommand(t *testing.T) {
 	if !redir.Eligible || !argvEqual(redir.Argv, []string{"echo", "ok"}) {
 		t.Fatalf("%+v", redir)
 	}
+	quoted := ParseCommand(`echo "foo # bar"`)
+	if !quoted.Eligible || !argvEqual(quoted.Argv, []string{"echo", "foo # bar"}) {
+		t.Fatalf("%+v", quoted)
+	}
 }
 
 func TestParseAsksForAnythingElse(t *testing.T) {

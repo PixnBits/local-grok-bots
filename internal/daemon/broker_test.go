@@ -118,6 +118,28 @@ func TestBrokerRunShellAskDoesNotExecute(t *testing.T) {
 	}
 }
 
+func TestUserMessageEndsPreviousTask(t *testing.T) {
+	app := newApp(t, "", nil)
+	app.editPol(func(p *policy.Policy) { p.Broker = "hook" })
+	bot, err := app.st.CreateBot("Ada", "help", nil, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.noteUserMessage(bot.ID, "m1")
+	_, err = app.gateShell(context.Background(), bot, "echo hi")
+	if err == nil || !strings.Contains(err.Error(), "pending approval") {
+		t.Fatal(err)
+	}
+	pending := app.broker.ListPending()
+	if len(pending) != 1 || pending[0].TaskID != "m1" {
+		t.Fatalf("pending %+v", pending)
+	}
+	app.noteUserMessage(bot.ID, "m2")
+	if err := app.broker.Decide(pending[0].ID, "approve", permbroker.ScopeOnce); err != permbroker.ErrStale {
+		t.Fatalf("old task err %v", err)
+	}
+}
+
 func TestGolden_HookSIGKILLed(t *testing.T) {
 	hook := writeHookScript(t, "#!/bin/sh\nprintf '%s\\n' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"permissionDecisionReason\":\"allowed\"}}'\nexit 0\n")
 	t.Setenv("LGB_FAKE_HOOK", "kill")

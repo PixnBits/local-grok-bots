@@ -120,19 +120,20 @@ func bytesTrim(b []byte) []byte {
 }
 
 // scopeAllowed is the ladder for saving an approval.
-// Critical is once only. A compound or a non-eligible command is once
-// or task. High and unclassified stop at the bot. Low and medium may
-// be global.
-func scopeAllowed(level Level, eligible, compound bool, scope string) bool {
+// Critical is once only. A compound, a non-eligible command, or a
+// command a task grant must not cover is once only when hard is set,
+// otherwise once or task. High and unclassified stop at the bot.
+// Low and medium may be global. A compound is never a bot or global rule.
+func scopeAllowed(level Level, eligible, compound, hard bool, scope string) bool {
 	switch scope {
 	case ScopeOnce:
 		return true
 	case ScopeTask:
-		return level != LevelCritical
+		return level != LevelCritical && !hard
 	case ScopeBot:
-		return eligible && !compound && level != LevelCritical
+		return eligible && !compound && !hard && level != LevelCritical
 	case ScopeGlobal:
-		return eligible && !compound && (level == LevelLow || level == LevelMedium)
+		return eligible && !compound && !hard && (level == LevelLow || level == LevelMedium)
 	default:
 		return false
 	}

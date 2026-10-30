@@ -616,6 +616,7 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.log(id, "user_message", map[string]any{"message_id": msg.ID})
+	a.noteUserMessage(id, msg.ID)
 	a.touchActivity(id)
 	a.dropResume(id)
 	runID := a.kick(id)

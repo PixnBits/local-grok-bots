@@ -15,8 +15,22 @@ func testEngine(t *testing.T) *Engine {
 	if err != nil {
 		t.Fatal(err)
 	}
+	e.resolver = fakeBinary
 	t.Cleanup(func() { _ = e.Close() })
 	return e
+}
+
+func fakeBinary(argv0 string) (string, bool) {
+	base := baseName(argv0)
+	if !binaryAllowed(base) {
+		return "", false
+	}
+	if strings.ContainsAny(argv0, `/\`) {
+		if !filepath.IsAbs(argv0) || filepath.Base(argv0) != base {
+			return "", false
+		}
+	}
+	return "/usr/bin/" + base, true
 }
 
 func bashReq(bot, session, task, cwd, cmd string) Request {
@@ -242,6 +256,15 @@ func TestPolicyRaiseAndLower(t *testing.T) {
 	}
 	if err := e.SetRisks([]RiskEntry{{Tool: "shell", Argv: []string{"git", "push"}, Level: LevelLow}}); err == nil {
 		t.Fatal("lowered git push")
+	}
+	if err := ValidateRisk([]RiskEntry{{Tool: "shell", Argv: []string{"git", "push", "origin"}, Level: LevelLow}}); err == nil {
+		t.Fatal("lowered git push origin")
+	}
+	if err := ValidateRisk([]RiskEntry{{Tool: "shell", Argv: []string{"gh", "pr", "view"}, Level: LevelUnclassified}}); err == nil {
+		t.Fatal("lowered gh pr view")
+	}
+	if err := ValidateRisk([]RiskEntry{{Tool: "shell", Argv: []string{"gh", "auth", "token"}, Level: LevelHigh}}); err == nil {
+		t.Fatal("lowered gh auth token")
 	}
 }
 

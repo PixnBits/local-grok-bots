@@ -391,6 +391,9 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_SYSTEM=/dev/null",
 		"GIT_CONFIG_NOSYSTEM=1",
+		// The git wrapper widens this to include http only while the
+		// loopback credential proxy is on.
+		"GIT_ALLOW_PROTOCOL=https:ssh",
 	}
 	if p.cleanBash {
 		p.env = dropEnvKeys(p.env, "BASH_ENV", "ENV")
@@ -436,8 +439,7 @@ func jailPATH() string {
 	}
 	var dirs []string
 	for _, dir := range candidates {
-		st, err := os.Stat(dir)
-		if err != nil || !st.IsDir() {
+		if !rootOwnedDir(dir) {
 			continue
 		}
 		dirs = append(dirs, dir)
@@ -446,6 +448,18 @@ func jailPATH() string {
 		return "/usr/bin:/bin"
 	}
 	return strings.Join(dirs, ":")
+}
+
+func rootOwnedDir(dir string) bool {
+	st, err := os.Stat(dir)
+	if err != nil || !st.IsDir() {
+		return false
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	if !ok || sys == nil {
+		return false
+	}
+	return sys.Uid == 0
 }
 
 func mustRead(path string) []byte {

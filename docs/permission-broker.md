@@ -71,23 +71,38 @@ A deny does not stop the run. The model keeps the reason. The run stays
 
 ## Decisions
 
-The engine evaluates in this order: a deny rule, a one-time human token,
-a critical level (task grants do not cover it), a non-eligible command
-(a task grant of the whole input, otherwise ask), per-bot rules, global
-rules when the level is low or medium, a task grant, then ask. An ask
-beats an allow at the same scope. Empty bot or session is a deny.
+The engine evaluates in this order: a deny rule (including a deny on any
+part of a compound), a one-time human token, then a critical level or a
+command that is not one eligible argv. Those ask, unless a task grant
+covers every part. Otherwise: per-bot rules, global rules when the level
+is low or medium, a task grant, then ask. An ask beats an allow at the
+same scope. Empty bot or session is a deny. The whole command is allowed
+or it asks. A prefix is not allowed on its own.
 
-An exact argv rule matches only a normalized literal simple command.
-Anything else asks. Run 2 of this work extends parsing, the risk tables,
-and task grants. The interfaces already keep a parts list and a level
-table so that work can land without a new protocol.
+An exact argv rule matches one normalized literal simple command. The
+key is the argv vector, shared by Claude Bash and `run_shell`. A
+compound is not a rule. Critical commands cannot be saved as a rule.
+Unclassified and high stop at per-bot. Global rules are only for low
+and medium. One approval can be once, for the task, for the bot, or
+global, within that ladder. The once token is bound to the bot, the
+session, the input hash, and the cwd, and it is consumed on first use.
 
-Critical commands and commands that are not a single literal argv cannot
-be saved as a bot or global rule. Unclassified and high stop at per-bot.
-Global rules are only for low and medium. One approval can be once, for
-the task, for the bot, or global, within that ladder. The once token is
-bound to the bot, the session, the input hash, and the cwd, and it is
-consumed on first use.
+Shipped tables set levels for git, gh, path classes, and non-Bash tool
+kinds. They do not allow a call. Policy may raise a level or repeat it.
+A task grant may cover a compound only when every part is granted and
+each part still passes critical and deny at request time. The grant is
+bound to the bot, the session, and the user-message id. It ends on the
+next user message for that bot, when the session ends, or after 4 hours.
+
+Daemon-run shells use a pinned PATH of root-owned directories and an
+environment allowlist. A rule names a command only when argv0 resolves
+to an allowlisted binary on that PATH. An assignment prefix is never
+eligible. The jail git wrapper forces a safe config for `run_shell`,
+including an empty fsmonitor, no external diff, and a protocol list of
+https and ssh. http is added only while the loopback credential proxy
+is on. Claude is not rewritten. The daemon records `.git/config` and
+`.gitattributes` at startup; a later change makes a Claude git command
+ask until the daemon restarts.
 
 Pending items do not expire. They are cancelled when the session ends,
 when the bot is deleted or the daemon restarts, or when the ruleset
@@ -95,10 +110,10 @@ changes. Approving a cancelled item is refused (HTTP 409). Identical asks
 collapse, including a repeat after a human deny.
 
 `git push` as a literal simple command still uses the existing push
-approval card. The broker does not rewrite git arguments. The jail already
-sets `GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, and `GIT_CONFIG_NOSYSTEM`
-to ignore the user's git config. A compound command that contains a push
-goes through the broker instead.
+approval card. The broker does not rewrite git arguments. The jail
+ignores the user's git config. A compound command that contains a push
+goes through the broker instead. The audit row includes the shipped
+table version.
 
 `run_shell` calls the same engine in-process. A deny is the tool error.
 The model can continue. The shell is not started.
@@ -157,6 +172,12 @@ go test -v ./web/... | grep -i skip
 - classifier only escalates
 - policy cannot lower a shipped level
 - critical and compound commands cannot be saved as bot or global rules
+- parsing bypasses stay denied when a literal allow rule or task grant exists
+- a task grant covers a compound only when every part is granted
+- a task grant ends on the next user message and after 4 hours
+- one argv rule applies to Claude Bash and run_shell
+- a deny rule beats a task grant
+- a critical part inside a granted compound still asks
 
 The fake Claude enters hook mode only when `--settings` contains a
 PreToolUse command. Launches that still set `disableAllHooks` keep the

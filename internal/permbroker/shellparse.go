@@ -1,9 +1,8 @@
-// Package-level shell parsing for exact-argv rules.
+// Shell parsing for exact-argv rules.
 //
-// This run accepts one simple command whose words are all literals.
-// Anything else is not eligible and the engine asks. Run 2 fills Parts
-// for compounds and tightens the wrapper list. ParseCommand stays the
-// entry point so that work does not change callers.
+// A single simple command of literal words can match a rule. A compound
+// is a list or a pipe of those commands. Anything else asks. The argv
+// vector, not the source text, is the rule key.
 package permbroker
 
 import (
@@ -14,9 +13,7 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// Part is one simple command inside a compound. This run leaves Parts
-// empty. Run 2 fills one entry per pipeline stage so a task grant can
-// cover each stage.
+// Part is one simple command inside a compound.
 type Part struct {
 	Argv []string
 	Hash string
@@ -25,32 +22,35 @@ type Part struct {
 
 // Parse is the normalized shape of one shell string.
 type Parse struct {
-	Eligible bool
-	Compound bool
-	Argv     []string
-	Raw      string
-	Parts    []Part
-	Reason   string
+	Eligible  bool
+	Compound  bool
+	Grantable bool
+	Void      bool
+	Argv      []string
+	Raw       string
+	Parts     []Part
+	LeadingCD string
+	Reason    string
 }
 
 // ParseCommand normalizes a shell command. Eligible is true only for a
-// single simple command of literal words. Argv is those words after
-// quote removal. A parse error, a bash/POSIX difference, a comment, a
-// substitution, a glob, or a wrapper argv0 is not eligible.
+// single simple command of literal words. A compound lists one part per
+// simple command when every part is literal. Grantable is the syntactic
+// shape a task grant may cover. The engine still re-checks each part.
 func ParseCommand(src string) Parse {
 	out := Parse{Raw: src}
-	if src == "" || strings.TrimSpace(src) == "" {
+	if strings.TrimSpace(src) == "" {
 		out.Reason = "empty"
 		return out
 	}
 	if badShellSource(src) {
-		out.Compound = true
+		out.Compound = looksCompound(src)
 		out.Reason = "unsupported syntax"
 		return out
 	}
 	bash, err := parseLang(src, syntax.LangBash)
 	if err != nil {
-		out.Compound = true
+		out.Compound = looksCompound(src)
 		out.Reason = "parse"
 		return out
 	}
@@ -61,57 +61,15 @@ func ParseCommand(src string) Parse {
 		return out
 	}
 	if hasComment(bash) {
+		out.Compound = true
 		out.Reason = "comment"
-		out.Compound = true
 		return out
 	}
-	if len(bash.Stmts) != 1 {
-		out.Compound = true
-		out.Reason = "compound"
-		return out
-	}
-	st := bash.Stmts[0]
-	if st == nil || st.Background || st.Coprocess || st.Negated || st.Cmd == nil {
-		out.Compound = true
-		out.Reason = "compound"
-		return out
-	}
-	call, ok := st.Cmd.(*syntax.CallExpr)
-	if !ok {
-		out.Compound = true
-		out.Reason = "compound"
-		return out
-	}
-	if len(call.Assigns) > 0 {
-		out.Reason = "assignment"
-		return out
-	}
-	for _, r := range st.Redirs {
-		if !redirOK(r) {
-			out.Reason = "redirect"
-			return out
-		}
-	}
-	if len(call.Args) == 0 {
-		out.Reason = "empty"
-		return out
-	}
-	argv := make([]string, 0, len(call.Args))
-	for _, w := range call.Args {
-		word, ok := literalWord(w)
-		if !ok {
-			out.Reason = "not a literal"
-			return out
-		}
-		argv = append(argv, word)
-	}
-	if wrapperArgv(argv) {
-		out.Reason = "wrapper"
-		return out
-	}
-	out.Eligible = true
-	out.Argv = argv
-	return out
+	return walkFile(src, bash)
+}
+
+func looksCompound(src string) bool {
+	return strings.ContainsAny(src, ";&|") || strings.Contains(src, "\n")
 }
 
 func badShellSource(src string) bool {
@@ -120,7 +78,7 @@ func badShellSource(src string) bool {
 	}
 	for _, r := range src {
 		switch r {
-		case '\u037e', '\uff1b', '\uff06', '\uff5c', '\u2223':
+		case '\u037e', '\uff1b', '\uff06', '\uff5c', '\u2223', '\ufeff':
 			return true
 		}
 		if r != '\t' && r != '\n' && unicode.IsControl(r) {
@@ -155,11 +113,212 @@ func hasComment(f *syntax.File) bool {
 		return true
 	}
 	for _, st := range f.Stmts {
-		if st != nil && len(st.Comments) > 0 {
+		if stmtHasComment(st) {
 			return true
 		}
 	}
 	return false
+}
+
+func stmtHasComment(st *syntax.Stmt) bool {
+	if st == nil {
+		return false
+	}
+	if len(st.Comments) > 0 {
+		return true
+	}
+	if bin, ok := st.Cmd.(*syntax.BinaryCmd); ok {
+		return stmtHasComment(bin.X) || stmtHasComment(bin.Y)
+	}
+	return false
+}
+
+type stage struct {
+	argv       []string
+	downstream bool
+}
+
+func walkFile(src string, f *syntax.File) Parse {
+	out := Parse{Raw: src}
+	if f == nil || len(f.Stmts) == 0 {
+		out.Reason = "empty"
+		return out
+	}
+	var stages []stage
+	for i, st := range f.Stmts {
+		got, reason := walkStmt(st, false)
+		if reason != "" {
+			out.Reason = reason
+			out.Compound = len(f.Stmts) > 1 || stmtCompound(st)
+			return out
+		}
+		if i > 0 {
+			for j := range got {
+				got[j].downstream = false
+			}
+		}
+		stages = append(stages, got...)
+	}
+	return finishWalk(out, stages)
+}
+
+func stmtCompound(st *syntax.Stmt) bool {
+	if st == nil || st.Cmd == nil {
+		return false
+	}
+	_, ok := st.Cmd.(*syntax.BinaryCmd)
+	return ok || st.Background
+}
+
+func walkStmt(st *syntax.Stmt, downstream bool) ([]stage, string) {
+	if st == nil || st.Cmd == nil {
+		return nil, "empty"
+	}
+	if st.Background || st.Coprocess || st.Negated {
+		return nil, "compound"
+	}
+	for _, r := range st.Redirs {
+		if !redirOK(r) {
+			return nil, "redirect"
+		}
+	}
+	switch cmd := st.Cmd.(type) {
+	case *syntax.CallExpr:
+		argv, reason := callArgv(cmd)
+		if reason != "" {
+			return nil, reason
+		}
+		return []stage{{argv: argv, downstream: downstream}}, ""
+	case *syntax.BinaryCmd:
+		switch cmd.Op {
+		case syntax.AndStmt, syntax.OrStmt:
+			left, reason := walkStmt(cmd.X, downstream)
+			if reason != "" {
+				return nil, reason
+			}
+			right, reason := walkStmt(cmd.Y, downstream)
+			if reason != "" {
+				return nil, reason
+			}
+			return append(left, right...), ""
+		case syntax.Pipe:
+			left, reason := walkStmt(cmd.X, downstream)
+			if reason != "" {
+				return nil, reason
+			}
+			right, reason := walkStmt(cmd.Y, true)
+			if reason != "" {
+				return nil, reason
+			}
+			for i := range right {
+				right[i].downstream = true
+			}
+			return append(left, right...), ""
+		default:
+			return nil, "compound"
+		}
+	default:
+		return nil, "compound"
+	}
+}
+
+func finishWalk(out Parse, stages []stage) Parse {
+	if len(stages) == 0 {
+		out.Reason = "empty"
+		return out
+	}
+	parts := make([]Part, 0, len(stages))
+	grantable := true
+	void := false
+	var leadingCD string
+	for i, st := range stages {
+		if len(st.argv) == 0 {
+			grantable = false
+			continue
+		}
+		if wrapperArgv(st.argv) {
+			grantable = false
+		}
+		if st.downstream && !filterArgv(st.argv) {
+			grantable = false
+		}
+		if !st.downstream && !producerOK(st.argv) {
+			grantable = false
+		}
+		v, cd := stateVoid(st.argv)
+		if v {
+			void = true
+			grantable = false
+		}
+		if cd {
+			if i != 0 || st.downstream || len(st.argv) != 2 {
+				void = true
+				grantable = false
+			} else if leadingCD == "" {
+				leadingCD = st.argv[1]
+			} else {
+				void = true
+				grantable = false
+			}
+		}
+		parts = append(parts, Part{Argv: append([]string(nil), st.argv...), Raw: strings.Join(st.argv, " ")})
+	}
+	if len(stages) == 1 && !stages[0].downstream {
+		if len(parts) == 0 {
+			out.Reason = "empty"
+			out.Grantable = false
+			return out
+		}
+		out.Argv = parts[0].Argv
+		out.Eligible = grantable && !void && leadingCD == "" && !wrapperArgv(out.Argv)
+		out.Grantable = false
+		out.Void = void
+		if !out.Eligible && out.Reason == "" {
+			switch {
+			case void:
+				out.Reason = "state"
+			case wrapperArgv(out.Argv):
+				out.Reason = "wrapper"
+			default:
+				out.Reason = "not eligible"
+			}
+		}
+		if out.Eligible {
+			out.Reason = ""
+		}
+		return out
+	}
+	out.Compound = true
+	out.Eligible = false
+	out.Parts = parts
+	out.Void = void
+	out.LeadingCD = leadingCD
+	out.Grantable = grantable && !void
+	if !out.Grantable && out.Reason == "" {
+		out.Reason = "compound"
+	}
+	return out
+}
+
+func callArgv(call *syntax.CallExpr) ([]string, string) {
+	if call == nil {
+		return nil, "empty"
+	}
+	if len(call.Assigns) > 0 {
+		return nil, "assignment"
+	}
+	if len(call.Args) == 0 {
+		return nil, "empty"
+	}
+	argv := make([]string, 0, len(call.Args))
+	for _, w := range call.Args {
+		word, ok := literalWord(w)
+		if !ok {
+			return nil, "not a literal"
+		}
+		argv = append(argv, word)
+	}
+	return argv, ""
 }
 
 func redirOK(r *syntax.Redirect) bool {
@@ -230,29 +389,30 @@ func literalPart(part syntax.WordPart, quoted bool) (string, bool) {
 }
 
 func unsafeBare(s string) bool {
-	if strings.ContainsAny(s, "*?[{~") || strings.Contains(s, "~") {
-		return true
+	return strings.ContainsAny(s, "*?[{~") || strings.Contains(s, "~")
+}
+
+func baseName(argv0 string) string {
+	base := argv0
+	if i := strings.LastIndexAny(base, `/\`); i >= 0 {
+		base = base[i+1:]
 	}
-	return false
+	return base
 }
 
 func wrapperArgv(argv []string) bool {
 	if len(argv) == 0 {
 		return true
 	}
-	base := argv[0]
-	if i := strings.LastIndexAny(base, "/"); i >= 0 {
-		base = base[i+1:]
-	}
-	switch base {
+	switch baseName(argv[0]) {
 	case "sh", "bash", "dash", "zsh", "ksh", "csh", "tcsh", "fish",
 		"env", "xargs", "eval", "exec", "source", ".", "command", "builtin",
 		"sudo", "doas", "nohup", "timeout", "nice", "ionice", "stdbuf", "setsid",
 		"python", "python2", "python3", "perl", "ruby", "node", "nodejs",
-		"awk", "sed":
+		"awk", "sed", "tee":
 		return true
 	}
-	if base == "find" {
+	if baseName(argv[0]) == "find" {
 		for _, a := range argv[1:] {
 			switch a {
 			case "-exec", "-execdir", "-ok", "-okdir", "-delete":
@@ -264,4 +424,38 @@ func wrapperArgv(argv []string) bool {
 		}
 	}
 	return false
+}
+
+func stateVoid(argv []string) (void bool, cd bool) {
+	if len(argv) == 0 {
+		return true, false
+	}
+	switch baseName(argv[0]) {
+	case "export", "alias", "set", "shopt", "trap", "source", "ln":
+		return true, false
+	case ".":
+		return true, false
+	case "cd":
+		return false, true
+	case "git":
+		if gitSubcommand(argv) == "config" || gitSubcommand(argv) == "remote" {
+			return true, false
+		}
+	}
+	return false, false
+}
+
+// producerOK rejects a producer that reads a pattern or program file.
+func producerOK(argv []string) bool {
+	if len(argv) == 0 || wrapperArgv(argv) {
+		return false
+	}
+	switch baseName(argv[0]) {
+	case "grep":
+		return grepFlagsOK(argv[1:])
+	case "jq":
+		return jqFlagsOK(argv[1:])
+	default:
+		return true
+	}
 }

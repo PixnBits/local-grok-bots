@@ -73,6 +73,7 @@ func launch(ctx context.Context, p *prepared) (string, string, error) {
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_SYSTEM=/dev/null",
 		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_ALLOW_PROTOCOL=https:ssh",
 	}
 	if p.cleanBash {
 		cmd.Env = dropEnvKeys(cmd.Env, "BASH_ENV", "ENV")
