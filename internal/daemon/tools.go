@@ -48,11 +48,9 @@ func schemaObj(props map[string]any, req ...string) map[string]any {
 // argument. The model is not asked to discover signatures; it gets them here.
 func toolDefs() []model.Tool {
 	name := func(what string) map[string]any { return prop("string", what+" Example: \"Ada\".") }
-	// File and shell tools come first. qwen3.8's default thinking only
-	// reliably notices tools near the end of this list. The bot tools
-	// stay last so create_bot is among the ones it uses. When they sit
-	// earlier, the model treats them as missing and keeps thinking past
-	// the three-minute model limit (about 8 tokens/s on this machine).
+	// Order is not significant: an A/B with run_shell moved first did not
+	// change how often the model used it. The system prompt names every
+	// tool in this list (see attachedToolsLine) so none is overlooked.
 	return []model.Tool{
 		{Name: "write_memory", Description: "Save or replace a memory note on yourself. Notes appear in your system prompt on later turns.",
 			Parameters: schemaObj(map[string]any{
@@ -445,7 +443,10 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 	case "pr_status":
 		return a.toolPRStatus(ctx, bot, args)
 	case "run_shell":
-		command := strArg(args, "command")
+		command, err := shellCommandArg(args)
+		if err != nil {
+			return "", err
+		}
 		current := bot
 		if fresh, err := a.st.GetBot(bot.ID); err == nil {
 			current = fresh
@@ -906,4 +907,18 @@ func isFalse(v any) bool {
 		return strings.EqualFold(strings.TrimSpace(t), "false") || t == "0" || strings.EqualFold(t, "no")
 	}
 	return false
+}
+
+// shellCommandArg reads run_shell's command, accepting "cmd" as an alias.
+func shellCommandArg(args map[string]any) (string, error) {
+	command, cmd := strArg(args, "command"), strArg(args, "cmd")
+	switch {
+	case command != "" && cmd != "" && command != cmd:
+		return "", fmt.Errorf("run_shell: \"command\" and \"cmd\" differ; pass only \"command\"")
+	case command != "":
+		return command, nil
+	case cmd != "":
+		return cmd, nil
+	}
+	return "", fmt.Errorf("run_shell: missing required \"command\" field (the bash command line to run)")
 }
