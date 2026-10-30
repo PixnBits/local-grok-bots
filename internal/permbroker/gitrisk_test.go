@@ -87,6 +87,9 @@ func TestGolden_GitCodeExecSurface(t *testing.T) {
 		{name: "url-ext", risky: true, plant: func(t *testing.T, ws, _, _ string) {
 			writeGit(t, ws, "[url \"https://example.invalid\"]\n\tinsteadOf = ext::remote\n")
 		}},
+		{name: "url-ext-base", risky: true, plant: func(t *testing.T, ws, _, _ string) {
+			writeGit(t, ws, "[url \"ext::true\"]\n\tinsteadOf = https://example.invalid/\n")
+		}},
 		{name: "gitdir-hook", risky: true, plant: func(t *testing.T, ws, _, _ string) {
 			real := filepath.Join(ws, "real-git")
 			hook := filepath.Join(real, "hooks", "pre-commit")

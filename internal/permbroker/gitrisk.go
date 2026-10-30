@@ -334,7 +334,7 @@ func riskyFlat(full, val string) string {
 	if strings.HasPrefix(full, "gpg.") && strings.HasSuffix(full, ".program") {
 		return "gpg.program"
 	}
-	if strings.HasPrefix(full, "url.") && strings.HasPrefix(strings.ToLower(strings.TrimSpace(val)), "ext::") {
+	if strings.HasPrefix(strings.ToLower(full), "url.ext::") || (strings.HasPrefix(full, "url.") && strings.HasPrefix(strings.ToLower(strings.TrimSpace(val)), "ext::")) {
 		if strings.HasSuffix(full, ".pushinsteadof") {
 			return "url.pushInsteadOf"
 		}
