@@ -22,6 +22,9 @@ type evalSnap struct {
 	snapAttrOK bool
 	critical   []string
 	hook       func(context.Context, Request)
+	perBot     bool
+	homes      []string
+	env        []string
 }
 
 func (e *Engine) capture(req Request) evalSnap {
@@ -48,12 +51,32 @@ func (e *Engine) capture(req Request) evalSnap {
 	ws := req.Workspace
 	var repos []string
 	if b, ok := e.bots[req.BotID]; ok {
-		if ws == "" {
+		if b.Workspace != "" {
+			ws = b.Workspace
+			snap.perBot = true
+			if b.snapSet {
+				snap.snapSet = true
+				snap.snapWS = b.Workspace
+				snap.snapGit = append([]byte(nil), b.snapGit...)
+				snap.snapGitOK = b.snapGitOK
+				snap.snapAttr = append([]byte(nil), b.snapAttr...)
+				snap.snapAttrOK = b.snapAttrOK
+			} else {
+				snap.snapSet = false
+				snap.snapWS = ""
+				snap.snapGit = nil
+				snap.snapGitOK = false
+				snap.snapAttr = nil
+				snap.snapAttrOK = false
+			}
+		} else if ws == "" {
 			ws = b.Workspace
 		}
 		if req.Repos == nil {
 			repos = b.Repos
 		}
+		snap.homes = homesOf(b)
+		snap.env = append([]string(nil), b.Env...)
 	}
 	if req.Repos != nil {
 		repos = append([]string(nil), req.Repos...)
@@ -90,7 +113,7 @@ func (e *Engine) raiseToCurrent(req Request, in inspected) inspected {
 	} else if lvl := e.table.level(req.ToolName, toolPaths(req.ToolInput)); Rank(lvl) > Rank(in.Level) {
 		in.Level = lvl
 	}
-	if hitsCritical(req, in, e.critical) {
+	if hitsCriticalWith(req, in, e.critical, e.critEnvLocked(req.BotID)) {
 		in.Level = LevelCritical
 	}
 	if in.Level == LevelCritical {
@@ -167,6 +190,13 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 			in.Eligible = false
 			in.HardAsk = true
 		}
+		if claudeBash(req.ToolName) && commandUsesGit(parsed) {
+			if why := gitConfigRisk(ws, snap.homes, snap.env); why != "" {
+				in.GitRisk = why
+				in.Eligible = false
+				in.HardAsk = true
+			}
+		}
 	} else {
 		canon, ok := canonicalJSON(req.ToolInput)
 		if !ok {
@@ -208,10 +238,20 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 		}
 		in.ClassNote = why
 	}
-	if in.ClassNote == "" {
+	if in.GitRisk != "" {
+		note := "git config " + in.GitRisk
+		if in.ClassNote == "" || in.ClassNote == "none" {
+			in.ClassNote = note
+		} else if !strings.Contains(in.ClassNote, in.GitRisk) {
+			in.ClassNote = in.ClassNote + "; " + note
+		}
+	} else if in.ClassNote == "" {
 		in.ClassNote = "none"
 	}
-	if hitsCritical(req, in, snap.critical) {
+	// A classifier cannot allow a call. ClassifierMayAllow is the gate any
+	// future allow has to pass, and it is false without this bot's
+	// workspace and git baseline.
+	if hitsCriticalWith(req, in, snap.critical, critEnv{homes: snap.homes, env: snap.env}) {
 		in.Level = LevelCritical
 	}
 	if in.Level == LevelCritical {
@@ -222,7 +262,14 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 }
 
 func gitDriftSnap(snap evalSnap, req Request, ws string, parsed Parse) bool {
-	if !snap.snapSet || !claudeBash(req.ToolName) || !commandUsesGit(parsed) {
+	if !claudeBash(req.ToolName) || !commandUsesGit(parsed) {
+		return false
+	}
+	if snap.perBot {
+		if !snap.snapSet {
+			return true
+		}
+	} else if !snap.snapSet {
 		return false
 	}
 	if ws == "" {
@@ -240,6 +287,10 @@ func gitDriftSnap(snap evalSnap, req Request, ws string, parsed Parse) bool {
 }
 
 func hitsCritical(req Request, in inspected, crit []string) bool {
+	return hitsCriticalWith(req, in, crit, critEnv{})
+}
+
+func hitsCriticalWith(req Request, in inspected, crit []string, ce critEnv) bool {
 	crit = normalizeCritical(crit)
 	if len(crit) == 0 {
 		return false
@@ -256,7 +307,31 @@ func hitsCritical(req Request, in inspected, crit []string) bool {
 			return true
 		}
 	}
-	return false
+	return resolvedCritical(req, in, crit, ce)
+}
+
+func (e *Engine) critEnvLocked(bot string) critEnv {
+	b := e.bots[bot]
+	return critEnv{homes: homesOf(b), env: append([]string(nil), b.Env...)}
+}
+
+func homesOf(b botCtx) []string {
+	var out []string
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return
+		}
+		for _, have := range out {
+			if have == s {
+				return
+			}
+		}
+		out = append(out, s)
+	}
+	add(b.Home)
+	add(b.UserHome)
+	return out
 }
 
 // BrokerCriticalPaths is the set the daemon marks critical: the hook

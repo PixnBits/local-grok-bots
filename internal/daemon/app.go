@@ -353,7 +353,6 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		cancel()
 		return nil, err
 	}
-	a.broker.SnapshotGit(a.ws)
 	a.applyVoiceRuntime()
 	a.RefreshProtectSnapshot()
 	a.wg.Add(1)
@@ -363,6 +362,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		a.Shutdown()
 		return nil, err
 	}
+	a.seedBrokerBots(bots)
 	for _, b := range bots {
 		if b.Status != "paused" {
 			a.kick(b.ID)

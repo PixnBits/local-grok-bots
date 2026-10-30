@@ -102,6 +102,11 @@ func (l *Listener) serve(c net.Conn) {
 		l.eng.auditPeer(l.bot, uid, pid)
 		return
 	}
+	if !l.eng.peerStrict(pid, l.bot) {
+		l.reply(c, wireReply{Verdict: VerdictDeny, Reason: "permission broker unavailable"})
+		l.eng.auditUnavailable(l.bot, uid, pid)
+		return
+	}
 	body, err := io.ReadAll(io.LimitReader(c, MaxRequest+1))
 	if err != nil || len(body) == 0 || len(body) > MaxRequest {
 		l.reply(c, wireReply{Verdict: VerdictDeny, Reason: "denied"})
@@ -178,6 +183,17 @@ func (e *Engine) auditPeer(bot string, uid, pid int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.auditDecision(Request{BotID: bot, PeerUID: uid, PeerPID: pid}, inspected{ClassNote: "none"}, VerdictDeny, "denied", "", "fail-closed", "", "")
+}
+
+func (e *Engine) auditUnavailable(bot string, uid, pid int) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.auditDecision(Request{BotID: bot, PeerUID: uid, PeerPID: pid}, inspected{
+		Raw: "permission broker unavailable", ClassNote: "none",
+	}, VerdictDeny, "permission broker unavailable", "", "fail-closed", "", "")
 }
 
 // wireRequest matches cmd/lgb-permhook. Keep the JSON keys aligned.

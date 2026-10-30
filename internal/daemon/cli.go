@@ -106,6 +106,15 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	if lgbEnv != nil {
 		iso.Env = withLGBEnv(iso.Env, filepath.Join(ws, lgbDirName, "bin"), lgbEnv)
 	}
+	if a.broker != nil && iso != nil {
+		userHome, _ := os.UserHomeDir()
+		home := iso.Home
+		if home == "" {
+			home = userHome
+		}
+		a.broker.SetBotRuntime(bot.ID, home, userHome, iso.Env)
+		a.broker.SnapshotBot(bot.ID)
+	}
 	turnTimeout := turnPol.EffectiveTurnTimeout()
 	turnCtx, turnCancel := context.WithTimeout(ctx, turnTimeout)
 	defer turnCancel()
@@ -140,6 +149,9 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 			}
 			pid = child
 			a.setCLIPID(bot.ID, child)
+			if a.broker != nil {
+				a.broker.RegisterLaunch(bot.ID, child)
+			}
 			a.noteCLIProc(bot.ID, child, runID, "")
 			a.auditCLI("cli_start", backend, sessionID, child, "")
 		},

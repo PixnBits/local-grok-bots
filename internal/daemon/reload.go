@@ -34,6 +34,7 @@ func (a *App) setPol(p policy.Policy) {
 		if err := a.broker.SetRisks(p.BrokerRisks); err != nil {
 			return
 		}
+		a.broker.SetApprovalTTL(p.EffectiveApprovalTTL())
 	}
 	a.pinBrokerHook(p)
 	cp := p

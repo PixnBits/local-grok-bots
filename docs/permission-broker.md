@@ -60,11 +60,18 @@ lock hooks; that key applies only in managed settings. Installing
 
 The settings deny list also names the hook binary, that settings file and
 its directory, and `DATA_DIR/permbroker`. A tool call that touches one of
-those paths is critical: it always asks, and it is never a rule. A bare
-command word is not one of those paths. Containment uses an absolute
-path, or a relative path resolved from the request's working directory
-when that directory is absolute. Text that contains an absolute critical
-path, such as a flag value, still counts.
+those paths is critical: it always asks, and it is never a rule, a grant,
+or a once-token. The Claude deny list is a second layer. Before that
+check, each argv token and each redirect target is resolved: the working
+directory after a leading `cd`, a short option glued to its value,
+`--name=value`, and redirect targets. A relative path is joined to that
+directory. Symlinks are resolved on the longest prefix that exists. `~`
+and `$HOME` expand to the bot home and the user home. Other variables
+expand from the bot's managed environment. A token whose base name is the
+hook file, `permbroker`, or a settings file name is critical, and so is a
+glob that can match one of those names. Command substitution is not run;
+that text stays lexical. Writes under `.git/info/`, `.gitmodules`, and
+`~/.config/git/` (the bot home and the user home) ask at high or above.
 
 The launch refuses bypass flags, `acceptEdits`, `dontAsk`,
 `bypassPermissions`, `--allowedTools`, `--add-dir`, and `--plugin-dir`.
@@ -88,7 +95,14 @@ permission flow.
 Claude is not inside the daemon's bubblewrap jail, so the hook command uses
 the host socket path. The hook talks to a per-bot Unix socket under
 `DATA_DIR/permbroker/<bot-id>/sock`. The directory is mode 0700 and the
-socket is mode 0600. The peer's uid must be the daemon's uid. The socket
+socket is mode 0600. The peer's uid must be the daemon's uid. On Linux
+the peer must also be the pinned hook binary: the device and inode of
+`/proc/<pid>/exe` match the pinned file or a daemon-owned copy, and the
+process is the CLI the daemon launched for that bot or a descendant of
+it (parent walk, at most 64 steps). Other systems keep the uid check. A
+platform that cannot name the peer still denies. Any other peer is
+denied with `permission broker unavailable`, audited, and does not use a
+token or open a pending item. The socket
 path has to fit in the platform's Unix address (108 bytes on Linux,
 including the trailing NUL). A path that does not fit refuses the turn.
 
@@ -104,9 +118,15 @@ On an ask, the daemon records a pending item and the hook denies with
 human approves that item, then the same command may be retried once. A
 second retry, a different argv, a different cwd, or a different session
 does not use that approval. The once token is also bound to the tool
-name. Claude Bash and `run_shell` share one shell name. A token for a
+name, and it expires. The default lifetime is 15 minutes.
+`[cli.permission] approval_ttl` sets it, bounded to 1 minute through 24
+hours. The cwd compared at use is the cleaned path, with symlinks
+resolved when the directory exists. A trailing slash, a `.` or `..`
+component, and a symlink to the same directory match. A different
+directory does not. Claude Bash and `run_shell` share one shell name. A token for a
 Read does not allow an Edit of the same bytes. A command that is critical
 at retry time is not allowed by a token issued earlier; it asks again.
+The same is true when the command's git config is a hard ask.
 
 A deny does not stop the run. The model keeps the reason. The run stays
 `done`. "Stopped after denial" remains the Grok card path.
@@ -136,7 +156,8 @@ kinds. They do not allow a call. Policy may raise a level or repeat it.
 A task grant may cover a compound only when every part is granted and
 each part still passes critical and deny at request time. The grant is
 bound to the bot, the session, and the user-message id. It ends on the
-next user message for that bot, when the session ends, or after 4 hours.
+next user message for that bot, when the session ends, or at the shorter
+of 4 hours and `approval_ttl`. Grant cwd stays the raw string.
 
 Daemon-run shells use a pinned PATH of root-owned directories and an
 environment allowlist. A rule names a command only when argv0 resolves
@@ -144,9 +165,19 @@ to an allowlisted binary on that PATH. An assignment prefix is never
 eligible. The jail git wrapper forces a safe config for `run_shell`,
 including an empty fsmonitor, no external diff, and a protocol list of
 https and ssh. http is added only while the loopback credential proxy
-is on. Claude is not rewritten. The daemon records `.git/config` and
-`.gitattributes` at startup; a later change makes a Claude git command
-ask until the daemon restarts.
+is on. Claude is not rewritten. Inside-workspace checks and the git
+baseline use that bot's directory (`<workspace>/bots/<id>`), not the
+shared root. Another bot's tree is outside. The daemon records the
+baseline when the bot context is set; a later change makes a Claude git
+command ask until the daemon restarts. A Claude git command also asks,
+and cannot be covered by a once-token, a task grant, or an allow rule,
+when that bot's git config contains `core.hooksPath`, `core.fsmonitor`,
+`filter.*`, `include` or `includeIf`, `core.sshCommand`, `core.pager`,
+`core.editor`, `diff.external`, or `credential.helper`. The scan covers
+the repo config and include targets that resolve, `.git/info/attributes`,
+`.gitattributes`, the bot home's git config, and `GIT_*` variables in
+the managed CLI environment. The reason is recorded. `run_shell` keeps
+the jail git wrapper and does not use that ask.
 
 Pending items do not expire. They are cancelled when the session ends,
 when the bot is deleted or the daemon restarts, or when the ruleset
@@ -163,7 +194,22 @@ table version.
 The model can continue. The shell is not started.
 
 The classifier stub can only raise a level. It cannot allow a call, and
-it makes no model request.
+it makes no model request. `ClassifierMayAllow` is false unless that bot
+has a workspace and a git baseline. A later classifier contribution to
+an allow has to pass that guard.
+
+## Rule migration
+
+On startup the daemon copies each active profile permission rule into
+the broker rules file. An exact command becomes an exact broker rule
+with the same effect. A glob that is one literal first word, `*` only
+inside a word, and an optional trailing `**` for the remaining words is
+stored as a pattern. Anything else is stored as a legacy record. Allow
+patterns and legacy allows never cover a critical path or a compound.
+Deny and ask patterns still apply. Each new row records source
+`migrated` and the original text, and one audit row is written. The
+ruleset bumps once per batch. The profile source is not deleted. A
+second start does not add duplicates.
 
 ## Admin API
 
@@ -233,6 +279,15 @@ go test -v ./web/... | grep -i skip
 - one argv rule applies to Claude Bash and run_shell
 - a deny rule beats a task grant
 - a critical part inside a granted compound still asks
+- another bot's workspace is outside this bot
+- risky git config is a hard ask for Claude git
+- writes under `.git/info/`, `.gitmodules`, and `~/.config/git/` ask
+- a classifier allow does not allow, and the guard is false without per-bot context
+- resolved critical-path forms, including a relative `cd`, a symlink, and a glob
+- once-tokens and task grants expire at `approval_ttl`; pending items do not
+- a same-uid process that is not the hook under the launched CLI is denied
+- a once-token cwd matches the canonical directory
+- profile rules migrate once and do not allow a critical command
 
 The fake Claude enters hook mode only when `--settings` contains a
 PreToolUse command. Launches that still set `disableAllHooks` keep the

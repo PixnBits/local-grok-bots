@@ -123,6 +123,10 @@ type Policy struct {
 	HookPath string
 	// BrokerRisks are policy raises over the shipped level table.
 	BrokerRisks []permbroker.RiskEntry
+	// ApprovalTTL is how long a once-token stays valid. Zero means the
+	// default. A task grant also ends at four hours, the next user
+	// message, or the end of the session. Pending items do not use it.
+	ApprovalTTL time.Duration
 	// ManagedBypass is true only when managed policy set an always-allow mode.
 	ManagedBypass bool
 	Pins          []Pin
@@ -1241,7 +1245,34 @@ func (p *Policy) applyBroker(perm *cliPermDoc) error {
 		}
 		p.BrokerRisks = entries
 	}
+	if perm.ApprovalTTL.Set {
+		d, err := parseApprovalTTL(perm.ApprovalTTL.Value)
+		if err != nil {
+			return err
+		}
+		p.ApprovalTTL = d
+	}
 	return nil
+}
+
+// EffectiveApprovalTTL is the once-token lifetime. Unset or out of range
+// uses the broker default. The bounds are 1m..24h.
+func (p Policy) EffectiveApprovalTTL() time.Duration {
+	if p.ApprovalTTL < time.Minute || p.ApprovalTTL > 24*time.Hour {
+		return permbroker.DefaultApprovalTTL
+	}
+	return p.ApprovalTTL
+}
+
+func parseApprovalTTL(s string) (time.Duration, error) {
+	d, err := parseTurnTimeout("cli.permission.approval_ttl", s)
+	if err != nil {
+		return 0, err
+	}
+	if d < time.Minute {
+		return 0, fmt.Errorf("cli.permission.approval_ttl must be at least 1m")
+	}
+	return d, nil
 }
 
 // IsBypassMode reports an always-allow mode. Those modes are honored only
@@ -1404,6 +1435,7 @@ type cliPermDoc struct {
 	BrokerBots         *[]string  `toml:"broker_bots" json:"broker_bots"`
 	HookPath           *string    `toml:"hook_path" json:"hook_path"`
 	Risk               *[]riskDoc `toml:"risk" json:"risk"`
+	ApprovalTTL        flexText   `toml:"approval_ttl" json:"approval_ttl"`
 }
 
 type riskDoc struct {

@@ -71,6 +71,9 @@ func (a *App) clearCLIPID(botID, runID string) {
 	a.rtMu.Unlock()
 	if match {
 		_ = a.st.ClearCLIProc(botID)
+		if a.broker != nil {
+			a.broker.ClearLaunch(botID)
+		}
 	}
 }
 

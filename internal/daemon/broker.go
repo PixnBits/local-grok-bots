@@ -137,7 +137,8 @@ func (a *App) prepareBrokerHook(bot store.Bot, ws, home string) (string, error) 
 	a.hookMu.Unlock()
 	a.setBrokerOn(bot.ID, true)
 	if a.broker != nil {
-		a.broker.SetBotContext(bot.ID, a.ws, a.effPol(bot.ID).EffectiveGitHubRepos(bot.GitHubAllow))
+		a.broker.SetBotContext(bot.ID, ws, a.effPol(bot.ID).EffectiveGitHubRepos(bot.GitHubAllow))
+		a.broker.SnapshotBot(bot.ID)
 		a.broker.AddCriticalPaths(a.brokerCriticalPaths(bin, "", "")...)
 	}
 	return permbroker.HookCommand(bin, sock), nil
@@ -150,6 +151,9 @@ func (a *App) pinBrokerHook(p policy.Policy) {
 	a.hookMu.Lock()
 	defer a.hookMu.Unlock()
 	a.hookPin = nil
+	if a.broker != nil {
+		a.broker.ClearHookIDs()
+	}
 	if p.Broker != "hook" {
 		return
 	}
@@ -166,6 +170,16 @@ func (a *App) pinBrokerHook(p policy.Policy) {
 	}
 	a.hookPin = &pin
 	a.hookBin = bin
+	if a.broker != nil {
+		a.broker.SetHookIdentity(pin.Dev, pin.Ino)
+		_ = a.broker.NoteHookFile(bin)
+		if a.cfg.DataDir != "" {
+			copyPath := filepath.Join(a.cfg.DataDir, "permbroker", "hook")
+			if st, err := os.Stat(copyPath); err == nil && st.Mode().IsRegular() {
+				_ = a.broker.NoteHookFile(copyPath)
+			}
+		}
+	}
 }
 
 func (a *App) hookChanged(bin string) error {
@@ -407,6 +421,37 @@ func (a *App) armBrokerSpec(botID, sessionID, runID string, inputs []store.Messa
 	return nil
 }
 
+// seedBrokerBots records each bot's workspace and git baseline and copies
+// profile rules into the broker file once. The profile rows stay where
+// they are. A second start does not add duplicate broker rules.
+func (a *App) seedBrokerBots(bots []store.Bot) {
+	if a == nil || a.broker == nil {
+		return
+	}
+	userHome, _ := os.UserHomeDir()
+	var legacy []permbroker.LegacyRule
+	for _, b := range bots {
+		ws := a.botWorkspace(b.ID)
+		a.broker.SetBotContext(b.ID, ws, a.pol().EffectiveGitHubRepos(b.GitHubAllow))
+		home := filepath.Join(filepath.Dir(a.ws), "cli", b.ID, "home")
+		a.broker.SetBotRuntime(b.ID, home, userHome, nil)
+		a.broker.SnapshotBot(b.ID)
+		if a.st == nil {
+			continue
+		}
+		rows, err := a.st.ListUserPermRules(b.ID)
+		if err != nil {
+			continue
+		}
+		for _, r := range rows {
+			legacy = append(legacy, permbroker.LegacyRule{BotID: b.ID, Effect: r.Effect, Text: r.Pattern})
+		}
+	}
+	if err := a.broker.MigrateLegacy(legacy); err != nil {
+		a.log("", "permbroker_migrate", map[string]any{"error": err.Error()})
+	}
+}
+
 func literalGitPush(command string) bool {
 	parsed := permbroker.ParseCommand(command)
 	return parsed.Eligible && len(parsed.Argv) >= 2 && parsed.Argv[0] == "git" && parsed.Argv[1] == "push"
@@ -425,11 +470,12 @@ func (a *App) gateShell(ctx context.Context, bot store.Bot, command string) (boo
 	if err != nil {
 		return false, errors.New("denied")
 	}
+	ws := a.botWorkspace(bot.ID)
 	repos := a.effPol(bot.ID).EffectiveGitHubRepos(bot.GitHubAllow)
-	a.broker.SetBotContext(bot.ID, a.ws, repos)
+	a.broker.SetBotContext(bot.ID, ws, repos)
 	d := a.broker.Evaluate(ctx, permbroker.Request{
 		BotID: bot.ID, SessionID: "shell:" + bot.ID, TaskID: a.broker.UserTask(bot.ID),
-		Cwd: a.ws, Workspace: a.ws, Repos: repos,
+		Cwd: ws, Workspace: ws, Repos: repos,
 		ToolName: "run_shell", ToolInput: raw,
 	})
 	if d.Verdict != permbroker.VerdictAllow {

@@ -159,6 +159,10 @@ imminent_timer_minutes = 2
 # broker = "off"
 # broker_bots = ["bot-id"]
 # hook_path = "/usr/local/bin/lgb-permhook"
+# approval_ttl is how long a once-token stays usable, and the cap on a
+# task grant along with the 4h task cap. Default 15m. Bounds are 1m..24h.
+# Pending items do not expire.
+# approval_ttl = "15m"
 # [[cli.permission.risk]]
 # tool = "run_shell"
 # argv = ["git", "status"]

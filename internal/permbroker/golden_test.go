@@ -161,6 +161,7 @@ func TestGolden_TaskGrantExpires(t *testing.T) {
 	start := time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
 	now := start
 	e.now = func() time.Time { return now }
+	e.SetApprovalTTL(24 * time.Hour)
 	e.NoteUserMessage("bot", "m1")
 	req := shellReq("Bash", "git status")
 	req.TaskID = "m1"

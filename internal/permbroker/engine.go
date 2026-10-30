@@ -28,6 +28,14 @@ const (
 	// TaskGrantCap is the longest a task approval stays valid.
 	TaskGrantCap = 4 * time.Hour
 
+	// DefaultApprovalTTL is how long a once-token stays valid when
+	// policy does not set approval_ttl. A task grant uses the shorter
+	// of this value and TaskGrantCap. Pending items do not expire.
+	DefaultApprovalTTL = 15 * time.Minute
+	// MinApprovalTTL and MaxApprovalTTL bound the policy knob.
+	MinApprovalTTL = time.Minute
+	MaxApprovalTTL = 24 * time.Hour
+
 	// JailSock is the path a future jail would see. Claude is not inside
 	// the daemon jail, so the hook is given the host socket path instead.
 	JailSock = "/lgb-perm.sock"
@@ -149,6 +157,7 @@ type token struct {
 	Tool      string
 	Hash      string
 	Cwd       string
+	Expires   time.Time
 }
 
 type grant struct {
@@ -194,6 +203,12 @@ type Engine struct {
 	resolver func(string) (string, bool)
 	bots     map[string]botCtx
 	userTask map[string]string
+	ttl      time.Duration
+
+	// hookIDs are the pinned hook and any daemon-owned copy.
+	// launchPID is the CLI process started for a bot.
+	hookIDs   []hookID
+	launchPID map[string]int
 
 	snapSet    bool
 	snapWS     string
@@ -203,11 +218,25 @@ type Engine struct {
 	snapAttrOK bool
 }
 
-// botCtx is the workspace and configured repos for one bot. The socket
-// does not receive those on the wire.
+// botCtx is the workspace, homes, and git baseline for one bot.
+// The socket does not receive those on the wire. Another bot's
+// workspace is outside this one.
 type botCtx struct {
-	Workspace string
-	Repos     []string
+	Workspace  string
+	Repos      []string
+	Home       string
+	UserHome   string
+	Env        []string
+	snapSet    bool
+	snapGit    []byte
+	snapGitOK  bool
+	snapAttr   []byte
+	snapAttrOK bool
+}
+
+type hookID struct {
+	Dev uint64
+	Ino uint64
 }
 
 // Open loads rules and the audit chain from dir. risks are policy
@@ -247,6 +276,7 @@ func Open(dir string, risks []RiskEntry, auditor Auditor) (*Engine, error) {
 		resolver:   resolvePinned,
 		bots:       map[string]botCtx{},
 		userTask:   map[string]string{},
+		launchPID:  map[string]int{},
 		stopCh:     make(chan struct{}),
 		flushCh:    make(chan struct{}, 1),
 	}
@@ -394,15 +424,165 @@ func (e *Engine) RuleCount() int {
 }
 
 // SetBotContext stores the workspace and configured repos the socket
-// uses for one bot. An empty repos slice means an explicit repo flag
-// is not eligible.
+// uses for one bot. The workspace is that bot's directory. An empty
+// repos slice means an explicit repo flag is not eligible. Homes, the
+// managed environment, and the git baseline stay when the workspace
+// does not change.
 func (e *Engine) SetBotContext(bot, workspace string, repos []string) {
 	if e == nil || bot == "" {
 		return
 	}
 	e.mu.Lock()
-	e.bots[bot] = botCtx{Workspace: workspace, Repos: append([]string(nil), repos...)}
+	prev := e.bots[bot]
+	next := botCtx{
+		Workspace: workspace,
+		Repos:     append([]string(nil), repos...),
+		Home:      prev.Home,
+		UserHome:  prev.UserHome,
+		Env:       append([]string(nil), prev.Env...),
+	}
+	if prev.Workspace == workspace {
+		next.snapSet = prev.snapSet
+		next.snapGit = prev.snapGit
+		next.snapGitOK = prev.snapGitOK
+		next.snapAttr = prev.snapAttr
+		next.snapAttrOK = prev.snapAttrOK
+	}
+	e.bots[bot] = next
 	e.mu.Unlock()
+}
+
+// SetBotRuntime stores the bot home, the user home, and the managed CLI
+// environment. Git config outside the repo is read from those homes.
+func (e *Engine) SetBotRuntime(bot, home, userHome string, env []string) {
+	if e == nil || bot == "" {
+		return
+	}
+	e.mu.Lock()
+	b := e.bots[bot]
+	b.Home = home
+	b.UserHome = userHome
+	b.Env = append([]string(nil), env...)
+	e.bots[bot] = b
+	e.mu.Unlock()
+}
+
+// SetApprovalTTL sets how long a new once-token and a new task grant
+// stay valid. Values outside 1m..24h are clamped. Zero keeps the default.
+func (e *Engine) SetApprovalTTL(d time.Duration) {
+	if e == nil {
+		return
+	}
+	if d != 0 {
+		if d < MinApprovalTTL {
+			d = MinApprovalTTL
+		}
+		if d > MaxApprovalTTL {
+			d = MaxApprovalTTL
+		}
+	}
+	e.mu.Lock()
+	e.ttl = d
+	e.mu.Unlock()
+}
+
+func (e *Engine) approvalTTL() time.Duration {
+	if e == nil || e.ttl == 0 {
+		return DefaultApprovalTTL
+	}
+	return e.ttl
+}
+
+// ClassifierMayAllow reports whether a future classifier may contribute
+// an allow for this bot. It is false until that bot has a workspace and
+// a git baseline. The classifier still cannot allow a call today.
+func (e *Engine) ClassifierMayAllow(bot string) bool {
+	if e == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.classifierMayAllowLocked(bot)
+}
+
+func (e *Engine) classifierMayAllowLocked(bot string) bool {
+	b, ok := e.bots[bot]
+	return ok && strings.TrimSpace(b.Workspace) != "" && b.snapSet
+}
+
+// RegisterLaunch records the CLI process started for bot.
+func (e *Engine) RegisterLaunch(bot string, pid int) {
+	if e == nil || bot == "" || pid <= 1 {
+		return
+	}
+	e.mu.Lock()
+	if e.launchPID == nil {
+		e.launchPID = map[string]int{}
+	}
+	e.launchPID[bot] = pid
+	e.mu.Unlock()
+}
+
+// ClearLaunch forgets the CLI process for bot.
+func (e *Engine) ClearLaunch(bot string) {
+	if e == nil || bot == "" {
+		return
+	}
+	e.mu.Lock()
+	delete(e.launchPID, bot)
+	e.mu.Unlock()
+}
+
+// ClearHookIDs drops every pinned hook identity.
+func (e *Engine) ClearHookIDs() {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	e.hookIDs = nil
+	e.mu.Unlock()
+}
+
+// SetHookIdentity records a device and inode the socket peer must match.
+func (e *Engine) SetHookIdentity(dev, ino uint64) {
+	if e == nil || (dev == 0 && ino == 0) {
+		return
+	}
+	e.mu.Lock()
+	e.hookIDs = append(e.hookIDs, hookID{Dev: dev, Ino: ino})
+	e.mu.Unlock()
+}
+
+// NoteHookFile records the binary at path when it is owned by root or
+// by this process. A daemon-owned copy of the hook is recorded this way.
+func (e *Engine) NoteHookFile(path string) error {
+	if e == nil {
+		return errors.New("no broker")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	dev, ino, uid, ok := fileIdentity(info)
+	if !ok {
+		return errors.New("hook identity")
+	}
+	if uid != 0 && int(uid) != os.Getuid() {
+		return errors.New("hook owner")
+	}
+	e.SetHookIdentity(dev, ino)
+	return nil
+}
+
+func (e *Engine) peerExpect(bot string) ([]hookID, int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	ids := append([]hookID(nil), e.hookIDs...)
+	root := 0
+	if e.launchPID != nil {
+		root = e.launchPID[bot]
+	}
+	return ids, root
 }
 
 // UserTask is the latest user-message id for the bot.
@@ -451,6 +631,36 @@ func (e *Engine) SnapshotGit(workspace string) {
 	e.snapGitOK = gitOK
 	e.snapAttr = attrData
 	e.snapAttrOK = attrOK
+	e.mu.Unlock()
+}
+
+// SnapshotBot records .git/config and .gitattributes for one bot's
+// workspace. A later change makes a Claude git command ask. run_shell
+// does not use the snapshot.
+func (e *Engine) SnapshotBot(bot string) {
+	if e == nil || bot == "" {
+		return
+	}
+	e.mu.Lock()
+	ws := e.bots[bot].Workspace
+	e.mu.Unlock()
+	if strings.TrimSpace(ws) == "" {
+		return
+	}
+	gitData, gitOK := readGitBaseline(ws)
+	attrData, attrOK := readBaselineFile(filepath.Join(ws, ".gitattributes"))
+	e.mu.Lock()
+	b := e.bots[bot]
+	if b.Workspace != ws {
+		e.mu.Unlock()
+		return
+	}
+	b.snapSet = true
+	b.snapGit = gitData
+	b.snapGitOK = gitOK
+	b.snapAttr = attrData
+	b.snapAttrOK = attrOK
+	e.bots[bot] = b
 	e.mu.Unlock()
 }
 
@@ -661,13 +871,19 @@ func (e *Engine) Evaluate(ctx context.Context, req Request) Decision {
 		e.touch(rule)
 		return e.finish(req, in, VerdictDeny, "denied by rule "+rule.ID, "", rule.ID, rule.ID)
 	}
-	if e.consumeToken(ctx, req, in.Hash, in.Level) {
+	if e.consumeToken(ctx, req, in) {
 		return e.finish(req, in, VerdictAllow, "approved", "", "human", "")
 	}
 	if d, stop := e.cancelled(ctx, req, in); stop {
 		return d
 	}
 	if in.Level == LevelCritical || !in.Eligible {
+		if rule := e.matchFlexAsk(req.BotID, in); rule != nil {
+			if d, stop := e.cancelled(ctx, req, in); stop {
+				return d
+			}
+			return e.applyRule(req, in, rule)
+		}
 		if in.Level != LevelCritical && e.grantCovers(req, in) {
 			if d, stop := e.cancelled(ctx, req, in); stop {
 				return d
@@ -836,9 +1052,12 @@ func (e *Engine) Decide(id, decision, scope string) error {
 		}
 		switch scope {
 		case ScopeOnce:
-			e.tokens = append(e.tokens, token{BotID: item.BotID, SessionID: item.SessionID, Tool: item.Tool, Hash: item.InputHash, Cwd: item.Cwd})
+			e.tokens = append(e.tokens, token{
+				BotID: item.BotID, SessionID: item.SessionID, Tool: item.Tool,
+				Hash: item.InputHash, Cwd: item.Cwd, Expires: e.now().Add(e.approvalTTL()),
+			})
 		case ScopeTask:
-			exp := e.now().Add(TaskGrantCap)
+			exp := e.grantExpiry()
 			if len(item.Parts) > 0 {
 				for _, p := range item.Parts {
 					if p.Hash == "" {
@@ -960,19 +1179,32 @@ func (e *Engine) invalidateLocked() {
 	e.denied = map[string]struct{}{}
 }
 
-func (e *Engine) consumeToken(ctx context.Context, req Request, hash string, level Level) bool {
-	if level == LevelCritical {
+func (e *Engine) grantExpiry() time.Time {
+	d := TaskGrantCap
+	if ttl := e.approvalTTL(); ttl < d {
+		d = ttl
+	}
+	return e.now().Add(d)
+}
+
+func (e *Engine) consumeToken(ctx context.Context, req Request, in inspected) bool {
+	if in.Level == LevelCritical || in.GitRisk != "" {
 		return false
 	}
 	want := normTool(req.ToolName)
 	if want == "" {
 		return false
 	}
+	now := e.now()
+	cwd := canonCwd(req.Cwd)
 	for i, t := range e.tokens {
+		if !tokenLive(t, now) {
+			continue
+		}
 		if t.Tool == "" || t.Tool != want {
 			continue
 		}
-		if t.BotID == req.BotID && t.SessionID == req.SessionID && t.Hash == hash && t.Cwd == req.Cwd {
+		if t.BotID == req.BotID && t.SessionID == req.SessionID && t.Hash == in.Hash && canonCwd(t.Cwd) == cwd {
 			if ctx.Err() != nil {
 				return false
 			}
@@ -981,6 +1213,13 @@ func (e *Engine) consumeToken(ctx context.Context, req Request, hash string, lev
 		}
 	}
 	return false
+}
+
+func tokenLive(t token, now time.Time) bool {
+	if t.Expires.IsZero() || !now.Before(t.Expires) {
+		return false
+	}
+	return true
 }
 
 func (e *Engine) grantCovers(req Request, in inspected) bool {
@@ -1009,11 +1248,14 @@ func (e *Engine) grantHas(req Request, hash string, now time.Time) bool {
 }
 
 func (e *Engine) matchDeny(bot string, in inspected) *Rule {
-	if in.Eligible {
-		return e.match(bot, in, EffectDeny)
+	view := in
+	view.Eligible = true
+	if rule := e.match(bot, view, EffectDeny); rule != nil {
+		return rule
 	}
 	for _, p := range in.Parts {
-		if rule := e.match(bot, inspected{Eligible: true, Argv: p.Argv}, EffectDeny); rule != nil {
+		part := inspected{Eligible: true, Argv: p.Argv, Raw: p.Raw, Level: in.Level, GitRisk: in.GitRisk}
+		if rule := e.match(bot, part, EffectDeny); rule != nil {
 			return rule
 		}
 	}
@@ -1021,33 +1263,34 @@ func (e *Engine) matchDeny(bot string, in inspected) *Rule {
 }
 
 func (e *Engine) match(bot string, in inspected, effect string) *Rule {
-	if !in.Eligible {
-		return nil
-	}
 	var found *Rule
 	for i := range e.rules.Rules {
 		rule := &e.rules.Rules[i]
-		if rule.Effect != effect || rule.Tool != ToolShell || !argvEqual(rule.Argv, in.Argv) {
+		if rule.Effect != effect || !scopeMatches(rule, bot) {
 			continue
 		}
-		if rule.Scope == ScopeGlobal || (rule.Scope == ScopeBot && rule.BotID == bot) {
-			found = rule
+		if !ruleHit(rule, in, effect == EffectDeny) {
+			continue
 		}
+		found = rule
 	}
 	return found
 }
 
 func (e *Engine) matchScoped(bot string, in inspected, scope string) *Rule {
-	if !in.Eligible {
+	if !in.Eligible || in.Compound || in.Level == LevelCritical || in.GitRisk != "" {
 		return nil
 	}
 	var ask, allow *Rule
 	for i := range e.rules.Rules {
 		rule := &e.rules.Rules[i]
-		if rule.Scope != scope || rule.Tool != ToolShell || !argvEqual(rule.Argv, in.Argv) {
+		if rule.Scope != scope {
 			continue
 		}
 		if scope == ScopeBot && rule.BotID != bot {
+			continue
+		}
+		if !ruleHit(rule, in, false) {
 			continue
 		}
 		switch rule.Effect {
@@ -1063,6 +1306,35 @@ func (e *Engine) matchScoped(bot string, in inspected, scope string) *Rule {
 	return allow
 }
 
+func (e *Engine) matchFlexAsk(bot string, in inspected) *Rule {
+	var found *Rule
+	for _, scope := range []string{ScopeBot, ScopeGlobal} {
+		for i := range e.rules.Rules {
+			rule := &e.rules.Rules[i]
+			if rule.Effect != EffectAsk || rule.Scope != scope {
+				continue
+			}
+			if rule.Kind != "pattern" && rule.Kind != "legacy" {
+				continue
+			}
+			if scope == ScopeBot && rule.BotID != bot {
+				continue
+			}
+			if ruleHit(rule, in, false) {
+				found = rule
+			}
+		}
+	}
+	return found
+}
+
+func scopeMatches(rule *Rule, bot string) bool {
+	if rule.Scope == ScopeGlobal {
+		return true
+	}
+	return rule.Scope == ScopeBot && rule.BotID == bot
+}
+
 type inspected struct {
 	Eligible  bool
 	Compound  bool
@@ -1073,6 +1345,7 @@ type inspected struct {
 	Level     Level
 	Parts     []Part
 	ClassNote string
+	GitRisk   string
 }
 
 func baselineDrift(prev []byte, prevOK bool, cur []byte, curOK bool) bool {
