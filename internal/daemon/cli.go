@@ -30,6 +30,8 @@ import (
 
 func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	turnPol := a.effPol(bot.ID)
+	// A previous turn must not leave the broker armed for this one.
+	a.setBrokerOn(bot.ID, false)
 
 	backend := turnPol.EffectiveBackend()
 	a.takePending(runID)
@@ -66,21 +68,21 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 			a.recordACPHostFail(bot.ID, runID, "acp", nil, err.Error())
 		}
 		if fresh {
-			_ = a.st.SetBotSession(bot.ID, "")
+			a.clearBotSession(bot.ID, sessionID)
 		}
 		a.failCLI(bot.ID, runID, backend, err)
 		return
 	}
 	if err := a.screenDLP(ctx, bot.ID, runID, backend, prompt); err != nil {
 		if fresh {
-			_ = a.st.SetBotSession(bot.ID, "")
+			a.clearBotSession(bot.ID, sessionID)
 		}
 		return
 	}
 	ws, err := cliWorkspace(a.ws, bot.ID)
 	if err != nil {
 		if fresh {
-			_ = a.st.SetBotSession(bot.ID, "")
+			a.clearBotSession(bot.ID, sessionID)
 		}
 		a.failCLI(bot.ID, runID, backend, err)
 		return
@@ -88,7 +90,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	iso, err := a.cliIsolation(bot, backend, ws, runID)
 	if err != nil {
 		if fresh {
-			_ = a.st.SetBotSession(bot.ID, "")
+			a.clearBotSession(bot.ID, sessionID)
 		}
 		a.failCLI(bot.ID, runID, backend, err)
 		return
@@ -150,6 +152,9 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	// when that UI is absent; the broker still denies residual asks.
 	// none, and mcp with no host, pass --permission-prompts none.
 	cliDenySource := "cli"
+	if strings.EqualFold(backend, "claude") && a.brokerHooksOn(bot.ID) {
+		cliDenySource = "broker"
+	}
 	eventTransport := ""
 	var cardDenied atomic.Bool
 	permOrigin := a.mcpHostBase()
@@ -189,8 +194,8 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	case transport == policy.TransportNone:
 		spec.PermissionPrompts = "none"
 		eventTransport = policy.TransportNone
-		cliDenySource = cliNoHostSource(turnPol.UIPrompts)
-	case turnPol.UIPrompts && host:
+		cliDenySource = a.residualDenySource(bot.ID, turnPol.UIPrompts)
+	case turnPol.UIPrompts && host && !a.brokerHooksOn(bot.ID):
 		tok := a.registerPerm(bot.ID, runID, sessionID)
 		defer a.unregisterPerm(tok)
 		cfgPath, werr := a.writePermMCP(bot.ID, runID, permOrigin, tok)
@@ -211,7 +216,21 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	default:
 		spec.PermissionPrompts = "none"
 		eventTransport = policy.TransportNone
-		cliDenySource = cliNoHostSource(turnPol.UIPrompts)
+		cliDenySource = a.residualDenySource(bot.ID, turnPol.UIPrompts)
+	}
+	if err := a.armBrokerSpec(bot.ID, sessionID, runID, inputs, &spec); err != nil {
+		if fresh {
+			a.clearBotSession(bot.ID, sessionID)
+		}
+		a.failCLI(bot.ID, runID, backend, err)
+		return
+	}
+	if err := a.checkClaudeBrokerVersion(bot.ID, spec); err != nil {
+		if fresh {
+			a.clearBotSession(bot.ID, sessionID)
+		}
+		a.failCLI(bot.ID, runID, backend, err)
+		return
 	}
 	a.warnGrokDarwinNetwork(bot, runID, backend)
 	trace := &cliTrace{a: a, botID: bot.ID, runID: runID}
@@ -291,8 +310,13 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		a.auditCLI("cli_stop", backend, sessionID, pid, result)
 	}
 	if res.SessionID != "" && res.SessionID != sessionID {
+		old := sessionID
 		_ = a.st.SetBotSession(bot.ID, res.SessionID)
+		if a.broker != nil && old != "" {
+			a.broker.CancelSession(bot.ID, old)
+		}
 		sessionID = res.SessionID
+		a.noteBrokerTurn(bot.ID, sessionID, runID, inputs)
 	}
 	trace.finish()
 	text := strings.TrimSpace(trace.reply(audit.RedactText(res.Text)))
@@ -335,7 +359,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 			a.auditVersionRefused(bot.ID, runID, backend, refused.Version)
 		}
 		if fresh && strings.TrimSpace(res.SessionID) == "" {
-			_ = a.st.SetBotSession(bot.ID, "")
+			a.clearBotSession(bot.ID, sessionID)
 		}
 		// A bridge that cannot be applied must not continue. A sandbox that
 		// cannot be applied must not continue either. Claude's
@@ -362,8 +386,10 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		if text != "" {
 			a.persistBotText(bot.ID, runID, text, false)
 		}
-		// A card denial cancels the turn. Other denials keep the existing end state.
-		if cardDenied.Load() && cancelledStop(res.StopReason) {
+		// A Grok card denial cancels the turn. A broker-hook denial does not:
+		// the model keeps the reason and the run stays done. Other denials
+		// keep the existing end state.
+		if cardDenied.Load() && cancelledStop(res.StopReason) && !a.brokerHooksOn(bot.ID) {
 			_, _ = a.finishRun(runID, "stopped", "stopped after denial")
 			a.bus.Publish(runID, "done", map[string]any{"run_id": runID, "status": "stopped", "reason": "stopped after denial"})
 			break
@@ -486,6 +512,27 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 	if ownHome {
 		opts.Home = filepath.Join(state, "home")
 	}
+	if strings.EqualFold(backend, "claude") {
+		hook, herr := a.prepareBrokerHook(bot, ws, opts.Home)
+		if herr != nil {
+			return nil, herr
+		}
+		opts.PermHookCommand = hook
+		if hook != "" {
+			settingsPath, serr := clisession.ClaudeSettingsPath(opts)
+			if serr != nil {
+				a.setBrokerOn(bot.ID, false)
+				return nil, serr
+			}
+			a.hookMu.Lock()
+			bin := a.hookBin
+			a.hookMu.Unlock()
+			opts.BrokerDeny = a.brokerCriticalPaths(bin, settingsPath, filepath.Dir(settingsPath))
+			if a.broker != nil {
+				a.broker.AddCriticalPaths(opts.BrokerDeny...)
+			}
+		}
+	}
 	var iso clisession.Isolation
 	var err error
 	if strings.EqualFold(backend, "grok") {
@@ -506,6 +553,7 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 		a.auditCredSymlink(bot.ID, runID)
 	}
 	if err != nil {
+		a.setBrokerOn(bot.ID, false)
 		var untrusted *clisession.UntrustedConfigError
 		if errors.As(err, &untrusted) {
 			a.auditUntrustedConfig(botID, runID, backend, "grok_home", untrusted.Names)
@@ -1528,7 +1576,22 @@ func cliNoHostSource(ui bool) string {
 	return "policy"
 }
 
+// residualDenySource is the permission row source for a denial the CLI
+// reported and the broker did not already decide. An armed broker records
+// broker. Otherwise a headless turn with no UI records no_ui.
+func (a *App) residualDenySource(botID string, ui bool) string {
+	if a.brokerHooksOn(botID) {
+		return "broker"
+	}
+	return cliNoHostSource(ui)
+}
+
 func (a *App) decideStreamControl(ctx context.Context, botID, runID, sessionID string, ask clisession.ControlAsk) clisession.ControlDecision {
+	// The hook is the ask path when the broker is armed. Do not open a card
+	// and do not mark the turn as stopped after a denial.
+	if a.brokerHooksOn(botID) {
+		return clisession.ControlDecision{Behavior: permission.Deny, Message: "denied"}
+	}
 	turnPol := a.effPol(botID)
 
 	req := permission.Request{
@@ -1829,7 +1892,7 @@ func (a *App) cliBoundary(botID string) string {
 	tail := "You run directly on the host, not inside the daemon's jail, and the daemon's own tools (run_shell, timers, memory, other bots) are not available to you. Some actions need the user's approval; a denied action is final for this turn.\n"
 	if turnPol.CLILGB && lgbSupported {
 		tail = "You run directly on the host, not inside the daemon's jail; the daemon's run_shell, read_file, and write_file are not available. Some actions need the user's approval; a denied action is final for this turn.\n" +
-			"For timers, your memory notes, other bots, and direct messages, run the lgb command in your shell (run `lgb help` for usage), for example `lgb timer in 5m Remind the user to stretch` or `lgb memory set favorite_color blue`. Run each lgb command as its own shell call, with nothing chained (no ;, &&, pipes, or $?), so it is approved without asking. lgb works only during this turn.\n"
+			"For timers, your memory notes, other bots, and direct messages, run the lgb command in your shell (run `lgb help` for usage), for example `lgb timer in 5m Remind the user to stretch` or `lgb memory set favorite_color blue`. Run each lgb command as its own shell call, with nothing chained (no ;, &&, pipes, or $?). It may need approval. lgb works only during this turn.\n"
 	}
 	switch turnPol.EffectiveBackend() {
 	case "grok":

@@ -58,7 +58,7 @@ func Parse(line string) (Event, bool) {
 	case "tool_result":
 		name := firstString(raw, "toolName", "tool", "name", "title")
 		text := firstString(raw, "result", "output", "content", "text")
-		return Event{Kind: "tool_result", ToolName: name, Text: text, SessionID: session}, true
+		return Event{Kind: "tool_result", ToolName: name, Text: text, SessionID: session, Failed: boolField(raw["is_error"])}, true
 	case "stream_event":
 		text := claudeTextDelta(raw["event"])
 		if text == "" {
@@ -89,8 +89,8 @@ func Parse(line string) (Event, bool) {
 		}
 		return Event{Kind: "meta", SessionID: session}, true
 	case "user":
-		if name, text, ok := claudeToolResult(raw["message"]); ok {
-			return Event{Kind: "tool_result", ToolName: name, Text: text, SessionID: session}, true
+		if name, text, ok, failed := claudeToolResult(raw["message"]); ok {
+			return Event{Kind: "tool_result", ToolName: name, Text: text, SessionID: session, Failed: failed}, true
 		}
 		if session == "" {
 			return Event{}, false
@@ -148,14 +148,14 @@ func claudeTool(v any) (string, map[string]any) {
 	return "", nil
 }
 
-func claudeToolResult(v any) (string, string, bool) {
+func claudeToolResult(v any) (string, string, bool, bool) {
 	m, ok := v.(map[string]any)
 	if !ok {
-		return "", "", false
+		return "", "", false, false
 	}
 	content, ok := m["content"].([]any)
 	if !ok {
-		return "", "", false
+		return "", "", false, false
 	}
 	for _, item := range content {
 		block, ok := item.(map[string]any)
@@ -174,9 +174,14 @@ func claudeToolResult(v any) (string, string, bool) {
 		default:
 			text = dataString(c)
 		}
-		return name, text, true
+		return name, text, true, boolField(block["is_error"])
 	}
-	return "", "", false
+	return "", "", false, false
+}
+
+func boolField(v any) bool {
+	b, ok := v.(bool)
+	return ok && b
 }
 
 func permissionDenials(raw map[string]any) []Denial {

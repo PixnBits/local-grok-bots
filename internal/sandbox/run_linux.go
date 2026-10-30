@@ -115,7 +115,7 @@ func runBwrap(ctx context.Context, p *prepared, bwrap string) (string, string, e
 		args = append(args, "--setenv", k, v)
 	}
 	args = append(args, "--")
-	args = append(args, commandArgv(p.command)...)
+	args = append(args, commandArgvMode(p.command, p.cleanBash)...)
 	cmd := exec.Command(bwrap, args...)
 	cmd.ExtraFiles = cmdExtraFiles(extra, bindFiles)
 	closeBinds := func() {
@@ -153,20 +153,31 @@ func jailDrops(uid int) bool {
 // commandArgv is the program bubblewrap executes. A non-root daemon keeps
 // /bin/sh. A root daemon maps the overflow uid and then drops to it.
 func commandArgv(command string) []string {
+	return commandArgvMode(command, false)
+}
+
+func commandArgvMode(command string, clean bool) []string {
 	uid, gid := JailIDs()
 	if !jailDrops(uid) {
+		if clean {
+			return []string{"/bin/bash", "--norc", "--noprofile", "-c", command}
+		}
 		return []string{"/bin/sh", "-c", command}
 	}
-	return droppedArgv(uid, gid, command)
+	return droppedArgv(uid, gid, command, clean)
 }
 
 // droppedArgv locks nested user namespaces, then drops to uid/gid.
 // command is a separate argument so it is not interpolated into the script.
-func droppedArgv(uid, gid int, command string) []string {
+func droppedArgv(uid, gid int, command string, clean bool) []string {
+	shell := "/bin/sh -c \"$1\""
+	if clean {
+		shell = "/bin/bash --norc --noprofile -c \"$1\""
+	}
 	script := "echo 1 > /proc/sys/user/max_user_namespaces || exit 1\n" +
 		"exec /usr/bin/setpriv --reuid=" + strconv.Itoa(uid) +
 		" --regid=" + strconv.Itoa(gid) +
-		" --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all /bin/sh -c \"$1\"\n"
+		" --clear-groups --inh-caps=-all --ambient-caps=-all --bounding-set=-all " + shell + "\n"
 	return []string{"/bin/sh", "-c", script, "sh", command}
 }
 
@@ -266,7 +277,7 @@ func runUnshare(ctx context.Context, p *prepared) (string, string, error) {
 		}
 		mounts = append(mounts, m)
 	}
-	cfg := stage2File{Workspace: p.workspace, Command: p.command, Env: p.env, Mounts: mounts}
+	cfg := stage2File{Workspace: p.workspace, Command: p.command, Env: p.env, Mounts: mounts, CleanBash: p.cleanBash}
 	b, err := json.Marshal(cfg)
 	if err != nil {
 		return "", "", err

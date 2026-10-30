@@ -58,7 +58,11 @@ func launch(ctx context.Context, p *prepared) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	cmd := exec.Command(sandboxExec, "-p", prof, "/bin/sh", "-c", p.command)
+	argv := []string{sandboxExec, "-p", prof, "/bin/sh", "-c", p.command}
+	if p.cleanBash {
+		argv = []string{sandboxExec, "-p", prof, "/bin/bash", "--norc", "--noprofile", "-c", p.command}
+	}
+	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = ws
 	cmd.Env = []string{
 		"PATH=" + darwinPATH(),
@@ -69,6 +73,10 @@ func launch(ctx context.Context, p *prepared) (string, string, error) {
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_SYSTEM=/dev/null",
 		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_ALLOW_PROTOCOL=https:ssh",
+	}
+	if p.cleanBash {
+		cmd.Env = dropEnvKeys(cmd.Env, "BASH_ENV", "ENV")
 	}
 	return capture(ctx, cmd)
 }

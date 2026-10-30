@@ -500,9 +500,14 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 				a.recordSandbox(current.ID, ev)
 			}
 		}
+		cleanBash, gerr := a.gateShell(shellCtx, current, command)
+		if gerr != nil {
+			return "", gerr
+		}
 		res, err := sandbox.Run(shellCtx, sandbox.Request{
 			Workspace:       a.ws,
 			Command:         command,
+			CleanBash:       cleanBash,
 			Grants:          current.Grants,
 			NetAllow:        current.NetAllow,
 			SSHAllow:        current.SSHAllow,

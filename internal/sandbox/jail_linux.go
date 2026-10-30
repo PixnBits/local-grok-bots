@@ -105,6 +105,10 @@ func enterJail(jail string, cfg stage2File) error {
 			"LANG=C.UTF-8",
 		}
 	}
+	if cfg.CleanBash {
+		env = dropEnvKeys(env, "BASH_ENV", "ENV")
+		return unix.Exec("/bin/bash", []string{"bash", "--norc", "--noprofile", "-c", command}, env)
+	}
 	return unix.Exec("/bin/sh", []string{"sh", "-c", command}, env)
 }
 

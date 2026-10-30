@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,7 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/coi"
 	"github.com/PixnBits/local-grok-bots/internal/config"
 	"github.com/PixnBits/local-grok-bots/internal/model"
+	"github.com/PixnBits/local-grok-bots/internal/permbroker"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"github.com/PixnBits/local-grok-bots/internal/sandbox"
@@ -68,6 +70,18 @@ type App struct {
 	turnMu     sync.Mutex
 	turnHeld   map[string]turnSnap
 	perm       *permission.Broker
+	// broker is the fail-closed permission broker. Nil only when Open failed
+	// before the process started. brokerOn is true for a bot whose Claude
+	// launch is armed with the hook.
+	broker   *permbroker.Engine
+	brokerMu sync.Mutex
+	brokerLn map[string]*permbroker.Listener
+	brokerOn map[string]bool
+	// hookPin is the hook binary recorded at the last policy publish.
+	// hookBin is the path the current armed launch checked.
+	hookMu  sync.Mutex
+	hookPin *permbroker.HookPin
+	hookBin string
 	// permBase is the HTTP origin the CLI calls back, such as http://127.0.0.1:8787.
 	// Empty means there is no permission host. A headless prompt still fails closed.
 	// The permission callback listener does not replace this except when the
@@ -184,6 +198,9 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	if w := brokerHookWarning(pol, cleanRoots(cfg.Workspace())); w != "" {
+		pol.Warnings = append(pol.Warnings, w)
+	}
 	for _, w := range pol.Warnings {
 		fmt.Fprintf(os.Stderr, "local-grok-bots: %s\n", w)
 	}
@@ -276,6 +293,13 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		m = model.NewOllama(cfg.OllamaURL)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	br, err := permbroker.Open(filepath.Join(cfg.DataDir, "permbroker"), pol.BrokerRisks, nil)
+	if err != nil {
+		st.Close()
+		_ = aud.Close()
+		cancel()
+		return nil, err
+	}
 	a := &App{
 		cfg:        cfg,
 		logw:       logw,
@@ -296,7 +320,9 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		permBase:   httpBase(cfg.BindAddr),
 		stt:        stt,
 		sttSlot:    make(chan struct{}, 1),
+		broker:     br,
 	}
+	br.SetAuditor(brokerAudit{a})
 	a.setPol(pol)
 	if len(fileTokens) > 0 {
 		a.authTokens.Store(&authTokenSet{toks: fileTokens})
@@ -327,6 +353,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		cancel()
 		return nil, err
 	}
+	a.broker.SnapshotGit(a.ws)
 	a.applyVoiceRuntime()
 	a.RefreshProtectSnapshot()
 	a.wg.Add(1)
@@ -365,6 +392,7 @@ func (a *App) Shutdown() {
 	a.wg.Wait()
 	a.stopPermCallback()
 	a.closeGrokProxy()
+	a.closeBroker()
 	_ = a.st.FailRunning("shutdown")
 	_ = a.st.AddLog("", "daemon_stop", map[string]any{})
 	_ = a.st.Close()

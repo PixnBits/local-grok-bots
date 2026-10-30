@@ -60,7 +60,7 @@ func claudeSettingsJSON(o IsolationOptions) ([]byte, error) {
 			deny = append(deny, "Bash("+c+")", "Bash("+c+" *)")
 		}
 	}
-	paths := protectedPaths(o.UserHome, o.Protect, nil)
+	paths := protectedPaths(o.UserHome, append(append([]string{}, o.Protect...), o.BrokerDeny...), nil)
 	if o.Grants.SSH && o.UserHome != "" {
 		paths = without(paths, filepath.Join(o.UserHome, ".ssh"))
 	}
@@ -75,12 +75,46 @@ func claudeSettingsJSON(o IsolationOptions) ([]byte, error) {
 		creds = append(creds, map[string]string{"path": p, "mode": "deny"})
 	}
 	doc := map[string]any{
-		"disableAllHooks":            true,
 		"enableAllProjectMcpServers": false,
 		"permissions": map[string]any{
 			"deny":                                deny,
 			"blockReadsOutsideWorkingDirectories": true,
 		},
+	}
+	// Hook settings, checked 2026-10-29:
+	// https://code.claude.com/docs/en/hooks
+	// https://code.claude.com/docs/en/hooks-guide
+	// https://code.claude.com/docs/en/settings
+	//
+	// Exit 2 blocks even if JSON says allow. Any other failure is
+	// non-blocking unless onFailure is block (Claude Code v2.1.295+).
+	// A PreToolUse timeout does not block by itself. continueOnBlock
+	// returns a deny to the model so the turn keeps going.
+	// allowManagedHooksOnly and allowManagedPermissionRulesOnly are
+	// honored only in a managed settings file. --setting-sources= is
+	// what keeps project and user settings out of this launch.
+	// Matcher "*" matches every tool, including MCP tools.
+	if cmd := strings.TrimSpace(o.PermHookCommand); cmd != "" {
+		doc["allowManagedHooksOnly"] = true
+		doc["allowManagedPermissionRulesOnly"] = true
+		doc["hooks"] = map[string]any{
+			"PreToolUse": []any{
+				map[string]any{
+					"matcher": "*",
+					"hooks": []any{
+						map[string]any{
+							"type":            "command",
+							"command":         cmd,
+							"timeout":         30,
+							"onFailure":       "block",
+							"continueOnBlock": true,
+						},
+					},
+				},
+			},
+		}
+	} else {
+		doc["disableAllHooks"] = true
 	}
 	if o.ClaudeSandbox {
 		domains := []string{}

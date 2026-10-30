@@ -43,6 +43,10 @@ type Isolation struct {
 	// ExtraBinds are host path, jail path pairs. Jail paths are JailProxySock
 	// and JailEgressSock.
 	ExtraBinds [][2]string
+	// PermHookCommand is the quoted lgb-permhook command. Empty keeps
+	// disableAllHooks. Claude is not in the Grok jail, so this command
+	// uses host paths.
+	PermHookCommand string
 }
 
 // JailProxySock is the credential proxy inside the Grok network namespace.
@@ -99,6 +103,13 @@ type IsolationOptions struct {
 	ClaudeSandbox bool
 	// Protect are extra absolute paths both CLIs are denied (daemon secrets).
 	Protect []string
+	// PermHookCommand, when set, replaces disableAllHooks with the broker
+	// PreToolUse hook. Empty keeps the locked-down settings.
+	PermHookCommand string
+	// BrokerDeny are absolute paths added to the Claude deny list when the
+	// hook is armed: the hook binary, the settings file and its directory,
+	// and the broker state directory.
+	BrokerDeny []string
 	// CredRoot is the trusted directory the Grok login walk starts at.
 	// Empty uses StateDir when the bot home is inside it, otherwise the
 	// parent of Home. Components below the root are not followed when they
@@ -305,6 +316,7 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 		}
 		iso.SettingsPath = path
 		iso.ClaudeSandbox = o.ClaudeSandbox
+		iso.PermHookCommand = strings.TrimSpace(o.PermHookCommand)
 	case "grok":
 		for _, k := range grokCompatOff {
 			env[k] = "false"
@@ -393,7 +405,8 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 	return iso, nil
 }
 
-func writeClaudeSettings(o IsolationOptions, body []byte) (string, error) {
+// ClaudeSettingsPath is the file writeClaudeSettings will replace.
+func ClaudeSettingsPath(o IsolationOptions) (string, error) {
 	state, err := absClean(o.StateDir)
 	if err != nil {
 		return "", err
@@ -407,21 +420,40 @@ func writeClaudeSettings(o IsolationOptions, body []byte) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		return filepath.Join(root, rel), nil
+	}
+	return filepath.Join(state, "claude-settings.json"), nil
+}
+
+func writeClaudeSettings(o IsolationOptions, body []byte) (string, error) {
+	path, err := ClaudeSettingsPath(o)
+	if err != nil {
+		return "", err
+	}
+	if r := strings.TrimSpace(o.CredRoot); r != "" {
+		root, err := absClean(r)
+		if err != nil {
+			return "", err
+		}
+		rel, err := relUnder(root, path)
+		if err != nil {
+			return "", err
+		}
 		if err := writeFileNoFollow(root, rel, body, 0o600); err != nil {
 			return "", err
 		}
-		return filepath.Join(root, rel), nil
+		return path, nil
 	}
-	parent := filepath.Dir(state)
-	base := filepath.Base(state)
-	if err := mkdirNoFollow(parent, base); err != nil {
+	parent := filepath.Dir(path)
+	base := filepath.Base(path)
+	if err := mkdirNoFollow(filepath.Dir(parent), filepath.Base(parent)); err != nil {
 		return "", err
 	}
-	rel := filepath.Join(base, "claude-settings.json")
-	if err := writeFileNoFollow(parent, rel, body, 0o600); err != nil {
+	rel := filepath.Join(filepath.Base(parent), base)
+	if err := writeFileNoFollow(filepath.Dir(parent), rel, body, 0o600); err != nil {
 		return "", err
 	}
-	return filepath.Join(parent, rel), nil
+	return path, nil
 }
 
 // placeGrokPlaceholder writes the synthetic login into GROK_HOME. It never
