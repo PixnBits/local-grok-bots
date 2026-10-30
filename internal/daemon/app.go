@@ -193,6 +193,9 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	if err != nil {
 		return nil, err
 	}
+	if w := brokerHookWarning(pol, cleanRoots(cfg.Workspace())); w != "" {
+		pol.Warnings = append(pol.Warnings, w)
+	}
 	for _, w := range pol.Warnings {
 		fmt.Fprintf(os.Stderr, "local-grok-bots: %s\n", w)
 	}

@@ -503,7 +503,11 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 		opts.Home = filepath.Join(state, "home")
 	}
 	if strings.EqualFold(backend, "claude") {
-		opts.PermHookCommand = a.prepareBrokerHook(bot, ws, opts.Home)
+		hook, herr := a.prepareBrokerHook(bot, ws, opts.Home)
+		if herr != nil {
+			return nil, herr
+		}
+		opts.PermHookCommand = hook
 	}
 	var iso clisession.Isolation
 	var err error

@@ -16,9 +16,13 @@ broker = "hook"   # off (default) or hook
 
 `hook` arms two paths: Claude Code, through `cmd/lgb-permhook`, and the
 daemon's `run_shell` tool. Anything else keeps today's behaviour, including
-Grok's permission card. If the hook binary is missing or not safe to run,
-that Claude turn stays on the locked-down settings (`disableAllHooks`)
-instead of failing closed into a weaker mode.
+Grok's permission card. If the broker is on for a bot and the hook binary
+is missing or not safe to run, the socket cannot be created, or the hook
+path is unknown, that Claude turn is refused before the CLI starts. The
+run error names the reason. When the broker is off for the bot, the turn
+stays on the locked-down settings (`disableAllHooks`). When `broker` is
+`hook` and the hook binary is not safe to run, startup prints a warning
+with the other policy warnings.
 
 A policy value other than `off` or `hook` is a startup error. A risk row
 that lowers a shipped level, or names an unknown level, is a startup error.
@@ -52,8 +56,7 @@ the host socket path. The hook talks to a per-bot Unix socket under
 `DATA_DIR/permbroker/<bot-id>/sock`. The directory is mode 0700 and the
 socket is mode 0600. The peer's uid must be the daemon's uid. The socket
 path has to fit in the platform's Unix address (108 bytes on Linux,
-including the trailing NUL). A path that does not fit leaves the turn
-locked down.
+including the trailing NUL). A path that does not fit refuses the turn.
 
 The hook is stdlib only. It waits at most 2.5 seconds, under the 30 second
 settings timeout. Exit 0 with a verdict of exactly `allow` is the only
@@ -141,9 +144,12 @@ socket are denies and do not change state.
 
 The daemon appends redacted rows to `DATA_DIR/permbroker/audit.jsonl`
 (mode 0600) with a hash chain. Hook transport failures are not rows,
-because the daemon did not make the decision. The mirror row in the
-daemon audit log, when that log is enabled, is a short `permbroker`
-event. Secrets in commands are redacted before they are stored.
+because the daemon did not make the decision. An approve, a deny, and
+each item of a deny-all append a row when the decision is stored. A rule
+save does the same. The row records the actor, the decision, the scope
+when there is one, and the pending id when there is one. The mirror row
+in the daemon audit log, when that log is enabled, is a short
+`permbroker` event. Secrets in commands are redacted before they are stored.
 
 ## How to test
 
@@ -159,6 +165,7 @@ go test -v ./web/... | grep -i skip
 `gofmt -l` prints nothing. The fail-closed tests are named `TestGolden_*`:
 
 - daemon stopped
+- an unusable hook refuses the turn before the CLI starts
 - daemon hangs past the hook deadline
 - hook killed (the fake CLI treats SIGKILL as a non-blocking hook error,
   then the launch config denies, and the tool marker is absent)

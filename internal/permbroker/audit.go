@@ -25,6 +25,7 @@ type AuditRow struct {
 	InputHash      string    `json:"input_hash"`
 	Cwd            string    `json:"cwd"`
 	Decision       string    `json:"decision"`
+	Scope          string    `json:"scope,omitempty"`
 	PendingID      string    `json:"pending_id,omitempty"`
 	Actor          string    `json:"actor"`
 	RuleID         string    `json:"rule_id,omitempty"`

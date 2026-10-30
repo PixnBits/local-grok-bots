@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -193,6 +194,92 @@ func TestGolden_JailSocketCannotApproveOrCreateRules(t *testing.T) {
 	}
 }
 
+func openAuditEngine(t *testing.T) (*Engine, string) {
+	t.Helper()
+	dir := t.TempDir()
+	e, err := Open(dir, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.resolver = fakeBinary
+	t.Cleanup(func() { _ = e.Close() })
+	return e, dir
+}
+
+func readPermAudit(t *testing.T, dir string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+func decodeAudit(t *testing.T, raw string) []AuditRow {
+	t.Helper()
+	var rows []AuditRow
+	for _, line := range strings.Split(strings.TrimRight(raw, "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var row AuditRow
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			t.Fatal(err)
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+func checkAuditChain(t *testing.T, rows []AuditRow) {
+	t.Helper()
+	prev := ""
+	for i, row := range rows {
+		if row.PrevHash != prev || len(row.Hash) != 64 {
+			t.Fatalf("row %d prev %q hash %q", i, row.PrevHash, row.Hash)
+		}
+		prev = row.Hash
+	}
+}
+
+func humanDecision(t *testing.T, rows []AuditRow, pending, decision string) AuditRow {
+	t.Helper()
+	var found *AuditRow
+	for i := range rows {
+		row := &rows[i]
+		if row.Actor == "human" && row.Decision == decision && row.PendingID == pending {
+			if found != nil {
+				t.Fatalf("duplicate %s %s", decision, pending)
+			}
+			found = row
+		}
+	}
+	if found == nil {
+		t.Fatalf("missing %s for %s", decision, pending)
+	}
+	return *found
+}
+
+func humanDenyCount(rows []AuditRow) int {
+	n := 0
+	for _, row := range rows {
+		if row.Actor == "human" && row.Decision == "deny" {
+			n++
+		}
+	}
+	return n
+}
+
+func ruleSaveAudited(rows []AuditRow, scope string) bool {
+	for _, row := range rows {
+		if row.Actor == "human" && row.Decision == EffectAllow && row.Scope == scope && row.RuleID != "" && row.TableVersion == TableVersion {
+			return true
+		}
+	}
+	return false
+}
+
 func sockRound(t *testing.T, sock string, msg any) wireReply {
 	t.Helper()
 	c, err := net.Dial("unix", sock)
@@ -224,6 +311,117 @@ func TestDenyDoesNotCreateAnotherPending(t *testing.T) {
 	if second.Verdict != VerdictDeny || second.PendingID != "" {
 		t.Fatalf("after deny %+v", second)
 	}
+}
+
+func TestApproveAuditedBeforeRetry(t *testing.T) {
+	const secret = "ghp_abcdefghijklmnopqrstuvwxyz"
+	e, dir := openAuditEngine(t)
+	ctx := context.Background()
+	req := bashReq("bot", "sess", "task", "/work", "echo "+secret)
+	first := e.Evaluate(ctx, req)
+	if first.PendingID == "" || first.Verdict == VerdictAllow {
+		t.Fatalf("%+v", first)
+	}
+	if err := e.Decide(first.PendingID, "approve", ScopeOnce); err != nil {
+		t.Fatal(err)
+	}
+	raw := readPermAudit(t, dir)
+	if strings.Contains(raw, secret) {
+		t.Fatal("audit kept a secret")
+	}
+	rows := decodeAudit(t, raw)
+	checkAuditChain(t, rows)
+	for _, row := range rows {
+		if row.Decision == VerdictAllow {
+			t.Fatal("allow was written before retry")
+		}
+	}
+	row := humanDecision(t, rows, first.PendingID, "approve")
+	if row.Actor != "human" || row.Scope != ScopeOnce || row.BotID != "bot" || row.SessionID != "sess" || row.Cwd != "/work" || row.InputHash == "" || row.InputHash != first.InputHash || row.Level == "" || row.TableVersion != TableVersion || row.RulesetVersion != e.Ruleset() {
+		t.Fatalf("%+v", row)
+	}
+	if got := e.Evaluate(ctx, req); got.Verdict != VerdictAllow {
+		t.Fatalf("retry %+v", got)
+	}
+}
+
+func TestApproveScopesAreAudited(t *testing.T) {
+	for _, scope := range []string{ScopeOnce, ScopeTask, ScopeBot, ScopeGlobal} {
+		t.Run(scope, func(t *testing.T) {
+			e, dir := openAuditEngine(t)
+			req := bashReq("bot", "sess", "task", "/work", "git status")
+			first := e.Evaluate(context.Background(), req)
+			if first.PendingID == "" || first.Level != LevelLow {
+				t.Fatalf("%+v", first)
+			}
+			before := e.Ruleset()
+			if err := e.Decide(first.PendingID, "approve", scope); err != nil {
+				t.Fatal(err)
+			}
+			rows := decodeAudit(t, readPermAudit(t, dir))
+			checkAuditChain(t, rows)
+			row := humanDecision(t, rows, first.PendingID, "approve")
+			if row.Actor != "human" || row.Scope != scope || row.BotID != "bot" || row.SessionID != "sess" || row.Cwd != "/work" || row.InputHash != first.InputHash || row.Level != LevelLow || row.TableVersion != TableVersion || row.RulesetVersion != e.Ruleset() {
+				t.Fatalf("%+v", row)
+			}
+			if scope != ScopeBot && scope != ScopeGlobal {
+				return
+			}
+			if e.Ruleset() != before+1 || e.RuleCount() != 1 || !ruleSaveAudited(rows, scope) {
+				t.Fatalf("ruleset %d rules %d", e.Ruleset(), e.RuleCount())
+			}
+		})
+	}
+}
+
+func TestDenyAllAuditsEachItem(t *testing.T) {
+	t.Run("deny", func(t *testing.T) {
+		e, dir := openAuditEngine(t)
+		first := e.Evaluate(context.Background(), bashReq("bot", "sess", "task", "/work", "echo no"))
+		if first.PendingID == "" {
+			t.Fatal(first)
+		}
+		if err := e.Decide(first.PendingID, "deny", ""); err != nil {
+			t.Fatal(err)
+		}
+		rows := decodeAudit(t, readPermAudit(t, dir))
+		row := humanDecision(t, rows, first.PendingID, "deny")
+		if row.Actor != "human" || row.BotID != "bot" || row.SessionID != "sess" || row.Cwd != "/work" || row.InputHash != first.InputHash || row.Level == "" || row.TableVersion != TableVersion || row.RulesetVersion != e.Ruleset() {
+			t.Fatalf("%+v", row)
+		}
+	})
+	t.Run("deny-all", func(t *testing.T) {
+		e, dir := openAuditEngine(t)
+		one := e.Evaluate(context.Background(), bashReq("bot", "sess", "task", "/work", "echo one"))
+		two := e.Evaluate(context.Background(), bashReq("bot", "sess", "task", "/work", "echo two"))
+		if one.PendingID == "" || two.PendingID == "" || one.PendingID == two.PendingID {
+			t.Fatalf("%+v %+v", one, two)
+		}
+		if err := e.DenyAll([]string{one.PendingID, "missing"}); err != ErrNotFound {
+			t.Fatalf("partial %v", err)
+		}
+		if len(e.ListPending()) != 2 {
+			t.Fatal("partial deny changed pending")
+		}
+		early := decodeAudit(t, readPermAudit(t, dir))
+		if humanDenyCount(early) != 0 {
+			t.Fatal("partial deny wrote an audit row")
+		}
+		if err := e.DenyAll(nil); err != nil {
+			t.Fatal(err)
+		}
+		rows := decodeAudit(t, readPermAudit(t, dir))
+		checkAuditChain(t, rows)
+		for _, id := range []string{one.PendingID, two.PendingID} {
+			row := humanDecision(t, rows, id, "deny")
+			if row.Actor != "human" || row.BotID != "bot" || row.SessionID != "sess" || row.Cwd != "/work" || row.InputHash == "" || row.Level == "" || row.TableVersion != TableVersion || row.RulesetVersion != e.Ruleset() {
+				t.Fatalf("%s %+v", id, row)
+			}
+		}
+		if humanDenyCount(rows) != 2 {
+			t.Fatalf("human deny rows %d", humanDenyCount(rows))
+		}
+	})
 }
 
 func TestCancelledApprovalIsRefused(t *testing.T) {

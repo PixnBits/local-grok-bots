@@ -410,9 +410,7 @@ func (e *Engine) SaveRule(rule Rule) (Rule, error) {
 	}
 	e.rules = next
 	e.invalidateLocked()
-	e.auditDecision(Request{BotID: rule.BotID}, inspected{
-		Eligible: true, Argv: rule.Argv, Hash: hashParts(ToolShell, rule.Argv), Level: lvl, ClassNote: "none",
-	}, rule.Effect, "rule", "", "human", rule.ID)
+	e.auditRule(rule, lvl)
 	return rule, nil
 }
 
@@ -656,7 +654,8 @@ func pendingView(item *pendingItem) Pending {
 }
 
 // Decide approves or denies one pending item. Approve does not stop a
-// run. Scope is required for approve and ignored for deny.
+// run. Scope is required for approve and ignored for deny. An accepted
+// decision is audited when it is stored.
 func (e *Engine) Decide(id, decision, scope string) error {
 	if e == nil {
 		return ErrNotFound
@@ -678,9 +677,7 @@ func (e *Engine) Decide(id, decision, scope string) error {
 	case "deny":
 		e.denied[collapseKey(item)] = struct{}{}
 		e.bury(item)
-		e.auditDecision(Request{BotID: item.BotID, SessionID: item.SessionID, RunID: item.RunID, TaskID: item.TaskID, Cwd: item.Cwd}, inspected{
-			Hash: item.InputHash, Level: item.Level, Argv: item.Argv, Raw: item.Raw, ClassNote: item.Classifier,
-		}, VerdictDeny, "denied", "", "human", "")
+		e.auditHuman(item, "deny", "")
 		return nil
 	case "approve":
 		if !scopeAllowed(item.Level, item.Eligible, item.Compound, item.HardAsk, scope) {
@@ -715,6 +712,7 @@ func (e *Engine) Decide(id, decision, scope string) error {
 			return ErrScope
 		}
 		e.bury(item)
+		e.auditHuman(item, "approve", scope)
 		return nil
 	default:
 		return ErrBadDecision
@@ -723,6 +721,7 @@ func (e *Engine) Decide(id, decision, scope string) error {
 
 // DenyAll denies the listed ids. A nil ids slice denies every current
 // item. An id that is not current fails the call and changes nothing.
+// Each denied item is audited.
 func (e *Engine) DenyAll(ids []string) error {
 	if e == nil {
 		return ErrNotFound
@@ -752,6 +751,7 @@ func (e *Engine) DenyAll(ids []string) error {
 		}
 		e.denied[collapseKey(item)] = struct{}{}
 		e.bury(item)
+		e.auditHuman(item, "deny", "")
 	}
 	return nil
 }
@@ -786,6 +786,7 @@ func (e *Engine) addRuleLocked(item *pendingItem, scope string) error {
 	}
 	e.rules = next
 	e.invalidateLocked()
+	e.auditRule(rule, item.Level)
 	return nil
 }
 
@@ -1169,7 +1170,7 @@ func (e *Engine) finish(req Request, in inspected, verdict, reason, pendingID, a
 	if reason == "" {
 		reason = "denied"
 	}
-	e.auditDecision(req, in, verdict, reason, pendingID, actor, ruleID)
+	e.auditDecision(req, in, verdict, reason, pendingID, actor, ruleID, "")
 	return Decision{
 		Verdict: verdict, Reason: reason, PendingID: pendingID,
 		Level: in.Level, Actor: actor, RuleID: ruleID, InputHash: in.Hash,
@@ -1177,7 +1178,26 @@ func (e *Engine) finish(req Request, in inspected, verdict, reason, pendingID, a
 	}
 }
 
-func (e *Engine) auditDecision(req Request, in inspected, verdict, reason, pendingID, actor, ruleID string) {
+func (e *Engine) auditHuman(item *pendingItem, decision, scope string) {
+	if item == nil {
+		return
+	}
+	e.auditDecision(Request{
+		BotID: item.BotID, SessionID: item.SessionID, RunID: item.RunID, TaskID: item.TaskID,
+		Cwd: item.Cwd, ToolName: item.Tool,
+	}, inspected{
+		Eligible: item.Eligible, Argv: item.Argv, Raw: item.Raw, Hash: item.InputHash,
+		Level: item.Level, ClassNote: item.Classifier,
+	}, decision, decision, item.ID, "human", "", scope)
+}
+
+func (e *Engine) auditRule(rule Rule, level Level) {
+	e.auditDecision(Request{BotID: rule.BotID}, inspected{
+		Eligible: true, Argv: rule.Argv, Hash: hashParts(ToolShell, rule.Argv), Level: level, ClassNote: "none",
+	}, rule.Effect, "rule", "", "human", rule.ID, rule.Scope)
+}
+
+func (e *Engine) auditDecision(req Request, in inspected, verdict, reason, pendingID, actor, ruleID, scope string) {
 	note := in.ClassNote
 	if note == "" {
 		note = "none"
@@ -1185,7 +1205,7 @@ func (e *Engine) auditDecision(req Request, in inspected, verdict, reason, pendi
 	row := AuditRow{
 		Time: e.now(), BotID: req.BotID, SessionID: req.SessionID, RunID: req.RunID, TaskID: req.TaskID,
 		Tool: normTool(req.ToolName), Argv: redactArgv(in.Argv), Input: clip(Redact(in.Raw), 500),
-		InputHash: in.Hash, Cwd: req.Cwd, Decision: verdict, PendingID: pendingID,
+		InputHash: in.Hash, Cwd: req.Cwd, Decision: verdict, Scope: scope, PendingID: pendingID,
 		Actor: actor, RuleID: ruleID, Level: in.Level, TableVersion: TableVersion,
 		RulesetVersion: e.rules.Version, Classifier: note, PeerUID: req.PeerUID, PeerPID: req.PeerPID,
 	}

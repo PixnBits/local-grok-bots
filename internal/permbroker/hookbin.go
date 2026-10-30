@@ -12,8 +12,8 @@ import (
 // The file must be an absolute regular file, not a symlink, executable,
 // and not group or world writable. Owner-writable is allowed when the
 // path is outside the jail-writable roots (the bot workspace and home).
-// A missing or unusable binary keeps the daemon on its locked-down
-// settings instead of arming the broker.
+// When the broker is enabled, a missing or unusable binary refuses the
+// turn. When the broker is off, the launch keeps its locked-down settings.
 func CheckHookBinary(path string, jailRoots []string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("hook path must be absolute")

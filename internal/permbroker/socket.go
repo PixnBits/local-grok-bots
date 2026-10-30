@@ -155,7 +155,7 @@ func (e *Engine) auditPeer(bot string, uid, pid int) {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.auditDecision(Request{BotID: bot, PeerUID: uid, PeerPID: pid}, inspected{ClassNote: "none"}, VerdictDeny, "denied", "", "fail-closed", "")
+	e.auditDecision(Request{BotID: bot, PeerUID: uid, PeerPID: pid}, inspected{ClassNote: "none"}, VerdictDeny, "denied", "", "fail-closed", "", "")
 }
 
 // wireRequest matches cmd/lgb-permhook. Keep the JSON keys aligned.

@@ -1,10 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -332,6 +334,130 @@ func TestGolden_AdminPendingIsAdminOnly(t *testing.T) {
 	_ = other
 }
 
+func TestGolden_UnusableHookRefusesTurn(t *testing.T) {
+	t.Run("group-writable", func(t *testing.T) {
+		hook := writeHookScript(t, "#!/bin/sh\nexit 0\n")
+		if err := os.Chmod(hook, 0o775); err != nil {
+			t.Fatal(err)
+		}
+		ran := runClaudeTurn(t, claudeTurn{hook: hook, broker: "hook"})
+		assertHookRefused(t, ran, "group or world writable")
+	})
+	t.Run("missing", func(t *testing.T) {
+		hook := filepath.Join(t.TempDir(), "lgb-permhook")
+		ran := runClaudeTurn(t, claudeTurn{hook: hook, broker: "hook"})
+		assertHookRefused(t, ran, "hook binary")
+		if !strings.Contains(ran.errText, hook) {
+			t.Fatalf("error %q", ran.errText)
+		}
+	})
+	t.Run("long socket", func(t *testing.T) {
+		parent, err := os.MkdirTemp("", "lgb")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(parent) })
+		dir := filepath.Join(parent, strings.Repeat("d", 90))
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		hook := writeHookScript(t, "#!/bin/sh\nexit 0\n")
+		ran := runClaudeTurn(t, claudeTurn{hook: hook, broker: "hook", dataDir: dir})
+		assertHookRefused(t, ran, "socket path is too long")
+	})
+	t.Run("broker off", func(t *testing.T) {
+		hook := writeHookScript(t, "#!/bin/sh\nexit 0\n")
+		if err := os.Chmod(hook, 0o775); err != nil {
+			t.Fatal(err)
+		}
+		ran := runClaudeTurn(t, claudeTurn{hook: hook, broker: "off"})
+		if ran.status != "done" || ran.errText != "" || ran.argv == "" || ran.marker {
+			t.Fatalf("status %s err %q argv %q marker %v", ran.status, ran.errText, ran.argv, ran.marker)
+		}
+		body, err := os.ReadFile(settingsArg(t, ran.argv))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), "disableAllHooks") {
+			t.Fatalf("settings %s", body)
+		}
+	})
+	t.Run("startup warning", func(t *testing.T) {
+		t.Setenv("MANAGED_POLICY", "")
+		bad := writeHookScript(t, "#!/bin/sh\nexit 0\n")
+		if err := os.Chmod(bad, 0o775); err != nil {
+			t.Fatal(err)
+		}
+		_, out := startWithBrokerPolicy(t, "hook", bad)
+		if !strings.Contains(out, "local-grok-bots: ") || !strings.Contains(out, "permission broker hook cannot be used") || !strings.Contains(out, "group or world writable") {
+			t.Fatalf("stderr %s", out)
+		}
+		missing := filepath.Join(t.TempDir(), "lgb-permhook")
+		_, out = startWithBrokerPolicy(t, "hook", missing)
+		if !strings.Contains(out, "permission broker hook cannot be used") || !strings.Contains(out, missing) {
+			t.Fatalf("stderr %s", out)
+		}
+		_, out = startWithBrokerPolicy(t, "hook", "")
+		if !strings.Contains(out, "permission broker hook cannot be used") || !strings.Contains(out, "lgb-permhook") {
+			t.Fatalf("derived stderr %s", out)
+		}
+		good := writeHookScript(t, "#!/bin/sh\nexit 0\n")
+		_, out = startWithBrokerPolicy(t, "hook", good)
+		if strings.Contains(out, "permission broker hook cannot be used") {
+			t.Fatalf("good hook warned: %s", out)
+		}
+		_, out = startWithBrokerPolicy(t, "off", missing)
+		if strings.Contains(out, "permission broker hook cannot be used") {
+			t.Fatalf("broker off warned: %s", out)
+		}
+	})
+}
+
+func TestStaleApprovalWritesNoAllow(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		end  string
+	}{
+		{name: "session ended", end: "session"},
+		{name: "ruleset changed", end: "ruleset"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app := newApp(t, "", nil)
+			srv := serve(t, app)
+			id := askPending(t, app, "echo hi")
+			if tc.end == "session" {
+				app.broker.CancelSession("b1", "s1")
+			} else if _, err := app.broker.SaveRule(permbroker.Rule{
+				Effect: permbroker.EffectDeny, Argv: []string{"git", "status"},
+				Tool: permbroker.ToolShell, Scope: permbroker.ScopeBot, BotID: "b1",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			res, body := do(t, "POST", srv.URL+"/api/permbroker/pending/"+id, map[string]string{"decision": "approve", "scope": "once"}, "")
+			if res.StatusCode != http.StatusConflict {
+				t.Fatalf("status %d %s", res.StatusCode, body)
+			}
+			if d := askRaw(t, app, "echo hi"); d.Verdict == permbroker.VerdictAllow {
+				t.Fatalf("allowed %+v", d)
+			}
+			rules, err := os.ReadFile(filepath.Join(app.cfg.DataDir, "permbroker", "rules.json"))
+			if err == nil && strings.Contains(string(rules), `"effect": "allow"`) {
+				t.Fatalf("rules %s", rules)
+			}
+			if tc.end == "session" && app.broker.RuleCount() != 0 {
+				t.Fatalf("rules %d", app.broker.RuleCount())
+			}
+			audit, err := os.ReadFile(filepath.Join(app.cfg.DataDir, "permbroker", "audit.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(audit), `"decision":"approve"`) || strings.Contains(string(audit), `"decision":"allow"`) {
+				t.Fatalf("audit\n%s", audit)
+			}
+		})
+	}
+}
+
 type brokerRun struct {
 	status  string
 	errText string
@@ -408,6 +534,129 @@ func runBrokerClaude(t *testing.T, hook string, before func(ws string)) brokerRu
 		argv: readArgv(t, argvPath), marker: statErr == nil,
 		pending: app.broker.ListPending(), logs: logs.String(),
 	}
+}
+
+type claudeTurn struct {
+	hook    string
+	broker  string
+	dataDir string
+}
+
+func runClaudeTurn(t *testing.T, opt claudeTurn) brokerRun {
+	t.Helper()
+	dir := opt.dataDir
+	if dir == "" {
+		var err error
+		dir, err = os.MkdirTemp("", "lgbp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	}
+	installFakeClaude(t, dir)
+	argvPath := filepath.Join(dir, "argv.log")
+	marker := filepath.Join(dir, "tool-marker")
+	t.Setenv("LGB_ARGV_LOG", argvPath)
+	t.Setenv("LGB_TOOL_MARKER", marker)
+	app := newApp(t, dir, nil)
+	app.cliTTY = func() bool { return false }
+	app.editPol(func(p *policy.Policy) {
+		p.Backend = "claude"
+		p.CLIPermitted = true
+		p.Broker = opt.broker
+		if opt.hook != "" {
+			p.HookPath = opt.hook
+		}
+		p.UIPrompts = false
+		p.ClaudeTransport = policy.TransportNone
+		p.TimersEnabled = true
+		p.Idle = time.Hour
+		p.Imminent = time.Minute
+	})
+	srv := serve(t, app)
+	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Ada", "description": "p"}, "")
+	if res.StatusCode != 201 && res.StatusCode != 200 {
+		t.Fatalf("create %d %s", res.StatusCode, b)
+	}
+	var bot store.Bot
+	decodeJSON(t, b, &bot)
+	res, b = do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "go"}, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("post %d %s", res.StatusCode, b)
+	}
+	waitIdle(t, srv.URL, bot.ID, "")
+	got, err := app.st.GetBot(bot.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := ""
+	if body, rerr := os.ReadFile(argvPath); rerr == nil {
+		argv = string(body)
+	}
+	_, statErr := os.Stat(marker)
+	return brokerRun{
+		status: got.LastRunStatus, errText: got.LastRunError, argv: argv, marker: statErr == nil,
+	}
+}
+
+func assertHookRefused(t *testing.T, ran brokerRun, reason string) {
+	t.Helper()
+	if ran.status != "error" || !strings.Contains(ran.errText, "permission broker is enabled but its hook cannot be used") || !strings.Contains(ran.errText, reason) || !strings.Contains(ran.errText, "so the turn was refused") {
+		t.Fatalf("run %s %q", ran.status, ran.errText)
+	}
+	if ran.argv != "" || ran.marker {
+		t.Fatalf("claude started argv %q marker %v", ran.argv, ran.marker)
+	}
+}
+
+func startWithBrokerPolicy(t *testing.T, broker, hook string) (*App, string) {
+	t.Helper()
+	dir := t.TempDir()
+	if err := chmodDataDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	var body strings.Builder
+	body.WriteString("[backend]\nbackend = \"ollama\"\n\n[cli.permission]\nbroker = " + fmt.Sprintf("%q", broker) + "\n")
+	if hook != "" {
+		body.WriteString("hook_path = " + fmt.Sprintf("%q", hook) + "\n")
+	}
+	path := filepath.Join(dir, "policy.toml")
+	if err := os.WriteFile(path, []byte(body.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var app *App
+	var err error
+	out := captureStderrDuring(t, func() {
+		app, err = New(config.Config{
+			DataDir: dir, PolicyPath: path, BindAddr: "127.0.0.1:0",
+			OllamaURL: "http://127.0.0.1:9", Model: "test-model", Version: "0.1.0",
+		}, nil)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Shutdown)
+	return app, out
+}
+
+func captureStderrDuring(t *testing.T, fn func()) (out string) {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	defer func() {
+		os.Stderr = old
+		_ = w.Close()
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		_ = r.Close()
+		out = buf.String()
+	}()
+	fn()
+	return ""
 }
 
 func askPending(t *testing.T, app *App, command string) string {

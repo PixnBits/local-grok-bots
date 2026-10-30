@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
 	"github.com/PixnBits/local-grok-bots/internal/permbroker"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
@@ -25,6 +27,7 @@ func (b brokerAudit) Record(row permbroker.AuditRow) {
 		"session_id":    row.SessionID,
 		"run_id":        row.RunID,
 		"decision":      row.Decision,
+		"scope":         row.Scope,
 		"actor":         row.Actor,
 		"tool":          row.Tool,
 		"level":         string(row.Level),
@@ -96,37 +99,99 @@ func (a *App) closeBrokerBot(id string) {
 	}
 }
 
-// prepareBrokerHook arms the broker for this Claude turn, or returns ""
-// so the launch keeps disableAllHooks. A bad hook binary does not fail
-// the turn. It stays locked down.
-func (a *App) prepareBrokerHook(bot store.Bot, ws, home string) string {
+// prepareBrokerHook arms the broker for this Claude turn.
+// An empty command means the broker is off for this bot, and the launch
+// keeps disableAllHooks. When the broker is on and the hook binary cannot
+// be used, the socket cannot be created, or the hook path is unknown, the
+// error refuses the turn before the CLI starts.
+func (a *App) prepareBrokerHook(bot store.Bot, ws, home string) (string, error) {
 	a.setBrokerOn(bot.ID, false)
 	if a == nil || a.broker == nil || !a.effPol(bot.ID).BrokerHook(bot.ID) {
-		return ""
+		return "", nil
 	}
-	bin := strings.TrimSpace(a.effPol(bot.ID).HookPath)
-	if bin == "" {
-		exe, err := os.Executable()
-		if err != nil {
-			a.log(bot.ID, "permbroker", map[string]any{"error": "hook binary unknown"})
-			return ""
-		}
-		bin = filepath.Join(filepath.Dir(exe), "lgb-permhook")
+	bin, err := brokerHookBinary(a.effPol(bot.ID))
+	if err != nil {
+		return "", a.refuseBrokerHook(bot.ID, err)
 	}
 	if err := permbroker.CheckHookBinary(bin, []string{ws, home, a.ws}); err != nil {
-		a.log(bot.ID, "permbroker", map[string]any{"error": err.Error()})
-		return ""
+		return "", a.refuseBrokerHook(bot.ID, err)
 	}
 	sock, err := a.brokerSocket(bot.ID)
 	if err != nil {
-		a.log(bot.ID, "permbroker", map[string]any{"error": err.Error()})
-		return ""
+		return "", a.refuseBrokerHook(bot.ID, err)
 	}
 	a.setBrokerOn(bot.ID, true)
 	if a.broker != nil {
 		a.broker.SetBotContext(bot.ID, a.ws, a.effPol(bot.ID).EffectiveGitHubRepos(bot.GitHubAllow))
 	}
-	return permbroker.HookCommand(bin, sock)
+	return permbroker.HookCommand(bin, sock), nil
+}
+
+// brokerHookBinary is the configured hook, or lgb-permhook next to this
+// daemon when policy leaves the path empty.
+func brokerHookBinary(pol policy.Policy) (string, error) {
+	bin := strings.TrimSpace(pol.HookPath)
+	if bin != "" {
+		return bin, nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return "", errors.New("hook binary unknown")
+	}
+	return filepath.Join(filepath.Dir(exe), "lgb-permhook"), nil
+}
+
+// brokerHookWarning is a policy warning when broker is hook and the
+// configured or derived binary fails CheckHookBinary. An empty result
+// means there is nothing to print.
+func brokerHookWarning(pol policy.Policy, roots []string) string {
+	if pol.Broker != "hook" {
+		return ""
+	}
+	bin, err := brokerHookBinary(pol)
+	if err != nil {
+		return brokerHookWarnText(err)
+	}
+	if err := permbroker.CheckHookBinary(bin, roots); err != nil {
+		return brokerHookWarnText(err)
+	}
+	return ""
+}
+
+func brokerHookWarnText(err error) string {
+	return "permission broker hook cannot be used (" + brokerHookReason(err) + ")"
+}
+
+func brokerHookReason(err error) string {
+	if err == nil {
+		return "unknown"
+	}
+	reason := clip(oneLine(err.Error()), 300)
+	if reason == "" {
+		return "unknown"
+	}
+	return reason
+}
+
+func cleanRoots(paths ...string) []string {
+	var out []string
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func (a *App) refuseBrokerHook(botID string, err error) error {
+	reason := brokerHookReason(err)
+	a.log(botID, "permbroker", map[string]any{"error": reason})
+	return fmt.Errorf("permission broker is enabled but its hook cannot be used (%s), so the turn was refused", reason)
 }
 
 func (a *App) brokerSocket(botID string) (string, error) {
