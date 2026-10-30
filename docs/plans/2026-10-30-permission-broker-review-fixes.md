@@ -21,4 +21,4 @@ Socket uid-only auth changes, exact-string cwd match, path text in errors, and p
 
 ## Tests
 
-Do not weaken a `TestGolden_*` test. `TestGolden_HookSIGKILLed` and `TestGolden_HookOverCLITimeout` use a Read so they fail if `onFailure` is removed. A Bash-only case still passes without that field. `TestLiveClaudeHookFailureBlocksRead` skips unless `LGB_LIVE_CLAUDE_BIN` is an absolute path. Hook fixtures cannot live under a group-writable directory such as `/tmp`. See `~/.grok/lessons/perm-broker/review-fixes.md`.
+Do not weaken a `TestGolden_*` test. `TestGolden_HookSIGKILLed` and `TestGolden_HookOverCLITimeout` use a Read so they fail if `onFailure` is removed. A Bash-only case still passes without that field. `TestLiveClaudeHookFailureBlocksRead` skips unless `LGB_LIVE_CLAUDE_BIN` is an absolute path. Hook fixtures cannot live under a group-writable directory such as `/tmp`.
