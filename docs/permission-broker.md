@@ -101,8 +101,7 @@ directory. Symlinks are resolved on the longest prefix that exists. `~`
 and `$HOME` expand to the bot home and the user home. Other variables
 expand from the bot's managed environment. A token whose base name is the
 hook file, `permbroker`, or a settings file name is critical, and so is a
-glob that can match one of those names. Command substitution is not run;
-that text stays lexical. Writes under `.git/info/`, `.gitmodules`, and
+glob that can match one of those names. Writes under `.git/info/`, `.gitmodules`, and
 `~/.config/git/` (the bot home and the user home) ask at high or above.
 
 The launch refuses bypass flags, `acceptEdits`, `dontAsk`,
@@ -133,7 +132,7 @@ socket is mode 0600. The peer's uid must be the daemon's uid. On Linux
 the peer must also be the pinned hook binary: the device and inode of
 `/proc/<pid>/exe` match the pinned file or a daemon-owned copy, and the
 process is the CLI the daemon launched for that bot or a descendant of
-it (parent walk, at most 64 steps). Other systems keep the uid check. A
+it (parent walk, at most 64 steps). A
 platform that cannot name the peer still denies. Any other peer is
 denied with `permission broker unavailable`, audited, and does not use a
 token or open a pending item. The socket

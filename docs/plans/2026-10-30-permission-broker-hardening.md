@@ -6,10 +6,10 @@ Each bot's workspace and git baseline are its own. A path in another bot's tree 
 
 ## In this run
 
-- Inside-workspace checks and the git baseline use `<workspace>/bots/<id>`. Risky git config (`core.hooksPath`, `core.fsmonitor`, `filter.*`, `include` / `includeIf`, `core.sshCommand`, `core.pager`, `core.editor`, `diff.external`, `credential.helper`) makes every Claude git command a hard ask. `run_shell` keeps the jail git wrapper. Writes under `.git/info/`, `.gitmodules`, and `~/.config/git/` ask. `ClassifierMayAllow` is false without that bot's workspace and baseline.
-- Argv tokens, flag values, and redirect targets are resolved (leading `cd`, symlinks, `~`, `$HOME`, globs) before the critical-path check. Command substitution stays lexical. The Claude deny list remains a second layer.
+- Inside-workspace checks and the git baseline use `<workspace>/bots/<id>`. Risky git config (`core.hooksPath`, `core.fsmonitor`, `filter.*`, `include` / `includeIf`, `core.sshCommand`, `core.pager`, `core.editor`, `diff.external`, `credential.helper`) makes every git command a hard ask, for Claude and `run_shell`. Writes under `.git/info/`, `.gitmodules`, and `~/.config/git/` ask. `ClassifierMayAllow` is false without that bot's workspace and baseline.
+- Argv tokens, flag values, and redirect targets are resolved (leading `cd`, symlinks, `~`, `$HOME`, globs) before the critical-path check. The Claude deny list remains a second layer.
 - Once-tokens expire at `[cli.permission] approval_ttl` (default 15m, bounds 1m..24h). Task grants end with the task and also at the shorter of 4 hours and that TTL. Pending items do not expire. Once-token cwd is the cleaned path with symlinks resolved.
-- On Linux the socket peer must be the pinned hook binary and a descendant of the CLI the daemon launched for that bot. Other systems keep the uid check. A platform that cannot name the peer still denies.
+- On Linux the socket peer must be the pinned hook binary and a descendant of the CLI the daemon launched for that bot. A platform that cannot name the peer still denies.
 - Startup copies profile permission rules into the broker file. Exact text becomes an exact rule, a fitting glob becomes a pattern, and anything else stays a legacy record. The source is not deleted. A second start adds nothing.
 
 ## Out of this run

@@ -33,10 +33,8 @@ resolve against the same bot directory `run_shell` binds at `/work`. A
 path into another bot, the shared workspace root, `..`, or a symlink out
 of that directory is refused.
 
-A hook path that lives under the read-only `/usr`, `/bin`, or `/lib` bind
-stays readable inside the jail. Hiding that one path would remove part of
-the library tree. That is deferred. A hook under `DATA_DIR` is not mounted.
-Claude's deny list names the hook path as well.
+A hook under `DATA_DIR` is not mounted. Claude's deny list names the hook
+path as well.
 
 ## Claude launch
 
@@ -67,6 +65,3 @@ because a missing deny path refuses the launch.
 - The Claude deny list includes the per-launch hook copy directory.
 - An empty isolation `PATH` is filled once and the startup warning names it.
 
-## Deferred
-
-- A hook installed inside the read-only system library bind is still visible to the shell jail.
