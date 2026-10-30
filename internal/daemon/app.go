@@ -73,10 +73,15 @@ type App struct {
 	// broker is the fail-closed permission broker. Nil only when Open failed
 	// before the process started. brokerOn is true for a bot whose Claude
 	// launch is armed with the hook.
-	broker   *permbroker.Engine
-	brokerMu sync.Mutex
-	brokerLn map[string]*permbroker.Listener
-	brokerOn map[string]bool
+	broker *permbroker.Engine
+	// gated is the permission mux. Auth is attached to each handler
+	// because ServeMux sets Pattern only after the handler is chosen.
+	gated         *http.ServeMux
+	adminPatterns []string
+	permPatterns  []string
+	brokerMu      sync.Mutex
+	brokerLn      map[string]*permbroker.Listener
+	brokerOn      map[string]bool
 	// hookPin is the hook binary recorded at the first pin or an admin repin.
 	// hookBin is the path the current armed launch checked.
 	// hookRepinRequired stays set until an admin repin.
@@ -305,6 +310,21 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		_ = aud.Close()
 		cancel()
 		return nil, err
+	}
+	if pol.ClassifierEnabled {
+		timeout := pol.ClassifierTimeout
+		if timeout <= 0 {
+			timeout = 4 * time.Second
+		}
+		clf, cerr := permbroker.NewLocalClassifier(pol.ClassifierEndpoint, pol.ClassifierModel, timeout)
+		if cerr != nil {
+			_ = br.Close()
+			st.Close()
+			_ = aud.Close()
+			cancel()
+			return nil, cerr
+		}
+		br.SetClassifier(clf)
 	}
 	a := &App{
 		cfg:        cfg,

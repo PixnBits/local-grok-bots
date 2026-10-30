@@ -29,26 +29,35 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/cancel", a.handleCancel)
 	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/continue", a.handleContinue)
 	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/retry", a.handleRetry)
-	mux.HandleFunc("POST /api/bots/{id}/runs/{run_id}/permissions/{req_id}", a.handlePermissionDecision)
-	mux.HandleFunc("GET /api/bots/{id}/permissions", a.handlePendingPermissions)
-	mux.HandleFunc("GET /api/permissions", a.handleAllPendingPermissions)
-	mux.HandleFunc("GET /api/bots/{id}/permission-rules", a.handleListPermRules)
-	mux.HandleFunc("POST /api/bots/{id}/permission-rules", a.handleCreatePermRule)
-	mux.HandleFunc("DELETE /api/bots/{id}/permission-rules/{rule_id}", a.handleDeletePermRule)
-	mux.HandleFunc("GET /api/bots/{id}/permission-suggestions", a.handleListPermSuggestions)
-	mux.HandleFunc("POST /api/bots/{id}/permission-suggestions/analyze", a.handleAnalyzePerms)
-	mux.HandleFunc("POST /api/bots/{id}/permission-suggestions/{sug_id}/accept", a.handleAcceptSuggestion)
-	mux.HandleFunc("POST /api/bots/{id}/permission-suggestions/{sug_id}/dismiss", a.handleDismissSuggestion)
 	mux.HandleFunc("POST /api/mcp/permission", a.handleMCPPermission)
 	mux.HandleFunc("POST /api/mcp/permission/{token}", a.handleMCPPermission)
-	mux.HandleFunc("GET /api/permbroker/pending", a.handleBrokerPending)
-	mux.HandleFunc("POST /api/permbroker/pending/deny-all", a.handleBrokerDenyAll)
-	mux.HandleFunc("POST /api/permbroker/pending/{id}", a.handleBrokerDecide)
-	mux.HandleFunc("POST /api/permbroker/hook/repin", a.handleBrokerRepin)
-	mux.HandleFunc("GET /api/permbroker/rules", a.handleBrokerRules)
-	mux.HandleFunc("DELETE /api/permbroker/rules/{id}", a.handleBrokerRevokeRule)
-	mux.HandleFunc("POST /api/permbroker/rules/{id}/confirm", a.handleBrokerConfirmRule)
-	mux.HandleFunc("POST /api/permbroker/bots/{id}/git-baseline", a.handleBrokerGitBaseline)
+	a.gated = http.NewServeMux()
+	a.adminPatterns = nil
+	a.permPatterns = nil
+	a.permRoute("POST /api/bots/{id}/runs/{run_id}/permissions/{req_id}", a.handlePermissionDecision)
+	a.permRoute("GET /api/bots/{id}/permissions", a.handlePendingPermissions)
+	a.permRoute("GET /api/permissions", a.handleAllPendingPermissions)
+	a.permRoute("GET /api/bots/{id}/permission-rules", a.handleListPermRules)
+	a.permRoute("POST /api/bots/{id}/permission-rules", a.handleCreatePermRule)
+	a.permRoute("DELETE /api/bots/{id}/permission-rules/{rule_id}", a.handleDeletePermRule)
+	a.permRoute("GET /api/bots/{id}/permission-suggestions", a.handleListPermSuggestions)
+	a.permRoute("POST /api/bots/{id}/permission-suggestions/analyze", a.handleAnalyzePerms)
+	a.permRoute("POST /api/bots/{id}/permission-suggestions/{sug_id}/accept", a.handleAcceptSuggestion)
+	a.permRoute("POST /api/bots/{id}/permission-suggestions/{sug_id}/dismiss", a.handleDismissSuggestion)
+	a.adminRoute("GET /api/permbroker/pending", a.handleBrokerPending)
+	a.adminRoute("POST /api/permbroker/pending/deny-all", a.handleBrokerDenyAll)
+	a.adminRoute("POST /api/permbroker/pending/{id}", a.handleBrokerDecide)
+	a.adminRoute("POST /api/permbroker/hook/repin", a.handleBrokerRepin)
+	a.adminRoute("GET /api/permbroker/rules", a.handleBrokerRules)
+	a.adminRoute("POST /api/permbroker/rules", a.handleBrokerCreateRule)
+	a.adminRoute("DELETE /api/permbroker/rules/{id}", a.handleBrokerRevokeRule)
+	a.adminRoute("POST /api/permbroker/rules/{id}/confirm", a.handleBrokerConfirmRule)
+	a.adminRoute("POST /api/permbroker/bots/{id}/git-baseline", a.handleBrokerGitBaseline)
+	a.adminRoute("POST /api/permbroker/patterns/validate", a.handleBrokerValidatePattern)
+	a.adminRoute("GET /api/permbroker/patterns/wrappers", a.handleBrokerPatternWrappers)
+	a.adminRoute("POST /api/permbroker/patterns/preview", a.handleBrokerPreview)
+	a.adminRoute("GET /api/permbroker/risk-tables", a.handleBrokerRiskTables)
+	a.adminRoute("GET /api/permbroker/recent", a.handleBrokerRecent)
 	mux.HandleFunc("GET /api/bots/{id}/memory", a.handleListMemory)
 	mux.HandleFunc("POST /api/bots/{id}/memory", a.handlePutMemory)
 	mux.HandleFunc("DELETE /api/bots/{id}/memory/{key}", a.handleDeleteMemory)
@@ -65,6 +74,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /login", a.handleLogin)
 	mux.HandleFunc("GET /", a.handleIndex)
 	mux.HandleFunc("GET /index.html", a.handleIndex)
+	// Approval rules. The client reads ?bot= from the query.
+	mux.HandleFunc("GET /rules", a.handleIndex)
 	// A bot's page. The client reads the id from the path.
 	mux.HandleFunc("GET /bots/{id}", a.handleIndex)
 	return a.withAuth(mux)
@@ -76,25 +87,12 @@ func (a *App) withAuth(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 			return
 		}
-		// Broker admin routes fail closed. With no admin token they are
-		// refused. A live run token cannot pass them. Other routes stay
-		// open when no token is configured.
-		if brokerAdminPath(r) {
-			if !a.tokensConfigured() {
-				writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
-				return
-			}
-			if tok, ok := bearerToken(r); ok && a.liveRunCredential(tok) {
-				writeJSON(w, http.StatusForbidden, map[string]string{"error": "run token cannot decide permissions"})
-				return
-			}
-			if !a.credentialAccepted(r) {
-				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-				return
-			}
-		} else if permissionDecisionPath(r) || pendingPermissionsPath(r) || durablePermissionPath(r) {
-			if tok, ok := bearerToken(r); ok && a.liveRunCredential(tok) {
-				writeJSON(w, http.StatusForbidden, map[string]string{"error": "run token cannot decide permissions"})
+		// Permission routes carry their own auth on the matched handler.
+		// Pattern is set only after routing, so the decision is not made
+		// by decoding the URL path here.
+		if a.gated != nil {
+			if _, pat := a.gated.Handler(r); pat != "" {
+				a.gated.ServeHTTP(w, r)
 				return
 			}
 		}
@@ -102,7 +100,7 @@ func (a *App) withAuth(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/index.html" || strings.HasPrefix(r.URL.Path, "/bots/")) {
+		if r.Method == http.MethodGet && (r.URL.Path == "/" || r.URL.Path == "/index.html" || r.URL.Path == "/rules" || strings.HasPrefix(r.URL.Path, "/bots/")) {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-store")
 			w.WriteHeader(http.StatusUnauthorized)
@@ -146,35 +144,36 @@ func mcpPermissionOpen(path string) bool {
 // authCookie carries the admin token for a browser that opened /login.
 const authCookie = "lgb_auth"
 
-func permissionDecisionPath(r *http.Request) bool {
-	if r.Method != http.MethodPost {
-		return false
-	}
-	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	return len(parts) == 7 && parts[0] == "api" && parts[1] == "bots" && parts[3] == "runs" && parts[5] == "permissions" && parts[2] != "" && parts[4] != "" && parts[6] != ""
+// adminRoute registers a broker route whose auth is the handler itself.
+func (a *App) adminRoute(pattern string, h http.HandlerFunc) {
+	a.adminPatterns = append(a.adminPatterns, pattern)
+	a.gated.HandleFunc(pattern, a.guardPermission(h))
 }
 
-// pendingPermissionsPath is a GET of open requests. A run token must not
-// read the cards it would be asking about.
-func pendingPermissionsPath(r *http.Request) bool {
-	if r.Method != http.MethodGet {
-		return false
-	}
-	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) == 2 && parts[0] == "api" && parts[1] == "permissions" {
-		return true
-	}
-	return len(parts) == 4 && parts[0] == "api" && parts[1] == "bots" && parts[2] != "" && parts[3] == "permissions"
+// permRoute registers a non-broker permission route with the same auth.
+func (a *App) permRoute(pattern string, h http.HandlerFunc) {
+	a.permPatterns = append(a.permPatterns, pattern)
+	a.gated.HandleFunc(pattern, a.guardPermission(h))
 }
 
-// durablePermissionPath is the user auto-grant API. A run token must not
-// read or write the rules it would be asking about.
-func durablePermissionPath(r *http.Request) bool {
-	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) < 4 || parts[0] != "api" || parts[1] != "bots" || parts[2] == "" {
-		return false
+// guardPermission fails closed. No admin token, a live run token, and a
+// missing credential are refused before the route handler runs.
+func (a *App) guardPermission(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !a.tokensConfigured() {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
+			return
+		}
+		if tok, ok := bearerToken(r); ok && a.liveRunCredential(tok) {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "run token cannot decide permissions"})
+			return
+		}
+		if !a.credentialAccepted(r) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		h(w, r)
 	}
-	return parts[3] == "permission-rules" || parts[3] == "permission-suggestions"
 }
 
 func bearerToken(r *http.Request) (string, bool) {
@@ -635,7 +634,7 @@ func (a *App) handlePostMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.log(id, "user_message", map[string]any{"message_id": msg.ID})
-	a.noteUserMessage(id, msg.ID)
+	a.noteUserMessage(id, msg.ID, content)
 	a.touchActivity(id)
 	a.dropResume(id)
 	runID := a.kick(id)

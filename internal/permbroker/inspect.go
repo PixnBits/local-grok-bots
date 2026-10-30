@@ -115,12 +115,22 @@ func (e *Engine) raiseToCurrent(req Request, in inspected) inspected {
 }
 
 func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
-	in := inspected{}
+	in := inspected{Literal: true, AdvisorySource: "table"}
 	ws, repos := snap.ws, snap.repos
 	if isShellTool(req.ToolName) {
 		raw, _ := commandOf(req.ToolInput)
 		in.Raw = raw
 		parsed := ParseCommand(raw)
+		if parsed.Reason == "not a literal" {
+			if sp, ops, ok := surfaceParse(raw); ok {
+				parsed = sp
+				in.Operators = ops
+				in.Literal = false
+			}
+		}
+		if in.Operators == nil {
+			in.Operators = commandOperators(raw)
+		}
 		in.Compound = parsed.Compound
 		in.Argv = append([]string(nil), parsed.Argv...)
 		cwd := req.Cwd
@@ -222,16 +232,30 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 	if classifier == nil {
 		classifier = NopClassifier{}
 	}
-	raised, why := classifier.Escalate(ctx, ClassInput{
+	classIn := ClassInput{
 		Tool: req.ToolName, Argv: in.Argv, Raw: in.Raw, Cwd: req.Cwd,
 		Eligible: in.Eligible, Compound: in.Compound, Level: in.Level,
-	})
-	if Rank(raised) > Rank(in.Level) {
-		in.Level = raised
-		if why == "" {
-			why = "escalated"
+	}
+	if rep, ok := classifier.(classReporter); ok {
+		report := rep.Classify(ctx, classIn)
+		in.AdvisoryChecked = report.Checked
+		if report.Advisory != "" {
+			in.Advisory = cleanAdvisory(report.Advisory)
 		}
-		in.ClassNote = why
+		if Rank(report.Level) > Rank(in.Level) {
+			in.Level = report.Level
+			in.AdvisorySource = "local model raised this to " + string(report.Level)
+			in.ClassNote = in.AdvisorySource
+		}
+	} else {
+		raised, why := classifier.Escalate(ctx, classIn)
+		if Rank(raised) > Rank(in.Level) {
+			in.Level = raised
+			if why == "" {
+				why = "escalated"
+			}
+			in.ClassNote = why
+		}
 	}
 	if in.GitRisk != "" {
 		note := "git config " + in.GitRisk
@@ -243,9 +267,8 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 	} else if in.ClassNote == "" {
 		in.ClassNote = "none"
 	}
-	// A classifier cannot allow a call. ClassifierMayAllow is the gate any
-	// future allow has to pass, and it is false without this bot's
-	// workspace and git baseline.
+	// A classifier cannot allow a call. classifierMayAllowCommandLocked is
+	// the gate any later allow from classifier input has to pass.
 	if hitsCriticalWith(req, in, snap.critical, critEnv{homes: snap.homes, env: snap.env}) {
 		in.Level = LevelCritical
 	}
@@ -253,6 +276,7 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 		in.Eligible = false
 		in.HardAsk = true
 	}
+	in.CriticalReason = criticalReason(in.Level, in.Argv, in.Raw)
 	return in
 }
 

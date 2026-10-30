@@ -39,7 +39,6 @@ func TestThreadStatic(t *testing.T) {
 		"Every push asks. Session approval does not apply.",
 		"Every pull request asks. Nothing is sent to GitHub until you allow it.",
 		"Couldn't send your answer. The daemon didn't respond. Try again.",
-		"Stopped after denial.",
 		"Open in Log",
 		"Try again",
 		"Stopped after 8 tool rounds. Continue picks up the same work for 8 more.",

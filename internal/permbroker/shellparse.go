@@ -400,17 +400,31 @@ func baseName(argv0 string) string {
 	return base
 }
 
+// wrapperNames are the interpreters and wrappers ValidatePattern refuses
+// as the first token. find is handled separately: it is a wrapper only
+// with an exec or delete flag.
+var wrapperNames = []string{
+	"sh", "bash", "dash", "zsh", "ksh", "csh", "tcsh", "fish",
+	"env", "xargs", "eval", "exec", "source", ".", "command", "builtin",
+	"sudo", "doas", "nohup", "timeout", "nice", "ionice", "stdbuf", "setsid",
+	"python", "python2", "python3", "perl", "ruby", "node", "nodejs",
+	"awk", "sed", "tee",
+}
+
+// WrapperNames is the interpreter list the pattern validator uses.
+func WrapperNames() []string {
+	return append([]string(nil), wrapperNames...)
+}
+
 func wrapperArgv(argv []string) bool {
 	if len(argv) == 0 {
 		return true
 	}
-	switch baseName(argv[0]) {
-	case "sh", "bash", "dash", "zsh", "ksh", "csh", "tcsh", "fish",
-		"env", "xargs", "eval", "exec", "source", ".", "command", "builtin",
-		"sudo", "doas", "nohup", "timeout", "nice", "ionice", "stdbuf", "setsid",
-		"python", "python2", "python3", "perl", "ruby", "node", "nodejs",
-		"awk", "sed", "tee":
-		return true
+	base := baseName(argv[0])
+	for _, name := range wrapperNames {
+		if base == name {
+			return true
+		}
 	}
 	if baseName(argv[0]) == "find" {
 		for _, a := range argv[1:] {

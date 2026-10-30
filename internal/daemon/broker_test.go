@@ -128,7 +128,7 @@ func TestUserMessageEndsPreviousTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app.noteUserMessage(bot.ID, "m1")
+	app.noteUserMessage(bot.ID, "m1", "")
 	_, err = app.gateShell(context.Background(), bot, "echo hi")
 	if err == nil || !strings.Contains(err.Error(), "pending approval") {
 		t.Fatal(err)
@@ -137,7 +137,7 @@ func TestUserMessageEndsPreviousTask(t *testing.T) {
 	if len(pending) != 1 || pending[0].TaskID != "m1" {
 		t.Fatalf("pending %+v", pending)
 	}
-	app.noteUserMessage(bot.ID, "m2")
+	app.noteUserMessage(bot.ID, "m2", "")
 	if err := app.broker.Decide(pending[0].ID, "approve", permbroker.ScopeOnce); err != permbroker.ErrStale {
 		t.Fatalf("old task err %v", err)
 	}
@@ -582,7 +582,7 @@ func (h brokerHarness) post(t *testing.T) brokerRun {
 	}
 	_, statErr := os.Stat(h.marker)
 	reply := ""
-	for _, m := range thread(t, h.srv.URL, h.bot.ID) {
+	for _, m := range thread(t, h.srv.URL, h.bot.ID, "") {
 		if m.Role == "bot" {
 			reply = m.Content
 		}

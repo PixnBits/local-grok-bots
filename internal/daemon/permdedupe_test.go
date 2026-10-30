@@ -143,12 +143,12 @@ func runMulti(t *testing.T, c multiCase) (string, []store.ToolRecord) {
 			cmd, _ := p.Arguments["command"].(string)
 			decision := c.answers[cmd]
 			url := f.url + "/api/bots/" + f.bot.ID + "/runs/" + f.runID + "/permissions/" + p.ID
-			res, b := do(t, "POST", url, map[string]any{"decision": decision}, "")
+			res, b := do(t, "POST", url, map[string]any{"decision": decision}, f.token)
 			if res.StatusCode != 200 {
 				t.Fatalf("answer %d %s", res.StatusCode, b)
 			}
 			if c.double {
-				res, b = do(t, "POST", url, map[string]any{"decision": decision}, "")
+				res, b = do(t, "POST", url, map[string]any{"decision": decision}, f.token)
 				if res.StatusCode != http.StatusConflict {
 					t.Fatalf("second answer %d %s", res.StatusCode, b)
 				}
@@ -162,7 +162,7 @@ func runMulti(t *testing.T, c multiCase) (string, []store.ToolRecord) {
 		t.Fatalf("run %s %s", got.LastRunStatus, got.LastRunError)
 	}
 	var reply string
-	for _, m := range thread(t, f.url, f.bot.ID) {
+	for _, m := range thread(t, f.url, f.bot.ID, f.token) {
 		if m.Role == "bot" {
 			reply = m.Content
 		}

@@ -16,11 +16,19 @@ func gitConfigRisk(ws string, homes, env []string) string {
 	seen := map[string]bool{}
 	var files []string
 	if strings.TrimSpace(ws) != "" {
-		files = append(files, gitConfigPath(ws), filepath.Join(ws, ".gitattributes"))
+		files = append(files, gitConfigPath(ws))
 		if dir, ok := gitDir(ws); ok {
 			files = append(files, filepath.Join(dir, "info", "attributes"))
 		}
+		rels, capped := listGitAttributes(ws)
+		if capped {
+			return "cap"
+		}
+		for _, rel := range rels {
+			files = append(files, filepath.Join(ws, rel))
+		}
 	}
+	files = append(files, systemGitconfig)
 	for _, home := range homes {
 		home = strings.TrimSpace(home)
 		if home == "" {

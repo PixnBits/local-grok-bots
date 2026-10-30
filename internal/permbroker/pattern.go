@@ -1,6 +1,7 @@
 package permbroker
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 )
@@ -25,6 +26,40 @@ func (e *PatternError) Error() string {
 		return "pattern"
 	}
 	return "pattern: " + e.Reason
+}
+
+// PatternCode maps a ValidatePattern error onto the rules API code.
+// An error that is not a PatternError is reported as operators.
+func PatternCode(err error) string {
+	var pe *PatternError
+	if !errors.As(err, &pe) || pe == nil {
+		return "operators"
+	}
+	switch pe.Reason {
+	case ReasonTrailingWildcard:
+		return "trailing_wildcard"
+	case ReasonWrapperCommand:
+		return "wrapper"
+	case ReasonFlagPosition:
+		return "flag_star"
+	case ReasonStarInWord:
+		return "star_in_word"
+	case ReasonStarFirst:
+		return "star_first"
+	case ReasonOperator:
+		return "operators"
+	default:
+		return "operators"
+	}
+}
+
+// PatternStatus is the validate endpoint: ok, a stable code, and a message.
+func PatternStatus(pattern string) (ok bool, code, message string) {
+	err := ValidatePattern(pattern)
+	if err == nil {
+		return true, "", ""
+	}
+	return false, PatternCode(err), err.Error()
 }
 
 // patternWitnesses are the argv tokens used to prove a pattern is a

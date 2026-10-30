@@ -197,7 +197,7 @@ func TestRunNoticeText(t *testing.T) {
 		runNoticeText("error", "turn_timeout"):           "Notice: Run timed out (turn_timeout). Partial output and tool results are kept above.",
 		runNoticeText("error", ""):                       "Notice: Run failed.",
 		runNoticeText("error", "boom"):                   "Notice: Run failed: boom",
-		runNoticeText("stopped", "stopped after denial"): "Notice: Stopped after denial.",
+		runNoticeText("stopped", "stopped after denial"): "Notice: Run failed: stopped after denial",
 	}
 	for got, want := range cases {
 		if got != want {

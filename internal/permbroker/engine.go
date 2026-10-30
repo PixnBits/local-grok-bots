@@ -132,6 +132,12 @@ type pendingItem struct {
 	Compound   bool
 	HardAsk    bool
 	Parts      []Part
+	Operators  []string
+	Advisory   string
+	AdvSource  string
+	AdvChecked bool
+	TaskText   string
+	CritReason string
 	CreatedAt  time.Time
 	Ruleset    int
 	Classifier string
@@ -139,20 +145,45 @@ type pendingItem struct {
 
 // Pending is the redacted view returned to an admin.
 type Pending struct {
-	ID        string    `json:"id"`
-	BotID     string    `json:"bot_id"`
-	SessionID string    `json:"session_id"`
-	RunID     string    `json:"run_id"`
-	TaskID    string    `json:"task_id"`
-	Tool      string    `json:"tool"`
-	Argv      []string  `json:"argv,omitempty"`
-	Command   string    `json:"command,omitempty"`
-	Cwd       string    `json:"cwd"`
-	Level     Level     `json:"level"`
-	InputHash string    `json:"input_hash"`
-	CreatedAt time.Time `json:"created_at"`
-	Ruleset   int       `json:"ruleset"`
-	Compound  bool      `json:"compound,omitempty"`
+	ID         string        `json:"id"`
+	BotID      string        `json:"bot_id"`
+	SessionID  string        `json:"session_id"`
+	RunID      string        `json:"run_id"`
+	TaskID     string        `json:"task_id"`
+	Tool       string        `json:"tool"`
+	Argv       []string      `json:"argv,omitempty"`
+	Command    string        `json:"command,omitempty"`
+	Cwd        string        `json:"cwd"`
+	Level      Level         `json:"level"`
+	InputHash  string        `json:"input_hash"`
+	CreatedAt  time.Time     `json:"created_at"`
+	Ruleset    int           `json:"ruleset"`
+	Compound   bool          `json:"compound,omitempty"`
+	BotName    string        `json:"bot_name"`
+	HardAsk    bool          `json:"hard_ask"`
+	Eligible   bool          `json:"eligible"`
+	Allowed    []string      `json:"allowed_scopes"`
+	Parts      []PendingPart `json:"parts"`
+	Operators  []string      `json:"operators"`
+	Advisory   Advisory      `json:"advisory"`
+	TaskText   string        `json:"task_text"`
+	Suggest    bool          `json:"suggest_always"`
+	CritReason string        `json:"critical_reason"`
+}
+
+// PendingPart is one command inside a pending card.
+type PendingPart struct {
+	Argv    []string `json:"argv"`
+	Raw     string   `json:"raw"`
+	Granted bool     `json:"granted_for_task"`
+	HasRule bool     `json:"has_bot_rule"`
+}
+
+// Advisory is the classifier note shown on a card.
+type Advisory struct {
+	Text    string `json:"text"`
+	Source  string `json:"source"`
+	Checked bool   `json:"checked"`
 }
 
 type token struct {
@@ -171,6 +202,9 @@ type grant struct {
 	Hash      string
 	Cwd       string
 	Expires   time.Time
+	Argv      []string
+	Raw       string
+	TaskText  string
 }
 
 // Engine decides tool calls and stores rules outside the jail.
@@ -214,7 +248,12 @@ type Engine struct {
 	resolver func(string) (string, bool)
 	bots     map[string]botCtx
 	userTask map[string]string
+	userText map[string]string
 	ttl      time.Duration
+	// approvals are human approvals in memory, for the suggest-always hint.
+	approvals []approvalStamp
+	reqRing   map[string][]ringReq
+	outcomes  []OutcomeView
 
 	// hookIDs are the pinned hook and any daemon-owned copy.
 	// launchPID is the CLI process started for a bot.
@@ -295,6 +334,8 @@ func Open(dir string, risks []RiskEntry, auditor Auditor) (*Engine, error) {
 		resolver:        resolvePinned,
 		bots:            map[string]botCtx{},
 		userTask:        map[string]string{},
+		userText:        map[string]string{},
+		reqRing:         map[string][]ringReq{},
 		launchPID:       map[string]int{},
 		stopCh:          make(chan struct{}),
 		flushCh:         make(chan struct{}, 1),
@@ -567,17 +608,50 @@ func (e *Engine) ClassifierMayAllow(bot string) bool {
 }
 
 func (e *Engine) classifierMayAllowLocked(bot string) bool {
-	b, ok := e.bots[bot]
-	if !ok || strings.TrimSpace(b.Workspace) == "" || !b.snapSet || e.baselineCorrupt {
+	if autoAllowGOOS != "linux" {
 		return false
 	}
-	if !bytes.Equal(b.snapBlob, gitBaselineBlob(b.Workspace, homesOf(b))) {
+	b, ok := e.bots[bot]
+	// Workspace and a matching baseline are one condition.
+	if !ok || strings.TrimSpace(b.Workspace) == "" || !b.snapSet || e.baselineCorrupt || !bytes.Equal(b.snapBlob, gitBaselineBlob(b.Workspace, homesOf(b))) {
 		return false
 	}
 	if gitConfigRisk(b.Workspace, homesOf(b), b.Env) != "" {
 		return false
 	}
 	return true
+}
+
+// classifierMayAllowCommandLocked is the guard for any classifier input
+// that would contribute to an allow. The classifier still cannot allow
+// a call. Each condition is separate so a test can drop one of them.
+func (e *Engine) classifierMayAllowCommandLocked(bot string, in inspected) bool {
+	if !in.Literal {
+		return false
+	}
+	if !in.Eligible {
+		return false
+	}
+	if in.Compound {
+		return false
+	}
+	if in.Level == LevelCritical {
+		return false
+	}
+	if in.GitRisk != "" {
+		return false
+	}
+	return e.classifierMayAllowLocked(bot)
+}
+
+// ClassifierMayAllowCommand reports the allow guard for one command and bot.
+func (e *Engine) ClassifierMayAllowCommand(bot string, in inspected) bool {
+	if e == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.classifierMayAllowCommandLocked(bot, in)
 }
 
 // RegisterLaunch records the CLI process started for bot.
@@ -668,13 +742,28 @@ func (e *Engine) UserTask(bot string) string {
 // NoteUserMessage records a user message. A new id ends grants and
 // pending items for the previous task of this bot, in every session.
 func (e *Engine) NoteUserMessage(bot, task string) {
+	e.NoteUserText(bot, task, "")
+}
+
+// NoteUserText records the user message id and a redacted copy of the
+// text that started the task. The copy is what a pending card shows.
+func (e *Engine) NoteUserText(bot, task, text string) {
 	if e == nil || bot == "" || task == "" {
 		return
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	prev := e.userTask[bot]
+	if e.userTask == nil {
+		e.userTask = map[string]string{}
+	}
 	e.userTask[bot] = task
+	if e.userText == nil {
+		e.userText = map[string]string{}
+	}
+	if strings.TrimSpace(text) != "" {
+		e.userText[bot] = clipText(Redact(text), 200)
+	}
 	if cur, ok := e.active[bot]; ok && cur.Task != task {
 		cur.Task = task
 		e.active[bot] = cur
@@ -830,6 +919,10 @@ func (e *Engine) SaveRule(rule Rule) (Rule, error) {
 	if !scopeAllowed(lvl, true, false, false, rule.Scope) {
 		return Rule{}, ErrScope
 	}
+	return e.commitRule(rule, lvl)
+}
+
+func (e *Engine) commitRule(rule Rule, level Level) (Rule, error) {
 	rule.ID = newID("r_")
 	rule.CreatedAt = e.now()
 	rule.Uses = 0
@@ -843,7 +936,7 @@ func (e *Engine) SaveRule(rule Rule) (Rule, error) {
 	e.rules = next
 	e.dirty = false
 	e.invalidateLocked()
-	e.auditRule(rule, lvl)
+	e.auditRule(rule, level)
 	return rule, nil
 }
 
@@ -863,6 +956,7 @@ type RuleView struct {
 	CreatedAt    time.Time `json:"created_at"`
 	LastUsedAt   time.Time `json:"last_used_at,omitempty"`
 	Uses         int       `json:"uses"`
+	SourceLine   string    `json:"source_line,omitempty"`
 }
 
 // ListRules returns bot and global rules. The hook socket does not call this.
@@ -896,6 +990,11 @@ func ruleView(rule Rule) RuleView {
 	}
 	if rule.Pattern != "" {
 		view.Pattern = Redact(rule.Pattern)
+	}
+	if rule.Text != "" {
+		view.SourceLine = Redact(rule.Text)
+	} else if rule.Source != "" {
+		view.SourceLine = rule.Source
 	}
 	return view
 }
@@ -1190,6 +1289,9 @@ func (e *Engine) Evaluate(ctx context.Context, req Request) Decision {
 			if d, stop := e.cancelled(ctx, req, in); stop {
 				return d
 			}
+			if !autoAllowOK(in) {
+				return e.ask(req, in)
+			}
 			return e.finish(req, in, VerdictAllow, "allowed for this task", "", "policy", "")
 		}
 		if d, stop := e.cancelled(ctx, req, in); stop {
@@ -1215,6 +1317,9 @@ func (e *Engine) Evaluate(ctx context.Context, req Request) Decision {
 		if d, stop := e.cancelled(ctx, req, in); stop {
 			return d
 		}
+		if !autoAllowOK(in) {
+			return e.ask(req, in)
+		}
 		return e.finish(req, in, VerdictAllow, "allowed for this task", "", "policy", "")
 	}
 	if d, stop := e.cancelled(ctx, req, in); stop {
@@ -1234,6 +1339,9 @@ func (e *Engine) cancelled(ctx context.Context, req Request, in inspected) (Deci
 }
 
 func (e *Engine) applyRule(req Request, in inspected, rule *Rule) Decision {
+	if rule.Effect == EffectAllow && !autoAllowOK(in) {
+		return e.ask(req, in)
+	}
 	e.touch(rule)
 	if rule.Effect == EffectAsk {
 		return e.ask(req, in)
@@ -1268,6 +1376,12 @@ func (e *Engine) ask(req Request, in inspected) Decision {
 		Compound:   in.Compound,
 		HardAsk:    in.HardAsk,
 		Parts:      append([]Part(nil), in.Parts...),
+		Operators:  append([]string(nil), in.Operators...),
+		Advisory:   in.Advisory,
+		AdvSource:  in.AdvisorySource,
+		AdvChecked: in.AdvisoryChecked,
+		TaskText:   e.userText[req.BotID],
+		CritReason: in.CriticalReason,
 		CreatedAt:  e.now(),
 		Ruleset:    e.rules.Version,
 		Classifier: in.ClassNote,
@@ -1290,7 +1404,7 @@ func (e *Engine) ListPending() []Pending {
 	defer e.mu.Unlock()
 	out := make([]Pending, 0, len(e.byID))
 	for _, item := range e.byID {
-		out = append(out, pendingView(item))
+		out = append(out, e.pendingView(item))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
@@ -1301,23 +1415,126 @@ func (e *Engine) ListPending() []Pending {
 	return out
 }
 
-func pendingView(item *pendingItem) Pending {
-	return Pending{
-		ID:        item.ID,
-		BotID:     item.BotID,
-		SessionID: item.SessionID,
-		RunID:     item.RunID,
-		TaskID:    item.TaskID,
-		Tool:      item.Tool,
-		Argv:      redactArgv(item.Argv),
-		Command:   Redact(item.Raw),
-		Cwd:       item.Cwd,
-		Level:     item.Level,
-		InputHash: item.InputHash,
-		CreatedAt: item.CreatedAt,
-		Ruleset:   item.Ruleset,
-		Compound:  item.Compound,
+func (e *Engine) pendingView(item *pendingItem) Pending {
+	source := item.AdvSource
+	if source == "" {
+		source = "table"
 	}
+	view := Pending{
+		ID: item.ID, BotID: item.BotID, BotName: item.BotID,
+		SessionID: item.SessionID, RunID: item.RunID, TaskID: item.TaskID,
+		Tool: item.Tool, Argv: redactArgv(item.Argv), Command: Redact(item.Raw),
+		Cwd: item.Cwd, Level: item.Level, InputHash: item.InputHash,
+		CreatedAt: item.CreatedAt, Ruleset: item.Ruleset, Compound: item.Compound,
+		HardAsk: item.HardAsk, Eligible: item.Eligible,
+		Allowed:   allowedScopes(item.Level, item.Eligible, item.Compound, item.HardAsk),
+		Operators: append([]string{}, item.Operators...),
+		Advisory:  Advisory{Text: item.Advisory, Source: source, Checked: item.AdvChecked},
+		TaskText:  item.TaskText, Suggest: e.suggestAlways(item),
+		CritReason: item.CritReason,
+	}
+	if view.Operators == nil {
+		view.Operators = []string{}
+	}
+	if view.Allowed == nil {
+		view.Allowed = []string{}
+	}
+	view.Parts = e.pendingParts(item)
+	return view
+}
+
+func allowedScopes(level Level, eligible, compound, hard bool) []string {
+	var out []string
+	for _, scope := range []string{ScopeOnce, ScopeTask, ScopeBot, ScopeGlobal} {
+		if scopeAllowed(level, eligible, compound, hard, scope) {
+			out = append(out, scope)
+		}
+	}
+	if out == nil {
+		out = []string{}
+	}
+	return out
+}
+
+func (e *Engine) pendingParts(item *pendingItem) []PendingPart {
+	parts := item.Parts
+	if len(parts) == 0 {
+		raw := item.Raw
+		if raw == "" {
+			raw = strings.Join(item.Argv, " ")
+		}
+		parts = []Part{{Argv: item.Argv, Raw: raw, Hash: item.InputHash}}
+	}
+	now := e.now()
+	req := Request{BotID: item.BotID, SessionID: item.SessionID, TaskID: item.TaskID, Cwd: item.Cwd}
+	out := make([]PendingPart, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, PendingPart{
+			Argv: redactArgv(p.Argv), Raw: Redact(p.Raw),
+			Granted: e.grantHas(req, p.Hash, now),
+			HasRule: e.partHasBotRule(item.BotID, p.Argv),
+		})
+	}
+	return out
+}
+
+func (e *Engine) partHasBotRule(bot string, argv []string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	view := inspected{
+		Eligible: true, Literal: true, Argv: argv,
+		Raw: strings.Join(argv, " "), Level: LevelLow,
+	}
+	for i := range e.rules.Rules {
+		rule := &e.rules.Rules[i]
+		if rule.Scope != ScopeBot || rule.BotID != bot {
+			continue
+		}
+		if ruleHit(rule, view, rule.Effect == EffectDeny) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Engine) suggestAlways(item *pendingItem) bool {
+	if item == nil || item.Compound {
+		return false
+	}
+	if item.Level != LevelLow && item.Level != LevelMedium {
+		return false
+	}
+	return e.approvalCount(item.BotID, item.InputHash) >= 2
+}
+
+func (e *Engine) approvalCount(bot, hash string) int {
+	if bot == "" || hash == "" {
+		return 0
+	}
+	cut := e.now().Add(-24 * time.Hour)
+	n := 0
+	for _, s := range e.approvals {
+		if s.Bot == bot && s.Hash == hash && s.At.After(cut) {
+			n++
+		}
+	}
+	return n
+}
+
+func (e *Engine) noteApproval(item *pendingItem) {
+	if item == nil {
+		return
+	}
+	cut := e.now().Add(-24 * time.Hour)
+	next := make([]approvalStamp, 0, len(e.approvals)+1)
+	for _, s := range e.approvals {
+		if s.At.After(cut) {
+			next = append(next, s)
+		}
+	}
+	next = append(next, approvalStamp{Bot: item.BotID, Hash: item.InputHash, At: e.now()})
+	e.approvals = next
 }
 
 // Decide approves or denies one pending item. Approve does not stop a
@@ -1347,6 +1564,7 @@ func (e *Engine) Decide(id, decision, scope string) error {
 		e.denied[collapseKey(item)] = struct{}{}
 		e.bury(item)
 		e.auditHuman(item, "deny", "")
+		e.pushOutcome(itemOutcome(item, "denied", "", 0))
 		return nil
 	case "approve":
 		if !scopeAllowed(item.Level, item.Eligible, item.Compound, item.HardAsk, scope) {
@@ -1360,6 +1578,7 @@ func (e *Engine) Decide(id, decision, scope string) error {
 			})
 		case ScopeTask:
 			exp := e.grantExpiry()
+			text := e.userText[item.BotID]
 			if len(item.Parts) > 0 {
 				for _, p := range item.Parts {
 					if p.Hash == "" {
@@ -1368,6 +1587,7 @@ func (e *Engine) Decide(id, decision, scope string) error {
 					e.grants = append(e.grants, grant{
 						BotID: item.BotID, SessionID: item.SessionID, TaskID: item.TaskID,
 						Hash: p.Hash, Cwd: item.Cwd, Expires: exp,
+						Argv: append([]string(nil), p.Argv...), Raw: p.Raw, TaskText: text,
 					})
 				}
 				break
@@ -1375,6 +1595,7 @@ func (e *Engine) Decide(id, decision, scope string) error {
 			e.grants = append(e.grants, grant{
 				BotID: item.BotID, SessionID: item.SessionID, TaskID: item.TaskID,
 				Hash: item.InputHash, Cwd: item.Cwd, Expires: exp,
+				Argv: append([]string(nil), item.Argv...), Raw: item.Raw, TaskText: text,
 			})
 		case ScopeBot, ScopeGlobal:
 			if err := e.addRuleLocked(item, scope); err != nil {
@@ -1385,6 +1606,8 @@ func (e *Engine) Decide(id, decision, scope string) error {
 		}
 		e.bury(item)
 		e.auditHuman(item, "approve", scope)
+		e.noteApproval(item)
+		e.pushOutcome(itemOutcome(item, "approved", "", 0))
 		return nil
 	default:
 		return ErrBadDecision
@@ -1424,6 +1647,7 @@ func (e *Engine) DenyAll(ids []string) error {
 		e.denied[collapseKey(item)] = struct{}{}
 		e.bury(item)
 		e.auditHuman(item, "deny", "")
+		e.pushOutcome(itemOutcome(item, "denied", "", 0))
 	}
 	return nil
 }
@@ -1499,7 +1723,13 @@ func (e *Engine) takeToken(ctx context.Context, req Request, in inspected) (toke
 	}
 	now := e.now()
 	cwd := canonCwd(req.Cwd)
+	expired := false
 	for i, t := range e.tokens {
+		match := t.Tool != "" && t.Tool == want && t.BotID == req.BotID && t.SessionID == req.SessionID && t.Hash == in.Hash && canonCwd(t.Cwd) == cwd
+		if match && !tokenLive(t, now) {
+			expired = true
+			continue
+		}
 		if !tokenLive(t, now) {
 			continue
 		}
@@ -1513,6 +1743,9 @@ func (e *Engine) takeToken(ctx context.Context, req Request, in inspected) (toke
 			e.tokens = append(e.tokens[:i], e.tokens[i+1:]...)
 			return t, true
 		}
+	}
+	if expired {
+		e.pushOutcome(outcomeFrom(req, in, "expired", "", 0))
 	}
 	return token{}, false
 }
@@ -1653,16 +1886,22 @@ func scopeMatches(rule *Rule, bot string) bool {
 }
 
 type inspected struct {
-	Eligible  bool
-	Compound  bool
-	HardAsk   bool
-	Argv      []string
-	Raw       string
-	Hash      string
-	Level     Level
-	Parts     []Part
-	ClassNote string
-	GitRisk   string
+	Eligible        bool
+	Compound        bool
+	HardAsk         bool
+	Literal         bool
+	Argv            []string
+	Raw             string
+	Hash            string
+	Level           Level
+	Parts           []Part
+	Operators       []string
+	ClassNote       string
+	GitRisk         string
+	Advisory        string
+	AdvisorySource  string
+	AdvisoryChecked bool
+	CriticalReason  string
 }
 
 func commandUsesGit(p Parse) bool {
@@ -1751,6 +1990,8 @@ func (e *Engine) finish(req Request, in inspected, verdict, reason, pendingID, a
 	if reason == "" {
 		reason = "denied"
 	}
+	e.noteRequest(req, in)
+	e.noteOutcome(req, in, verdict, reason, pendingID, ruleID)
 	e.auditDecision(req, in, verdict, reason, pendingID, actor, ruleID, "")
 	return Decision{
 		Verdict: verdict, Reason: reason, PendingID: pendingID,

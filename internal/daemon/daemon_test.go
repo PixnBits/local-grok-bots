@@ -92,6 +92,15 @@ func chmodDataDir(dir string) error {
 	return os.Chmod(dir, 0o700)
 }
 
+// testAdminToken is an admin credential for tests that hit permission routes.
+// Those routes fail closed until an admin token is configured.
+const testAdminToken = "lgbr_testadmintokenval"
+
+func armAdmin(app *App) string {
+	app.cfg.AuthToken = testAdminToken
+	return testAdminToken
+}
+
 func newApp(t *testing.T, dir string, m model.Client) *App {
 	t.Helper()
 	if dir == "" {
@@ -864,6 +873,22 @@ func indexOf(names []string, want string) int {
 		}
 	}
 	return -1
+}
+
+func TestRulesPageRoute(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "ok"}, nil
+	}})
+	srv := serve(t, app)
+	res, b := do(t, "GET", srv.URL+"/rules?bot=ada", nil, "")
+	if res.StatusCode != 200 || !strings.Contains(res.Header.Get("Content-Type"), "text/html") || !bytes.Contains(b, []byte("<title>")) {
+		t.Fatalf("GET /rules = %d %s", res.StatusCode, res.Header.Get("Content-Type"))
+	}
+	app.cfg.AuthToken = "secret"
+	res, b = do(t, "GET", srv.URL+"/rules", nil, "")
+	if res.StatusCode != 401 || !bytes.Contains(b, []byte("<title>")) {
+		t.Fatalf("unauthenticated GET /rules = %d", res.StatusCode)
+	}
 }
 
 func TestBotPageRoute(t *testing.T) {

@@ -127,6 +127,14 @@ type Policy struct {
 	// default. A task grant also ends at four hours, the next user
 	// message, or the end of the session. Pending items do not use it.
 	ApprovalTTL time.Duration
+	// ClassifierEnabled turns on the local loopback classifier.
+	// The default is off. Endpoint must be a loopback http(s) URL.
+	// The model only sees a redacted argv. It can raise a level.
+	// It cannot lower one and it cannot allow a call.
+	ClassifierEnabled  bool
+	ClassifierEndpoint string
+	ClassifierModel    string
+	ClassifierTimeout  time.Duration
 	// ManagedBypass is true only when managed policy set an always-allow mode.
 	ManagedBypass bool
 	Pins          []Pin
@@ -1184,7 +1192,7 @@ func NormClaudeTransport(v string) (string, error) {
 var errBrokerConfig = errors.New("cli.permission.broker must be off or hook")
 
 func hardBrokerErr(err error) bool {
-	return errors.Is(err, errBrokerConfig) || errors.Is(err, permbroker.ErrLevelLowered) || errors.Is(err, permbroker.ErrBadLevel)
+	return errors.Is(err, errBrokerConfig) || errors.Is(err, permbroker.ErrClassifierEndpoint) || errors.Is(err, permbroker.ErrLevelLowered) || errors.Is(err, permbroker.ErrBadLevel)
 }
 
 // BrokerHook reports that this bot should use the permission broker.
@@ -1252,6 +1260,40 @@ func (p *Policy) applyBroker(perm *cliPermDoc) error {
 		}
 		p.ApprovalTTL = d
 	}
+	if perm.Classifier != nil {
+		if err := p.applyClassifier(perm.Classifier); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *Policy) applyClassifier(doc *classifierDoc) error {
+	enabled := false
+	if doc.Enabled != nil {
+		enabled = *doc.Enabled
+	}
+	endpoint := ""
+	if doc.Endpoint != nil {
+		endpoint = strings.TrimSpace(*doc.Endpoint)
+	}
+	if err := permbroker.CheckClassifierEndpoint(endpoint, enabled); err != nil {
+		return err
+	}
+	if doc.Model != nil {
+		p.ClassifierModel = strings.TrimSpace(*doc.Model)
+	}
+	if doc.Timeout.Set {
+		d, err := time.ParseDuration(strings.TrimSpace(doc.Timeout.Value))
+		if err != nil || d <= 0 {
+			return fmt.Errorf("cli.permission.classifier.timeout must be a positive duration")
+		}
+		p.ClassifierTimeout = d
+	} else if enabled {
+		p.ClassifierTimeout = 4 * time.Second
+	}
+	p.ClassifierEnabled = enabled
+	p.ClassifierEndpoint = endpoint
 	return nil
 }
 
@@ -1422,20 +1464,28 @@ type cliIsoDoc struct {
 }
 
 type cliPermDoc struct {
-	Mode               *string    `toml:"mode" json:"mode"`
-	Allow              *[]string  `toml:"allow" json:"allow"`
-	Deny               *[]string  `toml:"deny" json:"deny"`
-	Ask                *[]string  `toml:"ask" json:"ask"`
-	UIPrompts          *bool      `toml:"ui_prompts" json:"ui_prompts"`
-	PromptTimeout      flexText   `toml:"prompt_timeout" json:"prompt_timeout"`
-	MaxPromptTimeout   flexText   `toml:"max_prompt_timeout" json:"max_prompt_timeout"`
-	AllowSessionGrants *bool      `toml:"allow_session_grants" json:"allow_session_grants"`
-	ClaudeTransport    *string    `toml:"claude_transport" json:"claude_transport"`
-	Broker             *string    `toml:"broker" json:"broker"`
-	BrokerBots         *[]string  `toml:"broker_bots" json:"broker_bots"`
-	HookPath           *string    `toml:"hook_path" json:"hook_path"`
-	Risk               *[]riskDoc `toml:"risk" json:"risk"`
-	ApprovalTTL        flexText   `toml:"approval_ttl" json:"approval_ttl"`
+	Mode               *string        `toml:"mode" json:"mode"`
+	Allow              *[]string      `toml:"allow" json:"allow"`
+	Deny               *[]string      `toml:"deny" json:"deny"`
+	Ask                *[]string      `toml:"ask" json:"ask"`
+	UIPrompts          *bool          `toml:"ui_prompts" json:"ui_prompts"`
+	PromptTimeout      flexText       `toml:"prompt_timeout" json:"prompt_timeout"`
+	MaxPromptTimeout   flexText       `toml:"max_prompt_timeout" json:"max_prompt_timeout"`
+	AllowSessionGrants *bool          `toml:"allow_session_grants" json:"allow_session_grants"`
+	ClaudeTransport    *string        `toml:"claude_transport" json:"claude_transport"`
+	Broker             *string        `toml:"broker" json:"broker"`
+	BrokerBots         *[]string      `toml:"broker_bots" json:"broker_bots"`
+	HookPath           *string        `toml:"hook_path" json:"hook_path"`
+	Risk               *[]riskDoc     `toml:"risk" json:"risk"`
+	ApprovalTTL        flexText       `toml:"approval_ttl" json:"approval_ttl"`
+	Classifier         *classifierDoc `toml:"classifier" json:"classifier"`
+}
+
+type classifierDoc struct {
+	Enabled  *bool    `toml:"enabled" json:"enabled"`
+	Endpoint *string  `toml:"endpoint" json:"endpoint"`
+	Model    *string  `toml:"model" json:"model"`
+	Timeout  flexText `toml:"timeout" json:"timeout"`
 }
 
 type riskDoc struct {

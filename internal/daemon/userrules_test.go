@@ -31,8 +31,9 @@ func TestDurableAllowAutoAllowsReadOnly(t *testing.T) {
 		}
 	}
 	srv := serve(t, app)
+	tok := armAdmin(app)
 	base := srv.URL + "/api/bots/" + bot.ID
-	res, body := do(t, "POST", base+"/permission-suggestions/analyze", map[string]any{}, "")
+	res, body := do(t, "POST", base+"/permission-suggestions/analyze", map[string]any{}, tok)
 	if res.StatusCode != 200 || !strings.Contains(string(body), "Bash(pwd)") || !strings.Contains(string(body), `"risk":"low"`) || strings.Contains(string(body), "gh pr") || strings.Contains(string(body), "git status") {
 		t.Fatalf("analyze %d %s", res.StatusCode, body)
 	}
@@ -43,7 +44,7 @@ func TestDurableAllowAutoAllowsReadOnly(t *testing.T) {
 	if len(listed.Suggestions) != 1 || listed.Suggestions[0].Status != "pending" {
 		t.Fatalf("%+v", listed.Suggestions)
 	}
-	res, body = do(t, "POST", base+"/permission-suggestions/"+listed.Suggestions[0].ID+"/accept", nil, "")
+	res, body = do(t, "POST", base+"/permission-suggestions/"+listed.Suggestions[0].ID+"/accept", nil, tok)
 	if res.StatusCode != 201 || !strings.Contains(string(body), "Bash(pwd)") {
 		t.Fatalf("accept suggestion %d %s", res.StatusCode, body)
 	}
@@ -57,19 +58,19 @@ func TestDurableAllowAutoAllowsReadOnly(t *testing.T) {
 	}
 	res, body = do(t, "POST", base+"/permission-rules", map[string]any{
 		"effect": "allow", "pattern": "Bash(git status*)",
-	}, "")
+	}, tok)
 	if res.StatusCode != 400 {
 		t.Fatalf("git status pattern %d %s", res.StatusCode, body)
 	}
 	res, body = do(t, "POST", base+"/permission-rules", map[string]any{
 		"effect": "allow", "pattern": "Bash(git push *)",
-	}, "")
+	}, tok)
 	if res.StatusCode != 400 {
 		t.Fatalf("push pattern %d %s", res.StatusCode, body)
 	}
 	res, body = do(t, "POST", base+"/permission-rules", map[string]any{
 		"effect": "allow", "pattern": "Bash(rm -rf *)",
-	}, "")
+	}, tok)
 	if res.StatusCode != 400 {
 		t.Fatalf("rm pattern %d %s", res.StatusCode, body)
 	}
@@ -147,24 +148,25 @@ func TestUserRulesDoNotWidenCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := serve(t, app)
+	tok := armAdmin(app)
 	base := srv.URL + "/api/bots/" + bot.ID
 	res, body := do(t, "POST", base+"/permission-rules", map[string]any{
 		"effect": "allow", "pattern": "Bash(pwd)",
-	}, "")
+	}, tok)
 	if res.StatusCode != 201 {
 		t.Fatalf("allow %d %s", res.StatusCode, body)
 	}
 	res, body = do(t, "POST", base+"/permission-rules", map[string]any{
 		"effect": "deny", "pattern": "Bash(*push*)",
-	}, "")
+	}, tok)
 	if res.StatusCode != 201 {
 		t.Fatalf("deny %d %s", res.StatusCode, body)
 	}
-	res, body = do(t, "POST", base+"/thread/messages", map[string]any{"content": "go"}, "")
+	res, body = do(t, "POST", base+"/thread/messages", map[string]any{"content": "go"}, tok)
 	if res.StatusCode != 200 {
 		t.Fatalf("post %d %s", res.StatusCode, body)
 	}
-	waitIdle(t, srv.URL, bot.ID, "")
+	waitIdle(t, srv.URL, bot.ID, tok)
 	got, err := app.st.GetBot(bot.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -225,6 +227,7 @@ func TestPermRuleApplyRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := serve(t, app)
+	tok := armAdmin(app)
 	base := srv.URL + "/api/bots/" + bot.ID
 	dir := filepath.Join(app.cfg.DataDir, "cli", bot.ID)
 
@@ -237,7 +240,7 @@ func TestPermRuleApplyRollsBack(t *testing.T) {
 	}
 	res, body := do(t, "POST", base+"/permission-rules", map[string]any{
 		"effect": "allow", "pattern": "Bash(pwd)",
-	}, "")
+	}, tok)
 	if res.StatusCode != 500 || !strings.Contains(string(body), "injected before files") {
 		t.Fatalf("before_files %d %s", res.StatusCode, body)
 	}
@@ -251,7 +254,7 @@ func TestPermRuleApplyRollsBack(t *testing.T) {
 	}
 	res, body = do(t, "POST", base+"/permission-rules", map[string]any{
 		"effect": "allow", "pattern": "Bash(pwd)",
-	}, "")
+	}, tok)
 	if res.StatusCode != 500 || !strings.Contains(string(body), "injected after files") {
 		t.Fatalf("after_files %d %s", res.StatusCode, body)
 	}
@@ -260,7 +263,7 @@ func TestPermRuleApplyRollsBack(t *testing.T) {
 	permApplyHook = nil
 	res, body = do(t, "POST", base+"/permission-rules", map[string]any{
 		"effect": "allow", "pattern": "Bash(pwd)",
-	}, "")
+	}, tok)
 	if res.StatusCode != 201 {
 		t.Fatalf("accept %d %s", res.StatusCode, body)
 	}
@@ -281,7 +284,7 @@ func TestPermRuleApplyRollsBack(t *testing.T) {
 		}
 		return nil
 	}
-	res, body = do(t, "DELETE", base+"/permission-rules/"+rule.ID, nil, "")
+	res, body = do(t, "DELETE", base+"/permission-rules/"+rule.ID, nil, tok)
 	if res.StatusCode != 500 || !strings.Contains(string(body), "injected revoke") {
 		t.Fatalf("revoke %d %s", res.StatusCode, body)
 	}
@@ -331,12 +334,13 @@ func TestRefusedSuggestionWhitespace(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := serve(t, app)
+	tok := armAdmin(app)
 	base := srv.URL + "/api/bots/" + bot.ID + "/permission-suggestions/" + sug.ID + "/accept"
-	res, body := do(t, "POST", base, map[string]any{"effect": "allow", "pattern": "  Bash( pwd )  "}, "")
+	res, body := do(t, "POST", base, map[string]any{"effect": "allow", "pattern": "  Bash( pwd )  "}, tok)
 	if res.StatusCode != 400 || !strings.Contains(string(body), "classification refused") {
 		t.Fatalf("padded refused %d %s", res.StatusCode, body)
 	}
-	res, body = do(t, "POST", base, map[string]any{"effect": "allow", "pattern": "Bash(ls *)"}, "")
+	res, body = do(t, "POST", base, map[string]any{"effect": "allow", "pattern": "Bash(ls *)"}, tok)
 	if res.StatusCode != 201 {
 		t.Fatalf("edited %d %s", res.StatusCode, body)
 	}

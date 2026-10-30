@@ -330,8 +330,6 @@ func runNoticeText(status, errText string) string {
 			return "Notice: Run timed out."
 		}
 		return "Notice: " + errText
-	case status == "stopped" && errText == "stopped after denial":
-		return "Notice: Stopped after denial."
 	case errText == "interrupted":
 		return "Notice: Run interrupted before it finished."
 	case errText == "turn_timeout" || errText == "timed out":

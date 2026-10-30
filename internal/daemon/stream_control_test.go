@@ -54,7 +54,7 @@ func TestStreamControlAllowAndInterleave(t *testing.T) {
 		t.Fatal("UI did not see a permission_request")
 	}
 	decide := f.url + "/api/bots/" + f.bot.ID + "/runs/" + f.runID + "/permissions/" + reqID
-	res, b := do(t, "POST", decide, map[string]any{"decision": "allow_once"}, "")
+	res, b := do(t, "POST", decide, map[string]any{"decision": "allow_once"}, f.token)
 	if res.StatusCode != 200 {
 		t.Fatalf("allow %d %s", res.StatusCode, b)
 	}
@@ -70,7 +70,7 @@ func TestStreamControlAllowAndInterleave(t *testing.T) {
 		t.Fatalf("decision %#v", saw)
 	}
 	var reply string
-	for _, m := range thread(t, f.url, f.bot.ID) {
+	for _, m := range thread(t, f.url, f.bot.ID, f.token) {
 		if m.Role == "bot" {
 			reply = m.Content
 		}
@@ -185,7 +185,7 @@ func TestStreamControlMalformedDoesNotCrash(t *testing.T) {
 		t.Fatalf("run %s %s", got.LastRunStatus, got.LastRunError)
 	}
 	var reply string
-	for _, m := range thread(t, f.url, f.bot.ID) {
+	for _, m := range thread(t, f.url, f.bot.ID, f.token) {
 		if m.Role == "bot" {
 			reply = m.Content
 		}
@@ -510,6 +510,7 @@ type streamFix struct {
 	stallRelease string
 	lg           *audit.Logger
 	auditPath    string
+	token        string
 }
 
 func newStreamTurn(t *testing.T, mode string, pol policy.Policy, withGate, prompts bool) *streamFix {
@@ -540,6 +541,7 @@ func newStreamTurn(t *testing.T, mode string, pol policy.Policy, withGate, promp
 		t.Setenv("LGB_FAKE_STALL_RELEASE", f.stallRelease)
 	}
 	app := newApp(t, dir, nil)
+	f.token = armAdmin(app)
 	lg, err := audit.Open(f.auditPath)
 	if err != nil {
 		t.Fatal(err)
@@ -563,13 +565,13 @@ func newStreamTurn(t *testing.T, mode string, pol policy.Policy, withGate, promp
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	app.permBase = srv.URL
-	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Ada", "description": "p"}, "")
+	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Ada", "description": "p"}, f.token)
 	if res.StatusCode != 201 && res.StatusCode != 200 {
 		t.Fatalf("create %d %s", res.StatusCode, b)
 	}
 	var bot store.Bot
 	decodeJSON(t, b, &bot)
-	res, b = do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "go"}, "")
+	res, b = do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "go"}, f.token)
 	if res.StatusCode != 200 {
 		t.Fatalf("post %d %s", res.StatusCode, b)
 	}
@@ -583,7 +585,7 @@ func newStreamTurn(t *testing.T, mode string, pol policy.Policy, withGate, promp
 	f.runID = posted.RunID
 	f.lg = lg
 	if prompts {
-		f.events = startSSE(t, srv.URL, bot.ID, posted.RunID)
+		f.events = startSSE(t, srv.URL, bot.ID, posted.RunID, f.token)
 		waitSubscribed(t, app, posted.RunID)
 	}
 	return f
@@ -598,7 +600,7 @@ func (f *streamFix) openGate() {
 
 func (f *streamFix) waitDone() store.Bot {
 	f.t.Helper()
-	waitIdle(f.t, f.url, f.bot.ID, "")
+	waitIdle(f.t, f.url, f.bot.ID, f.token)
 	got, err := f.app.st.GetBot(f.bot.ID)
 	if err != nil {
 		f.t.Fatal(err)

@@ -4,11 +4,23 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	iofs "io/fs"
 	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+)
+
+// systemGitconfig is read when a git command is classified and when a
+// baseline is recorded. It is never written. Tests point it at a temp file.
+var systemGitconfig = "/etc/gitconfig"
+
+// gitAttrMaxFiles and gitAttrMaxDepth bound the worktree attribute walk.
+// Hitting either cap is treated as a git risk.
+var (
+	gitAttrMaxFiles = 64
+	gitAttrMaxDepth = 16
 )
 
 const gitBaselineName = "git-baseline.json"
@@ -43,8 +55,17 @@ func gitBaselineBlob(ws string, homes []string) []byte {
 		infoData, infoOK = readBaselineFile(filepath.Join(dir, "info", "attributes"))
 	}
 	writePiece(&b, "info-attributes", infoData, infoOK)
-	attr, attrOK := readBaselineFile(filepath.Join(ws, ".gitattributes"))
-	writePiece(&b, "gitattributes", attr, attrOK)
+	rels, capped := listGitAttributes(ws)
+	if capped {
+		writePiece(&b, "gitattributes", []byte("capped"), true)
+	} else {
+		for _, rel := range rels {
+			data, ok := readBaselineFile(filepath.Join(ws, rel))
+			writePiece(&b, "gitattributes "+rel, data, ok)
+		}
+	}
+	sys, sysOK := readBaselineFile(systemGitconfig)
+	writePiece(&b, "system-gitconfig", sys, sysOK)
 	hs := append([]string(nil), homes...)
 	sort.Strings(hs)
 	seen := map[string]bool{}
@@ -69,6 +90,64 @@ func gitBaselineBlob(ws string, homes []string) []byte {
 		writePiece(&b, "xdg-attributes", xa, xaOK)
 	}
 	return []byte(b.String())
+}
+
+// listGitAttributes walks the worktree for .gitattributes. It does not
+// enter a .git directory. .git/info/attributes is recorded separately.
+// A walk that hits the file or depth cap returns capped so the caller asks.
+func listGitAttributes(ws string) (rels []string, capped bool) {
+	ws = strings.TrimSpace(ws)
+	if ws == "" {
+		return nil, false
+	}
+	ws = filepath.Clean(ws)
+	st, statErr := os.Stat(ws)
+	if statErr != nil || !st.IsDir() {
+		return nil, false
+	}
+	err := filepath.WalkDir(ws, func(path string, d iofs.DirEntry, err error) error {
+		if err != nil {
+			capped = true
+			return iofs.SkipDir
+		}
+		rel, relErr := filepath.Rel(ws, path)
+		if relErr != nil {
+			capped = true
+			return iofs.SkipAll
+		}
+		depth := 0
+		if rel != "." {
+			depth = strings.Count(rel, string(os.PathSeparator))
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return iofs.SkipDir
+			}
+			if depth > gitAttrMaxDepth {
+				capped = true
+				return iofs.SkipDir
+			}
+			return nil
+		}
+		if d.Name() != ".gitattributes" {
+			return nil
+		}
+		if depth > gitAttrMaxDepth {
+			capped = true
+			return nil
+		}
+		if len(rels) >= gitAttrMaxFiles {
+			capped = true
+			return iofs.SkipAll
+		}
+		rels = append(rels, rel)
+		return nil
+	})
+	if err != nil {
+		capped = true
+	}
+	sort.Strings(rels)
+	return rels, capped
 }
 
 func writePiece(b *strings.Builder, name string, data []byte, ok bool) {
