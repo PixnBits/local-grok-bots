@@ -345,9 +345,8 @@ func runUnshare(ctx context.Context, p *prepared) (string, string, error) {
 	if err := os.WriteFile(cfgPath, b, 0o644); err != nil {
 		return "", "", err
 	}
-	cmd := exec.Command("/usr/bin/unshare",
-		"--user", "--mount", "--net", "--map-root-user", "--propagation", "private",
-		exe, "--sandbox-stage2", jail, cfgPath)
+	argv := append(unshareNamespaceArgs(), exe, "--sandbox-stage2", jail, cfgPath)
+	cmd := exec.Command("/usr/bin/unshare", argv...)
 	return capture(ctx, cmd)
 }
 

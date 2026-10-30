@@ -16,11 +16,24 @@ there is no `/work` mount.
 | `/usr`, `/bin`, `/lib`, `/lib64` when present | ro | The shell and its libraries | Host files under those trees are visible read-only, including a hook that was installed there |
 | `/etc` | empty dir, plus ro `/etc/ld.so.cache`, `/etc/ssl`, `/etc/services` when present | Loader and TLS | The host `/etc` is not mounted |
 | `/tmp` | tmpfs | Scratch | Not the host `/tmp` |
-| `/proc`, `/dev` | proc, dev | The process needs them | Host home and `DATA_DIR` are not mounted here |
+| `/proc`, `/dev` | proc and dev, bubblewrap only | bubblewrap unshares the pid namespace and mounts proc and a dev tmpfs | Host home and `DATA_DIR` are not mounted here. The unshare fallback does not mount either |
 | `/work` | rw | The bot directory | Other bots, `DATA_DIR/permbroker`, the rules file, the audit log, and the token file are not inside this bind |
 | `/lgb` | rw prep dir | Proxy sockets, the real `git` at `/lgb/bin/git`, wrappers | A per-launch prep tree, not `DATA_DIR` |
 | `/usr/bin/git` and `/usr/bin/ssh` | ro wrapper | Narrow git and ssh config | The real binaries stay at `/lgb/bin/…` |
 | Environment | fixed | `HOME=/work`, pinned `PATH`, `GIT_CONFIG_GLOBAL` and `GIT_CONFIG_SYSTEM` at `/dev/null`, `GIT_CONFIG_NOSYSTEM=1` | The user home is not `HOME` |
+
+The unshare fallback does not unshare the pid namespace. Its arguments are
+`--user`, `--mount`, `--net`, `--map-root-user`, and `--propagation private`.
+It bind-mounts `/bin`, `/lib`, `/usr`, and `/lib64` when that directory
+exists, all read-only. It bind-mounts the bot directory read-write at
+`/work`. It bind-mounts only `/dev/null`, not `/dev`. It mounts a tmpfs at
+`/tmp`. It does not mount `/proc`. When `/etc/ld.so.cache` can be read, the
+bytes are copied into the jail as a file; that is not a mount of `/etc`,
+and `/etc/ssl` and `/etc/services` are not mounted. Caller path binds,
+including the `/lgb` prep tree, are applied after that plan. A bind that
+is an open file descriptor is refused instead of mounted. This fallback
+has no `/proc` mount unless it also unshares the pid namespace, which it
+does not.
 
 The git wrapper sets several safe keys and a protocol list. It does not
 cover every risky key on every invocation: a caller can still pass config,

@@ -101,9 +101,15 @@ func (a *App) handleBrokerRevokeRule(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "rule not found"})
 		return
 	}
-	if err := a.broker.RevokeRule(r.PathValue("id")); err != nil {
+	id := r.PathValue("id")
+	if err := a.broker.RevokeRule(id); err != nil {
 		writeBrokerErr(w, err)
 		return
+	}
+	if a.audit != nil && a.audit.Enabled() {
+		a.audit.Write(map[string]any{
+			"event": "permbroker", "action": "rule_revoke", "rule_id": id,
+		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

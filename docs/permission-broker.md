@@ -153,8 +153,10 @@ human approves that item, then the same command may be retried once. A
 second retry, a different argv, a different cwd, or a different session
 does not use that approval. The once token is also bound to the tool
 name, and it expires. The default lifetime is 15 minutes.
-`[cli.permission] approval_ttl` sets it, bounded to 1 minute through 24
-hours. The cwd compared at use is the cleaned path, with symlinks
+`[cli.permission] approval_ttl` sets it. The accepted range is 1 minute
+to 24 hours inclusive. A value outside that range makes the policy fail
+to load. The failure is fail closed: the jail stays on and CLI backends
+are off. The value is not clamped into range. The cwd compared at use is the cleaned path, with symlinks
 resolved when the directory exists. A trailing slash, a `.` or `..`
 component, and a symlink to the same directory match. A different
 directory does not. Claude Bash and `run_shell` share one shell name. A token for a
@@ -357,6 +359,9 @@ mutating admin routes (`Sec-Fetch-Site` and `Origin`).
 - `POST /api/permbroker/bots/{id}/git-baseline` records that bot's git
   baseline again. It does not bump the ruleset. The call is audited
   with the bot id.
+- `GET /api/permbroker/rules` lists saved rules.
+- `DELETE /api/permbroker/rules/{id}` revokes one saved rule, including a
+  read-only legacy row. The call is audited with the action and the id.
 
 The socket accepts only `evaluate`. Approve, deny, create-rule, list, and
 revoke on the socket are denies and do not change state.

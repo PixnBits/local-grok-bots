@@ -36,18 +36,18 @@ func criticalResolved(req Request, in inspected, crit []string, ce critEnv) bool
 		}
 	}
 	for _, p := range toolPaths(req.ToolInput) {
-		if tokenCritical(p, cwd, crit, ce) {
+		if wordCritical(p, cwd, crit, ce) {
 			return true
 		}
 	}
 	for _, a := range in.Argv {
-		if tokenCritical(a, cwd, crit, ce) {
+		if wordCritical(a, cwd, crit, ce) {
 			return true
 		}
 	}
 	for _, p := range in.Parts {
 		for _, a := range p.Argv {
-			if tokenCritical(a, cwd, crit, ce) {
+			if wordCritical(a, cwd, crit, ce) {
 				return true
 			}
 		}
@@ -129,19 +129,21 @@ func callCritical(src string, c *syntax.CallExpr, cwd string, crit []string, ce 
 		return false, cwd
 	}
 	next := cwd
+	raws := make([]string, 0, len(c.Args))
 	args := make([]string, 0, len(c.Args))
 	for _, w := range c.Args {
-		args = append(args, stripShellQuotes(strings.TrimSpace(wordSurface(src, w))))
+		raw := strings.TrimSpace(wordSurface(src, w))
+		raws = append(raws, raw)
+		args = append(args, stripShellQuotes(raw))
 	}
-	if len(args) > 0 && args[0] == "cd" {
-		dest := cwd
-		if len(args) >= 2 {
-			dest = joinCwd(cwd, firstExpand(args[1], ce))
-		}
-		next = dest
+	if commandBase(args) == "cd" {
+		next = cdDestination(args, cwd, ce)
 	}
-	for _, a := range args {
-		if tokenCritical(a, cwd, crit, ce) {
+	if implicitCwd(args) && pathRelationCritical(cwd, crit) {
+		return true, next
+	}
+	for _, raw := range raws {
+		if wordCritical(raw, cwd, crit, ce) {
 			return true, next
 		}
 	}
@@ -157,8 +159,7 @@ func redirCritical(src string, r *syntax.Redirect, cwd string, crit []string, ce
 	default:
 		return false
 	}
-	text := stripShellQuotes(strings.TrimSpace(wordSurface(src, r.Word)))
-	return tokenCritical(text, cwd, crit, ce)
+	return wordCritical(wordSurface(src, r.Word), cwd, crit, ce)
 }
 
 func wordsIn(src string, n syntax.Node, cwd string, crit []string, ce critEnv) bool {
@@ -168,7 +169,7 @@ func wordsIn(src string, n syntax.Node, cwd string, crit []string, ce critEnv) b
 		if !ok {
 			return true
 		}
-		if tokenCritical(stripShellQuotes(strings.TrimSpace(wordSurface(src, w))), cwd, crit, ce) {
+		if wordCritical(wordSurface(src, w), cwd, crit, ce) {
 			hit = true
 		}
 		return true
@@ -178,7 +179,7 @@ func wordsIn(src string, n syntax.Node, cwd string, crit []string, ce critEnv) b
 
 func rawTokensCritical(src, cwd string, crit []string, ce critEnv) bool {
 	for _, tok := range strings.Fields(src) {
-		if tokenCritical(stripShellQuotes(tok), cwd, crit, ce) {
+		if wordCritical(tok, cwd, crit, ce) {
 			return true
 		}
 	}
@@ -413,14 +414,42 @@ func matchGlob(pattern, value string) bool {
 
 func pathIsCritical(tok, cwd string, crit []string) bool {
 	for _, cand := range pathCandidates(tok, cwd) {
-		real := resolveExistingPrefix(cand)
-		for _, c := range crit {
-			if c == "" || c == "/" || c == "." {
-				continue
-			}
-			if cand == c || underRoot(cand, c) || real == c || underRoot(real, c) {
+		if pathRelationCritical(cand, crit) {
+			return true
+		}
+		if real := resolveExistingPrefix(cand); real != "" && real != cand && pathRelationCritical(real, crit) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathRelationCritical is true when cand is inside a critical path, equal
+// to one, or a strict ancestor of one. The root is an ancestor of every
+// absolute critical path. String prefix is not used here.
+func pathRelationCritical(cand string, crit []string) bool {
+	if !filepath.IsAbs(cand) {
+		return false
+	}
+	cand = filepath.Clean(cand)
+	if cand == "" || cand == "." {
+		return false
+	}
+	for _, c := range crit {
+		if c == "" || c == "/" || c == "." {
+			continue
+		}
+		if cand == c || underRoot(cand, c) {
+			return true
+		}
+		if cand == "/" {
+			if filepath.IsAbs(c) {
 				return true
 			}
+			continue
+		}
+		if underRoot(c, cand) {
+			return true
 		}
 	}
 	return false
@@ -428,7 +457,15 @@ func pathIsCritical(tok, cwd string, crit []string) bool {
 
 func pathCandidates(tok, cwd string) []string {
 	tok = filepath.Clean(tok)
-	if tok == "" || tok == "." {
+	if tok == "" {
+		return nil
+	}
+	// "." and "./" are the working directory, including a path that
+	// cleans to the current directory.
+	if tok == "." {
+		if filepath.IsAbs(cwd) {
+			return []string{filepath.Clean(cwd)}
+		}
 		return nil
 	}
 	if filepath.IsAbs(tok) {
@@ -588,4 +625,288 @@ func lookupVar(name string, env []string) (string, bool) {
 		}
 	}
 	return os.LookupEnv(name)
+}
+
+// wordCritical checks one shell word. A non-literal word is judged from
+// the literal text before the first substitution, glob, brace, or escape.
+// A literal word is resolved as a path and is not matched by string prefix.
+func wordCritical(raw, cwd string, crit []string, ce critEnv) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	if nonLiteralCritical(raw, cwd, crit, ce) {
+		return true
+	}
+	return tokenCritical(stripShellQuotes(raw), cwd, crit, ce)
+}
+
+func nonLiteralCritical(raw, cwd string, crit []string, ce critEnv) bool {
+	prefix, ok := splitLiteralPrefix(raw)
+	if !ok {
+		return false
+	}
+	for _, cand := range resolvePrefix(prefix, cwd, ce) {
+		if pathRelationCritical(cand, crit) || partialPrefixCritical(cand, crit) {
+			return true
+		}
+		if real := resolveExistingPrefix(cand); real != "" && real != cand && (pathRelationCritical(real, crit) || partialPrefixCritical(real, crit)) {
+			return true
+		}
+	}
+	return false
+}
+
+// splitLiteralPrefix returns the text before the first non-literal
+// construct. Single quotes are literal. Double quotes still expand
+// parameters, substitutions, and backslash escapes. An empty prefix with
+// ok true means the construct is at the start of the word.
+func splitLiteralPrefix(s string) (string, bool) {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '\'':
+			j := strings.IndexByte(s[i+1:], '\'')
+			if j < 0 {
+				b.WriteString(s[i+1:])
+				return b.String(), false
+			}
+			b.WriteString(s[i+1 : i+1+j])
+			i += 1 + j
+		case '"':
+			i++
+			for i < len(s) && s[i] != '"' {
+				if s[i] == '\\' || s[i] == '$' || s[i] == '`' {
+					return b.String(), true
+				}
+				b.WriteByte(s[i])
+				i++
+			}
+		case '\\', '$', '`', '*', '?', '[':
+			return b.String(), true
+		case '{':
+			if braceExpandAt(s, i) {
+				return b.String(), true
+			}
+			b.WriteByte('{')
+		default:
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String(), false
+}
+
+func braceExpandAt(s string, i int) bool {
+	end := strings.IndexByte(s[i:], '}')
+	if end <= 1 {
+		return false
+	}
+	body := s[i+1 : i+end]
+	return strings.Contains(body, ",") || strings.Contains(body, "..")
+}
+
+func resolvePrefix(prefix, cwd string, ce critEnv) []string {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		if filepath.IsAbs(cwd) {
+			return []string{filepath.Clean(cwd)}
+		}
+		return nil
+	}
+	seeds := []string{prefix}
+	seeds = append(seeds, expandCandidates(prefix, ce)...)
+	var out []string
+	seen := map[string]bool{}
+	add := func(c string) {
+		if c == "" || c == "." || seen[c] {
+			return
+		}
+		seen[c] = true
+		out = append(out, c)
+	}
+	for _, s := range seeds {
+		s = stripShellQuotes(strings.TrimSpace(s))
+		if s == "" {
+			continue
+		}
+		var c string
+		if filepath.IsAbs(s) {
+			c = filepath.Clean(s)
+		} else if filepath.IsAbs(cwd) {
+			c = joinCwd(cwd, s)
+		} else {
+			continue
+		}
+		add(c)
+	}
+	return out
+}
+
+// partialPrefixCritical matches a non-literal prefix that stops inside a
+// path component, such as the text before a glob. Literal paths do not use it.
+func partialPrefixCritical(cand string, crit []string) bool {
+	if !filepath.IsAbs(cand) {
+		return false
+	}
+	cand = filepath.Clean(cand)
+	if cand == "" || cand == "." || cand == "/" {
+		return false
+	}
+	for _, c := range crit {
+		if c == "" || c == cand {
+			continue
+		}
+		if strings.HasPrefix(c, cand) {
+			return true
+		}
+	}
+	return false
+}
+
+func commandBase(args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	return filepath.Base(args[0])
+}
+
+func cdDestination(args []string, cwd string, ce critEnv) string {
+	operand, has := cdOperand(args)
+	if !has {
+		return homeDir(ce)
+	}
+	if operand == "-" {
+		return cwd
+	}
+	return joinCwd(cwd, firstExpand(operand, ce))
+}
+
+// cdOperand skips POSIX cd flags. No operand means the home directory.
+// "-" is the previous directory, which this tracker does not record.
+func cdOperand(args []string) (string, bool) {
+	i := 1
+	for i < len(args) {
+		switch args[i] {
+		case "-L", "-P", "-e", "-@":
+			i++
+			continue
+		case "--":
+			i++
+			if i < len(args) {
+				return args[i], true
+			}
+			return "", false
+		case "-":
+			return "-", true
+		default:
+			return args[i], true
+		}
+	}
+	return "", false
+}
+
+func homeDir(ce critEnv) string {
+	h := firstExpand("~", ce)
+	if h == "" || h == "~" {
+		return ""
+	}
+	if !filepath.IsAbs(h) {
+		return ""
+	}
+	return filepath.Clean(h)
+}
+
+// implicitCwd reports commands that read the working directory when they
+// are given no path operand. "." is handled as a path, not here.
+func implicitCwd(args []string) bool {
+	base := commandBase(args)
+	switch base {
+	case "ls", "dir", "vdir", "du", "find":
+	default:
+		return false
+	}
+	return !hasPathOperand(base, args[1:])
+}
+
+func hasPathOperand(cmd string, args []string) bool {
+	if cmd == "find" {
+		return findHasPath(args)
+	}
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		if a == "--" {
+			return i+1 < len(args)
+		}
+		if strings.HasPrefix(a, "-") && a != "-" {
+			if flagConsumesNext(cmd, a) {
+				i += 2
+				continue
+			}
+			i++
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func findHasPath(args []string) bool {
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		switch a {
+		case "-H", "-L", "-P":
+			i++
+			continue
+		case "-D":
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(a, "-O") || a == "--" {
+			if a == "--" {
+				return i+1 < len(args)
+			}
+			i++
+			continue
+		}
+		if strings.HasPrefix(a, "-") || a == "!" || a == "(" {
+			return false
+		}
+		return true
+	}
+	return false
+}
+
+func flagConsumesNext(cmd, flag string) bool {
+	if strings.Contains(flag, "=") || flag == "-" {
+		return false
+	}
+	if strings.HasPrefix(flag, "--") {
+		switch cmd {
+		case "ls", "dir", "vdir":
+			switch strings.TrimPrefix(flag, "--") {
+			case "ignore", "hide", "width", "tabsize", "format", "quoting-style", "time", "time-style", "color", "block-size", "indicator-style", "sort", "hyperlink":
+				return true
+			}
+		case "du":
+			switch strings.TrimPrefix(flag, "--") {
+			case "block-size", "exclude", "exclude-from", "max-depth", "threshold", "files0-from":
+				return true
+			}
+		}
+		return false
+	}
+	if !strings.HasPrefix(flag, "-") || len(flag) < 2 {
+		return false
+	}
+	last := flag[len(flag)-1]
+	switch cmd {
+	case "ls", "dir", "vdir":
+		return last == 'I' || last == 'w' || last == 'T'
+	case "du":
+		return last == 'd' || last == 'B' || last == 'X'
+	default:
+		return false
+	}
 }

@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -263,9 +264,10 @@ func Open(dir string, risks []RiskEntry, auditor Auditor) (*Engine, error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return nil, err
 	}
-	doc, err := loadRules(filepath.Join(dir, "rules.json"))
+	rulesPath := filepath.Join(dir, "rules.json")
+	doc, err := loadRules(rulesPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("permission broker rules file %s: %w", rulesPath, err)
 	}
 	aud, err := openAudit(filepath.Join(dir, "audit.jsonl"))
 	if err != nil {

@@ -12,6 +12,62 @@ import (
 	"time"
 )
 
+func TestGolden_PeerDescendantOfRegisteredCLI(t *testing.T) {
+	e := testEngine(t)
+	e.NoteTurn("bot", "sess", "run", "task")
+	helper := buildPeerHelper(t)
+	payload := filepath.Join(t.TempDir(), "req.json")
+	body, _ := json.Marshal(map[string]any{
+		"op": "evaluate", "hook_event_name": "PreToolUse", "cwd": "/work",
+		"tool_name": "Bash", "tool_input": map[string]string{"command": "git status"},
+	})
+	if err := os.WriteFile(payload, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := os.MkdirTemp("", "pb")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(parent) })
+	sock := filepath.Join(parent, "s")
+	ln, err := e.Listen("bot", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	e.ClearHookIDs()
+	if err := e.NoteHookFile(helper); err != nil {
+		t.Fatal(err)
+	}
+	sleepBin, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sleep := exec.Command(sleepBin, "30")
+	if err := sleep.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = sleep.Process.Kill()
+		_, _ = sleep.Process.Wait()
+	})
+	e.RegisterLaunch("bot", sleep.Process.Pid)
+	unrelated := runPeer(t, helper, sock, payload)
+	if unrelated.Verdict != VerdictDeny || !strings.Contains(unrelated.Reason, "permission broker unavailable") {
+		t.Fatalf("unrelated %+v", unrelated)
+	}
+	if len(e.ListPending()) != 0 {
+		t.Fatal("unrelated process reached the engine")
+	}
+	child := runPeerUnder(t, e, helper, sock, payload)
+	if child.Verdict != VerdictDeny || !strings.Contains(child.Reason, "pending approval ") {
+		t.Fatalf("descendant %+v", child)
+	}
+	if len(e.ListPending()) == 0 {
+		t.Fatal("descendant did not reach the engine")
+	}
+}
+
 func TestGolden_SocketPeerMustBeHookUnderBotCLI(t *testing.T) {
 	e := testEngine(t)
 	e.NoteTurn("bot", "sess", "run", "task")

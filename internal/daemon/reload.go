@@ -35,6 +35,7 @@ func (a *App) setPol(p policy.Policy) {
 			return
 		}
 		a.broker.SetApprovalTTL(p.EffectiveApprovalTTL())
+		a.seedStartupCriticalPaths(p)
 	}
 	a.pinBrokerHook(p)
 	cp := p

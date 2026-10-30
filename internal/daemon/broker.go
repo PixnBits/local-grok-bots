@@ -123,6 +123,7 @@ func (a *App) prepareBrokerHook(bot store.Bot, ws, home, runID string) (string, 
 		return "", a.refuseBrokerHook(bot.ID, err)
 	}
 	if err := a.hookChanged(bin); err != nil {
+		a.requireRepin()
 		a.noteHookChange(bot.ID, err)
 		return "", a.refuseBrokerHook(bot.ID, err)
 	}
@@ -358,28 +359,9 @@ func (a *App) markHookChanged(bot string) {
 	if a == nil {
 		return
 	}
-	a.hookMu.Lock()
-	already := a.hookRepinRequired
-	a.hookRepinRequired = true
-	var cancel context.CancelFunc
-	if a.cliCancel != nil {
-		cancel = a.cliCancel[bot]
-	}
-	if cancel != nil {
-		if a.hookAbort == nil {
-			a.hookAbort = map[string]bool{}
-		}
-		a.hookAbort[bot] = true
-	}
-	a.hookMu.Unlock()
-	if cancel != nil {
-		cancel()
-	}
-	if already || a.broker == nil {
-		return
-	}
-	a.broker.Note(bot, "deny", "hook changed")
-	a.log(bot, "permbroker", map[string]any{"error": "hook changed"})
+	// Mid-turn and Evaluate both arrive here. The latch stays set until
+	// an admin repin, including when the original bytes are restored.
+	a.requireRepin()
 }
 
 func (a *App) setCLICancel(bot string, cancel context.CancelFunc) {
@@ -477,6 +459,27 @@ func (a *App) brokerCriticalPaths(bin, settings, settingsDir string) []string {
 		data = a.cfg.DataDir
 	}
 	return permbroker.BrokerCriticalPaths(data, bin, settings, settingsDir)
+}
+
+// seedStartupCriticalPaths marks broker files before any Claude launch so
+// run_shell and Bash see the same set. The bot workspace is not included.
+func (a *App) seedStartupCriticalPaths(p policy.Policy) {
+	if a == nil || a.broker == nil || p.Broker != "hook" {
+		return
+	}
+	bin, _ := brokerHookBinary(p)
+	paths := a.brokerCriticalPaths(bin, "", "")
+	if data := strings.TrimSpace(a.cfg.DataDir); data != "" {
+		paths = append(paths,
+			filepath.Join(data, adminTokenFile),
+			filepath.Join(data, "cli"),
+			filepath.Dir(filepath.Join(data, "permbroker", "hook")),
+		)
+	}
+	if tok := strings.TrimSpace(a.cfg.AuthTokensFile); tok != "" {
+		paths = append(paths, tok)
+	}
+	a.broker.AddCriticalPaths(paths...)
 }
 
 // brokerHookBinary is the configured hook, or lgb-permhook next to this
