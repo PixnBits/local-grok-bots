@@ -48,9 +48,7 @@ func schemaObj(props map[string]any, req ...string) map[string]any {
 // argument. The model is not asked to discover signatures; it gets them here.
 func toolDefs() []model.Tool {
 	name := func(what string) map[string]any { return prop("string", what+" Example: \"Ada\".") }
-	// Order is not significant: an A/B with run_shell moved first did not
-	// change how often the model used it. The system prompt names every
-	// tool in this list (see attachedToolsLine) so none is overlooked.
+	// The system prompt names every tool in this list via attachedToolsLine.
 	return []model.Tool{
 		{Name: "write_memory", Description: "Save or replace a memory note on yourself. Notes appear in your system prompt on later turns.",
 			Parameters: schemaObj(map[string]any{
@@ -210,6 +208,8 @@ func hasAlias(tool, field string, args map[string]any) bool {
 		alts = []string{"message", "text", "reminder"}
 	case tool == "read_bot" && field == "name":
 		alts = []string{"id"}
+	case tool == "run_shell" && field == "command":
+		alts = []string{"cmd"}
 	}
 	for _, k := range alts {
 		if strings.TrimSpace(strArg(args, k)) != "" {
@@ -910,15 +910,43 @@ func isFalse(v any) bool {
 }
 
 // shellCommandArg reads run_shell's command, accepting "cmd" as an alias.
+// Permission broker approval binds to the command text, so approving
+// `command` X also allows the same X passed via `cmd` once; the alias
+// does not widen what can run.
 func shellCommandArg(args map[string]any) (string, error) {
-	command, cmd := strArg(args, "command"), strArg(args, "cmd")
+	command, commandOK, err := shellStringField(args, "command")
+	if err != nil {
+		return "", err
+	}
+	cmd, cmdOK, err := shellStringField(args, "cmd")
+	if err != nil {
+		return "", err
+	}
 	switch {
-	case command != "" && cmd != "" && command != cmd:
+	case commandOK && cmdOK && command != cmd:
 		return "", fmt.Errorf("run_shell: \"command\" and \"cmd\" differ; pass only \"command\"")
-	case command != "":
+	case commandOK:
 		return command, nil
-	case cmd != "":
+	case cmdOK:
 		return cmd, nil
 	}
 	return "", fmt.Errorf("run_shell: missing required \"command\" field (the bash command line to run)")
+}
+
+// shellStringField reads one command field. A missing, null, or
+// whitespace-only value is absent. Any other non-string is an error that
+// names the field.
+func shellStringField(args map[string]any, key string) (string, bool, error) {
+	v, exists := args[key]
+	if !exists || v == nil {
+		return "", false, nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return "", false, fmt.Errorf("run_shell: %q must be a string", key)
+	}
+	if strings.TrimSpace(s) == "" {
+		return "", false, nil
+	}
+	return s, true, nil
 }

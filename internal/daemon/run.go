@@ -88,13 +88,15 @@ func (a *App) execute(botID, runID string) {
 	}
 	// seen holds turn input already in the transcript, so a message that
 	// lands between CreateRun and buildMessages is not folded in twice.
+	// tools is the slice named in the system prompt and sent on the request.
+	tools := botTools(bot)
 	seen := map[string]bool{}
 	msgs, ok := a.takePending(runID)
 	if !ok {
 		a.dropResume(botID)
 		a.noteToolChanges(bot)
 		var hist []store.Message
-		msgs, hist, err = a.buildMessagesHist(bot)
+		msgs, hist, err = a.buildMessagesHist(bot, tools)
 		if err != nil {
 			_, _ = a.finishRun(runID, "error", err.Error())
 			a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
@@ -146,7 +148,7 @@ func (a *App) execute(botID, runID string) {
 			callResp, err := a.model.Chat(mctx, model.ChatRequest{
 				Model:              modelName,
 				Messages:           msgs,
-				Tools:              toolDefs(),
+				Tools:              tools,
 				FirstOutputTimeout: firstLim,
 				StallTimeout:       stallLim,
 				KeepAlive:          turnPol.EffectiveOllamaKeepAlive(),
@@ -562,11 +564,11 @@ func (a *App) foldInput(botID, runID string, msgs []model.Message, through strin
 }
 
 func (a *App) buildMessages(bot store.Bot) ([]model.Message, error) {
-	out, _, err := a.buildMessagesHist(bot)
+	out, _, err := a.buildMessagesHist(bot, botTools(bot))
 	return out, err
 }
 
-func (a *App) buildMessagesHist(bot store.Bot) ([]model.Message, []store.Message, error) {
+func (a *App) buildMessagesHist(bot store.Bot, tools []model.Tool) ([]model.Message, []store.Message, error) {
 	mem, err := a.st.ListMemory(bot.ID)
 	if err != nil {
 		return nil, nil, err
@@ -602,7 +604,7 @@ func (a *App) buildMessagesHist(bot store.Bot) ([]model.Message, []store.Message
 		b.WriteString(m.Value)
 		b.WriteString("\n")
 	}
-	b.WriteString("\n" + attachedToolsLine() + "\n" + toolAuthority + "\n\nYou can call tools. create_bot creates a bot: pass name and description. description is the standing prompt the new bot is given. instructions is an old name for that same field and still works. Do not use the shell to create a bot. update_bot changes a bot. list_bots and read_bot inspect bots. send_dm sends a direct message. write_memory and delete_memory keep notes. set_timer schedules a prompt back to you: pass prompt plus one of in (one-shot duration such as \"5m\"), at (one-shot RFC 3339 time), or every (repeating interval); list_timers and clear_timer manage them. Each tool's arguments are described in its schema; use those names. read_file, write_file, edit_file, and delete_file stay inside the workspace; paths outside it are rejected and symlinks are refused. run_shell stays inside the workspace. go, gofmt, and other tools installed under /usr are on PATH. Tests stay offline unless net is granted. The build grant does not add a network exception. GitHub remotes are HTTPS to allowlisted repositories. git push waits for an approval card and the daemon sends it; the jail does not send the push. create_pr waits for an approval card. pr_status reads one allowlisted pull request. SSH stays off unless the user turned it on in the profile. After tools, send a short reply to the user. Direct messages from other bots appear as user messages prefixed with [DM from Name]. Scheduled prompts are prefixed with [scheduled]. If you need a tool, call it in this response. Do not reply with only an announcement such as \"Let me check.\"\n")
+	b.WriteString("\n" + attachedToolsLine(tools) + "\n" + toolAuthority + "\n\nYou can call tools. create_bot creates a bot: pass name and description. description is the standing prompt the new bot is given. instructions is an old name for that same field and still works. Do not use the shell to create a bot. update_bot changes a bot. list_bots and read_bot inspect bots. send_dm sends a direct message. write_memory and delete_memory keep notes. set_timer schedules a prompt back to you: pass prompt plus one of in (one-shot duration such as \"5m\"), at (one-shot RFC 3339 time), or every (repeating interval); list_timers and clear_timer manage them. Each tool's arguments are described in its schema; use those names. read_file, write_file, edit_file, and delete_file stay inside the workspace; paths outside it are rejected and symlinks are refused. run_shell stays inside the workspace. go, gofmt, and other tools installed under /usr are on PATH. Tests stay offline unless net is granted. The build grant does not add a network exception. GitHub remotes are HTTPS to allowlisted repositories. git push waits for an approval card and the daemon sends it; the jail does not send the push. create_pr waits for an approval card. pr_status reads one allowlisted pull request. SSH stays off unless the user turned it on in the profile. After tools, send a short reply to the user. Direct messages from other bots appear as user messages prefixed with [DM from Name]. Scheduled prompts are prefixed with [scheduled]. If you need a tool, call it in this response. Do not reply with only an announcement such as \"Let me check.\"\n")
 	out := []model.Message{{Role: "system", Content: b.String()}}
 	for _, m := range hist {
 		out = append(out, mapHist(m, names))
@@ -649,12 +651,18 @@ func zoneLabel(now time.Time) string {
 	return name + ", " + abbr
 }
 
-// attachedToolsLine names every tool sent with the request, built from
-// toolDefs so it cannot drift from what is attached.
-func attachedToolsLine() string {
-	defs := toolDefs()
-	names := make([]string, len(defs))
-	for i, t := range defs {
+// botTools is the tool list attached to a model request for bot. Call it
+// once and pass that slice to the chat request and to attachedToolsLine.
+// There is no per-bot filter today; every bot gets toolDefs.
+func botTools(bot store.Bot) []model.Tool {
+	return toolDefs()
+}
+
+// attachedToolsLine names every tool in tools, the slice sent with the
+// model request.
+func attachedToolsLine(tools []model.Tool) string {
+	names := make([]string, len(tools))
+	for i, t := range tools {
 		names[i] = t.Name
 	}
 	return "Attached tools: " + strings.Join(names, ", ")
