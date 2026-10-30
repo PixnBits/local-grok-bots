@@ -189,6 +189,13 @@ type Engine struct {
 	critical   []string
 	// inspectHook runs outside the engine lock. Tests use it to stall one bot.
 	inspectHook func(context.Context, Request)
+	// hookGuard runs at the start of Evaluate, outside the lock.
+	// A non-nil error denies the call before a token or a pending item.
+	hookGuard func(bot string) error
+	// afterEval runs under the lock after a once-token is taken and before
+	// the allow is returned. Tests stall here so a deadline can land after
+	// the token is gone. Production leaves it nil.
+	afterEval func()
 
 	byID   map[string]*pendingItem
 	byKey  map[string]string
@@ -398,6 +405,29 @@ func (e *Engine) SetInspectHook(fn func(context.Context, Request)) {
 	e.mu.Unlock()
 }
 
+// SetHookGuard installs the per-call hook check. Nil clears it.
+// The function runs outside the engine lock. A non-nil error denies
+// the call and does not spend a token or open a pending item.
+func (e *Engine) SetHookGuard(fn func(string) error) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	e.hookGuard = fn
+	e.mu.Unlock()
+}
+
+// SetAfterEval installs a function that runs under the engine lock after
+// a once-token is taken and before that allow is returned. Nil clears it.
+func (e *Engine) SetAfterEval(fn func()) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	e.afterEval = fn
+	e.mu.Unlock()
+}
+
 // Note appends an audit row that is not a tool verdict. The decision is
 // stored as given. Callers use it for a hook identity mismatch.
 func (e *Engine) Note(bot, decision, input string) {
@@ -449,6 +479,24 @@ func (e *Engine) SetBotContext(bot, workspace string, repos []string) {
 		next.snapAttrOK = prev.snapAttrOK
 	}
 	e.bots[bot] = next
+	e.mu.Unlock()
+}
+
+// EnsureBotHomes fills an empty bot home or user home and keeps the
+// stored environment. A later SetBotRuntime still replaces that environment.
+func (e *Engine) EnsureBotHomes(bot, home, userHome string) {
+	if e == nil || bot == "" {
+		return
+	}
+	e.mu.Lock()
+	b := e.bots[bot]
+	if strings.TrimSpace(b.Home) == "" {
+		b.Home = home
+	}
+	if strings.TrimSpace(b.UserHome) == "" {
+		b.UserHome = userHome
+	}
+	e.bots[bot] = b
 	e.mu.Unlock()
 }
 
@@ -617,7 +665,7 @@ func (e *Engine) NoteUserMessage(bot, task string) {
 // SnapshotGit records .git/config and .gitattributes for the Claude
 // path. A later change makes a Claude git command ask. The daemon
 // calls this once, after the workspace exists. run_shell does not use
-// the snapshot; the jail git wrapper forces its own config.
+// this snapshot. Risky git config is a separate hard ask for both.
 func (e *Engine) SnapshotGit(workspace string) {
 	if e == nil || strings.TrimSpace(workspace) == "" {
 		return
@@ -844,6 +892,14 @@ func (e *Engine) Evaluate(ctx context.Context, req Request) Decision {
 	if e == nil {
 		return Decision{Verdict: VerdictDeny, Reason: "denied", Actor: "fail-closed"}
 	}
+	e.mu.Lock()
+	guard := e.hookGuard
+	e.mu.Unlock()
+	if guard != nil {
+		if err := guard(req.BotID); err != nil {
+			return Decision{Verdict: VerdictDeny, Reason: "hook changed", Actor: "fail-closed"}
+		}
+	}
 	snap := e.capture(req)
 	if snap.hook != nil {
 		snap.hook(ctx, req)
@@ -871,7 +927,14 @@ func (e *Engine) Evaluate(ctx context.Context, req Request) Decision {
 		e.touch(rule)
 		return e.finish(req, in, VerdictDeny, "denied by rule "+rule.ID, "", rule.ID, rule.ID)
 	}
-	if e.consumeToken(ctx, req, in) {
+	if tok, ok := e.takeToken(ctx, req, in); ok {
+		if e.afterEval != nil {
+			e.afterEval()
+		}
+		if ctx.Err() != nil {
+			e.tokens = append(e.tokens, tok)
+			return e.finish(req, in, VerdictDeny, "denied", "", "fail-closed", "")
+		}
 		return e.finish(req, in, VerdictAllow, "approved", "", "human", "")
 	}
 	if d, stop := e.cancelled(ctx, req, in); stop {
@@ -1187,13 +1250,13 @@ func (e *Engine) grantExpiry() time.Time {
 	return e.now().Add(d)
 }
 
-func (e *Engine) consumeToken(ctx context.Context, req Request, in inspected) bool {
+func (e *Engine) takeToken(ctx context.Context, req Request, in inspected) (token, bool) {
 	if in.Level == LevelCritical || in.GitRisk != "" {
-		return false
+		return token{}, false
 	}
 	want := normTool(req.ToolName)
 	if want == "" {
-		return false
+		return token{}, false
 	}
 	now := e.now()
 	cwd := canonCwd(req.Cwd)
@@ -1206,13 +1269,13 @@ func (e *Engine) consumeToken(ctx context.Context, req Request, in inspected) bo
 		}
 		if t.BotID == req.BotID && t.SessionID == req.SessionID && t.Hash == in.Hash && canonCwd(t.Cwd) == cwd {
 			if ctx.Err() != nil {
-				return false
+				return token{}, false
 			}
 			e.tokens = append(e.tokens[:i], e.tokens[i+1:]...)
-			return true
+			return t, true
 		}
 	}
-	return false
+	return token{}, false
 }
 
 func tokenLive(t token, now time.Time) bool {
@@ -1369,6 +1432,17 @@ func commandUsesGit(p Parse) bool {
 
 func claudeBash(name string) bool {
 	return strings.EqualFold(strings.TrimSpace(name), "bash")
+}
+
+// gitRiskTool is a shell tool whose git config is a hard ask.
+// Claude Bash and the daemon run_shell share that scan.
+func gitRiskTool(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "bash", "run_shell":
+		return true
+	default:
+		return false
+	}
 }
 
 func readGitBaseline(ws string) ([]byte, bool) {

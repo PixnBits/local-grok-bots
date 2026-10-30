@@ -190,7 +190,7 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 			in.Eligible = false
 			in.HardAsk = true
 		}
-		if claudeBash(req.ToolName) && commandUsesGit(parsed) {
+		if gitRiskTool(req.ToolName) && commandUsesGit(parsed) {
 			if why := gitConfigRisk(ws, snap.homes, snap.env); why != "" {
 				in.GitRisk = why
 				in.Eligible = false

@@ -697,7 +697,9 @@ func installFakeClaude(t *testing.T, dir string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\nexec " + shellQuote(exe) + " --lgb-fake-claude \"$@\"\n"
+	script := "#!/bin/sh\n" +
+		"if [ -n \"$LGB_ARGV0_LOG\" ]; then printf '%s\\n' \"$0\" >> \"$LGB_ARGV0_LOG\"; fi\n" +
+		"exec " + shellQuote(exe) + " --lgb-fake-claude \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -853,6 +855,28 @@ func hookOnFailure(args []string) string {
 	return ""
 }
 
+func fakeTwoTools(sid string) {
+	emit := func(name string) {
+		fmt.Printf("{\"type\":\"assistant\",\"session_id\":%q,\"message\":{\"content\":[{\"type\":\"tool_use\",\"name\":%q,\"input\":{}}]}}\n", sid, name)
+		_ = os.Stdout.Sync()
+	}
+	emit("Bash")
+	if p := os.Getenv("LGB_FAKE_BETWEEN"); p != "" {
+		_ = os.WriteFile(p, []byte("1\n"), 0o644)
+	}
+	gate := os.Getenv("LGB_FAKE_SECOND_GATE")
+	deadline := time.Now().Add(20 * time.Second)
+	for gate != "" && time.Now().Before(deadline) {
+		if _, err := os.Stat(gate); err == nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	emit("Bash")
+	fmt.Printf("{\"type\":\"result\",\"result\":%q,\"session_id\":%q}\n", "ran", sid)
+	os.Exit(0)
+}
+
 // fakeHookClaude runs the settings hook the way Claude runs a command hook,
 // then decides whether the tool ran. It does not read project settings,
 // settings.local.json, or LGB_FAKE_USER_SETTINGS. --setting-sources= is
@@ -863,6 +887,10 @@ func fakeHookClaude(args []string, command string) {
 	sid := flagValue(args, "--session-id")
 	if sid == "" {
 		sid = flagValue(args, "--resume")
+	}
+	if os.Getenv("LGB_FAKE_TWO_TOOLS") == "1" {
+		fakeTwoTools(sid)
+		return
 	}
 	cwd, err := os.Getwd()
 	if err != nil {

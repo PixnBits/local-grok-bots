@@ -158,10 +158,49 @@ func TestGolden_RiskyGitConfigHardAsk(t *testing.T) {
 			run := shellReq("run_shell", "git status")
 			run.Cwd = ws
 			run.Workspace = ws
-			if got := e.Evaluate(context.Background(), run); got.Verdict != VerdictAllow {
+			if got := e.Evaluate(context.Background(), run); got.Verdict == VerdictAllow || got.PendingID == "" {
 				t.Fatalf("run_shell %+v", got)
 			}
 		})
+	}
+}
+
+func TestGolden_RunShellRiskyGit(t *testing.T) {
+	e := testEngine(t)
+	ws, home, userHome := riskyRepo(t, e)
+	req := shellReq("run_shell", "git status")
+	req.Cwd = ws
+	req.Workspace = ws
+	if d := e.Evaluate(context.Background(), req); d.Verdict != VerdictAllow {
+		t.Fatalf("clean %+v", d)
+	}
+	writeGit(t, ws, "[core]\n\thooksPath = x\n")
+	e.SetBotRuntime("bot", home, userHome, nil)
+	d := e.Evaluate(context.Background(), req)
+	if d.Verdict == VerdictAllow || d.Level == LevelCritical || d.PendingID == "" {
+		t.Fatalf("ask %+v", d)
+	}
+	if err := e.Decide(d.PendingID, "approve", ScopeOnce); err != nil {
+		t.Fatal(err)
+	}
+	again := e.Evaluate(context.Background(), req)
+	if again.Verdict == VerdictAllow {
+		t.Fatalf("once token allowed %+v", again)
+	}
+	body, err := os.ReadFile(filepath.Join(e.dir, "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(body), "git config core.hooksPath") {
+		t.Fatalf("audit\n%s", body)
+	}
+	e.SetBotRuntime("bot", home, userHome, []string{"GIT_AUTHOR_NAME=hooksPath"})
+	mustWrite(t, filepath.Join(ws, ".git", "config"), "[core]\n\trepositoryformatversion = 0\n")
+	benign := shellReq("run_shell", "git status")
+	benign.Cwd = ws
+	benign.Workspace = ws
+	if got := e.Evaluate(context.Background(), benign); got.Verdict != VerdictAllow {
+		t.Fatalf("benign %+v", got)
 	}
 }
 

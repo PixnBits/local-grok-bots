@@ -29,6 +29,20 @@ func BrokerModeForbidden(mode string) bool {
 	}
 }
 
+// brokerLaunchRefused is an argv token the broker will not launch.
+// The three allowed-tools spellings and their = forms are the same refusal.
+func brokerLaunchRefused(a string) bool {
+	name, _, _ := strings.Cut(a, "=")
+	switch name {
+	case "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions",
+		"--allowedTools", "--allowed-tools", "--allowed_tools",
+		"--add-dir", "--plugin-dir":
+		return true
+	default:
+		return false
+	}
+}
+
 // AssertBrokerLaunch rejects an argv that could skip the hook.
 // settingsPath is the daemon-written --settings file. mcpConfig is the
 // daemon's own MCP file; an empty value refuses every --mcp-config.
@@ -41,6 +55,9 @@ func AssertBrokerLaunch(argv []string, settingsPath, mcpConfig string) error {
 	mcp := 0
 	for i := 0; i < len(argv); i++ {
 		a := argv[i]
+		if brokerLaunchRefused(a) {
+			return fmt.Errorf("broker launch refuses %s", a)
+		}
 		switch a {
 		case "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--allowedTools":
 			return fmt.Errorf("broker launch refuses %s", a)

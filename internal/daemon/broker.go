@@ -15,6 +15,10 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
+// afterClaudePathCheck runs after the version check and before the launch.
+// Tests use it to change the launch PATH. Production leaves it nil.
+var afterClaudePathCheck func(*clisession.Isolation)
+
 type brokerAudit struct{ a *App }
 
 func (b brokerAudit) Record(row permbroker.AuditRow) {
@@ -104,10 +108,15 @@ func (a *App) closeBrokerBot(id string) {
 // keeps disableAllHooks. When the broker is on and the hook binary cannot
 // be used, the socket cannot be created, or the hook path is unknown, the
 // error refuses the turn before the CLI starts.
-func (a *App) prepareBrokerHook(bot store.Bot, ws, home string) (string, error) {
+func (a *App) prepareBrokerHook(bot store.Bot, ws, home, runID string) (string, error) {
 	a.setBrokerOn(bot.ID, false)
 	if a == nil || a.broker == nil || !a.effPol(bot.ID).BrokerHook(bot.ID) {
 		return "", nil
+	}
+	if a.repinRequired() {
+		err := errors.New("hook changed; re-pin required")
+		a.noteHookChange(bot.ID, err)
+		return "", a.refuseBrokerHook(bot.ID, err)
 	}
 	bin, err := brokerHookBinary(a.effPol(bot.ID))
 	if err != nil {
@@ -125,6 +134,10 @@ func (a *App) prepareBrokerHook(bot store.Bot, ws, home string) (string, error) 
 		a.noteHookChange(bot.ID, err)
 		return "", a.refuseBrokerHook(bot.ID, err)
 	}
+	copyPath, err := a.copyLaunchHook(bot.ID, runID)
+	if err != nil {
+		return "", a.refuseBrokerHook(bot.ID, err)
+	}
 	if _, err := a.brokerSockPath(bot.ID); err != nil {
 		return "", a.refuseBrokerHook(bot.ID, err)
 	}
@@ -134,52 +147,167 @@ func (a *App) prepareBrokerHook(bot store.Bot, ws, home string) (string, error) 
 	}
 	a.hookMu.Lock()
 	a.hookBin = bin
+	if a.hookCopy == nil {
+		a.hookCopy = map[string]string{}
+	}
+	a.hookCopy[bot.ID] = copyPath
 	a.hookMu.Unlock()
+	if a.broker != nil {
+		_ = a.broker.NoteHookFile(copyPath)
+	}
 	a.setBrokerOn(bot.ID, true)
 	if a.broker != nil {
 		a.broker.SetBotContext(bot.ID, ws, a.effPol(bot.ID).EffectiveGitHubRepos(bot.GitHubAllow))
 		a.broker.SnapshotBot(bot.ID)
 		a.broker.AddCriticalPaths(a.brokerCriticalPaths(bin, "", "")...)
+		a.broker.AddCriticalPaths(filepath.Dir(copyPath))
 	}
-	return permbroker.HookCommand(bin, sock), nil
+	return permbroker.HookCommand(copyPath, sock), nil
+}
+
+func (a *App) copyLaunchHook(botID, runID string) (string, error) {
+	if !safeBotID(botID) || !safeBotID(runID) {
+		return "", errors.New("hook changed")
+	}
+	a.hookMu.Lock()
+	pin := a.hookPin
+	a.hookMu.Unlock()
+	if pin == nil {
+		return "", errors.New("hook changed")
+	}
+	dir := filepath.Join(a.cfg.DataDir, "permbroker", botID, "launch", runID)
+	path, err := permbroker.CopyPinnedHook(*pin, dir)
+	if err != nil {
+		return "", errors.New("hook changed")
+	}
+	a.hookMu.Lock()
+	pin = a.hookPin
+	a.hookMu.Unlock()
+	if pin == nil || pin.CopySum(path) != nil {
+		_ = os.RemoveAll(dir)
+		return "", errors.New("hook changed")
+	}
+	return path, nil
 }
 
 func (a *App) pinBrokerHook(p policy.Policy) {
-	if a == nil {
-		return
-	}
-	a.hookMu.Lock()
-	defer a.hookMu.Unlock()
-	a.hookPin = nil
-	if a.broker != nil {
-		a.broker.ClearHookIDs()
-	}
-	if p.Broker != "hook" {
+	if a == nil || p.Broker != "hook" {
 		return
 	}
 	bin, err := brokerHookBinary(p)
 	if err != nil {
+		a.requireRepin()
 		return
 	}
-	if err := permbroker.CheckHookBinary(bin, cleanRoots(a.ws)); err != nil {
+	a.hookMu.Lock()
+	pin := a.hookPin
+	a.hookMu.Unlock()
+	if pin == nil {
+		if err := permbroker.CheckHookBinary(bin, cleanRoots(a.ws)); err != nil {
+			return
+		}
+		fresh, err := permbroker.PinHook(bin)
+		if err != nil {
+			return
+		}
+		a.installPin(fresh, bin)
 		return
 	}
-	pin, err := permbroker.PinHook(bin)
-	if err != nil {
+	clean := bin
+	if abs, err := filepath.Abs(bin); err == nil {
+		clean = filepath.Clean(abs)
+	}
+	if pin.Path != clean || pin.Diff(bin) != nil {
+		a.requireRepin()
 		return
 	}
+}
+
+func (a *App) installPin(pin permbroker.HookPin, bin string) {
+	a.hookMu.Lock()
 	a.hookPin = &pin
 	a.hookBin = bin
-	if a.broker != nil {
-		a.broker.SetHookIdentity(pin.Dev, pin.Ino)
-		_ = a.broker.NoteHookFile(bin)
-		if a.cfg.DataDir != "" {
-			copyPath := filepath.Join(a.cfg.DataDir, "permbroker", "hook")
-			if st, err := os.Stat(copyPath); err == nil && st.Mode().IsRegular() {
-				_ = a.broker.NoteHookFile(copyPath)
+	a.hookRepinRequired = false
+	a.hookMu.Unlock()
+	if a.broker == nil {
+		return
+	}
+	a.broker.ClearHookIDs()
+	a.broker.SetHookIdentity(pin.Dev, pin.Ino)
+	_ = a.broker.NoteHookFile(bin)
+	if a.cfg.DataDir != "" {
+		copyPath := filepath.Join(a.cfg.DataDir, "permbroker", "hook")
+		if st, err := os.Stat(copyPath); err == nil && st.Mode().IsRegular() {
+			_ = a.broker.NoteHookFile(copyPath)
+		}
+	}
+}
+
+func (a *App) repinRequired() bool {
+	if a == nil {
+		return false
+	}
+	a.hookMu.Lock()
+	defer a.hookMu.Unlock()
+	return a.hookRepinRequired
+}
+
+func (a *App) requireRepin() {
+	if a == nil {
+		return
+	}
+	a.hookMu.Lock()
+	already := a.hookRepinRequired
+	a.hookRepinRequired = true
+	var cancels []context.CancelFunc
+	if a.cliCancel != nil {
+		for _, fn := range a.cliCancel {
+			if fn != nil {
+				cancels = append(cancels, fn)
 			}
 		}
 	}
+	a.hookMu.Unlock()
+	if len(cancels) > 0 {
+		a.noteHookAbort("")
+		for _, fn := range cancels {
+			fn()
+		}
+	}
+	if already {
+		return
+	}
+	if a.broker != nil {
+		a.broker.Note("", "deny", "hook changed; re-pin required")
+	}
+	a.log("", "permbroker", map[string]any{"error": "hook changed; re-pin required"})
+}
+
+func (a *App) repinBrokerHook() error {
+	if a == nil || a.broker == nil {
+		return errors.New("hook cannot be pinned")
+	}
+	pol := a.pol()
+	if pol.Broker != "hook" {
+		return errors.New("hook cannot be pinned")
+	}
+	bin, err := brokerHookBinary(pol)
+	if err != nil {
+		return err
+	}
+	if err := permbroker.CheckHookBinary(bin, cleanRoots(a.ws)); err != nil {
+		return err
+	}
+	pin, err := permbroker.PinHook(bin)
+	if err != nil {
+		return err
+	}
+	a.installPin(pin, bin)
+	a.broker.Note("", "repin", "hook re-pinned")
+	if a.audit != nil && a.audit.Enabled() {
+		a.audit.Write(map[string]any{"event": "permbroker", "action": "hook_repin"})
+	}
+	return nil
 }
 
 func (a *App) hookChanged(bin string) error {
@@ -198,6 +326,115 @@ func (a *App) hookPinned() bool {
 	return a.hookPin != nil
 }
 
+func (a *App) verifyLaunchHook(bot string) error {
+	if a == nil {
+		return nil
+	}
+	a.hookMu.Lock()
+	pin := a.hookPin
+	copyPath := ""
+	if a.hookCopy != nil {
+		copyPath = a.hookCopy[bot]
+	}
+	sticky := a.hookRepinRequired
+	a.hookMu.Unlock()
+	if pin == nil && !sticky {
+		return nil
+	}
+	if sticky {
+		return errors.New("hook changed")
+	}
+	if pin.Diff(pin.Path) != nil {
+		a.markHookChanged(bot)
+		return errors.New("hook changed")
+	}
+	if copyPath != "" && pin.CopySum(copyPath) != nil {
+		a.markHookChanged(bot)
+		return errors.New("hook changed")
+	}
+	return nil
+}
+
+func (a *App) markHookChanged(bot string) {
+	if a == nil {
+		return
+	}
+	a.hookMu.Lock()
+	already := a.hookRepinRequired
+	a.hookRepinRequired = true
+	var cancel context.CancelFunc
+	if a.cliCancel != nil {
+		cancel = a.cliCancel[bot]
+	}
+	if cancel != nil {
+		if a.hookAbort == nil {
+			a.hookAbort = map[string]bool{}
+		}
+		a.hookAbort[bot] = true
+	}
+	a.hookMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if already || a.broker == nil {
+		return
+	}
+	a.broker.Note(bot, "deny", "hook changed")
+	a.log(bot, "permbroker", map[string]any{"error": "hook changed"})
+}
+
+func (a *App) setCLICancel(bot string, cancel context.CancelFunc) {
+	if a == nil || bot == "" {
+		return
+	}
+	a.hookMu.Lock()
+	if a.cliCancel == nil {
+		a.cliCancel = map[string]context.CancelFunc{}
+	}
+	a.cliCancel[bot] = cancel
+	a.hookMu.Unlock()
+}
+
+func (a *App) clearCLICancel(bot string) {
+	if a == nil || bot == "" {
+		return
+	}
+	a.hookMu.Lock()
+	delete(a.cliCancel, bot)
+	a.hookMu.Unlock()
+}
+
+func (a *App) noteHookAbort(bot string) {
+	if a == nil {
+		return
+	}
+	a.hookMu.Lock()
+	if a.hookAbort == nil {
+		a.hookAbort = map[string]bool{}
+	}
+	if bot == "" {
+		for id := range a.cliCancel {
+			a.hookAbort[id] = true
+		}
+	} else {
+		a.hookAbort[bot] = true
+	}
+	a.hookMu.Unlock()
+}
+
+func (a *App) consumeHookAbort(bot string) bool {
+	if a == nil {
+		return false
+	}
+	a.hookMu.Lock()
+	defer a.hookMu.Unlock()
+	if a.hookAbort == nil || !a.hookAbort[bot] {
+		return false
+	}
+	delete(a.hookAbort, bot)
+	return true
+}
+
 func (a *App) noteHookChange(botID string, err error) {
 	if a == nil || a.broker == nil || err == nil {
 		return
@@ -206,23 +443,27 @@ func (a *App) noteHookChange(botID string, err error) {
 }
 
 // checkClaudeBrokerVersion runs --version on the binary this launch will
-// execute. The launch environment is already final, including its PATH.
-func (a *App) checkClaudeBrokerVersion(botID string, spec clisession.Spec) error {
+// execute. The returned path is that file. The caller sets it as argv0
+// so the launch does not look the name up again.
+func (a *App) checkClaudeBrokerVersion(botID string, spec clisession.Spec) (string, error) {
 	if a == nil || !strings.EqualFold(spec.Backend, "claude") || !a.brokerHooksOn(botID) {
-		return nil
+		return "", nil
 	}
 	argv, err := clisession.Args(spec)
 	if err != nil || len(argv) == 0 {
-		return a.refuseBrokerCLI(botID, fmt.Errorf("version cannot be read"))
+		return "", a.refuseBrokerCLI(botID, fmt.Errorf("version cannot be read"))
 	}
 	path, err := clisession.ResolveLaunchPath(argv[0], clisession.LaunchEnv(spec))
 	if err != nil {
-		return a.refuseBrokerCLI(botID, fmt.Errorf("version cannot be read"))
+		return "", a.refuseBrokerCLI(botID, fmt.Errorf("version cannot be read"))
 	}
 	if err := clisession.CheckClaudeBrokerVersion(context.Background(), path); err != nil {
-		return a.refuseBrokerCLI(botID, err)
+		return "", a.refuseBrokerCLI(botID, err)
 	}
-	return nil
+	if afterClaudePathCheck != nil {
+		afterClaudePathCheck(spec.Isolate)
+	}
+	return path, nil
 }
 
 func (a *App) refuseBrokerCLI(botID string, err error) error {
@@ -473,6 +714,8 @@ func (a *App) gateShell(ctx context.Context, bot store.Bot, command string) (boo
 	ws := a.botWorkspace(bot.ID)
 	repos := a.effPol(bot.ID).EffectiveGitHubRepos(bot.GitHubAllow)
 	a.broker.SetBotContext(bot.ID, ws, repos)
+	userHome, _ := os.UserHomeDir()
+	a.broker.EnsureBotHomes(bot.ID, filepath.Join(filepath.Dir(a.ws), "cli", bot.ID, "home"), userHome)
 	d := a.broker.Evaluate(ctx, permbroker.Request{
 		BotID: bot.ID, SessionID: "shell:" + bot.ID, TaskID: a.broker.UserTask(bot.ID),
 		Cwd: ws, Workspace: ws, Repos: repos,

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/PixnBits/local-grok-bots/internal/audit"
@@ -50,9 +51,12 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 	if err != nil {
 		return Result{}, err
 	}
-	path, err := ResolveLaunchPath(argv[0], LaunchEnv(spec))
-	if err != nil {
-		return Result{}, err
+	path := argv[0]
+	if !filepath.IsAbs(path) {
+		path, err = ResolveLaunchPath(path, LaunchEnv(spec))
+		if err != nil {
+			return Result{}, err
+		}
 	}
 	if strings.EqualFold(spec.Backend, "grok") {
 		pinSHA := ""

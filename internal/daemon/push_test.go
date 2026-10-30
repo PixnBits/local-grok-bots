@@ -694,7 +694,8 @@ func TestGitPushAuthorRange(t *testing.T) {
 	if res.StatusCode != 200 {
 		t.Fatalf("allow %d %s", res.StatusCode, b)
 	}
-	if err := os.MkdirAll(filepath.Join(app.ws, "runs"), 0o755); err != nil {
+	root := app.botWorkspace(bot.ID)
+	if err := os.MkdirAll(filepath.Join(root, "runs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	ada := []string{
@@ -721,7 +722,7 @@ func TestGitPushAuthorRange(t *testing.T) {
 	}
 
 	t.Run("new branch over human history", func(t *testing.T) {
-		sub := filepath.Join(app.ws, "runs", "a")
+		sub := filepath.Join(root, "runs", "a")
 		gitOK(t, "clone", bare, sub)
 		beforeE, beforeP := evals.Load(), packs.Load()
 		out, err := run(t, `set -e
@@ -744,7 +745,7 @@ echo PUSH_DONE
 		}
 	})
 	t.Run("foreign commit on new branch", func(t *testing.T) {
-		sub := filepath.Join(app.ws, "runs", "b")
+		sub := filepath.Join(root, "runs", "b")
 		gitOK(t, "clone", bare, sub)
 		beforeE, beforeP := evals.Load(), packs.Load()
 		out, err := run(t, `set -e
@@ -767,7 +768,7 @@ echo PUSH_DONE
 		}
 	})
 	t.Run("merge newer upstream", func(t *testing.T) {
-		sub := filepath.Join(app.ws, "runs", "c")
+		sub := filepath.Join(root, "runs", "c")
 		gitOK(t, "clone", bare, sub)
 		gitOK(t, "-C", sub, "checkout", "-b", "feature-c")
 		if err := os.WriteFile(filepath.Join(sub, "bot.txt"), []byte("bot\n"), 0o644); err != nil {

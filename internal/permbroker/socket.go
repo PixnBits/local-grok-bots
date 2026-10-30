@@ -14,8 +14,9 @@ import (
 )
 
 // evaluateTimeout is how long one socket evaluate may run.
-// The deadline is a deny, including when the engine would have allowed.
-// A late evaluation must not spend a one-time approval or a task grant.
+// A result that is ready is the reply, including when the deadline has
+// also fired. If the deadline wins before that result is stored, a
+// once-token taken for the call is put back and the reply is a deny.
 const evaluateTimeout = 2 * time.Second
 
 // Listener is one bot's evaluate socket. The directory is 0700 and the
@@ -146,10 +147,6 @@ func (l *Listener) serve(c net.Conn) {
 	select {
 	case d = <-done:
 	case <-ctx.Done():
-		l.reply(c, wireReply{Verdict: VerdictDeny, Reason: "denied"})
-		return
-	}
-	if ctx.Err() != nil {
 		l.reply(c, wireReply{Verdict: VerdictDeny, Reason: "denied"})
 		return
 	}

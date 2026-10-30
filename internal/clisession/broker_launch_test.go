@@ -2,6 +2,35 @@ package clisession
 
 import "testing"
 
+func TestGolden_BrokerLaunchRefusesAllowedToolsAliases(t *testing.T) {
+	settings := "/data/cli/bot/claude-settings.json"
+	base := []string{"claude", "--setting-sources=", "--settings", settings, "-p", "hi"}
+	if err := AssertBrokerLaunch(base, settings, ""); err != nil {
+		t.Fatal(err)
+	}
+	flags := []string{
+		"--allowed-tools",
+		"--allowed-tools=Bash",
+		"--allowedTools",
+		"--allowedTools=Bash",
+		"--allowed_tools",
+		"--allowed_tools=Bash",
+		"--dangerously-skip-permissions",
+		"--dangerously-skip-permissions=true",
+		"--permission-mode=bypassPermissions",
+	}
+	for _, flag := range flags {
+		argv := append(append([]string{}, base...), flag)
+		if err := AssertBrokerLaunch(argv, settings, ""); err == nil {
+			t.Fatalf("accepted %s", flag)
+		}
+	}
+	argv := append(append([]string{}, base...), "--permission-mode", "bypassPermissions")
+	if err := AssertBrokerLaunch(argv, settings, ""); err == nil {
+		t.Fatal("accepted bypassPermissions")
+	}
+}
+
 func TestAssertBrokerLaunch(t *testing.T) {
 	settings := "/data/cli/bot/claude-settings.json"
 	base := []string{"claude", "--setting-sources=", "--settings", settings, "-p", "hi"}

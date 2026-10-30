@@ -282,7 +282,7 @@ func TestGolden_GitBaselineDriftAsks(t *testing.T) {
 	if d := e.Evaluate(context.Background(), req); d.Verdict != VerdictAllow {
 		t.Fatalf("baseline %+v", d)
 	}
-	if err := os.WriteFile(configPath, []byte("[core]\n\thooksPath = x\n"), 0o644); err != nil {
+	if err := os.WriteFile(configPath, []byte("[user]\n\tname = ada\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if d := e.Evaluate(context.Background(), req); d.Verdict == VerdictAllow {

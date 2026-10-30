@@ -77,11 +77,17 @@ type App struct {
 	brokerMu sync.Mutex
 	brokerLn map[string]*permbroker.Listener
 	brokerOn map[string]bool
-	// hookPin is the hook binary recorded at the last policy publish.
+	// hookPin is the hook binary recorded at the first pin or an admin repin.
 	// hookBin is the path the current armed launch checked.
-	hookMu  sync.Mutex
-	hookPin *permbroker.HookPin
-	hookBin string
+	// hookRepinRequired stays set until an admin repin.
+	// hookCopy is the per-launch copy for a bot. cliCancel ends that bot's CLI.
+	hookMu            sync.Mutex
+	hookPin           *permbroker.HookPin
+	hookBin           string
+	hookRepinRequired bool
+	hookCopy          map[string]string
+	cliCancel         map[string]context.CancelFunc
+	hookAbort         map[string]bool
 	// permBase is the HTTP origin the CLI calls back, such as http://127.0.0.1:8787.
 	// Empty means there is no permission host. A headless prompt still fails closed.
 	// The permission callback listener does not replace this except when the
@@ -323,6 +329,9 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		broker:     br,
 	}
 	br.SetAuditor(brokerAudit{a})
+	br.SetHookGuard(func(bot string) error {
+		return a.verifyLaunchHook(bot)
+	})
 	a.setPol(pol)
 	if len(fileTokens) > 0 {
 		a.authTokens.Store(&authTokenSet{toks: fileTokens})

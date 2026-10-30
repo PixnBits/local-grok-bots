@@ -50,8 +50,51 @@ func launch(ctx context.Context, p *prepared) (string, string, error) {
 
 func runBwrap(ctx context.Context, p *prepared, bwrap string) (string, string, error) {
 	uid, gid := JailIDs()
+	args, extra, bindFiles, infoR, blockW, err := bwrapLaunchArgs(p)
+	if err != nil {
+		return "", "", err
+	}
+	defer func() {
+		for _, f := range extra {
+			if f != nil {
+				_ = f.Close()
+			}
+		}
+		if infoR != nil {
+			_ = infoR.Close()
+		}
+		if blockW != nil {
+			_ = blockW.Close()
+		}
+	}()
+	cmd := exec.Command(bwrap, args...)
+	cmd.ExtraFiles = cmdExtraFiles(extra, bindFiles)
+	closeBinds := func() {
+		for _, f := range bindFiles {
+			if f != nil {
+				_ = f.Close()
+			}
+		}
+	}
+	if !jailDrops(uid) {
+		return captureReady(ctx, cmd, closeBinds, nil)
+	}
+	return captureReady(ctx, cmd, closeBinds, func() error {
+		if len(extra) >= 2 {
+			_ = extra[0].Close()
+			_ = extra[1].Close()
+		}
+		return finishUserNamespace(ctx, infoR, blockW, uid, gid)
+	})
+}
+
+// bwrapLaunchArgs is the bubblewrap argv for one prepared shell.
+// extra holds the info and block pipe ends when a root jail drops.
+// infoR and blockW stay with the parent for the uid map.
+func bwrapLaunchArgs(p *prepared) (args []string, extra, bindFiles []*os.File, infoR, blockW *os.File, err error) {
+	uid, _ := JailIDs()
 	drop := jailDrops(uid)
-	args := []string{
+	args = []string{
 		"--unshare-user", "--unshare-net", "--unshare-pid", "--unshare-uts",
 		"--die-with-parent",
 	}
@@ -65,7 +108,7 @@ func runBwrap(ctx context.Context, p *prepared, bwrap string) (string, string, e
 		"--ro-bind", "/bin", "/bin",
 		"--ro-bind", "/lib", "/lib",
 	)
-	if st, err := os.Stat("/lib64"); err == nil && st.IsDir() {
+	if st, statErr := os.Stat("/lib64"); statErr == nil && st.IsDir() {
 		args = append(args, "--ro-bind", "/lib64", "/lib64")
 	}
 	args = append(args,
@@ -76,36 +119,33 @@ func runBwrap(ctx context.Context, p *prepared, bwrap string) (string, string, e
 		"--bind", p.workspace, "/work",
 		"--chdir", "/work",
 	)
-	if st, err := os.Stat("/etc/ld.so.cache"); err == nil && !st.IsDir() {
+	if st, statErr := os.Stat("/etc/ld.so.cache"); statErr == nil && !st.IsDir() {
 		args = append(args, "--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache")
 	}
-	if st, err := os.Stat("/etc/ssl"); err == nil && st.IsDir() {
+	if st, statErr := os.Stat("/etc/ssl"); statErr == nil && st.IsDir() {
 		args = append(args, "--ro-bind", "/etc/ssl", "/etc/ssl")
 	}
-	if st, err := os.Stat("/etc/services"); err == nil && !st.IsDir() {
+	if st, statErr := os.Stat("/etc/services"); statErr == nil && !st.IsDir() {
 		args = append(args, "--ro-bind", "/etc/services", "/etc/services")
 	}
-	var infoR, infoW, blockR, blockW *os.File
-	var extra []*os.File
 	if drop {
-		var err error
+		var infoW, blockR *os.File
 		infoR, infoW, err = os.Pipe()
 		if err != nil {
-			return "", "", err
+			return nil, nil, nil, nil, nil, err
 		}
-		defer infoR.Close()
-		defer infoW.Close()
 		blockR, blockW, err = os.Pipe()
 		if err != nil {
-			return "", "", err
+			_ = infoR.Close()
+			_ = infoW.Close()
+			return nil, nil, nil, nil, nil, err
 		}
-		defer blockR.Close()
-		defer blockW.Close()
 		// ExtraFiles start at fd 3. Info and block stay 3 and 4.
 		extra = []*os.File{infoW, blockR}
 		args = append(args, "--info-fd", "3", "--userns-block-fd", "4")
 	}
-	margs, bindFiles := mountArgs(p.mounts, len(extra))
+	var margs []string
+	margs, bindFiles = mountArgs(p.mounts, len(extra))
 	args = append(args, margs...)
 	for _, e := range p.env {
 		k, v, ok := strings.Cut(e, "=")
@@ -116,23 +156,42 @@ func runBwrap(ctx context.Context, p *prepared, bwrap string) (string, string, e
 	}
 	args = append(args, "--")
 	args = append(args, commandArgvMode(p.command, p.cleanBash)...)
-	cmd := exec.Command(bwrap, args...)
-	cmd.ExtraFiles = cmdExtraFiles(extra, bindFiles)
-	closeBinds := func() {
-		for _, f := range bindFiles {
-			if f != nil {
-				_ = f.Close()
-			}
+	return args, extra, bindFiles, infoR, blockW, nil
+}
+
+// BwrapArgv is the bubblewrap argument vector for req, without running it.
+func BwrapArgv(req Request) ([]string, error) {
+	if strings.TrimSpace(req.Command) == "" {
+		return nil, fmt.Errorf("command required")
+	}
+	ws, err := filepath.Abs(req.Workspace)
+	if err != nil {
+		return nil, err
+	}
+	if st, statErr := os.Stat(ws); statErr != nil || !st.IsDir() {
+		return nil, fmt.Errorf("workspace unavailable")
+	}
+	p, err := prepare(context.Background(), req, ws)
+	if err != nil {
+		return nil, err
+	}
+	defer p.close()
+	args, extra, _, infoR, blockW, err := bwrapLaunchArgs(p)
+	if infoR != nil {
+		_ = infoR.Close()
+	}
+	if blockW != nil {
+		_ = blockW.Close()
+	}
+	for _, f := range extra {
+		if f != nil {
+			_ = f.Close()
 		}
 	}
-	if !drop {
-		return captureReady(ctx, cmd, closeBinds, nil)
+	if err != nil {
+		return nil, err
 	}
-	return captureReady(ctx, cmd, closeBinds, func() error {
-		_ = infoW.Close()
-		_ = blockR.Close()
-		return finishUserNamespace(ctx, infoR, blockW, uid, gid)
-	})
+	return args, nil
 }
 
 // cmdExtraFiles places existing bwrap fds (info, block, and any other

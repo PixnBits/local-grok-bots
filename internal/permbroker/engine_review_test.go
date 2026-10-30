@@ -243,6 +243,62 @@ func TestDeadlineDenyKeepsOnceToken(t *testing.T) {
 	}
 }
 
+func TestGolden_LateDeadlineOnceToken(t *testing.T) {
+	e := testEngine(t)
+	ctx := context.Background()
+	req := bashReq("bot", "sess", "task", "/work", "git status")
+	first := e.Evaluate(ctx, req)
+	if first.PendingID == "" {
+		t.Fatalf("%+v", first)
+	}
+	if err := e.Decide(first.PendingID, "approve", ScopeOnce); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := os.MkdirTemp("", "late")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(parent) })
+	ln, err := e.Listen("bot", filepath.Join(parent, "s.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	e.NoteTurn("bot", "sess", "run", "task")
+	e.SetAfterEval(func() { time.Sleep(evaluateTimeout + 300*time.Millisecond) })
+	t.Cleanup(func() { e.SetAfterEval(nil) })
+	start := time.Now()
+	rep, err := sockRoundErr(ln.Path(), hookMsg("git status"))
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed > 6*time.Second {
+		t.Fatalf("deadline took %s", elapsed)
+	}
+	e.SetAfterEval(nil)
+	again, err := sockRoundErr(ln.Path(), hookMsg("git status"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Verdict == VerdictDeny {
+		if again.Verdict != VerdictAllow {
+			t.Fatalf("token lost first %+v again %+v", rep, again)
+		}
+		third, err := sockRoundErr(ln.Path(), hookMsg("git status"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if third.Verdict == VerdictAllow {
+			t.Fatalf("token reused %+v", third)
+		}
+		return
+	}
+	if rep.Verdict != VerdictAllow || again.Verdict == VerdictAllow {
+		t.Fatalf("first %+v again %+v", rep, again)
+	}
+}
+
 func hookMsg(command string) map[string]any {
 	return map[string]any{
 		"op": "evaluate", "hook_event_name": "PreToolUse",

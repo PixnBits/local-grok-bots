@@ -15,7 +15,7 @@ func brokerAdminPath(r *http.Request) bool {
 		return false
 	}
 	p := r.URL.Path
-	return p == "/api/permbroker/pending" || strings.HasPrefix(p, "/api/permbroker/pending/")
+	return p == "/api/permbroker/pending" || strings.HasPrefix(p, "/api/permbroker/pending/") || p == "/api/permbroker/hook/repin"
 }
 
 func (a *App) brokerPostOK(w http.ResponseWriter, r *http.Request) bool {
@@ -24,6 +24,17 @@ func (a *App) brokerPostOK(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+func (a *App) handleBrokerRepin(w http.ResponseWriter, r *http.Request) {
+	if !a.brokerPostOK(w, r) {
+		return
+	}
+	if err := a.repinBrokerHook(); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook cannot be pinned"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (a *App) handleBrokerPending(w http.ResponseWriter, r *http.Request) {

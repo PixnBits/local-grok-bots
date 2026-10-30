@@ -35,6 +35,16 @@ func (a *App) userRules(botID string) []permission.UserRule {
 	return out
 }
 
+// shellWorkspace is the directory bound at /work for run_shell.
+// It is that bot's directory, created if needed.
+func (a *App) shellWorkspace(botID string) (string, error) {
+	dir := a.botWorkspace(botID)
+	if err := mkdir(dir); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
 func (a *App) botWorkspace(botID string) string {
 	if a == nil {
 		return ""

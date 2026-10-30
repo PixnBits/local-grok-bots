@@ -7,11 +7,11 @@ import (
 	"strings"
 )
 
-// gitConfigRisk reports a git config key that makes every Claude git
-// command ask. The scan reads the bot repo, included files, attribute
-// files, the bot and user git config, and the managed CLI environment.
-// A missing file is not itself a reason. run_shell is not scanned; the
-// jail git wrapper supplies that config.
+// gitConfigRisk reports a git config key that makes a git command ask.
+// Claude Bash and run_shell both use it. The scan reads the bot repo,
+// included files, attribute files, the bot and user git config, and the
+// managed environment stored for that bot. A missing file is not itself
+// a reason.
 func gitConfigRisk(ws string, homes, env []string) string {
 	seen := map[string]bool{}
 	var files []string

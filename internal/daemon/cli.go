@@ -28,6 +28,17 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
+var isolationPATHOnce sync.Once
+
+func (a *App) warnEmptyIsolationPATH(note string) {
+	isolationPATHOnce.Do(func() {
+		if a == nil || note == "" {
+			return
+		}
+		a.writeStartup("local-grok-bots: WARN: %s\n", note)
+	})
+}
+
 func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	turnPol := a.effPol(bot.ID)
 	// A previous turn must not leave the broker armed for this one.
@@ -118,6 +129,8 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	turnTimeout := turnPol.EffectiveTurnTimeout()
 	turnCtx, turnCancel := context.WithTimeout(ctx, turnTimeout)
 	defer turnCancel()
+	a.setCLICancel(bot.ID, turnCancel)
+	defer a.clearCLICancel(bot.ID)
 	a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "working"})
 	var runner clisession.Runner = clisession.ExecRunner{
 		Policy: turnPol,
@@ -237,12 +250,16 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		a.failCLI(bot.ID, runID, backend, err)
 		return
 	}
-	if err := a.checkClaudeBrokerVersion(bot.ID, spec); err != nil {
+	checked, err := a.checkClaudeBrokerVersion(bot.ID, spec)
+	if err != nil {
 		if fresh {
 			a.clearBotSession(bot.ID, sessionID)
 		}
 		a.failCLI(bot.ID, runID, backend, err)
 		return
+	}
+	if checked != "" {
+		spec.Bin = checked
 	}
 	a.warnGrokDarwinNetwork(bot, runID, backend)
 	trace := &cliTrace{a: a, botID: bot.ID, runID: runID}
@@ -262,6 +279,12 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 			trace.token(safe)
 			a.bus.Publish(runID, "token", map[string]string{"text": safe})
 		case "tool":
+			if a.brokerHooksOn(bot.ID) {
+				if herr := a.verifyLaunchHook(bot.ID); herr != nil {
+					turnCancel()
+					return
+				}
+			}
 			name := ev.ToolName
 			if name == "" {
 				name = "tool"
@@ -342,6 +365,11 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	}
 	a.log(bot.ID, "model_call", map[string]any{"model": backend, "ok": err == nil, "session_id": sessionID})
 	switch {
+	case a.consumeHookAbort(bot.ID):
+		if text != "" {
+			a.persistBotText(bot.ID, runID, text, false)
+		}
+		a.failCLI(bot.ID, runID, backend, errors.New("hook changed"))
 	case a.consumeIdleKill(bot.ID):
 		a.finishCLIInterrupted(bot.ID, runID, text)
 	case turnCtx.Err() != nil && ctx.Err() == nil && errors.Is(turnCtx.Err(), context.DeadlineExceeded):
@@ -525,7 +553,7 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 		opts.Home = filepath.Join(state, "home")
 	}
 	if strings.EqualFold(backend, "claude") {
-		hook, herr := a.prepareBrokerHook(bot, ws, opts.Home)
+		hook, herr := a.prepareBrokerHook(bot, ws, opts.Home, runID)
 		if herr != nil {
 			return nil, herr
 		}
@@ -538,8 +566,15 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 			}
 			a.hookMu.Lock()
 			bin := a.hookBin
+			copyPath := ""
+			if a.hookCopy != nil {
+				copyPath = a.hookCopy[bot.ID]
+			}
 			a.hookMu.Unlock()
 			opts.BrokerDeny = a.brokerCriticalPaths(bin, settingsPath, filepath.Dir(settingsPath))
+			if copyPath != "" {
+				opts.BrokerDeny = append(opts.BrokerDeny, filepath.Dir(copyPath))
+			}
 			if a.broker != nil {
 				a.broker.AddCriticalPaths(opts.BrokerDeny...)
 			}
@@ -587,6 +622,9 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 	}
 	iso.Protect = append([]string(nil), opts.Protect...)
 	a.noteBotProtect(botID, iso.Protect)
+	if iso.PathNote != "" {
+		a.warnEmptyIsolationPATH(iso.PathNote)
+	}
 	if strings.EqualFold(backend, "claude") {
 		if _, seen := a.loginChecked.LoadOrStore(botID, true); !seen {
 			a.recordClaudeLogin(botID, ws, iso, ownHome)
