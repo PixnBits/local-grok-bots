@@ -1,12 +1,62 @@
 package policy
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/PixnBits/local-grok-bots/internal/permbroker"
 )
+
+func TestGolden_PolicyCannotLowerShippedLevel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "policy.toml")
+	write := func(body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(`
+[backend]
+backend = "ollama"
+[cli.permission]
+broker = "hook"
+[[cli.permission.risk]]
+tool = "run_shell"
+argv = ["git", "status"]
+level = "unclassified"
+`)
+	if _, err := Load(Options{Path: path}); !errors.Is(err, permbroker.ErrLevelLowered) {
+		t.Fatalf("lower: %v", err)
+	}
+	write(`
+[backend]
+backend = "ollama"
+[cli.permission]
+broker = "sometimes"
+`)
+	if _, err := Load(Options{Path: path}); !errors.Is(err, errBrokerConfig) {
+		t.Fatalf("broker: %v", err)
+	}
+	write(`
+[backend]
+backend = "ollama"
+[cli.permission]
+broker = "hook"
+[[cli.permission.risk]]
+tool = "run_shell"
+argv = ["git", "status"]
+level = "high"
+`)
+	p, err := Load(Options{Path: path})
+	if err != nil || p.Broker != "hook" || len(p.BrokerRisks) != 1 || p.BrokerRisks[0].Level != permbroker.LevelHigh {
+		t.Fatalf("raise err=%v policy=%+v", err, p.BrokerRisks)
+	}
+}
 
 func TestMissingPolicyFailClosed(t *testing.T) {
 	p, err := Load(Options{Path: filepath.Join(t.TempDir(), "nope.toml")})

@@ -43,6 +43,10 @@ type Isolation struct {
 	// ExtraBinds are host path, jail path pairs. Jail paths are JailProxySock
 	// and JailEgressSock.
 	ExtraBinds [][2]string
+	// PermHookCommand is the quoted lgb-permhook command. Empty keeps
+	// disableAllHooks. Claude is not in the Grok jail, so this command
+	// uses host paths.
+	PermHookCommand string
 }
 
 // JailProxySock is the credential proxy inside the Grok network namespace.
@@ -99,6 +103,9 @@ type IsolationOptions struct {
 	ClaudeSandbox bool
 	// Protect are extra absolute paths both CLIs are denied (daemon secrets).
 	Protect []string
+	// PermHookCommand, when set, replaces disableAllHooks with the broker
+	// PreToolUse hook. Empty keeps the locked-down settings.
+	PermHookCommand string
 	// CredRoot is the trusted directory the Grok login walk starts at.
 	// Empty uses StateDir when the bot home is inside it, otherwise the
 	// parent of Home. Components below the root are not followed when they
@@ -305,6 +312,7 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 		}
 		iso.SettingsPath = path
 		iso.ClaudeSandbox = o.ClaudeSandbox
+		iso.PermHookCommand = strings.TrimSpace(o.PermHookCommand)
 	case "grok":
 		for _, k := range grokCompatOff {
 			env[k] = "false"

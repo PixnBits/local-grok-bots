@@ -30,6 +30,11 @@ func (a *App) setPol(p policy.Policy) {
 	if a == nil {
 		return
 	}
+	if a.broker != nil {
+		if err := a.broker.SetRisks(p.BrokerRisks); err != nil {
+			return
+		}
+	}
 	cp := p
 	a.polCur.Store(&cp)
 }

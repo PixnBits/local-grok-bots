@@ -8,6 +8,7 @@ package policy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,8 @@ import (
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
+
+	"github.com/PixnBits/local-grok-bots/internal/permbroker"
 )
 
 const maxPolicyBytes = 64 * 1024
@@ -110,6 +113,16 @@ type Policy struct {
 	// the stream-json control protocol on stdin. none passes
 	// --permission-prompts none and attaches no prompt host.
 	ClaudeTransport string
+	// Broker is off (the default) or hook. hook arms the permission
+	// broker for Claude and for run_shell.
+	Broker string
+	// BrokerBots, when non-empty, limits Broker == hook to those bots.
+	BrokerBots []string
+	// HookPath is the lgb-permhook binary. Empty uses the binary next
+	// to this daemon.
+	HookPath string
+	// BrokerRisks are policy raises over the shipped level table.
+	BrokerRisks []permbroker.RiskEntry
 	// ManagedBypass is true only when managed policy set an always-allow mode.
 	ManagedBypass bool
 	Pins          []Pin
@@ -319,6 +332,9 @@ func Load(opts Options) (Policy, error) {
 	p.Loaded = true
 	p.CLIPermitted = true
 	if err := p.apply(doc, false); err != nil {
+		if hardBrokerErr(err) {
+			return Policy{}, err
+		}
 		p = fallback(fmt.Sprintf("policy file %s is unparseable (%s); fail-closed: daemon jail ON, CLI backends OFF", path, err.Error()))
 		return overlayManaged(p, opts, false)
 	}
@@ -365,6 +381,9 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 		base.Warnings = []string{"local policy was not applied; managed policy is in effect"}
 	}
 	if err := base.apply(doc, true); err != nil {
+		if hardBrokerErr(err) {
+			return Policy{}, err
+		}
 		fb := Defaults()
 		fb.CLIPermitted = false
 		fb.DaemonJail = true
@@ -1156,6 +1175,75 @@ func NormClaudeTransport(v string) (string, error) {
 	}
 }
 
+// errBrokerConfig is a startup error. Other policy mistakes fail closed
+// inside Load. A bad broker value or a lowered shipped level does not.
+var errBrokerConfig = errors.New("cli.permission.broker must be off or hook")
+
+func hardBrokerErr(err error) bool {
+	return errors.Is(err, errBrokerConfig) || errors.Is(err, permbroker.ErrLevelLowered) || errors.Is(err, permbroker.ErrBadLevel)
+}
+
+// BrokerHook reports that this bot should use the permission broker.
+// The default is off. An empty broker_bots list means every bot.
+func (p Policy) BrokerHook(botID string) bool {
+	if p.Broker != "hook" {
+		return false
+	}
+	if len(p.BrokerBots) == 0 {
+		return true
+	}
+	for _, id := range p.BrokerBots {
+		if id == botID {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *Policy) applyBroker(perm *cliPermDoc) error {
+	if perm.Broker != nil {
+		switch strings.ToLower(strings.TrimSpace(*perm.Broker)) {
+		case "", "off":
+			p.Broker = "off"
+		case "hook":
+			p.Broker = "hook"
+		default:
+			return errBrokerConfig
+		}
+	}
+	if perm.BrokerBots != nil {
+		var ids []string
+		for _, id := range *perm.BrokerBots {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				return fmt.Errorf("cli.permission.broker_bots contains an empty id")
+			}
+			ids = append(ids, id)
+		}
+		p.BrokerBots = ids
+	}
+	if perm.HookPath != nil {
+		v := strings.TrimSpace(*perm.HookPath)
+		if v != "" && !filepath.IsAbs(v) {
+			return fmt.Errorf("cli.permission.hook_path must be absolute")
+		}
+		p.HookPath = v
+	}
+	if perm.Risk != nil {
+		var entries []permbroker.RiskEntry
+		for _, r := range *perm.Risk {
+			entries = append(entries, permbroker.RiskEntry{
+				Tool: r.Tool, Argv: append([]string(nil), r.Argv...), Level: permbroker.Level(strings.TrimSpace(r.Level)),
+			})
+		}
+		if err := permbroker.ValidateRisk(entries); err != nil {
+			return err
+		}
+		p.BrokerRisks = entries
+	}
+	return nil
+}
+
 // IsBypassMode reports an always-allow mode. Those modes are honored only
 // when managed policy set them.
 func IsBypassMode(mode string) bool {
@@ -1303,15 +1391,25 @@ type cliIsoDoc struct {
 }
 
 type cliPermDoc struct {
-	Mode               *string   `toml:"mode" json:"mode"`
-	Allow              *[]string `toml:"allow" json:"allow"`
-	Deny               *[]string `toml:"deny" json:"deny"`
-	Ask                *[]string `toml:"ask" json:"ask"`
-	UIPrompts          *bool     `toml:"ui_prompts" json:"ui_prompts"`
-	PromptTimeout      flexText  `toml:"prompt_timeout" json:"prompt_timeout"`
-	MaxPromptTimeout   flexText  `toml:"max_prompt_timeout" json:"max_prompt_timeout"`
-	AllowSessionGrants *bool     `toml:"allow_session_grants" json:"allow_session_grants"`
-	ClaudeTransport    *string   `toml:"claude_transport" json:"claude_transport"`
+	Mode               *string    `toml:"mode" json:"mode"`
+	Allow              *[]string  `toml:"allow" json:"allow"`
+	Deny               *[]string  `toml:"deny" json:"deny"`
+	Ask                *[]string  `toml:"ask" json:"ask"`
+	UIPrompts          *bool      `toml:"ui_prompts" json:"ui_prompts"`
+	PromptTimeout      flexText   `toml:"prompt_timeout" json:"prompt_timeout"`
+	MaxPromptTimeout   flexText   `toml:"max_prompt_timeout" json:"max_prompt_timeout"`
+	AllowSessionGrants *bool      `toml:"allow_session_grants" json:"allow_session_grants"`
+	ClaudeTransport    *string    `toml:"claude_transport" json:"claude_transport"`
+	Broker             *string    `toml:"broker" json:"broker"`
+	BrokerBots         *[]string  `toml:"broker_bots" json:"broker_bots"`
+	HookPath           *string    `toml:"hook_path" json:"hook_path"`
+	Risk               *[]riskDoc `toml:"risk" json:"risk"`
+}
+
+type riskDoc struct {
+	Tool  string   `toml:"tool" json:"tool"`
+	Argv  []string `toml:"argv" json:"argv"`
+	Level string   `toml:"level" json:"level"`
 }
 
 type timersDoc struct {
@@ -1573,6 +1671,9 @@ func (p *Policy) apply(doc document, trusted bool) error {
 				return err
 			}
 			p.ClaudeTransport = v
+		}
+		if err := p.applyBroker(perm); err != nil {
+			return err
 		}
 	}
 	if iso := doc.CLI.Isolation; iso != nil {

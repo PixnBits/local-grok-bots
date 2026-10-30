@@ -152,6 +152,17 @@ imminent_timer_minutes = 2
 # --permission-prompt-tool stdio and does not pass --mcp-config.
 # none always passes --permission-prompts none.
 # claude_transport = "mcp"
+# broker is off (the default) or hook. hook arms the permission broker for
+# Claude and for run_shell. broker_bots, when set, limits that to those bots.
+# hook_path is an absolute lgb-permhook binary. A risk row can only raise a
+# shipped level. See docs/permission-broker.md.
+# broker = "off"
+# broker_bots = ["bot-id"]
+# hook_path = "/usr/local/bin/lgb-permhook"
+# [[cli.permission.risk]]
+# tool = "run_shell"
+# argv = ["git", "status"]
+# level = "high"
 # Optional binary pins. Prefer path + SHA-256. Empty keeps PATH launch.
 # Hardened setups should set sha256 for the grok binary. The version gate
 # trusts the text grok --version prints (only 1.0.52 and 1.0.62). The pin

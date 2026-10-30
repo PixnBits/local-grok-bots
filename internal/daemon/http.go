@@ -41,6 +41,9 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /api/bots/{id}/permission-suggestions/{sug_id}/dismiss", a.handleDismissSuggestion)
 	mux.HandleFunc("POST /api/mcp/permission", a.handleMCPPermission)
 	mux.HandleFunc("POST /api/mcp/permission/{token}", a.handleMCPPermission)
+	mux.HandleFunc("GET /api/permbroker/pending", a.handleBrokerPending)
+	mux.HandleFunc("POST /api/permbroker/pending/deny-all", a.handleBrokerDenyAll)
+	mux.HandleFunc("POST /api/permbroker/pending/{id}", a.handleBrokerDecide)
 	mux.HandleFunc("GET /api/bots/{id}/memory", a.handleListMemory)
 	mux.HandleFunc("POST /api/bots/{id}/memory", a.handlePutMemory)
 	mux.HandleFunc("DELETE /api/bots/{id}/memory/{key}", a.handleDeleteMemory)
@@ -70,7 +73,7 @@ func (a *App) withAuth(next http.Handler) http.Handler {
 		}
 		// A live lgb token or MCP permission token must not decide a card,
 		// including when the admin token is unset. Other routes stay 401.
-		if permissionDecisionPath(r) || pendingPermissionsPath(r) || durablePermissionPath(r) {
+		if permissionDecisionPath(r) || pendingPermissionsPath(r) || durablePermissionPath(r) || brokerAdminPath(r) {
 			if tok, ok := bearerToken(r); ok && a.liveRunCredential(tok) {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": "run token cannot decide permissions"})
 				return
@@ -526,6 +529,7 @@ func (a *App) handleDeleteBot(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	a.goneBots.Store(id, struct{}{})
 	a.cancelBot(id)
+	a.closeBrokerBot(id)
 	a.credMu.Lock()
 	// Release before removal so a failed delete still rejects the secret.
 	a.releaseBotGates(id)

@@ -242,9 +242,12 @@ On each bot's first Claude turn after the daemon starts, the daemon writes a
   home's `~/.claude/settings.json` and copies that file's sandbox keys into
   the `--settings` file, as described under [Sandbox and tools](#sandbox-and-tools).
   Allow rules, hooks, and the rest of the user file are not copied.
-- `--settings DATA_DIR/cli/<bot>/claude-settings.json`: daemon-written,
-  `disableAllHooks`, `enableAllProjectMcpServers: false`, and the restrictions
-  under [Sandbox and tools](#sandbox-and-tools).
+- `--settings DATA_DIR/cli/<bot>/claude-settings.json`: daemon-written.
+  By default this file sets `disableAllHooks`. When the permission broker
+  hook is on, that flag is omitted and the file contains only the broker
+  PreToolUse hook (`matcher` `*`). `enableAllProjectMcpServers` stays false,
+  plus the restrictions under [Sandbox and tools](#sandbox-and-tools).
+  See `docs/permission-broker.md`.
 - `--strict-mcp-config`: only the daemon's `--mcp-config` (the permission tool
   on the mcp transport), never `.mcp.json` or `~/.claude.json`.
   Permission prompts on the mcp transport depend on MCP. If managed policy
@@ -793,7 +796,9 @@ In SDK 0.3.300, `ExitPlanModeInput` is `allowedPrompts` plus unknown keys.
 
 ### MCP elicitation
 
-Declined. The daemon sets `disableAllHooks` and does not implement Claude's
+Declined. By default the daemon sets `disableAllHooks`. When the permission
+broker hook is on, the settings file contains that one PreToolUse command
+and no other hooks. The daemon does not implement Claude's
 elicitation dialog or Elicitation hooks. An unrecognized `control_request`
 subtype, including `mcp_message` and `hook_callback`, gets
 `Unsupported control request subtype: ...` and a deny audit. There is no form.

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -721,6 +722,19 @@ func fakeClaudeMain() {
 		fakeMulti(args)
 		return
 	}
+	// Hook mode only when this launch's --settings file has our PreToolUse
+	// command. Older tests write disableAllHooks and no hooks, so they stay
+	// on the permission-host path.
+	// Semantics checked 2026-10-29 against
+	// https://code.claude.com/docs/en/hooks
+	// Exit 2 or JSON permissionDecision deny blocks the tool. Any other
+	// failure, including a killed hook or a timeout, does not block by
+	// itself. The tool then follows the normal permission flow. Our launch
+	// has no allow list and no bypass flag, so that flow denies.
+	if cmd := preToolUseCommand(args); cmd != "" {
+		fakeHookClaude(args, cmd)
+		return
+	}
 	if streamControlArgs(args) {
 		fakeStreamClaude(args)
 		return
@@ -756,6 +770,143 @@ func fakeClaudeMain() {
 	fmt.Printf("{\"type\":\"system\",\"subtype\":\"permission_denied\",\"session_id\":%q,\"tool\":\"Bash\"}\n", sid)
 	fmt.Printf("{\"type\":\"result\",\"result\":%q,\"session_id\":%q}\n", detail, sid)
 	os.Exit(0)
+}
+
+// preToolUseCommand is the first command hook in --settings. An unreadable
+// file or a settings object with no command hook returns "".
+func preToolUseCommand(args []string) string {
+	path := flagValue(args, "--settings")
+	if path == "" {
+		return ""
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var doc struct {
+		Hooks struct {
+			PreToolUse []struct {
+				Hooks []struct {
+					Type    string `json:"type"`
+					Command string `json:"command"`
+				} `json:"hooks"`
+			} `json:"PreToolUse"`
+		} `json:"hooks"`
+	}
+	if json.Unmarshal(b, &doc) != nil {
+		return ""
+	}
+	for _, group := range doc.Hooks.PreToolUse {
+		for _, h := range group.Hooks {
+			if h.Type == "command" && strings.TrimSpace(h.Command) != "" {
+				return h.Command
+			}
+		}
+	}
+	return ""
+}
+
+// fakeHookClaude runs the settings hook the way Claude runs a command hook,
+// then decides whether the tool ran. It does not read project settings,
+// settings.local.json, or LGB_FAKE_USER_SETTINGS. --setting-sources= is
+// what keeps those out of a real launch. LGB_PROJECT_HOOK_MARKER is never
+// created here.
+func fakeHookClaude(args []string, command string) {
+	waitFakeGate()
+	sid := flagValue(args, "--session-id")
+	if sid == "" {
+		sid = flagValue(args, "--resume")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	payload, err := json.Marshal(map[string]any{
+		"hook_event_name": "PreToolUse",
+		"session_id":      sid,
+		"cwd":             cwd,
+		"tool_name":       "Bash",
+		"tool_input":      map[string]string{"command": "echo hi"},
+		"tool_use_id":     "tu_hook",
+	})
+	if err != nil {
+		payload = []byte(`{}`)
+	}
+	block, allow := runFakeHook(command, payload, os.Getenv("LGB_FAKE_HOOK"))
+	ran := allow
+	if !block && !allow && fakeFallthroughAllows(args) {
+		ran = true
+	}
+	if ran {
+		if p := os.Getenv("LGB_TOOL_MARKER"); p != "" {
+			_ = os.WriteFile(p, []byte("ran\n"), 0o644)
+		}
+		fmt.Printf("{\"type\":\"result\",\"result\":%q,\"session_id\":%q}\n", "ran", sid)
+		os.Exit(0)
+	}
+	fmt.Printf("{\"type\":\"result\",\"result\":%q,\"session_id\":%q}\n", "continued", sid)
+	os.Exit(0)
+}
+
+// fakeFallthroughAllows is the normal permission flow after a hook error.
+// acceptEdits, dontAsk, bypassPermissions, and an allow list run the tool.
+// Anything else denies it.
+func fakeFallthroughAllows(args []string) bool {
+	for _, a := range args {
+		switch a {
+		case "--dangerously-skip-permissions", "--allow-dangerously-skip-permissions", "--allowedTools":
+			return true
+		}
+		if strings.HasPrefix(a, "--allowedTools=") || strings.HasPrefix(a, "--dangerously-skip-permissions") {
+			return true
+		}
+	}
+	mode := strings.ToLower(strings.ReplaceAll(flagValue(args, "--permission-mode"), "_", "-"))
+	switch mode {
+	case "acceptedits", "accept-edits", "dontask", "dont-ask", "bypasspermissions", "bypass-permissions", "bypass":
+		return true
+	}
+	return false
+}
+
+// classifyHook maps a finished hook process onto block or allow.
+// Both false means the failure is non-blocking and the caller falls through.
+func classifyHook(err error, stdout []byte) (block, allow bool) {
+	code := 0
+	if err != nil {
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			return false, false
+		}
+		code = ee.ExitCode()
+	}
+	if code == 2 {
+		return true, false
+	}
+	if code != 0 {
+		return false, false
+	}
+	var doc struct {
+		HookSpecificOutput struct {
+			PermissionDecision string `json:"permissionDecision"`
+		} `json:"hookSpecificOutput"`
+		PermissionDecision string `json:"permissionDecision"`
+	}
+	if json.Unmarshal(bytes.TrimSpace(stdout), &doc) != nil {
+		return false, false
+	}
+	decision := doc.HookSpecificOutput.PermissionDecision
+	if decision == "" {
+		decision = doc.PermissionDecision
+	}
+	switch decision {
+	case "deny":
+		return true, false
+	case "allow":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func waitFakeGate() {

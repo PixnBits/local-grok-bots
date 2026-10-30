@@ -53,6 +53,10 @@ type Request struct {
 	OnPushStart func()
 	// Dial, when set, is the proxy's outbound TCP dial. Tests use it.
 	Dial func(context.Context, string, string) (net.Conn, error)
+	// CleanBash runs the command with bash --norc --noprofile and without
+	// BASH_ENV or ENV. The broker sets it only after an allow. Other
+	// shells stay on /bin/sh.
+	CleanBash bool
 }
 
 // Result is the captured output and the grant events for this command.
@@ -77,6 +81,7 @@ type stage2File struct {
 	Command   string   `json:"command"`
 	Env       []string `json:"env"`
 	Mounts    []mount  `json:"mounts"`
+	CleanBash bool     `json:"clean_bash,omitempty"`
 }
 
 type prepared struct {
@@ -90,6 +95,7 @@ type prepared struct {
 	// O_PATH|O_DIRECTORY|O_CLOEXEC. It is not passed to child processes.
 	// The jail can replace /lgb/events; this fd still names the original inode.
 	eventsDir *os.File
+	cleanBash bool
 	proxy     *proxy
 	push      *pushSrv
 	before    *treeSnap
@@ -186,7 +192,7 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &prepared{workspace: ws, command: req.Command, dir: dir, before: takeSnap(ws)}
+	p := &prepared{workspace: ws, command: req.Command, dir: dir, before: takeSnap(ws), cleanBash: req.CleanBash}
 	ok := false
 	defer func() {
 		if !ok {
@@ -386,6 +392,9 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 		"GIT_CONFIG_SYSTEM=/dev/null",
 		"GIT_CONFIG_NOSYSTEM=1",
 	}
+	if p.cleanBash {
+		p.env = dropEnvKeys(p.env, "BASH_ENV", "ENV")
+	}
 	if p.proxy != nil {
 		p.env = append(p.env,
 			"LD_PRELOAD=/lgb/preload.so",
@@ -394,6 +403,22 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 	}
 	ok = true
 	return p, nil
+}
+
+func dropEnvKeys(env []string, keys ...string) []string {
+	skip := map[string]bool{}
+	for _, k := range keys {
+		skip[k] = true
+	}
+	out := make([]string, 0, len(env))
+	for _, e := range env {
+		k, _, ok := strings.Cut(e, "=")
+		if ok && skip[k] {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // jailPATH names binaries that are already on the read-only /usr and /bin mounts.

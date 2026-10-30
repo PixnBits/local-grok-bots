@@ -45,7 +45,7 @@ func TestCommandArgvStaysShellWhenNotDropped(t *testing.T) {
 
 func TestDroppedArgvKeepsCommandApart(t *testing.T) {
 	const marker = "marker-not-in-script"
-	got := droppedArgv(65534, 65534, marker)
+	got := droppedArgv(65534, 65534, marker, false)
 	if len(got) != 5 || got[4] != marker {
 		t.Fatalf("argv %q", got)
 	}
