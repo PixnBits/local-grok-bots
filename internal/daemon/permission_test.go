@@ -265,6 +265,7 @@ func TestFakeClaudePermissionRoundTrip(t *testing.T) {
 	}
 	app.audit = lg
 	app.cliTTY = func() bool { return false }
+	tok := armAdmin(app)
 	app.rtMu.Lock()
 	app.setPol(policy.Policy{
 		Backend: "claude", CLIPermitted: true, TimersEnabled: true,
@@ -275,13 +276,13 @@ func TestFakeClaudePermissionRoundTrip(t *testing.T) {
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	app.permBase = srv.URL
-	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Ada", "description": "p"}, "")
+	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Ada", "description": "p"}, tok)
 	if res.StatusCode != 201 && res.StatusCode != 200 {
 		t.Fatalf("create %d %s", res.StatusCode, b)
 	}
 	var bot store.Bot
 	decodeJSON(t, b, &bot)
-	res, b = do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "go"}, "")
+	res, b = do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "go"}, tok)
 	if res.StatusCode != 200 {
 		t.Fatalf("post %d %s", res.StatusCode, b)
 	}
@@ -292,7 +293,7 @@ func TestFakeClaudePermissionRoundTrip(t *testing.T) {
 	if posted.RunID == "" {
 		t.Fatalf("no run id %s", b)
 	}
-	events := startSSE(t, srv.URL, bot.ID, posted.RunID)
+	events := startSSE(t, srv.URL, bot.ID, posted.RunID, tok)
 	waitSubscribed(t, app, posted.RunID)
 	if err := os.WriteFile(gate, []byte("go\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -325,15 +326,15 @@ func TestFakeClaudePermissionRoundTrip(t *testing.T) {
 	}
 	permToken := permFilesDuringRun(t, dir, bot.ID)
 	decide := srv.URL + "/api/bots/" + bot.ID + "/runs/" + posted.RunID + "/permissions/" + reqID
-	res, b = do(t, "POST", decide, map[string]any{"decision": "allow_session"}, "")
+	res, b = do(t, "POST", decide, map[string]any{"decision": "allow_session"}, tok)
 	if res.StatusCode != http.StatusForbidden {
 		t.Fatalf("session %d %s", res.StatusCode, b)
 	}
-	res, b = do(t, "POST", decide, map[string]any{"decision": "allow_once"}, "")
+	res, b = do(t, "POST", decide, map[string]any{"decision": "allow_once"}, tok)
 	if res.StatusCode != 200 {
 		t.Fatalf("allow %d %s", res.StatusCode, b)
 	}
-	waitIdle(t, srv.URL, bot.ID, "")
+	waitIdle(t, srv.URL, bot.ID, tok)
 	got, err := app.st.GetBot(bot.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -341,7 +342,7 @@ func TestFakeClaudePermissionRoundTrip(t *testing.T) {
 	if got.LastRunStatus != "done" || got.LastRunError != "" {
 		t.Fatalf("run %s %s", got.LastRunStatus, got.LastRunError)
 	}
-	msgs := thread(t, srv.URL, bot.ID)
+	msgs := thread(t, srv.URL, bot.ID, tok)
 	var saw bool
 	for _, m := range msgs {
 		if m.Role == "bot" && m.Content == "approved" {
@@ -376,13 +377,13 @@ func TestFakeClaudePermissionRoundTrip(t *testing.T) {
 	}
 }
 
-func startSSE(t *testing.T, base, botID, runID string) <-chan string {
+func startSSE(t *testing.T, base, botID, runID, token string) <-chan string {
 	t.Helper()
-	_, events := openSSE(t, base, botID, runID, true)
+	_, events := openSSE(t, base, botID, runID, true, token)
 	return events
 }
 
-func openSSE(t *testing.T, base, botID, runID string, prompts bool) (*http.Response, <-chan string) {
+func openSSE(t *testing.T, base, botID, runID string, prompts bool, token string) (*http.Response, <-chan string) {
 	t.Helper()
 	u := base + "/api/bots/" + botID + "/thread/stream?run_id=" + runID
 	if prompts {
@@ -391,6 +392,9 @@ func openSSE(t *testing.T, base, botID, runID string, prompts bool) (*http.Respo
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -446,6 +450,7 @@ func startPendingRun(t *testing.T, timeout time.Duration) (*App, string, string,
 	gate := filepath.Join(dir, "gate")
 	t.Setenv("LGB_FAKE_GATE", gate)
 	app := newApp(t, dir, nil)
+	tok := armAdmin(app)
 	app.cliTTY = func() bool { return false }
 	app.rtMu.Lock()
 	app.setPol(policy.Policy{
@@ -456,13 +461,13 @@ func startPendingRun(t *testing.T, timeout time.Duration) (*App, string, string,
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	app.permBase = srv.URL
-	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Ada", "description": "p"}, "")
+	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Ada", "description": "p"}, tok)
 	if res.StatusCode != 201 && res.StatusCode != 200 {
 		t.Fatalf("create %d %s", res.StatusCode, b)
 	}
 	var bot store.Bot
 	decodeJSON(t, b, &bot)
-	res, b = do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "go"}, "")
+	res, b = do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "go"}, tok)
 	if res.StatusCode != 200 {
 		t.Fatalf("post %d %s", res.StatusCode, b)
 	}
@@ -486,9 +491,9 @@ type pendingList struct {
 	} `json:"pending"`
 }
 
-func getPending(t *testing.T, base, botID string) pendingList {
+func getPending(t *testing.T, base, botID, token string) pendingList {
 	t.Helper()
-	res, b := do(t, "GET", base+"/api/bots/"+botID+"/permissions", nil, "")
+	res, b := do(t, "GET", base+"/api/bots/"+botID+"/permissions", nil, token)
 	if res.StatusCode != 200 {
 		t.Fatalf("pending %d %s", res.StatusCode, b)
 	}
@@ -502,10 +507,11 @@ func getPending(t *testing.T, base, botID string) pendingList {
 // until it is answered or times out, and a page opened later must see it.
 func TestPermissionWaitsWithNoPageOpen(t *testing.T) {
 	app, base, botID, runID := startPendingRun(t, 20*time.Second)
+	tok := app.cfg.AuthToken
 	var list pendingList
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
-		list = getPending(t, base, botID)
+		list = getPending(t, base, botID, tok)
 		if len(list.Pending) > 0 {
 			break
 		}
@@ -520,10 +526,10 @@ func TestPermissionWaitsWithNoPageOpen(t *testing.T) {
 	}
 	// Still pending a little later: nothing auto-denied it.
 	time.Sleep(300 * time.Millisecond)
-	if again := getPending(t, base, botID); len(again.Pending) != 1 {
+	if again := getPending(t, base, botID, tok); len(again.Pending) != 1 {
 		t.Fatalf("request was resolved with no page: %+v", again)
 	}
-	res, b := do(t, "GET", base+"/api/bots", nil, "")
+	res, b := do(t, "GET", base+"/api/bots", nil, tok)
 	if res.StatusCode != 200 {
 		t.Fatalf("bots %d", res.StatusCode)
 	}
@@ -532,12 +538,12 @@ func TestPermissionWaitsWithNoPageOpen(t *testing.T) {
 	if len(bots) != 1 || bots[0].PendingPermissions != 1 {
 		t.Fatalf("bot list badge %+v", bots)
 	}
-	res, b = do(t, "GET", base+"/api/permissions", nil, "")
+	res, b = do(t, "GET", base+"/api/permissions", nil, tok)
 	if res.StatusCode != 200 || !strings.Contains(string(b), p.ID) {
 		t.Fatalf("all pending %d %s", res.StatusCode, b)
 	}
 	// A page that opens now gets the card from the stream history too.
-	_, events := openSSE(t, base, botID, runID, true)
+	_, events := openSSE(t, base, botID, runID, true, tok)
 	sawCard := false
 	wait := time.After(3 * time.Second)
 	for !sawCard {
@@ -549,15 +555,15 @@ func TestPermissionWaitsWithNoPageOpen(t *testing.T) {
 		}
 	}
 	decide := base + "/api/bots/" + botID + "/runs/" + runID + "/permissions/" + p.ID
-	res, b = do(t, "POST", decide, map[string]any{"decision": "allow_once"}, "")
+	res, b = do(t, "POST", decide, map[string]any{"decision": "allow_once"}, tok)
 	if res.StatusCode != 200 {
 		t.Fatalf("allow %d %s", res.StatusCode, b)
 	}
-	res, _ = do(t, "POST", decide, map[string]any{"decision": "deny"}, "")
+	res, _ = do(t, "POST", decide, map[string]any{"decision": "deny"}, tok)
 	if res.StatusCode == 200 {
 		t.Fatal("second decision accepted")
 	}
-	waitIdle(t, base, botID, "")
+	waitIdle(t, base, botID, tok)
 	got, err := app.st.GetBot(botID)
 	if err != nil {
 		t.Fatal(err)
@@ -566,7 +572,7 @@ func TestPermissionWaitsWithNoPageOpen(t *testing.T) {
 		t.Fatalf("run %s %s", got.LastRunStatus, got.LastRunError)
 	}
 	saw := false
-	for _, m := range thread(t, base, botID) {
+	for _, m := range thread(t, base, botID, tok) {
 		if m.Role == "bot" && m.Content == "approved" {
 			saw = true
 		}
@@ -574,7 +580,7 @@ func TestPermissionWaitsWithNoPageOpen(t *testing.T) {
 	if !saw {
 		t.Fatal("approved reply missing")
 	}
-	if left := getPending(t, base, botID); len(left.Pending) != 0 {
+	if left := getPending(t, base, botID, tok); len(left.Pending) != 0 {
 		t.Fatalf("pending after decision %+v", left)
 	}
 }
@@ -582,7 +588,8 @@ func TestPermissionWaitsWithNoPageOpen(t *testing.T) {
 // Fail closed: an unanswered request with no page is denied at the timeout.
 func TestPermissionTimesOutWithNoPageOpen(t *testing.T) {
 	app, base, botID, runID := startPendingRun(t, 400*time.Millisecond)
-	waitIdle(t, base, botID, "")
+	tok := app.cfg.AuthToken
+	waitIdle(t, base, botID, tok)
 	tools, err := app.st.RunTools([]string{runID})
 	if err != nil {
 		t.Fatal(err)
@@ -599,7 +606,7 @@ func TestPermissionTimesOutWithNoPageOpen(t *testing.T) {
 	if !found {
 		t.Fatalf("no timeout record: %+v", tools[runID])
 	}
-	if left := getPending(t, base, botID); len(left.Pending) != 0 {
+	if left := getPending(t, base, botID, tok); len(left.Pending) != 0 {
 		t.Fatalf("pending after timeout %+v", left)
 	}
 }

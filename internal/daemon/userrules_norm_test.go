@@ -21,39 +21,40 @@ func TestRuleWhitespaceIsOneRuleAndCatWarns(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv := serve(t, app)
+	tok := armAdmin(app)
 	base := srv.URL + "/api/bots/" + bot.ID
-	res, body := do(t, "POST", base+"/permission-suggestions/analyze", map[string]any{}, "")
+	res, body := do(t, "POST", base+"/permission-suggestions/analyze", map[string]any{}, tok)
 	if res.StatusCode != 200 || !strings.Contains(string(body), "Bash(cat *)") || !strings.Contains(string(body), "cat -- file") {
 		t.Fatalf("analyze %d %s", res.StatusCode, body)
 	}
 	res, body = do(t, "POST", base+"/permission-rules", map[string]any{
 		"effect": "allow", "pattern": "Bash(cat *)",
-	}, "")
+	}, tok)
 	if res.StatusCode != 201 || !strings.Contains(string(body), `"pattern":"Bash(cat *)"`) || !strings.Contains(string(body), "cat -- file") || !strings.Contains(string(body), `"match_form":"cat -- file"`) {
 		t.Fatalf("create %d %s", res.StatusCode, body)
 	}
 	res, body = do(t, "POST", base+"/permission-rules", map[string]any{
 		"effect": "allow", "pattern": "Bash(cat  *)",
-	}, "")
+	}, tok)
 	if res.StatusCode != 409 || !strings.Contains(string(body), "rule already exists") {
 		t.Fatalf("duplicate %d %s", res.StatusCode, body)
 	}
 	res, body = do(t, "POST", base+"/permission-rules", map[string]any{
 		"effect": "allow", "pattern": "Bash(cat\n*)",
-	}, "")
+	}, tok)
 	if res.StatusCode != 400 {
 		t.Fatalf("newline %d %s", res.StatusCode, body)
 	}
 	res, body = do(t, "POST", base+"/permission-rules", map[string]any{
 		"effect": "deny", "pattern": "Bash(cat  *)",
-	}, "")
+	}, tok)
 	if res.StatusCode != 201 || strings.Contains(string(body), "match_form") || strings.Contains(string(body), "unprefixed") {
 		t.Fatalf("deny %d %s", res.StatusCode, body)
 	}
 	if !strings.Contains(string(body), `"pattern":"Bash(cat *)"`) {
 		t.Fatalf("deny pattern %s", body)
 	}
-	res, body = do(t, "GET", base+"/permission-rules", nil, "")
+	res, body = do(t, "GET", base+"/permission-rules", nil, tok)
 	if res.StatusCode != 200 || strings.Count(string(body), "Bash(cat *)") != 2 || !strings.Contains(string(body), "cat -- file") {
 		t.Fatalf("list %d %s", res.StatusCode, body)
 	}

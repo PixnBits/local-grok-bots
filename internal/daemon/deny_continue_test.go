@@ -161,10 +161,11 @@ func TestGolden_DenyNeverStopsRun_Claude(t *testing.T) {
 	})
 	t.Run("card", func(t *testing.T) {
 		app, base, botID, runID := startPendingRun(t, 20*time.Second)
+		tok := app.cfg.AuthToken
 		var id string
 		deadline := time.Now().Add(8 * time.Second)
 		for id == "" && time.Now().Before(deadline) {
-			list := getPending(t, base, botID)
+			list := getPending(t, base, botID, tok)
 			if len(list.Pending) > 0 {
 				id = list.Pending[0].ID
 				break
@@ -175,11 +176,11 @@ func TestGolden_DenyNeverStopsRun_Claude(t *testing.T) {
 			t.Fatal("card did not open")
 		}
 		decide := base + "/api/bots/" + botID + "/runs/" + runID + "/permissions/" + id
-		res, b := do(t, "POST", decide, map[string]any{"decision": "deny"}, "")
+		res, b := do(t, "POST", decide, map[string]any{"decision": "deny"}, tok)
 		if res.StatusCode != 200 {
 			t.Fatalf("deny %d %s", res.StatusCode, b)
 		}
-		waitIdle(t, base, botID, "")
+		waitIdle(t, base, botID, tok)
 		got, err := app.st.GetBot(botID)
 		if err != nil {
 			t.Fatal(err)
@@ -188,7 +189,7 @@ func TestGolden_DenyNeverStopsRun_Claude(t *testing.T) {
 			t.Fatalf("run %s %q", got.LastRunStatus, got.LastRunError)
 		}
 		saw := false
-		for _, m := range thread(t, base, botID) {
+		for _, m := range thread(t, base, botID, tok) {
 			if strings.Contains(m.Content, "Stopped after denial") {
 				t.Fatalf("notice %q", m.Content)
 			}

@@ -1157,6 +1157,227 @@ window.addEventListener("storage", function (ev) {
     #bot-list.is-stale,
     #bot-list.is-stale * { transition: none; }
   }
+
+  /* Approvals queue, rules page, and new-rule sheet. Tokens only. No edge stripes. */
+  button.appr-btn {
+    height: 32px; min-height: 32px; display: inline-flex; align-items: center; gap: 6px;
+    padding: 0 10px; border-radius: 999px; font-size: 13px; font-weight: 600; line-height: 18px;
+    border: 1px solid transparent; background: transparent; color: var(--muted); flex: none;
+  }
+  button.appr-btn svg { flex: none; }
+  button.appr-btn.is-wait { color: var(--attention-text); border-color: var(--attention); background: var(--surface); }
+  button.appr-btn.is-critical { color: var(--danger-text); border-color: var(--danger); }
+  button.appr-btn.is-open { background: var(--surface-2); }
+  button.appr-btn .appr-badge {
+    min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--attention); color: var(--on-attention); font-size: 12px; font-weight: 700;
+  }
+  button.appr-btn.is-critical .appr-badge { background: var(--danger); color: var(--on-danger); }
+  button.appr-btn.is-down .appr-badge {
+    background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1.5px var(--muted);
+  }
+  .perm-badge.is-critical { background: var(--danger); color: var(--on-danger); }
+  .appr-sep { width: 1px; height: 24px; background: var(--border); flex: none; }
+  #approvals-scrim { position: fixed; inset: 0; background: var(--scrim); z-index: 40; }
+  #approvals-scrim[hidden], #approvals[hidden], #rule-sheet[hidden], #rule-scrim[hidden] { display: none !important; }
+  #rule-scrim { position: fixed; inset: 0; background: var(--scrim); z-index: 49; }
+  #approvals {
+    display: flex; flex-direction: column; min-height: 0; background: var(--surface); color: var(--text);
+    border-left: 1px solid var(--border);
+  }
+  .appr-bar, .rules-bar { height: 64px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--surface); }
+  .appr-bar h2, #rules-title { margin: 0; font-size: 17px; font-weight: 650; line-height: 24px; }
+  .appr-body, .rules-scroll { flex: 1; min-height: 0; overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
+  .appr-note, .appr-err, .appr-alert {
+    display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; border-radius: 10px;
+    background: var(--danger-soft); color: var(--danger-text); font-size: 13px; line-height: 18px;
+  }
+  .appr-alert { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+  .appr-alert p { margin: 0; }
+  .appr-empty { display: grid; gap: 8px; justify-items: center; text-align: center; padding: 32px 16px; color: var(--text); }
+  .appr-empty p { margin: 0; color: var(--muted); font-size: 13px; line-height: 18px; }
+  .appr-group { margin: 8px 0 0; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .appr-card {
+    border: 1px solid var(--attention); border-radius: 14px; background: var(--surface); box-shadow: none;
+    display: flex; flex-direction: column; min-width: 0;
+  }
+  .appr-card.is-high { border-color: var(--danger); }
+  .appr-card.is-critical { border: 1.5px solid var(--danger); box-shadow: var(--e2); }
+  .appr-card.is-unclassified { border-style: dashed; }
+  .appr-card.is-low, .appr-card.is-medium { border-color: var(--attention); }
+  .appr-band {
+    padding: 8px 12px; background: var(--danger-soft); color: var(--danger-text);
+    font-size: 11.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+    border-bottom: 1px solid var(--danger); border-radius: 13px 13px 0 0;
+  }
+  .appr-in { display: flex; flex-direction: column; gap: 8px; padding: 12px 12px 0; min-width: 0; }
+  .appr-argv { background: var(--surface-2); border-radius: 10px; padding: 8px 10px; min-width: 0; }
+  .appr-argv-h { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+  .appr-argv-h span { flex: 1; }
+  .appr-pre {
+    margin: 6px 0 0; font-family: var(--mono); font-weight: 600; font-size: 13.5px; line-height: 20px;
+    color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
+  }
+  .appr-card.is-thread .appr-pre { font-size: 15px; line-height: 22px; }
+  .appr-op {
+    display: inline-block; margin: 0 2px; padding: 0 4px; border-radius: 4px;
+    background: var(--attention-soft); color: var(--attention-text); font-weight: 700;
+  }
+  .appr-meta, .appr-top, .appr-src, .appr-task { font-size: 12px; line-height: 16px; color: var(--muted); }
+  .appr-top { display: flex; align-items: center; gap: 8px; }
+  .appr-top b { color: var(--text); font-size: 13px; }
+  .appr-age { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .appr-eyebrow { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--attention-text); }
+  .appr-card.is-critical .appr-eyebrow, .appr-card.is-high .appr-eyebrow { color: var(--danger-text); }
+  .appr-title { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 15px; font-weight: 650; line-height: 22px; }
+  .appr-chip {
+    display: inline-flex; align-items: center; gap: 4px; height: 20px; padding: 0 8px; border-radius: 999px;
+    font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  }
+  .appr-chip.critical { background: var(--danger); color: var(--on-danger); }
+  .appr-chip.high { background: var(--danger-soft); color: var(--danger-text); }
+  .appr-chip.medium, .appr-chip.unclassified { background: var(--attention-soft); color: var(--attention-text); }
+  .appr-chip.low, .appr-chip.allow { background: var(--success-soft); color: var(--success-text); }
+  .appr-chip.deny { background: var(--danger-soft); color: var(--danger-text); }
+  .appr-chip.ask { background: var(--surface-2); color: var(--text-2); }
+  .appr-chip.pattern { background: var(--accent-soft); color: var(--accent-text); }
+  .appr-compound { font-size: 13px; line-height: 18px; }
+  .appr-compound ol { margin: 8px 0 0; padding-left: 20px; display: grid; gap: 6px; }
+  .appr-compound code { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+  .appr-part { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+  .appr-adv { border-top: 1px solid var(--border); padding-top: 8px; display: grid; gap: 4px; }
+  .appr-adv.is-unchecked { border-top-style: dashed; }
+  .appr-adv b { font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--text-2); }
+  .appr-adv p, .appr-reason { margin: 0; font-size: 13px; line-height: 18px; }
+  .appr-task { display: flex; gap: 8px; align-items: baseline; }
+  .appr-actions {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    padding: 12px; border-top: 1px solid var(--border); margin-top: 8px;
+  }
+  .appr-card.is-critical .appr-actions { background: var(--danger-soft); border-radius: 0 0 13px 13px; }
+  .appr-split { display: inline-flex; }
+  .appr-split > button:first-child { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+  .appr-split > button.appr-chev {
+    width: 28px; min-width: 28px; padding: 0; border-top-left-radius: 0; border-bottom-left-radius: 0;
+    border-left: 1px solid var(--border-strong);
+  }
+  .appr-split > button.primary.appr-chev { border-left-color: var(--on-accent); }
+  button.appr-deny-fill { background: var(--danger); color: var(--on-danger); border-color: transparent; }
+  button.appr-deny-fill:hover { opacity: .9; }
+  button.appr-deny-line { background: transparent; color: var(--danger-text); }
+  #approvals button[aria-disabled="true"], #rule-sheet button[aria-disabled="true"] { opacity: .55; }
+  .appr-lock { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
+  .appr-confirm, .appr-ladder, .appr-nudge {
+    padding: 8px 12px 12px; display: grid; gap: 8px; border-top: 1px solid var(--border);
+  }
+  .appr-arm { height: 3px; background: var(--surface-3); border-radius: 99px; overflow: hidden; }
+  .appr-arm i { display: block; height: 100%; width: 0; background: var(--attention); transition: width 1.5s linear; }
+  .appr-arm.is-armed i { width: 100%; }
+  .appr-ladder h3 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+  .appr-step { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; padding: 8px; border-radius: 10px; border: 1px solid transparent; text-align: left; background: transparent; }
+  .appr-step.is-on { border-color: var(--accent); background: var(--accent-soft); }
+  .appr-step small, .appr-step.is-locked { color: var(--muted); font-size: 12px; }
+  .appr-nudge { background: var(--attention-soft); color: var(--text); }
+  .appr-record { display: flex; gap: 8px; align-items: baseline; font-size: 13px; line-height: 18px; padding: 4px 0; }
+  .appr-record code { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+  #view-rules.on { overflow: hidden; gap: 0; }
+  .rules-scroll { padding: 16px; }
+  .rules-col { width: 100%; max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+  .rules-intro { margin: 0; color: var(--text-2); font-size: 14px; line-height: 20px; }
+  .rules-filters { display: flex; flex-wrap: wrap; gap: 8px; }
+  .rules-filters button[aria-checked="true"] { background: var(--accent); color: var(--on-accent); border-color: transparent; }
+  .rules-sec { border: 1px solid var(--border); border-radius: 14px; background: var(--surface); overflow: hidden; }
+  .rules-sec h3 { margin: 0; font-size: 15px; font-weight: 650; display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+  .rules-sec-h { display: flex; justify-content: space-between; gap: 8px; align-items: center; padding: 12px 12px 8px; }
+  .rules-sub { color: var(--muted); font-size: 13px; font-weight: 400; }
+  .rules-row, .rules-head {
+    display: grid; grid-template-columns: 96px minmax(0, 1fr) 140px 120px 44px; gap: 8px;
+    align-items: start; padding: 10px 12px; border-top: 1px solid var(--border); font-size: 13px;
+  }
+  .rules-head { color: var(--muted); font-size: 12px; font-weight: 600; }
+  .rules-cmd { font-family: var(--mono); font-weight: 600; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .rules-src { color: var(--muted); font-family: var(--font); font-weight: 400; font-size: 12px; }
+  .rules-subhead { background: var(--surface-2); padding: 8px 12px; border-top: 1px solid var(--border); font-size: 13px; }
+  .rules-menu { position: relative; }
+  .rules-pop {
+    position: absolute; right: 0; top: 36px; z-index: 5; min-width: 220px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--e3); padding: 6px;
+    display: grid; gap: 4px;
+  }
+  .rules-pop[hidden] { display: none !important; }
+  .rules-pop button { text-align: left; }
+  .rules-foot { border: 1px solid var(--border); border-radius: 14px; padding: 16px; background: var(--surface); display: grid; gap: 8px; }
+  .rules-foot h3 { margin: 0; font-size: 15px; }
+  .rules-foot ol { margin: 0; padding-left: 20px; display: grid; gap: 6px; font-size: 13px; line-height: 18px; }
+  #rule-sheet {
+    position: fixed; z-index: 50; inset: 0; margin: auto; width: min(720px, calc(100% - 32px)); height: min(90dvh, 860px);
+    background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 20px; box-shadow: var(--e3);
+    display: flex; flex-direction: column; min-height: 0;
+  }
+  #rule-sheet h2 { margin: 0; font-size: 20px; line-height: 28px; font-weight: 650; }
+  .rule-body { flex: 1; overflow: auto; padding: 16px; display: grid; gap: 12px; }
+  .rule-field { display: grid; gap: 6px; }
+  .rule-field label, .rule-field .lbl { font-size: 13px; font-weight: 600; }
+  .rule-help { margin: 0; color: var(--muted); font-size: 12px; line-height: 16px; }
+  .rule-err { margin: 0; color: var(--danger-text); font-size: 13px; line-height: 18px; display: flex; gap: 6px; }
+  textarea.rule-mono {
+    font-family: var(--mono); font-size: 14px; line-height: 20px; min-height: 64px; resize: vertical;
+    white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: hidden;
+  }
+  textarea.rule-mono[aria-invalid="true"] { border-color: var(--danger); }
+  .rule-cons { margin: 0; padding: 10px 12px; border-radius: 10px; background: var(--surface-2); font-size: 13px; line-height: 18px; }
+  .rule-cons.is-high { background: var(--attention-soft); }
+  .rule-preview { border-top: 1px solid var(--border); padding-top: 8px; display: grid; gap: 6px; }
+  .rule-preview ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  .rule-preview li { display: grid; gap: 2px; font-size: 13px; }
+  .rule-preview code { font-family: var(--mono); overflow-wrap: anywhere; }
+  .rule-actions { display: flex; gap: 8px; padding: 12px 16px 16px; }
+  #rule-sheet button.primary[aria-disabled="true"] { background: var(--surface-3); color: var(--text-2); }
+  .broker-thread { display: flex; flex-direction: column; gap: 12px; }
+  .broker-thread:empty { display: none; }
+  @media (min-width: 980px) {
+    #view-rules { display: none !important; }
+    body.solo #view-rules.on { display: flex !important; flex-direction: column; grid-column: 1 / -1; }
+  }
+  @media (min-width: 980px) and (max-width: 1179px) {
+    #approvals.is-slide {
+      position: fixed; top: 0; right: 0; width: 400px; height: 100dvh; z-index: 45; box-shadow: var(--e3); border-left: 1px solid var(--border);
+    }
+  }
+  @media (max-width: 979px) {
+    .appr-bar, #view-rules .solo-bar { height: 56px; }
+    #approvals.is-sheet { position: fixed; inset: 0; width: 100%; height: 100dvh; z-index: 45; border-left: 0; }
+  }
+  @media (min-width: 1180px) {
+    body.queue-dock .app { flex-direction: row; }
+    body.queue-dock .app > main { flex: 1 1 auto; min-width: 0; }
+    #approvals.is-dock { position: relative; width: 380px; height: 100dvh; flex: none; z-index: 1; box-shadow: none; }
+  }
+  @media (max-width: 540px) {
+    button.appr-btn { width: 44px; height: 44px; min-width: 44px; min-height: 44px; padding: 0; justify-content: center; position: relative; }
+    button.appr-btn .appr-word, button.appr-btn .appr-dot, button.appr-btn .appr-num {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+    }
+    button.appr-btn .appr-badge { position: absolute; top: 4px; right: 2px; }
+    .appr-actions { gap: 12px; }
+    .appr-actions > button, .appr-split, .appr-split > button, .appr-chev, .appr-copy, .appr-step, .rules-filters button,
+    #rule-sheet button, #rule-sheet textarea, #rule-sheet select { min-height: 44px; }
+    .appr-split > button.appr-chev { width: 44px; min-width: 44px; }
+    .appr-card.is-thread .appr-pre, .appr-pre { font-size: 13.5px; line-height: 20px; }
+    .rules-row, .rules-head { grid-template-columns: 1fr; }
+    .rules-sub .rules-dot { display: none; }
+    .rules-sub { display: block; }
+    #rule-sheet { width: 100%; height: 100dvh; border-radius: 0; border: 0; }
+    #rule-sheet .seg { display: flex; }
+    #rule-sheet .seg button { flex: 1; min-height: 44px; }
+    .rule-actions { flex-direction: column; }
+    .rule-actions button { width: 100%; min-height: 44px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .appr-arm i, #approvals, #rule-sheet { transition: none; }
+  }
+
 </style>
 </head>
 <body>
@@ -1173,6 +1394,8 @@ window.addEventListener("storage", function (ev) {
               <button type="button" role="menuitem" id="menu-archived" hidden></button>
               <div class="menu-sep" role="separator"></div>
               <button type="button" role="menuitem" id="menu-log">Log</button>
+              <button type="button" role="menuitem" id="menu-alerts">Critical alerts · Off</button>
+              <button type="button" role="menuitem" id="menu-rules">Approval rules · 0</button>
               <div class="menu-sep" role="separator"></div>
               <div class="mlabel" id="appearance-label">Appearance</div>
               <div class="seg" id="theme-seg" role="radiogroup" aria-label="Appearance" aria-labelledby="appearance-label">
@@ -1183,6 +1406,7 @@ window.addEventListener("storage", function (ev) {
             </div>
           </div>
           <button type="button" class="icon-btn" id="new-bot" aria-label="New bot"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M17.5 3.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4z" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button type="button" class="appr-btn is-zero" aria-expanded="false" aria-haspopup="dialog" aria-controls="approvals" aria-label="Approvals, 0 waiting, 0 critical"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"><path d="M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg><span class="appr-word">Approvals</span><span class="appr-dot"> · </span><span class="appr-num">0</span><span class="appr-badge" hidden>0</span></button>
         </div>
       </header>
       <nav class="roster-scroll" aria-label="Bots">
@@ -1218,8 +1442,11 @@ window.addEventListener("storage", function (ev) {
               <button type="button" data-act="archive" role="menuitem" id="menu-archive"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M4 7h16v3H4zM6 10v8h12v-8M10 14h4" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg><span id="menu-archive-label">Archive</span></button>
             </div>
           </div>
+          <span class="appr-sep" aria-hidden="true"></span>
+          <button type="button" class="appr-btn is-zero" aria-expanded="false" aria-haspopup="dialog" aria-controls="approvals" aria-label="Approvals, 0 waiting, 0 critical"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"><path d="M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg><span class="appr-word">Approvals</span><span class="appr-dot"> · </span><span class="appr-num">0</span><span class="appr-badge" hidden>0</span></button>
         </div>
         <div class="thread-col">
+        <div id="broker-thread" class="broker-thread"></div>
         <div class="msgs" id="msgs"><p class="empty">Choose a bot to read its thread.</p><div class="live" id="live"></div><div class="working" id="working" hidden><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span id="working-text">Working</span></div></div>
         <button type="button" class="new-pill" id="new-pill" hidden>New messages ↓</button>
         <div class="note" id="run-note" hidden></div>
@@ -1269,6 +1496,7 @@ window.addEventListener("storage", function (ev) {
         <div class="menu">
           <button type="button" class="icon-btn" id="profile-menu" aria-haspopup="menu" aria-expanded="false" aria-controls="bot-menu" aria-label="Bot menu"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><circle cx="6" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="18" cy="12" r="1.6" fill="currentColor"/></svg></button>
         </div>
+        <button type="button" class="appr-btn is-zero" aria-expanded="false" aria-haspopup="dialog" aria-controls="approvals" aria-label="Approvals, 0 waiting, 0 critical"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"><path d="M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg><span class="appr-word">Approvals</span><span class="appr-dot"> · </span><span class="appr-num">0</span><span class="appr-badge" hidden>0</span></button>
       </header>
       <div class="profile-layout">
         <nav class="profile-nav profile-nav-block" id="profile-nav-main" aria-label="Profile sections">
@@ -1464,6 +1692,7 @@ window.addEventListener("storage", function (ev) {
                   <h2>Permission rules</h2>
                   <span class="aside ok"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path d="M20 6L9 17l-5-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>Rules save immediately</span>
                 </div>
+                <p class="help"><button type="button" class="ghost small" id="open-approval-rules">Open Approval rules</button></p>
                 <p class="help" id="perm-rules-help">Ask and deny rules only narrow what a managed allow would permit.</p>
                 <p class="info-box" id="perm-draft" hidden>Rules can be added once the bot is created.</p>
                 <div id="perm-rules" class="perm-list"></div>
@@ -1503,6 +1732,7 @@ window.addEventListener("storage", function (ev) {
         <button type="button" class="back log-back" id="log-back" aria-label="Back"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <h2 class="solo-title">Log</h2>
         <button type="button" id="log-refresh">Refresh</button>
+        <button type="button" class="appr-btn is-zero" aria-expanded="false" aria-haspopup="dialog" aria-controls="approvals" aria-label="Approvals, 0 waiting, 0 critical"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"><path d="M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg><span class="appr-word">Approvals</span><span class="appr-dot"> · </span><span class="appr-num">0</span><span class="appr-badge" hidden>0</span></button>
       </header>
       <div style="display:flex;flex-direction:column;min-height:0;flex:1">
         <div style="padding:12px" class="filters">
@@ -1514,7 +1744,104 @@ window.addEventListener("storage", function (ev) {
         <div class="log" id="log"></div>
       </div>
     </section>
+<section class="view" id="view-rules">
+      <header class="solo-bar">
+        <button type="button" class="back" id="rules-back" aria-label="Back"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        <h2 class="solo-title" id="rules-title" tabindex="-1">Approval rules</h2>
+        <button type="button" class="primary small" id="rules-new">New rule</button>
+        <button type="button" class="appr-btn is-zero" aria-expanded="false" aria-haspopup="dialog" aria-controls="approvals" aria-label="Approvals, 0 waiting, 0 critical"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false"><path d="M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg><span class="appr-word">Approvals</span><span class="appr-dot"> · </span><span class="appr-num">0</span><span class="appr-badge" hidden>0</span></button>
+      </header>
+      <div class="rules-scroll">
+        <div class="rules-col">
+          <p class="rules-intro">Rules match an exact command or a pattern. A prompt never offers a pattern.</p>
+          <div class="rules-filters" role="radiogroup" aria-label="Rule filters">
+            <button type="button" role="radio" data-filter="all" aria-checked="true">All</button>
+            <button type="button" role="radio" data-filter="global" aria-checked="false">Global</button>
+            <button type="button" role="radio" data-filter="bot" aria-checked="false">Per bot</button>
+            <button type="button" role="radio" data-filter="grants" aria-checked="false">Task grants</button>
+            <button type="button" role="radio" data-filter="patterns" aria-checked="false">Patterns</button>
+            <button type="button" role="radio" data-filter="risk" aria-checked="false">Risk tables</button>
+          </div>
+          <div id="rules-list"></div>
+          <section class="rules-foot">
+            <h3>How a request is decided</h3>
+            <ol>
+              <li>Any deny (exact or pattern, any scope).</li>
+              <li>Several parts ask, unless every part is granted for this task.</li>
+              <li>Critical asks. No rule, pattern or task grant approves a critical item.</li>
+              <li>Narrowest scope: task &gt; bot &gt; global. Within one scope, exact beats pattern, then ask beats allow.</li>
+              <li>No match asks.</li>
+            </ol>
+          </section>
+        </div>
+      </div>
+    </section>
   </main>
+
+  <div id="approvals-scrim" hidden></div>
+  <aside id="approvals" hidden role="dialog" aria-labelledby="approvals-title">
+    <header class="appr-bar">
+      <h2 id="approvals-title" tabindex="-1">Approvals</h2>
+      <button type="button" class="ghost icon-btn" id="approvals-close" aria-label="Close"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+    </header>
+    <div id="approvals-banner" class="appr-note" hidden></div>
+    <div id="approvals-alerts"></div>
+    <div class="appr-body" id="approvals-body"></div>
+    <div id="approvals-count" class="sr" aria-live="polite"></div>
+    <div id="approvals-assert" class="sr" aria-live="assertive"></div>
+  </aside>
+  <div id="rule-scrim" hidden></div>
+  <div id="rule-sheet" role="dialog" aria-modal="true" aria-labelledby="rule-sheet-title" hidden>
+    <header class="appr-bar">
+      <h2 id="rule-sheet-title">New rule</h2>
+      <button type="button" class="ghost icon-btn" id="rule-close" aria-label="Close"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
+    </header>
+    <div class="rule-body">
+      <div class="rule-field">
+        <div class="lbl" id="rule-kind-label">Rule type</div>
+        <div class="seg" id="rule-kind" role="radiogroup" aria-labelledby="rule-kind-label">
+          <button type="button" role="radio" data-kind="exact" aria-checked="true">Exact command</button>
+          <button type="button" role="radio" data-kind="pattern" aria-checked="false">Pattern</button>
+        </div>
+      </div>
+      <div class="rule-field">
+        <label id="rule-input-label" for="rule-pattern">Exact command</label>
+        <textarea id="rule-pattern" class="rule-mono" rows="3" spellcheck="false" aria-invalid="false" aria-describedby="rule-help rule-error"></textarea>
+        <p class="rule-help" id="rule-help">Matches this exact command only. To cover more than one command, add a pattern rule. Commands with ; &amp;&amp; | $( ) can't be saved.</p>
+        <p class="rule-err" id="rule-error" hidden></p>
+      </div>
+      <div class="rule-field">
+        <div class="lbl" id="rule-scope-label">Applies to</div>
+        <div class="seg" id="rule-scope" role="radiogroup" aria-labelledby="rule-scope-label">
+          <button type="button" role="radio" data-scope="bot" aria-checked="true">One bot</button>
+          <button type="button" role="radio" data-scope="global" aria-checked="false">All bots</button>
+        </div>
+        <label>Bot
+          <select id="rule-bot"></select>
+        </label>
+      </div>
+      <div class="rule-field">
+        <div class="lbl" id="rule-effect-label">Effect</div>
+        <div class="seg" id="rule-effect" role="radiogroup" aria-labelledby="rule-effect-label">
+          <button type="button" role="radio" data-effect="allow" aria-checked="true">Allow</button>
+          <button type="button" role="radio" data-effect="ask" aria-checked="false">Ask</button>
+          <button type="button" role="radio" data-effect="deny" aria-checked="false">Deny</button>
+        </div>
+      </div>
+      <p class="rule-cons" id="rule-cons"></p>
+      <div class="rule-preview">
+        <h3>Matches in recent requests</h3>
+        <p id="rule-summary" aria-live="polite"></p>
+        <ul id="rule-hits"></ul>
+      </div>
+    </div>
+    <div class="rule-actions">
+      <button type="button" class="primary" id="rule-save" aria-disabled="true">Save</button>
+      <button type="button" class="ghost" id="rule-cancel">Cancel</button>
+    </div>
+  </div>
+  <template id="tpl-chev"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><path d="M5 9l7 7 7-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></template>
+  <template id="tpl-lock"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false"><rect x="6" y="11" width="12" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3" fill="none" stroke="currentColor" stroke-width="2"/></svg></template>
 </div>
 <div class="auth" id="auth">
   <form class="panel card">
@@ -1663,6 +1990,7 @@ function drillFocusTarget(name, wide) {
   if (name === "chat") return { sel: "#thread-name", tabindex: -1 };
   if (name === "profile") return { sel: "#profile-heading", tabindex: -1 };
   if (name === "log") return { sel: "#view-log h2.solo-title", tabindex: -1 };
+  if (name === "rules") return { sel: "#rules-title", tabindex: -1 };
   return null;
 }
 function applyDrillFocus(el, tabindex) {
@@ -1684,6 +2012,7 @@ function desktopPaneFocusTarget(name, wide) {
   if (name === "chat") return { sel: "#thread-name", tabindex: -1 };
   if (name === "profile") return { sel: "#profile-heading", tabindex: -1 };
   if (name === "log") return { sel: "#view-log h2.solo-title", tabindex: -1 };
+  if (name === "rules") return { sel: "#rules-title", tabindex: -1 };
   return null;
 }
 // pane-focus:end
@@ -1701,13 +2030,15 @@ function setView(name) {
     state.profileBase = null;
   }
   const wide = isWide();
-  const solo = name === "profile" || name === "log";
+  const solo = name === "profile" || name === "log" || name === "rules";
   document.body.classList.toggle("solo", solo);
   state.desktopLog = name === "log";
-  for (const v of ["bots","chat","profile","log"]) {
+  for (const v of ["bots","chat","profile","log","rules"]) {
+    const node = $("#view-" + v);
+    if (!node) continue;
     let on = v === name;
     if (wide && !solo && (v === "bots" || v === "chat")) on = true;
-    $("#view-" + v).classList.toggle("on", on);
+    node.classList.toggle("on", on);
   }
   if (name === "log" && enter) loadLog();
   if (shouldFocusDrill(prev, name, wide)) focusDrillView(name, wide, (sel) => $(sel));
@@ -1962,6 +2293,7 @@ function renderBots() {
     syncLogBots();
     syncComposer();
     if (typeof syncRetryButton === "function") syncRetryButton();
+    if (typeof syncBrokerBadges === "function") syncBrokerBadges();
     return;
   }
   let focusKey = "";
@@ -2039,7 +2371,8 @@ function renderBots() {
     line2.append(el("span", "bot-label", b.label || ""));
     // Waiting beats running. The count pill is the visible badge; bot-attn
     // keeps the accessible name the roster tests pin.
-    if (b.pending_permissions > 0 && !b.archived) {
+    if (typeof appendPendingBadge === "function") appendPendingBadge(copy, line2, btn, b);
+    else if (b.pending_permissions > 0 && !b.archived) {
       const n = b.pending_permissions;
       const words = approvalWords(n);
       copy.append(el("small", "bot-attn", words));
@@ -2198,9 +2531,7 @@ function paintHeader(b) {
     paintNote("continue", "Stopped after 8 tool rounds. Continue picks up the same work for 8 more.", [btn]);
     return;
   }
-  if (!state.streaming && b.status !== "running" && b.last_run_status === "stopped") {
-    paintNote("quiet", "Stopped after denial.");
-  } else if (!state.streaming && b.status !== "running" && b.last_run_status === "error" && b.last_run_error) {
+  if (!state.streaming && b.status !== "running" && b.last_run_status === "error" && b.last_run_error) {
     paintFailedNote("Run failed: " + b.last_run_error);
   } else if (!state.streaming && state.stopNote !== "failed") {
     note.hidden = true;
@@ -2210,7 +2541,6 @@ function paintHeader(b) {
 function showRunError(text) {
   const t = text == null ? "" : String(text);
   if (t.indexOf("Run failed:") === 0) { paintFailedNote(t); return; }
-  if (t === "Stopped after denial" || t === "Stopped after denial.") { paintNote("quiet", "Stopped after denial."); return; }
   paintNote("", t);
 }
 function menuTriggers() { return document.querySelectorAll("[aria-controls='bot-menu']"); }
@@ -2233,24 +2563,43 @@ function toggleBotMenu(btn) {
   for (const b of menuTriggers()) b.setAttribute("aria-expanded", b === btn && willOpen ? "true" : "false");
 }
 // The selected bot lives in the URL as {base}/bots/{id}. Profile and log stay
-// on that same path (or /) with a hash: the daemon only serves /, /index.html
-// and /bots/{id}, so an extra path segment would 404 on reload.
+// on that same path (or /) with a hash. The daemon also serves /rules (the
+// client reads ?bot=). #approvals opens the queue and is not a view. Any
+// other extra path segment 404s on reload.
 // route:begin
 function botFromPathname(pathname, root) {
   const rest = String(pathname || "").slice(String(root || "").length);
   const m = rest.match(/^\/bots\/([^/]+)\/?$/);
   return m ? decodeURIComponent(m[1]) : null;
 }
+function rulesBotFromSearch(search) {
+  const q = String(search || "");
+  const m = q.match(/[?&]bot=([^&]*)/);
+  if (!m) return null;
+  try {
+    const v = decodeURIComponent(m[1].replace(/\+/g, " "));
+    return v || null;
+  } catch (e) {
+    return m[1] || null;
+  }
+}
 function levelURL(root, view, bot, search) {
   if (view === "draft") return root + "/" + (search || "") + "#new";
+  if (view === "rules") {
+    const q = bot ? "?bot=" + encodeURIComponent(bot) : "";
+    return root + "/rules" + q;
+  }
   const id = view !== "bots" && bot ? bot : null;
   const path = root + (id ? "/bots/" + encodeURIComponent(id) : "/");
   const hash = view === "profile" ? "#profile" : view === "log" ? "#log" : "";
   return path + (search || "") + hash;
 }
-function parseLevel(pathname, hash, root, hist) {
+function parseLevel(pathname, hash, root, hist, search) {
+  const rest = String(pathname || "").slice(String(root || "").length);
+  if (/^\/rules\/?$/.test(rest)) return { view: "rules", bot: rulesBotFromSearch(search) };
   const bot = botFromPathname(pathname, root);
-  const h = String(hash || "").replace(/^#/, "");
+  const raw = String(hash || "").replace(/^#/, "");
+  const h = raw === "approvals" ? "" : raw;
   if (h === "profile" && bot) return { view: "profile", bot: bot };
   if (h === "log") return { view: "log", bot: bot };
   if (h === "new") return { view: "draft", bot: null };
@@ -2259,6 +2608,9 @@ function parseLevel(pathname, hash, root, hist) {
   }
   if (hist && hist.lgb === 1 && hist.view === "log") {
     return { view: "log", bot: hist.bot || bot };
+  }
+  if (hist && hist.lgb === 1 && hist.view === "rules") {
+    return { view: "rules", bot: hist.bot || rulesBotFromSearch(search) };
   }
   if (hist && hist.lgb === 1 && hist.view === "draft") return { view: "draft", bot: null };
   if (bot) return { view: "chat", bot: bot };
@@ -2273,20 +2625,29 @@ function parentLevel(level) {
   if (level && level.view === "draft") return { view: "bots", bot: null };
   if (level && level.view === "profile" && bot) return { view: "chat", bot: bot };
   if (level && level.view === "log") return bot ? { view: "chat", bot: bot } : { view: "bots", bot: null };
+  if (level && level.view === "rules") return bot ? { view: "chat", bot: bot } : { view: "bots", bot: null };
   return { view: "bots", bot: null };
 }
-function historyStamp(hist, pathname, hash, root) {
+function historyStamp(hist, pathname, hash, root, search) {
   if (hist && hist.lgb === 1) return null;
-  const level = parseLevel(pathname, hash, root, hist);
+  const level = parseLevel(pathname, hash, root, hist, search);
   return { op: "replace", view: level.view, bot: level.bot };
 }
 // route:end
 function botPath(id) { return base() + (id ? "/bots/" + encodeURIComponent(id) : "/"); }
 function botFromPath() { return botFromPathname(location.pathname, base()); }
+function commitSearch(view) {
+  if (view === "rules") return "";
+  let search = location.search || "";
+  search = search.replace(/([?&])bot=[^&]*/g, "$1").replace(/[?&]$/, "").replace(/\?&/, "?").replace(/&&/g, "&");
+  if (search === "?") search = "";
+  return search;
+}
 function commitLevel(level, mode) {
   const view = level && level.view ? level.view : "bots";
   const bot = level && level.bot ? level.bot : null;
-  const url = levelURL(base(), view, bot, location.search);
+  let url = levelURL(base(), view, bot, commitSearch(view));
+  if (url.indexOf("#") < 0 && typeof hashIsApprovals === "function" && hashIsApprovals(location.hash)) url += "#approvals";
   const prev = history.state && history.state.lgb === 1 ? history.state : null;
   const here = location.pathname + location.search + location.hash;
   if (prev && prev.view === view && (prev.bot || null) === bot && here === url) return;
@@ -2296,7 +2657,7 @@ function commitLevel(level, mode) {
   else history.replaceState(rec, "", url);
 }
 function ensureHistory() {
-  const stamp = historyStamp(history.state, location.pathname, location.hash, base());
+  const stamp = historyStamp(history.state, location.pathname, location.hash, base(), location.search);
   if (!stamp) return;
   commitLevel(stamp, "replace");
 }
@@ -2314,6 +2675,7 @@ function navBack() {
 function knownBot(id) { return !!(id && state.bots.some(b => b.id === id)); }
 function revealLevel(level) {
   if (level.view === "draft") return openDraft(false);
+  if (level.view === "rules") return openRules(level.bot || "", false);
   if (level.view === "profile" && knownBot(level.bot)) return openProfile(level.bot, false);
   if (level.view === "chat" && knownBot(level.bot)) return openBot(level.bot, false);
   if (level.view === "log") {
@@ -2345,16 +2707,14 @@ function openLog(push = true) {
   focusPane("log");
 }
 function setTitle() {
-  if (state.view === "log") {
-    document.title = "Log — Local Grok Bots";
-    return;
+  if (state.view === "log") document.title = "Log — Local Grok Bots";
+  else if (state.view === "rules") document.title = "Approval rules — Local Grok Bots";
+  else if (state.draft) document.title = "New bot — Local Grok Bots";
+  else {
+    const b = state.botId && currentBot();
+    document.title = b ? b.name + " — Local Grok Bots" : "Local Grok Bots";
   }
-  if (state.draft) {
-    document.title = "New bot — Local Grok Bots";
-    return;
-  }
-  const b = state.botId && currentBot();
-  document.title = b ? b.name + " — Local Grok Bots" : "Local Grok Bots";
+  document.title = criticalTitle(document.title, approvalsCriticalCount());
 }
 function goHome(push = true) {
   closeState();
@@ -2380,9 +2740,10 @@ function goHome(push = true) {
   setTitle();
 }
 window.addEventListener("hashchange", () => {
+  if (typeof syncApprovalsHash === "function") syncApprovalsHash();
   if (history.state && history.state.lgb === 1) return;
   ensureHistory();
-  revealLevel(parseLevel(location.pathname, location.hash, base(), history.state));
+  revealLevel(parseLevel(location.pathname, location.hash, base(), history.state, location.search));
 });
 window.addEventListener("popstate", () => {
   if (state.expectPop) {
@@ -2390,7 +2751,7 @@ window.addEventListener("popstate", () => {
     navBypass = true;
     try {
       ensureHistory();
-      revealLevel(parseLevel(location.pathname, location.hash, base(), history.state));
+      revealLevel(parseLevel(location.pathname, location.hash, base(), history.state, location.search));
     } finally { navBypass = false; }
     return;
   }
@@ -2408,7 +2769,7 @@ window.addEventListener("popstate", () => {
     return;
   }
   ensureHistory();
-  revealLevel(parseLevel(location.pathname, location.hash, base(), history.state));
+  revealLevel(parseLevel(location.pathname, location.hash, base(), history.state, location.search));
 });
 async function openBot(id, push = true) {
   if (!navBypass && profileDirty()) {
@@ -3113,6 +3474,8 @@ $("#composer-input").addEventListener("keydown", (e) => {
   if (typeof permCards !== "undefined") {
     for (const rec of permCards.values()) if (rec && !rec.settled) dialogOpen = true;
   }
+  if (typeof queueIsOpen === "function" && queueIsOpen()) dialogOpen = true;
+  if (typeof brokerCardPending === "function" && brokerCardPending()) dialogOpen = true;
   const stop = !touch && escStopsRun({
     key: "Escape",
     empty: !String(input && input.value || "").trim(),
@@ -3911,8 +4274,7 @@ async function follow(runId) {
           }
           setWorking(false);
           if (state.stop.phase !== "stopped") {
-            if (event === "done" && payload.status === "stopped") showRunError("Stopped after denial.");
-            else if (event === "error" && payload.error !== "tool round limit") showRunError("Run failed: " + (payload.error || "unknown error"));
+            if (event === "error" && payload.error !== "tool round limit") showRunError("Run failed: " + (payload.error || "unknown error"));
           }
           stopStream();
           if (state.stop && state.stop.phase === "stopped") {
@@ -4882,13 +5244,25 @@ function applySnapshot(snap) {
   state.saveErrorChip = false;
   paintDirty();
 }
-function showStatusToast(message) {
+function showStatusToast(message, undo) {
   const toast = $("#toast");
   if (!toast) return;
   clearTimeout(state.toastTimer);
-  toast.replaceChildren(el("span", "toast-copy", message));
+  let text = message == null ? "" : String(message);
+  const kids = [];
+  if (typeof undo === "function") {
+    const undoAt = text.lastIndexOf("Undo");
+    kids.push(el("span", "toast-copy", undoAt >= 0 ? text.slice(0, undoAt) : text));
+    const undoBtn = btn("ghost", "Undo");
+    undoBtn.addEventListener("click", function () { dismissToast(); undo(); });
+    kids.push(undoBtn);
+  } else {
+    kids.push(el("span", "toast-copy", text));
+  }
+  toast.replaceChildren.apply(toast, kids);
   toast.hidden = false;
-  state.toastTimer = setTimeout(dismissToast, 2000);
+  const ms = arguments.length > 1 ? ((typeof ARCHIVE_TOAST_MS === "number") ? ARCHIVE_TOAST_MS : 6000) : 2000;
+  state.toastTimer = setTimeout(dismissToast, ms);
 }
 function focusProfileHeading() {
   const h = $("#profile-heading");
@@ -5007,10 +5381,11 @@ function leaveProfile() {
     history.back();
     return;
   }
-  const parent = parentLevel(parseLevel(location.pathname, location.hash, base(), history.state));
+  const parent = parentLevel(parseLevel(location.pathname, location.hash, base(), history.state, location.search));
   commitLevel(parent, "replace");
   if (parent.view === "chat" && parent.bot) openBot(parent.bot, false);
   else if (parent.view === "log") openLog(false);
+  else if (parent.view === "rules") openRules(parent.bot || "", false);
   else goHome(false);
 }
 function discardSaveBar() {
@@ -6800,9 +7175,22 @@ document.addEventListener("keydown", (e) => {
     } else if (e.key === "Tab") trapStateTab(e, $("#discard-dialog"), document.activeElement);
     return;
   }
+  if (typeof approvalKey === "function" && typeof closeApprovalLayer === "function") {
+    const act = approvalKey(e, typeof isTypingTarget === "function" && isTypingTarget(e.target));
+    if (act && act.close && closeApprovalLayer()) {
+      e.preventDefault();
+      return;
+    }
+    if (act && act.open && typeof openApprovals === "function" && !(typeof queueIsOpen === "function" && queueIsOpen())) {
+      e.preventDefault();
+      openApprovals({ manual: true, focus: true });
+      return;
+    }
+  }
   if (e.key !== "Escape") return;
   // hidden stays set until the sheet finishes closing, so the same Escape
   // that starts closeState does not also dismiss the toast.
+  // Escape closes the approvals queue and never approves, denies, or stops a run.
   const sheet = $("#state-sheet");
   if (sheet && !sheet.hidden) return;
   const roster = $("#roster-menu");
@@ -6832,7 +7220,14 @@ function scheduleDaemon(ms) {
 async function bootFromURL() {
   if (didBoot) return;
   didBoot = true;
-  const level = parseLevel(location.pathname, location.hash, base(), history.state);
+  const level = parseLevel(location.pathname, location.hash, base(), history.state, location.search);
+  if (typeof hashIsApprovals === "function" && hashIsApprovals(location.hash) && typeof openApprovals === "function") {
+    openApprovals({ manual: true, focus: false });
+  }
+  if (level.view === "rules") {
+    await revealLevel(level);
+    return;
+  }
   if (level.bot && !knownBot(level.bot)) {
     goHome(false);
     commitLevel({ view: "bots", bot: null }, "replace");
@@ -7800,10 +8195,1901 @@ function sttErrorMessage(status) {
   prefetchVoiceStatus();
   syncSendEmpty();
 })();
+// approvals-pure:begin
+const APPROVE_ARM_MS = 1500;
+const APPROVAL_POLL_MS = 2000;
+const DENY_BODY = '{"decision":"deny"}';
+const EMPTY_QUEUE_TITLE = "Nothing waiting";
+const EMPTY_QUEUE_BODY = "When a bot needs your OK, it shows up here, sorted by risk. Requests wait until you answer or the bot stops. This panel closes by itself once it's empty, unless you opened it.";
+const RECONNECT_COPY = "Reconnect to answer.";
+const UNREACHABLE_COPY = "Can't reach the daemon. Answers are paused until it's back.";
+const CRITICAL_BAND = "⚠ CRITICAL · WE RECOMMEND DENYING";
+const CRITICAL_EYEBROW = "CRITICAL RISK · PERMISSION NEEDED";
+const SEND_FAILED_COPY = "Couldn't send your answer. The daemon didn't respond. Try again.";
+const NOTIFY_TITLE = "Critical approval waiting";
+const NOTIFY_UNAVAILABLE = "Browsers don't allow notifications on plain http. Critical approvals still show here and in the tab title.";
+const NOTIFY_BLOCKED = "Notifications are blocked. Allow notifications for this page in your browser's site settings. Critical approvals still show here and in the tab title.";
+const PREPROMPT_TITLE = "Get a notification for critical approvals?";
+const PREPROMPT_BODY = "When a bot asks for a critical approval and this tab is in the background, your browser can show a notification. It comes from this page only, with no outside service. You still decide here.";
+const EXACT_HELP = "Matches this exact command only. To cover more than one command, add a pattern rule. Commands with ; && | $( ) can't be saved.";
+const PATTERN_HELP = "Patterns match the command word for word. `*` stands for exactly one word and never matches a flag (a word starting with `-`). Write flags out in full. Case-sensitive.";
+const LEGACY_NOTE = "Can't be converted. Add a pattern rule to replace it, then revoke this.";
+const BUILTIN_RISK = "Built-in";
+const BUILTIN_RISK_NOTE = "Ships with the daemon. Updated with it.";
+const STRICTER_RISK = "Your stricter entries";
+const STRICTER_RISK_NOTE = "From your policy file. They can only raise a level, never lower it.";
+const LADDER_HEADING = "HOW LONG SHOULD THIS LAST?";
+const LADDER_NOTE = "Rules match the exact command above, character for character.";
+const LOCK_GLOBAL = "All bots isn't offered";
+const CANT_BE_A_RULE = "Can't be a rule";
+
+function hashIsApprovals(hash) {
+  return String(hash || "").replace(/^#/, "") === "approvals";
+}
+function approvalRank(level) {
+  const l = String(level || "").toLowerCase();
+  if (l === "critical") return 0;
+  if (l === "high") return 1;
+  if (l === "low") return 3;
+  return 2;
+}
+function groupTitle(rank) {
+  if (rank === 0) return "Critical";
+  if (rank === 1) return "High";
+  if (rank === 3) return "Low";
+  return "Medium & Unclassified";
+}
+function orderApprovalIds(items, prevIds, focusId) {
+  const list = (items || []).slice();
+  list.sort(function (a, b) {
+    const r = approvalRank(a && a.level) - approvalRank(b && b.level);
+    if (r) return r;
+    const ta = Date.parse(a && a.created_at) || 0;
+    const tb = Date.parse(b && b.created_at) || 0;
+    if (ta !== tb) return ta - tb;
+    const ia = String((a && a.id) || "");
+    const ib = String((b && b.id) || "");
+    return ia < ib ? -1 : ia > ib ? 1 : 0;
+  });
+  const ids = list.map(function (x) { return x.id; });
+  if (!focusId || !prevIds || prevIds.indexOf(focusId) < 0 || ids.indexOf(focusId) < 0) return ids;
+  const from = ids.indexOf(focusId);
+  ids.splice(from, 1);
+  let dest = prevIds.indexOf(focusId);
+  if (dest > ids.length) dest = ids.length;
+  ids.splice(dest, 0, focusId);
+  return ids;
+}
+function approvalAge(created, now, frozenAt) {
+  const end = frozenAt ? frozenAt : now;
+  const start = created instanceof Date ? created.getTime() : Date.parse(created);
+  if (!isFinite(start) || !isFinite(end)) return "";
+  let ms = end - start;
+  if (ms < 0) ms = 0;
+  const mins = Math.floor(ms / 60000);
+  if (mins < 60) return mins + "m";
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return hours + "h " + (mins % 60) + "m";
+  return approvalSince(new Date(start));
+}
+function approvalSince(date) {
+  const d = date instanceof Date ? date : new Date(date);
+  const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  let h = d.getHours();
+  const am = h < 12;
+  h = h % 12;
+  if (h === 0) h = 12;
+  const m = String(d.getMinutes()).padStart(2, "0");
+  return "since " + days[d.getDay()] + " " + h + ":" + m + " " + (am ? "AM" : "PM");
+}
+function approvalKey(e, typing) {
+  const ev = e || {};
+  if (ev.altKey || ev.ctrlKey || ev.metaKey) return { close: false, open: false, approve: false };
+  if (ev.key === "Escape") return { close: true, open: false, approve: false };
+  if ((ev.key === "a" || ev.key === "A") && !typing) return { close: false, open: true, approve: false };
+  return { close: false, open: false, approve: false };
+}
+function approvalFriction(item) {
+  if (!item) return "medium";
+  if (item.compound) return "compound";
+  const l = String(item.level || "unclassified");
+  if (l === "critical" || l === "high" || l === "low" || l === "medium") return l;
+  return "unclassified";
+}
+function approvalActions(item) {
+  const friction = approvalFriction(item);
+  const allowed = (item && item.allowed_scopes) || [];
+  const lockGlobal = allowed.indexOf("global") < 0 && (item && (item.level === "high" || item.level === "unclassified"));
+  if (friction === "compound") return { approve: "once", chevron: false, deny: "outline", batch: false, note: CANT_BE_A_RULE, lockGlobal: false };
+  if (friction === "critical") return { approve: "confirm", chevron: false, deny: "fill", batch: false, note: CANT_BE_A_RULE, lockGlobal: false };
+  if (friction === "high") return { approve: "split-secondary", chevron: true, deny: "outline", batch: false, lockGlobal: !!lockGlobal };
+  if (friction === "low") return { approve: "split-primary", chevron: true, deny: "outline", batch: true, lockGlobal: false };
+  if (friction === "unclassified") return { approve: "split-primary", chevron: true, deny: "outline", batch: false, lockGlobal: !!lockGlobal };
+  return { approve: "split-primary", chevron: true, deny: "outline", batch: false, lockGlobal: false };
+}
+function ladderSteps(item) {
+  const allowed = (item && item.allowed_scopes) || [];
+  const has = function (s) { return allowed.indexOf(s) >= 0; };
+  const steps = [];
+  if (has("once")) steps.push({ scope: "once", label: "Just this once" });
+  if (has("task")) steps.push({ scope: "task", label: "This task" });
+  if (has("bot")) steps.push({ scope: "bot", label: "Always for {bot}" });
+  if (has("global")) steps.push({ scope: "global", label: "All bots" });
+  const level = String((item && item.level) || "");
+  const lockGlobal = !has("global") && (level === "high" || level === "unclassified");
+  return { steps: steps, lockGlobal: lockGlobal };
+}
+function taskStepCopy(bot, task) {
+  return "Until " + (bot || "the bot") + " finishes your message \"" + (task || "") + "\". Your next message asks again.";
+}
+function botStepCopy(bot) {
+  const name = bot || "this bot";
+  return "This exact command only, for " + name + ". Any change to the arguments asks again.";
+}
+function globalStepCopy() {
+  return "This exact command, for every bot, including ones you add later. Deny rules still win.";
+}
+function commitLabel(scope, bot) {
+  const name = bot || "this bot";
+  if (scope === "task") return "Approve for this task";
+  if (scope === "bot") return "Approve · always for " + name;
+  if (scope === "global") return "Approve · always for all bots";
+  return "Approve once";
+}
+function patternErrorCopy(code, cmd, wrappers) {
+  const c = String(code || "");
+  if (c === "trailing_wildcard") return "There's no \"match the rest\" wildcard. Patterns match word for word: use one `*` for each word, and write flags out in full.";
+  if (c === "wrapper") {
+    const list = (wrappers || []).filter(Boolean);
+    const prefer = ["sh", "env", "sudo", "xargs", "python", "node"];
+    const picked = [];
+    for (let i = 0; i < prefer.length; i++) if (list.indexOf(prefer[i]) >= 0) picked.push(prefer[i]);
+    for (let j = 0; j < list.length && picked.length < 6; j++) {
+      if (picked.indexOf(list[j]) < 0 && list[j] !== ".") picked.push(list[j]);
+    }
+    const shown = picked.slice(0, 6).map(function (w) { return "`" + w + "`"; }).join(", ");
+    return "`" + (cmd || "that command") + "` can run any other command, so it can't start a pattern. The same goes for " + (shown || "the commands on the daemon's list") + " and others on the daemon's list.";
+  }
+  if (c === "flag_star") return "A `*` can't stand for a flag or be part of one. Write the flag out in full, for example `--json`.";
+  if (c === "star_in_word") return "A `*` must be a whole word on its own.";
+  if (c === "star_first") return "Start with the command name, for example `gh`.";
+  if (c === "operators") return "Patterns can't contain ; && | $( ) or backticks. Commands with several parts always ask.";
+  return "";
+}
+function denyToast(bot) { return "Denied. " + (bot || "The bot") + " carries on without it."; }
+function denyAllToast(n, bot) { return "Denied " + n + " requests. " + (bot || "The bot") + " carries on without them."; }
+function denyRecord(bot, argv) { return "Denied · " + (bot || "The bot") + " carries on without it · " + (argv || ""); }
+function denyAllRecord(n, bot, argv) { return "Denied " + n + " · " + (bot || "The bot") + " carried on · " + (argv || ""); }
+function denyAllDesc(n, bot) { return "Denies these " + n + " requests. " + (bot || "The bot") + " carries on without them."; }
+function partStatus(part, bot) {
+  if (part && part.granted_for_task) return "Granted for this task";
+  if (part && part.has_bot_rule) return "Has a " + (bot || "bot") + " rule, but no task grant";
+  return "Not granted for this task";
+}
+function compoundIntro(item) {
+  const parts = (item && item.parts) || [];
+  const n = parts.length;
+  const ops = (item && item.operators) || [];
+  const joined = ops.length ? " joined by " + ops.join(" and ") : "";
+  const missing = parts.filter(function (p) { return !p.granted_for_task; }).length;
+  const here = missing === 1 ? "Here one part isn't granted" : "Here " + missing + " parts aren't granted";
+  return "This command has " + n + " parts" + joined + ". Commands with several parts ask and can't be saved as a rule. The one exception: when every part is already granted for this task, the task grant covers the whole command. Other rules don't count. " + here + ", so it asks:";
+}
+function recentLabel(kind, bot) {
+  if (kind === "expired") return "Expired · " + (bot || "bot") + " stopped";
+  if (kind === "approved") return "Approved on another device";
+  if (kind === "allowed_by_rule") return "Allowed by rule";
+  if (kind === "denied_by_rule") return "Denied by rule";
+  if (kind === "allowed_by_task_grant") return "Allowed by task grant";
+  return "";
+}
+function showRecent(row, own) {
+  if (!row) return "";
+  if (row.kind === "denied") return "";
+  if (row.kind === "approved" && own) return "";
+  return recentLabel(row.kind, row.bot_name || row.bot_id || "bot");
+}
+function criticalTitle(base, n) {
+  const title = String(base || "");
+  const count = Number(n) || 0;
+  if (count <= 0) return title;
+  return "(" + count + ") Critical approval · " + title;
+}
+function notifyBody(bot, action) {
+  return (bot || "A bot") + " wants to " + (action || "run a command") + ". Open Local Grok Bots to decide.";
+}
+function notifyStateLabel(secure, permission, locallyOff) {
+  if (secure === false) return "Not available";
+  if (permission === "denied") return "Blocked";
+  if (permission === "granted" && !locallyOff) return "On";
+  return "Off";
+}
+function identicalKey(item) {
+  if (!item || item.compound || String(item.level) !== "low") return "";
+  return String(item.bot_id || "") + "\n" + JSON.stringify(item.argv || []);
+}
+function splitArgv(text) {
+  const s = String(text || "").trim();
+  const out = [];
+  let i = 0;
+  while (i < s.length) {
+    while (s.charAt(i) === " ") i++;
+    if (i >= s.length) break;
+    const q = s.charAt(i);
+    if (q === "\"" || q === "'") {
+      let j = i + 1;
+      while (j < s.length && s.charAt(j) !== q) j++;
+      const end = s.charAt(j) === q ? j + 1 : j;
+      out.push(s.slice(i, end));
+      i = end;
+    } else {
+      let j = i;
+      while (j < s.length && s.charAt(j) !== " ") j++;
+      out.push(s.slice(i, j));
+      i = j;
+    }
+  }
+  return out;
+}
+function exactHasOp(text) {
+  const s = String(text || "");
+  return /[;|&`\n()]/.test(s) || s.indexOf("$(") >= 0;
+}
+function matchAllowRule(rules, item, scope) {
+  const argv = JSON.stringify((item && item.argv) || []);
+  const bot = scope === "global" ? "" : ((item && item.bot_id) || "");
+  let best = null;
+  for (let i = 0; i < (rules || []).length; i++) {
+    const r = rules[i];
+    if (!r || r.effect !== "allow") continue;
+    if (r.kind === "pattern" || r.kind === "legacy") continue;
+    if (r.scope !== scope) continue;
+    if (scope === "bot" && (r.bot_id || "") !== bot) continue;
+    if (scope === "global" && r.bot_id) continue;
+    if (JSON.stringify(r.argv || []) !== argv) continue;
+    if (!best || String(r.created_at || "") > String(best.created_at || "")) best = r;
+  }
+  return best;
+}
+function previewSummary(summary, name) {
+  const s = summary || {};
+  const allow = s.would_allow || 0;
+  const ask = (s.would_ask || 0) + (s.still_asks_compound || 0) + (s.still_asks_critical || 0);
+  const who = name ? name + "'s" : "recent";
+  return allow + " of " + who + " last 50 requests would be allowed · " + ask + " still asks";
+}
+function outcomeLabel(outcome, reason) {
+  if (outcome === "would_allow") return "Would be allowed";
+  if (outcome === "would_ask") return "Would ask";
+  if (outcome === "would_deny") return "Would be denied";
+  if (outcome === "still_asks_compound") return "Still asks · several parts";
+  if (outcome === "still_asks_critical") return "Still asks · critical";
+  let text = "Doesn't match";
+  if (reason === "flag_in_star") text += " · `*` never matches a flag";
+  else if (reason === "extra_word") text += " · extra word";
+  else if (reason === "missing_word") text += " · missing word";
+  return text;
+}
+function armReady(ui, now) {
+  if (!ui || !ui.armedAt) return false;
+  return (now || 0) - ui.armedAt >= APPROVE_ARM_MS;
+}
+function advisorySource(advisory) {
+  const a = advisory || {};
+  const src = String(a.source || "");
+  if (!a.checked && (!src || src === "table")) return "Not checked";
+  if (!src || src === "table") return "From the risk table";
+  return src.charAt(0).toUpperCase() + src.slice(1);
+}
+function eyebrowFor(level) {
+  if (String(level || "").toLowerCase() === "critical") return CRITICAL_EYEBROW;
+  return String(level || "unclassified").toUpperCase() + " RISK · PERMISSION NEEDED";
+}
+// approvals-pure:end
+// approvals-dom:begin
+let approvalItems = null;
+let approvalRules = [];
+let approvalGrants = [];
+let approvalRecent = [];
+let approvalRisk = null;
+let cardUI = {};
+let localRecords = [];
+let uiRev = 0;
+let queueOpen = false;
+let queueManual = false;
+let queueDismissed = false;
+let queueSig = "";
+let threadSig = "";
+let prevOrder = [];
+let rulesFilter = "all";
+let rulesSig = "";
+let rulesForce = false;
+let alertsSig = "";
+let pollTimer = 0;
+let pollAgain = false;
+let ruleDraft = null;
+let ruleToken = 0;
+const approvals = {
+  netDown: false,
+  frozenAt: 0,
+  polled: false,
+  wrappers: null,
+  seenCritical: [],
+  seenReady: false,
+  lastCount: null,
+  notes: {},
+  notified: {},
+  own: [],
+  forceAlerts: false,
+  focusDeny: "",
+  wantFocus: false,
+  polling: false,
+  started: false,
+  editingId: ""
+};
+
+function approvalsCriticalCount() {
+  let n = 0;
+  const items = approvalItems || [];
+  for (let i = 0; i < items.length; i++) if (items[i].level === "critical") n += 1;
+  return n;
+}
+function approvalCountsFor(id) {
+  if (approvalItems == null) return null;
+  let total = 0;
+  let critical = 0;
+  for (let i = 0; i < approvalItems.length; i++) {
+    const item = approvalItems[i];
+    if (item.bot_id !== id) continue;
+    total += 1;
+    if (item.level === "critical") critical += 1;
+  }
+  return { total: total, critical: critical };
+}
+function queueIsOpen() { return !!queueOpen; }
+function brokerCardPending() {
+  const host = document.getElementById("broker-thread");
+  return !!(host && host.querySelector(".appr-card"));
+}
+function isTypingTarget(node) {
+  if (!node || !node.tagName) return false;
+  const tag = node.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  return !!node.isContentEditable;
+}
+function botLabel(id, fallback) {
+  const list = (state && state.bots) || [];
+  for (let i = 0; i < list.length; i++) if (list[i].id === id && list[i].name) return list[i].name;
+  return fallback || id || "bot";
+}
+function itemBot(item) {
+  if (!item) return "The bot";
+  return item.bot_name || botLabel(item.bot_id, "The bot");
+}
+function itemArgv(item) {
+  if (!item) return "";
+  if (item.command) return item.command;
+  return (item.argv || []).join(" ");
+}
+function approvalsUnreachable() {
+  if (approvals.netDown) return true;
+  if (typeof daemonUnreachable === "function" && daemonUnreachable()) return true;
+  return false;
+}
+function syncFreeze() {
+  if (approvalsUnreachable()) {
+    if (!approvals.frozenAt) approvals.frozenAt = Date.now();
+  } else approvals.frozenAt = 0;
+}
+function approvalMode() {
+  if (window.matchMedia && window.matchMedia("(min-width: 1180px)").matches) return "dock";
+  if (window.matchMedia && window.matchMedia("(min-width: 980px)").matches) return "slide";
+  return "sheet";
+}
+function ensureUI(id) {
+  if (!cardUI[id]) cardUI[id] = {};
+  return cardUI[id];
+}
+function focusedApprovalId() {
+  const active = document.activeElement;
+  if (!active || !active.getAttribute) return "";
+  const key = active.getAttribute("data-appr-focus") || "";
+  const m = key.match(/:([^:]+)$/);
+  return m ? m[1] : "";
+}
+function cloneTpl(id) {
+  const tpl = document.getElementById(id);
+  if (tpl && tpl.content) return tpl.content.cloneNode(true);
+  return document.createTextNode("");
+}
+function btn(cls, text) {
+  const n = el("button", cls, text);
+  n.type = "button";
+  return n;
+}
+function setAriaDisabled(node, on) {
+  if (!node) return;
+  if (on) node.setAttribute("aria-disabled", "true");
+  else node.removeAttribute("aria-disabled");
+}
+function rememberOwn(item, kind) {
+  approvals.own.push({ bot_id: item.bot_id, command: itemArgv(item), kind: kind });
+  if (approvals.own.length > 50) approvals.own.shift();
+}
+function isOwnRecent(row) {
+  const cmd = row.command || (row.argv || []).join(" ");
+  for (let i = 0; i < approvals.own.length; i++) {
+    const o = approvals.own[i];
+    if (o.bot_id !== row.bot_id || o.command !== cmd) continue;
+    if (o.kind === "approve" && row.kind === "approved") return true;
+    if (o.kind === "deny" && row.kind === "denied") return true;
+  }
+  return false;
+}
+function closeNote(id) {
+  const note = approvals.notes[id];
+  if (!note) return;
+  try { note.close(); } catch (e) {}
+  delete approvals.notes[id];
+}
+async function brokerCall(path, opts) {
+  const headers = {};
+  const body = opts && opts.body;
+  if (body) headers["Content-Type"] = "application/json";
+  if (state.token) headers.Authorization = "Bearer " + state.token;
+  try {
+    const res = await fetch(base() + path, {
+      method: (opts && opts.method) || "GET",
+      headers: headers,
+      body: body || undefined,
+      cache: "no-store"
+    });
+    const text = await res.text();
+    let data = null;
+    if (text) { try { data = JSON.parse(text); } catch (e) { data = { error: text }; } }
+    if (res.status === 401 && typeof showAuth === "function") showAuth();
+    return { network: false, status: res.status, data: data };
+  } catch (e) {
+    return { network: true, status: 0, data: null };
+  }
+}
+function showReconnect() {
+  const note = $("#approvals-banner");
+  if (!note) return;
+  note.hidden = false;
+  note.textContent = RECONNECT_COPY;
+}
+function guardAnswer(ev) {
+  if (!approvalsUnreachable()) return false;
+  if (ev) ev.preventDefault();
+  showReconnect();
+  return true;
+}
+function paintApprovalButtons() {
+  const items = approvalItems || [];
+  const n = items.length;
+  let c = 0;
+  for (let i = 0; i < items.length; i++) if (items[i].level === "critical") c += 1;
+  const down = approvalsUnreachable();
+  const label = "Approvals, " + n + " waiting, " + c + " critical";
+  document.querySelectorAll("button.appr-btn").forEach(function (button) {
+    button.classList.toggle("is-zero", n === 0 && !down);
+    button.classList.toggle("is-wait", n > 0 && c === 0 && !down);
+    button.classList.toggle("is-critical", c > 0 && !down);
+    button.classList.toggle("is-open", queueOpen);
+    button.classList.toggle("is-down", down);
+    button.setAttribute("aria-expanded", queueOpen ? "true" : "false");
+    button.setAttribute("aria-label", label);
+    const num = button.querySelector(".appr-num");
+    if (num) num.textContent = String(n);
+    const badge = button.querySelector(".appr-badge");
+    if (badge) {
+      badge.hidden = n === 0 && !down;
+      badge.textContent = String(n);
+    }
+  });
+}
+function appendPendingBadge(copy, line2, button, b) {
+  if (!b || b.archived || !copy || !line2) return;
+  const brokerCounts = approvalCountsFor(b.id);
+  const legacyN = Number(b.pending_permissions) || 0;
+  const n = brokerCounts ? Math.max(brokerCounts.total, legacyN) : legacyN;
+  if (n <= 0) return;
+  const critical = !!(brokerCounts && brokerCounts.critical);
+  const words = approvalWords(n) + (critical ? ", critical" : "");
+  copy.append(el("small", "bot-attn", words));
+  const badge = el("span", "perm-badge" + (critical ? " is-critical" : ""), String(n));
+  badge.setAttribute("aria-label", words);
+  line2.append(badge);
+  button.title = critical ? "Critical approval waiting" : "Waiting for your approval";
+}
+function syncBrokerBadges() {
+  const list = document.getElementById("bot-list");
+  if (!list) return;
+  list.querySelectorAll("button.bot").forEach(function (button) {
+    const id = button.getAttribute("data-bot-id");
+    const bot = (state.bots || []).find(function (b) { return b.id === id; });
+    if (!bot) return;
+    const copy = button.querySelector(".bot-copy");
+    const lines = button.querySelectorAll(".bot-line");
+    const line2 = lines.length > 1 ? lines[1] : null;
+    const oldAttn = button.querySelector(".bot-attn");
+    const oldBadge = button.querySelector(".perm-badge");
+    if (oldAttn) oldAttn.remove();
+    if (oldBadge) oldBadge.remove();
+    if (copy && line2) appendPendingBadge(copy, line2, button, bot);
+  });
+}
+function paintRulesLinks() {
+  const n = (approvalRules || []).length;
+  const menu = $("#menu-rules");
+  if (menu) menu.textContent = "Approval rules · " + n;
+  const alerts = $("#menu-alerts");
+  if (alerts) alerts.textContent = "Critical alerts · " + currentNotifyLabel();
+  const link = $("#open-approval-rules");
+  if (link) {
+    const bot = typeof currentBot === "function" ? currentBot() : null;
+    const name = bot ? bot.name : "this bot";
+    let mine = n;
+    if (bot) {
+      mine = 0;
+      for (let i = 0; i < approvalRules.length; i++) {
+        if (approvalRules[i].scope === "bot" && approvalRules[i].bot_id === bot.id) mine += 1;
+      }
+    }
+    link.textContent = mine + " rules for " + name + " · Open Approval rules";
+  }
+}
+function currentNotifyLabel() {
+  if (typeof window !== "undefined" && window.isSecureContext === false) return notifyStateLabel(false, "", false);
+  if (typeof window.Notification === "undefined") return "Not available";
+  let off = false;
+  try { off = localStorage.getItem("lgb.notify.off") === "1"; } catch (e) {}
+  return notifyStateLabel(true, window.Notification.permission, off);
+}
+function notifySnoozed() {
+  try { return Number(localStorage.getItem("lgb.notify.snoozeUntil") || 0) > Date.now(); } catch (e) { return false; }
+}
+function setApprovalsHash(on) {
+  if (!on) {
+    if (hashIsApprovals(location.hash)) history.replaceState(history.state, "", location.pathname + location.search);
+    return;
+  }
+  if (!queueManual) return;
+  if (location.hash && !hashIsApprovals(location.hash)) return;
+  if (hashIsApprovals(location.hash)) return;
+  history.replaceState(history.state, "", location.pathname + location.search + "#approvals");
+}
+function applyQueueChrome() {
+  const panel = $("#approvals");
+  const scrim = $("#approvals-scrim");
+  const mode = approvalMode();
+  const dock = queueOpen && mode === "dock";
+  document.body.classList.toggle("queue-dock", dock);
+  if (panel) {
+    panel.hidden = !queueOpen;
+    panel.classList.toggle("is-dock", queueOpen && mode === "dock");
+    panel.classList.toggle("is-slide", queueOpen && mode === "slide");
+    panel.classList.toggle("is-sheet", queueOpen && mode === "sheet");
+    if (mode === "dock") panel.removeAttribute("aria-modal");
+    else panel.setAttribute("aria-modal", "true");
+  }
+  if (scrim) scrim.hidden = !(queueOpen && mode !== "dock");
+  setApprovalsHash(queueOpen);
+  paintApprovalButtons();
+}
+function reconcileQueue() {
+  const waiting = (approvalItems || []).length > 0;
+  const dock = approvalMode() === "dock";
+  if (!waiting) queueDismissed = false;
+  if (queueOpen && !waiting && !queueManual) queueOpen = false;
+  if (!queueOpen && dock && waiting && !queueDismissed) {
+    queueOpen = true;
+    queueManual = false;
+  }
+}
+function openApprovals(opts) {
+  queueOpen = true;
+  queueManual = !(opts && opts.auto);
+  queueDismissed = false;
+  if (opts && opts.focus) approvals.wantFocus = true;
+  if (typeof closeRosterMenu === "function") closeRosterMenu();
+  if (typeof closeMenu === "function") closeMenu();
+  applyQueueChrome();
+  approvals.force = true;
+  renderApprovals();
+}
+function closeApprovals() {
+  const panel = $("#approvals");
+  const inside = panel && panel.contains(document.activeElement);
+  const waiting = (approvalItems || []).length > 0;
+  queueOpen = false;
+  queueManual = false;
+  if (waiting) queueDismissed = true;
+  applyQueueChrome();
+  if (inside) {
+    const back = document.querySelector("button.appr-btn");
+    if (back) back.focus();
+  }
+}
+function closeApprovalLayer() {
+  const sheet = $("#rule-sheet");
+  if (sheet && !sheet.hidden) { closeRuleSheet(); return true; }
+  const pop = document.querySelector("#view-rules .rules-pop:not([hidden])");
+  if (pop) { pop.hidden = true; return true; }
+  if (queueOpen) { closeApprovals(); return true; }
+  return false;
+}
+function syncApprovalsHash() {
+  if (hashIsApprovals(location.hash)) openApprovals({ manual: true, focus: false });
+}
+function openRules(bot, push) {
+  if (typeof navBypass !== "undefined" && !navBypass && typeof profileDirty === "function" && profileDirty()) {
+    confirmLeave(function () { openRules(bot, push); });
+    return;
+  }
+  if (typeof closeState === "function") closeState();
+  if (typeof closeRosterMenu === "function") closeRosterMenu();
+  if (typeof closeMenu === "function") closeMenu();
+  const id = bot || "";
+  state.rulesBot = id;
+  if (push !== false) commitLevel({ view: "rules", bot: id || null }, "push");
+  setView("rules");
+  setTitle();
+  if (typeof focusPane === "function") focusPane("rules");
+  rulesForce = true;
+  paintRules();
+}
+function findByAttr(root, name, value) {
+  if (!root || !root.querySelectorAll) return null;
+  const all = root.querySelectorAll("[" + name + "]");
+  for (let i = 0; i < all.length; i++) if (all[i].getAttribute(name) === value) return all[i];
+  return null;
+}
+function typingFocus() { return isTypingTarget(document.activeElement); }
+function patchAges(root) {
+  if (!root) return;
+  const byId = {};
+  (approvalItems || []).forEach(function (item) { byId[item.id] = item; });
+  root.querySelectorAll("[data-age-for]").forEach(function (node) {
+    const item = byId[node.getAttribute("data-age-for")];
+    if (item) node.textContent = approvalAge(item.created_at, Date.now(), approvals.frozenAt || 0);
+  });
+}
+function appendCommand(pre, item) {
+  const raw = itemArgv(item);
+  const ops = (item.compound && item.operators) || [];
+  if (!ops.length) { pre.textContent = raw; return; }
+  const sorted = ops.slice().sort(function (a, b) { return b.length - a.length; });
+  let rest = raw;
+  while (rest.length) {
+    let at = -1;
+    let hit = "";
+    for (let i = 0; i < sorted.length; i++) {
+      const iAt = rest.indexOf(sorted[i]);
+      if (iAt >= 0 && (at < 0 || iAt < at)) { at = iAt; hit = sorted[i]; }
+    }
+    if (at < 0) { pre.append(document.createTextNode(rest)); break; }
+    if (at > 0) pre.append(document.createTextNode(rest.slice(0, at)));
+    pre.append(el("span", "appr-op", hit));
+    rest = rest.slice(at + hit.length);
+  }
+}
+function scheduleArm(id) {
+  const ui = cardUI[id];
+  if (!ui || !ui.confirm || !ui.armedAt || ui.armTimer) return;
+  const left = APPROVE_ARM_MS - (Date.now() - ui.armedAt);
+  if (left <= 0) return;
+  ui.armTimer = setTimeout(function () {
+    if (cardUI[id]) cardUI[id].armTimer = 0;
+    if (!cardUI[id] || !cardUI[id].confirm) return;
+    uiRev += 1;
+    renderApprovals();
+  }, left + 40);
+}
+function copyCommand(text) {
+  const value = String(text || "");
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(value).catch(function () { copyFallback(value); });
+    return;
+  }
+  copyFallback(value);
+}
+function copyFallback(value) {
+  const area = document.createElement("textarea");
+  area.value = value;
+  document.body.append(area);
+  area.select();
+  try { document.execCommand("copy"); } catch (e) {}
+  area.remove();
+}
+function renderApprovalCard(item, mode) {
+  const friction = approvalFriction(item);
+  const actions = approvalActions(item);
+  const ui = ensureUI(item.id);
+  const level = String(item.level || "unclassified");
+  const card = el("article", "appr-card is-" + (item.compound ? friction === "compound" ? (level === "unclassified" ? "unclassified" : level) : level : (level === "unclassified" ? "unclassified" : level)));
+  if (level === "critical") card.classList.add("is-critical");
+  if (level === "high") card.classList.add("is-high");
+  if (level === "low") card.classList.add("is-low");
+  if (level === "medium") card.classList.add("is-medium");
+  if (level === "unclassified") card.classList.add("is-unclassified");
+  if (mode === "thread") card.classList.add("is-thread");
+  card.setAttribute("data-level", level);
+  card.setAttribute("data-id", item.id);
+  if (level === "critical") card.append(el("div", "appr-band", CRITICAL_BAND));
+  const inner = el("div", "appr-in");
+  const argv = el("div", "appr-argv");
+  const head = el("div", "appr-argv-h");
+  head.append(el("span", "", item.compound ? "Exact command · several parts" : "Exact command"));
+  const copy = btn("ghost small appr-copy", "Copy");
+  copy.setAttribute("aria-label", "Copy command");
+  copy.addEventListener("click", function () { copyCommand(itemArgv(item)); });
+  head.append(copy);
+  argv.append(head);
+  const pre = el("pre", "appr-pre");
+  appendCommand(pre, item);
+  argv.append(pre);
+  const meta = [item.cwd, item.tool].filter(Boolean).join(" · ");
+  if (meta) argv.append(el("div", "appr-meta", meta));
+  inner.append(argv);
+  if (mode === "queue") {
+    const top = el("div", "appr-top");
+    top.append(el("b", "", itemBot(item)));
+    const age = el("span", "appr-age", approvalAge(item.created_at, Date.now(), approvals.frozenAt || 0));
+    age.setAttribute("data-age-for", item.id);
+    top.append(age);
+    inner.append(top);
+  } else {
+    inner.append(el("div", "appr-eyebrow", eyebrowFor(level)));
+  }
+  const title = el("div", "appr-title");
+  const chip = el("span", "appr-chip " + level, level);
+  title.append(chip, document.createTextNode((item.advisory && item.advisory.text) || "Permission needed"));
+  inner.append(title);
+  if (item.compound) {
+    const note = el("div", "appr-compound");
+    note.append(document.createTextNode(compoundIntro(item)));
+    const ol = document.createElement("ol");
+    (item.parts || []).forEach(function (part) {
+      const li = document.createElement("li");
+      const row = el("div", "appr-part");
+      row.append(el("code", "", part.raw || (part.argv || []).join(" ")));
+      row.append(el("span", "", partStatus(part, itemBot(item))));
+      li.append(row);
+      ol.append(li);
+    });
+    note.append(ol);
+    inner.append(note);
+  }
+  if (item.advisory) {
+    const adv = el("div", "appr-adv" + (item.advisory.checked ? "" : " is-unchecked"));
+    adv.append(el("b", "", "Advisory"));
+    if (item.advisory.text) adv.append(el("p", "", item.advisory.text));
+    adv.append(el("p", "appr-src", advisorySource(item.advisory)));
+    inner.append(adv);
+  }
+  if (item.critical_reason) inner.append(el("p", "appr-reason", item.critical_reason));
+  if (item.task_text) {
+    const task = el("div", "appr-task");
+    task.append(el("span", "", "Task: " + item.task_text));
+    inner.append(task);
+  }
+  card.append(inner);
+  if (ui.sendError) {
+    const err = el("div", "appr-err");
+    err.append(document.createTextNode(SEND_FAILED_COPY + " "));
+    const retry = btn("secondary small", "Try again");
+    retry.addEventListener("click", function (ev) {
+      if (guardAnswer(ev)) return;
+      const last = ui.lastTry || { decision: "deny" };
+      if (last.batch) postDenyAll(last.ids, item);
+      else postDecision(item, last.decision, last.scope);
+    });
+    err.append(retry);
+    card.append(err);
+  }
+  const bar = el("div", "appr-actions");
+  const down = approvalsUnreachable();
+  const prefix = mode === "thread" ? "t:" : "q:";
+  const steps = ladderSteps(item);
+  const showChevron = actions.chevron && (steps.steps.length > 1 || steps.lockGlobal);
+  function wireAnswer(node, fn) {
+    setAriaDisabled(node, down);
+    node.addEventListener("click", function (ev) {
+      if (guardAnswer(ev)) return;
+      fn();
+    });
+  }
+  if (actions.approve === "confirm") {
+    const approve = btn("secondary", "Approve…");
+    approve.setAttribute("data-appr-focus", prefix + "approve:" + item.id);
+    wireAnswer(approve, function () {
+      ui.confirm = true;
+      ui.armedAt = Date.now();
+      ui.staleGesture = false;
+      ui.armTimer = 0;
+      uiRev += 1;
+      renderApprovals();
+    });
+    bar.append(approve);
+  } else if (actions.approve === "once") {
+    const approve = btn("secondary", "Approve once");
+    approve.setAttribute("data-appr-focus", prefix + "approve:" + item.id);
+    wireAnswer(approve, function () { postDecision(item, "approve", "once"); });
+    bar.append(approve);
+  } else {
+    const split = el("span", "appr-split");
+    const primary = actions.approve === "split-primary";
+    const approve = btn(primary ? "primary" : "secondary", "Approve once");
+    approve.setAttribute("data-appr-focus", prefix + "approve:" + item.id);
+    wireAnswer(approve, function () { postDecision(item, "approve", "once"); });
+    split.append(approve);
+    if (showChevron) {
+      const chev = btn((primary ? "primary" : "secondary") + " appr-chev", "");
+      chev.setAttribute("aria-label", "More approve options");
+      chev.setAttribute("aria-expanded", ui.ladder ? "true" : "false");
+      chev.append(cloneTpl("tpl-chev"));
+      setAriaDisabled(chev, down);
+      chev.addEventListener("click", function (ev) {
+        if (guardAnswer(ev)) return;
+        ui.ladder = !ui.ladder;
+        if (!ui.scope) ui.scope = "once";
+        uiRev += 1;
+        renderApprovals();
+      });
+      split.append(chev);
+    }
+    bar.append(split);
+  }
+  if (actions.batch) {
+    const key = identicalKey(item);
+    const group = key ? (approvalItems || []).filter(function (other) { return identicalKey(other) === key; }) : [];
+    if (group.length > 1) {
+      const all = btn("secondary", "Approve all " + group.length);
+      wireAnswer(all, function () { postApproveAll(group); });
+      const denyAll = btn("appr-deny-line", "Deny all " + group.length);
+      const desc = el("p", "appr-src", denyAllDesc(group.length, itemBot(item)));
+      desc.id = "deny-all-desc-" + mode + "-" + item.id;
+      denyAll.setAttribute("aria-describedby", desc.id);
+      wireAnswer(denyAll, function () { postDenyAll(group.map(function (g) { return g.id; }), item); });
+      bar.append(all, denyAll, desc);
+    }
+  }
+  const deny = btn(actions.deny === "fill" ? "appr-deny-fill appr-deny" : "appr-deny-line appr-deny", "Deny");
+  deny.setAttribute("data-appr-focus", prefix + "deny:" + item.id);
+  wireAnswer(deny, function () { postDecision(item, "deny", ""); });
+  bar.append(deny);
+  if (actions.note) bar.append(el("span", "appr-lock", actions.note));
+  card.append(bar);
+  if (item.suggest_always && !ui.suggestHidden && !item.compound && (level === "low" || level === "medium" || level === "unclassified")) {
+    const nudge = el("div", "appr-nudge");
+    nudge.append(el("strong", "", "Always allow it?"));
+    const row = el("div", "appr-actions");
+    const choose = btn("secondary", "Choose…");
+    const later = btn("ghost", "Not now");
+    wireAnswer(choose, function () {
+      ui.suggestHidden = true;
+      ui.ladder = true;
+      ui.scope = (item.allowed_scopes || []).indexOf("bot") >= 0 ? "bot" : "once";
+      uiRev += 1;
+      renderApprovals();
+    });
+    later.addEventListener("click", function () {
+      ui.suggestHidden = true;
+      uiRev += 1;
+      renderApprovals();
+    });
+    row.append(choose, later);
+    nudge.append(row);
+    card.append(nudge);
+  }
+  if (ui.confirm) {
+    const box = el("div", "appr-confirm");
+    box.append(el("p", "", "Approve once? " + itemBot(item) + " will run " + itemArgv(item) + ". This can't be undone from here and can't become a rule."));
+    const armed = armReady(ui, Date.now());
+    const arm = el("div", "appr-arm" + (armed ? " is-done" : ""));
+    const fill = document.createElement("i");
+    arm.append(fill);
+    if (!armed) {
+      requestAnimationFrame(function () {
+        if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+        arm.classList.add("is-armed");
+      });
+      scheduleArm(item.id);
+    }
+    box.append(arm);
+    const yes = btn("primary", "Yes");
+    setAriaDisabled(yes, !armed || down);
+    yes.setAttribute("data-appr-focus", prefix + "yes:" + item.id);
+    const ignore = function () { if (!armReady(ui, Date.now())) ui.staleGesture = true; };
+    yes.addEventListener("pointerdown", ignore);
+    yes.addEventListener("keydown", function (ev) {
+      if (ev.key !== "Enter" && ev.key !== " ") return;
+      ignore();
+    });
+    yes.addEventListener("click", function (ev) {
+      if (guardAnswer(ev)) return;
+      if (!armReady(ui, Date.now()) || ui.staleGesture) { ui.staleGesture = false; return; }
+      postDecision(item, "approve", "once");
+    });
+    const no = btn("ghost", "No");
+    no.addEventListener("click", function () {
+      ui.confirm = false;
+      ui.armedAt = 0;
+      clearTimeout(ui.armTimer);
+      ui.armTimer = 0;
+      uiRev += 1;
+      renderApprovals();
+    });
+    const row = el("div", "appr-actions");
+    row.append(yes, no);
+    box.append(row);
+    card.append(box);
+  }
+  if (ui.ladder && showChevron) {
+    const ladder = el("div", "appr-ladder");
+    const h = document.createElement("h3");
+    h.textContent = LADDER_HEADING;
+    ladder.append(h, el("p", "appr-src", LADDER_NOTE));
+    const picked = ui.scope || "once";
+    steps.steps.forEach(function (step) {
+      const stepBtn = btn("appr-step" + (picked === step.scope ? " is-on" : ""), "");
+      stepBtn.setAttribute("aria-pressed", picked === step.scope ? "true" : "false");
+      const label = step.scope === "bot" ? "Always for " + itemBot(item) : step.label;
+      const strong = el("strong", "", label);
+      let detail = "";
+      if (step.scope === "task") detail = taskStepCopy(itemBot(item), item.task_text || "");
+      else if (step.scope === "bot") detail = botStepCopy(itemBot(item));
+      else if (step.scope === "global") detail = globalStepCopy();
+      stepBtn.append(strong);
+      if (detail) stepBtn.append(el("small", "", detail));
+      stepBtn.addEventListener("click", function () {
+        ui.scope = step.scope;
+        uiRev += 1;
+        renderApprovals();
+      });
+      ladder.append(stepBtn);
+    });
+    if (steps.lockGlobal) ladder.append(el("div", "appr-step is-locked", LOCK_GLOBAL));
+    const commit = btn("primary", commitLabel(picked, itemBot(item)));
+    wireAnswer(commit, function () { postDecision(item, "approve", picked); });
+    ladder.append(commit);
+    card.append(ladder);
+  }
+  return card;
+}
+async function postDecision(item, decision, scope) {
+  const ui = ensureUI(item.id);
+  ui.lastTry = { decision: decision, scope: scope || "once" };
+  ui.sendError = false;
+  const body = decision === "deny" ? DENY_BODY : JSON.stringify({ decision: "approve", scope: scope || "once" });
+  const res = await brokerCall("/api/permbroker/pending/" + encodeURIComponent(item.id), { method: "POST", body: body });
+  if (res.network) {
+    ui.sendError = true;
+    uiRev += 1;
+    renderApprovals();
+    return;
+  }
+  if (res.status === 409 || res.status === 404) {
+    localRecords.unshift({ text: "Approved on another device" });
+    dropItem(item.id);
+    return;
+  }
+  if (res.status !== 200) {
+    ui.sendError = true;
+    uiRev += 1;
+    renderApprovals();
+    return;
+  }
+  if (decision === "deny") {
+    rememberOwn(item, "deny");
+    localRecords.unshift({ text: denyRecord(itemBot(item), itemArgv(item)) });
+    showStatusToast(denyToast(itemBot(item)), null);
+    dropItem(item.id);
+    return;
+  }
+  rememberOwn(item, "approve");
+  if (scope === "bot" || scope === "global") {
+    showStatusToast("Rule saved · Undo", function () { undoScopeRule(item, scope); });
+  } else if (scope === "task") showStatusToast("Approved for this task.", null);
+  else showStatusToast("Approved once.", null);
+  dropItem(item.id);
+}
+async function undoScopeRule(item, scope) {
+  const res = await brokerCall("/api/permbroker/rules");
+  const rules = (res.data && res.data.rules) || [];
+  const match = matchAllowRule(rules, item, scope);
+  if (match && match.id) await brokerCall("/api/permbroker/rules/" + encodeURIComponent(match.id), { method: "DELETE" });
+  pollSoon();
+}
+async function postApproveAll(group) {
+  for (let i = 0; i < group.length; i++) {
+    const item = group[i];
+    const res = await brokerCall("/api/permbroker/pending/" + encodeURIComponent(item.id), {
+      method: "POST",
+      body: JSON.stringify({ decision: "approve", scope: "once" })
+    });
+    if (res.network || (res.status !== 200 && res.status !== 409 && res.status !== 404)) {
+      const ui = ensureUI(item.id);
+      ui.sendError = true;
+      ui.lastTry = { decision: "approve", scope: "once" };
+      uiRev += 1;
+      renderApprovals();
+      return;
+    }
+    if (res.status === 200) rememberOwn(item, "approve");
+  }
+  showStatusToast("Approved once.", null);
+  pollSoon();
+}
+async function postDenyAll(ids, sample) {
+  const ui = sample ? ensureUI(sample.id) : {};
+  ui.lastTry = { batch: true, ids: ids };
+  const res = await brokerCall("/api/permbroker/pending/deny-all", {
+    method: "POST",
+    body: JSON.stringify({ ids: ids })
+  });
+  if (res.network || res.status !== 200) {
+    if (sample) {
+      ui.sendError = true;
+      uiRev += 1;
+      renderApprovals();
+    }
+    return;
+  }
+  const n = ids.length;
+  const bot = itemBot(sample);
+  const argv = itemArgv(sample);
+  localRecords.unshift({ text: denyAllRecord(n, bot, argv) });
+  showStatusToast(denyAllToast(n, bot), null);
+  ids.forEach(function (id) { rememberOwn({ bot_id: sample && sample.bot_id, command: argv, id: id }, "deny"); });
+  pollSoon();
+}
+function dropItem(id) {
+  closeNote(id);
+  approvalItems = (approvalItems || []).filter(function (item) { return item.id !== id; });
+  delete cardUI[id];
+  uiRev += 1;
+  renderApprovals();
+  if (typeof setTitle === "function") setTitle();
+}
+function renderAlerts(host) {
+  if (!host) return;
+  const label = currentNotifyLabel();
+  const perm = (typeof window.Notification !== "undefined") ? window.Notification.permission : "";
+  const critical = approvalsCriticalCount() > 0;
+  const showPre = critical && perm === "default" && label === "Off" && !notifySnoozed();
+  const sig = [label, perm, showPre ? 1 : 0, approvals.forceAlerts ? 1 : 0, critical ? 1 : 0].join("|");
+  if (sig === alertsSig) return;
+  alertsSig = sig;
+  host.replaceChildren();
+  if (!approvals.forceAlerts && !showPre) return;
+  const card = el("div", "appr-alert");
+  if (label === "Not available") {
+    const insecure = typeof window !== "undefined" && window.isSecureContext === false;
+    card.append(el("p", "", insecure ? NOTIFY_UNAVAILABLE : "Notifications aren't available in this browser. Critical approvals still show here and in the tab title."));
+  } else if (label === "Blocked") {
+    card.append(el("p", "", NOTIFY_BLOCKED));
+  } else if (label === "On") {
+    card.append(el("p", "", "Critical alerts are on."));
+    const off = btn("secondary", "Turn off");
+    off.addEventListener("click", function () {
+      try { localStorage.setItem("lgb.notify.off", "1"); } catch (e) {}
+      renderApprovals();
+    });
+    card.append(off);
+  } else {
+    card.append(el("p", "", PREPROMPT_TITLE));
+    card.append(el("p", "", PREPROMPT_BODY));
+    const on = btn("primary", "Turn on notifications");
+    on.addEventListener("click", function () { turnOnNotifications(); });
+    const later = btn("ghost", "Not now");
+    later.addEventListener("click", function () {
+      try { localStorage.setItem("lgb.notify.snoozeUntil", String(Date.now() + 7 * 24 * 60 * 60 * 1000)); } catch (e) {}
+      approvals.forceAlerts = false;
+      renderApprovals();
+    });
+    card.append(on, later);
+  }
+  host.append(card);
+}
+function turnOnNotifications() {
+  if (typeof window === "undefined") return;
+  if (window.isSecureContext === false || typeof window.Notification === "undefined") return;
+  try { localStorage.removeItem("lgb.notify.off"); } catch (e) {}
+  if (window.Notification.permission === "granted") { renderApprovals(); return; }
+  if (window.Notification.permission !== "default") return;
+  window.Notification.requestPermission().then(function () { renderApprovals(); }).catch(function () {});
+}
+function syncNotifications(items) {
+  const live = {};
+  (items || []).forEach(function (item) { if (item.level === "critical") live[item.id] = item; });
+  Object.keys(approvals.notes).forEach(function (id) { if (!live[id]) closeNote(id); });
+  if (!document.hidden || currentNotifyLabel() !== "On") return;
+  Object.keys(live).forEach(function (id) {
+    if (approvals.notes[id] || approvals.notified[id]) return;
+    const item = live[id];
+    try {
+      const n = new Notification(NOTIFY_TITLE, {
+        body: notifyBody(item.bot_name || botLabel(item.bot_id), itemArgv(item)),
+        tag: id
+      });
+      n.onclick = function () {
+        window.focus();
+        approvals.focusDeny = id;
+        openApprovals({ manual: true, focus: true });
+      };
+      approvals.notes[id] = n;
+      approvals.notified[id] = true;
+    } catch (e) {}
+  });
+}
+function renderRecords(body) {
+  const rows = [];
+  localRecords.forEach(function (rec) { if (rec && rec.text) rows.push(rec.text); });
+  (approvalRecent || []).forEach(function (row) {
+    const text = showRecent(row, isOwnRecent(row));
+    if (!text) return;
+    const cmd = row.command || (row.argv || []).join(" ");
+    rows.push(cmd ? text + " · " + cmd : text);
+  });
+  if (!rows.length) return;
+  body.append(el("h3", "appr-group", "Recent"));
+  rows.slice(0, 12).forEach(function (text) {
+    const line = el("div", "appr-record");
+    const cut = text.indexOf(" · ");
+    if (cut > 0) {
+      line.append(document.createTextNode(text.slice(0, cut) + " · "));
+      line.append(el("code", "", text.slice(cut + 3)));
+    } else line.append(document.createTextNode(text));
+    body.append(line);
+  });
+}
+function applyQueueFocus(panel) {
+  if (typingFocus()) return;
+  if (approvals.focusDeny) {
+    const deny = findByAttr(panel, "data-appr-focus", "q:deny:" + approvals.focusDeny);
+    approvals.focusDeny = "";
+    if (deny) { deny.focus(); return; }
+  }
+  if (!approvals.wantFocus) return;
+  approvals.wantFocus = false;
+  const first = panel.querySelector(".appr-card");
+  const level = first && first.getAttribute("data-level");
+  if (first && (level === "critical" || level === "high")) {
+    const deny = first.querySelector(".appr-deny");
+    if (deny) { deny.focus(); return; }
+  }
+  const heading = $("#approvals-title");
+  if (heading) heading.focus();
+}
+function renderApprovals() {
+  syncFreeze();
+  reconcileQueue();
+  applyQueueChrome();
+  const panel = $("#approvals");
+  const body = $("#approvals-body");
+  const items = approvalItems || [];
+  const crits = items.filter(function (item) { return item.level === "critical"; }).map(function (item) { return item.id; });
+  if (approvals.seenReady) {
+    const fresh = crits.filter(function (id) { return approvals.seenCritical.indexOf(id) < 0; });
+    if (fresh.length) {
+      const region = $("#approvals-assert");
+      if (region) {
+        region.textContent = "";
+        setTimeout(function () { region.textContent = NOTIFY_TITLE; }, 20);
+      }
+      if (queueOpen && !typingFocus()) approvals.focusDeny = fresh[0];
+    }
+  }
+  approvals.seenCritical = crits;
+  approvals.seenReady = true;
+  const count = $("#approvals-count");
+  if (count && approvals.lastCount !== items.length && approvals.polled) {
+    count.textContent = items.length ? items.length + " waiting" : EMPTY_QUEUE_TITLE;
+    approvals.lastCount = items.length;
+  }
+  const banner = $("#approvals-banner");
+  if (banner) {
+    const mode = banner.getAttribute("data-mode") || "";
+    if (approvalsUnreachable()) {
+      banner.hidden = false;
+      if (mode !== "down" && banner.textContent !== RECONNECT_COPY) {
+        banner.setAttribute("data-mode", "down");
+        banner.replaceChildren(document.createTextNode(UNREACHABLE_COPY + " "));
+        const retry = btn("secondary small", "Retry now");
+        retry.addEventListener("click", function () { if (typeof retryDaemonNow === "function") retryDaemonNow(); });
+        banner.append(retry);
+      }
+    } else if (mode === "down") {
+      banner.hidden = true;
+      banner.removeAttribute("data-mode");
+      banner.replaceChildren();
+    }
+  }
+  renderAlerts($("#approvals-alerts"));
+  syncNotifications(items);
+  paintRulesLinks();
+  if (typeof setTitle === "function") setTitle();
+  renderBrokerThread();
+  if (state.view === "rules") paintRules();
+  if (!panel || !body) return;
+  const sig = [
+    items.map(function (i) { return [i.id, i.level, i.ruleset, i.suggest_always ? 1 : 0, i.compound ? 1 : 0].join(":"); }).join("|"),
+    uiRev,
+    approvalsUnreachable() ? 1 : 0,
+    queueOpen ? 1 : 0,
+    localRecords.length,
+    (approvalRecent || []).map(function (r) { return (r.kind || "") + (r.command || ""); }).join("~"),
+    approvals.forceAlerts ? 1 : 0,
+    currentNotifyLabel()
+  ].join("#");
+  if (sig === queueSig && !approvals.force) {
+    patchAges(panel);
+    applyQueueFocus(panel);
+    return;
+  }
+  approvals.force = false;
+  queueSig = sig;
+  const active = document.activeElement;
+  const restore = active && panel.contains(active) && active.getAttribute ? (active.getAttribute("data-appr-focus") || "") : "";
+  const focusId = focusedApprovalId();
+  const ids = orderApprovalIds(items, prevOrder, focusId);
+  prevOrder = ids.slice();
+  const byId = {};
+  items.forEach(function (item) { byId[item.id] = item; });
+  body.replaceChildren();
+  if (!items.length) {
+    const empty = el("div", "appr-empty");
+    empty.append(el("h3", "", EMPTY_QUEUE_TITLE), el("p", "", EMPTY_QUEUE_BODY));
+    body.append(empty);
+  } else {
+    let lastRank = -1;
+    ids.forEach(function (id) {
+      const item = byId[id];
+      if (!item) return;
+      const rank = approvalRank(item.level);
+      if (rank !== lastRank) {
+        body.append(el("h3", "appr-group", groupTitle(rank)));
+        lastRank = rank;
+      }
+      body.append(renderApprovalCard(item, "queue"));
+    });
+  }
+  renderRecords(body);
+  if (restore && !approvals.focusDeny && !approvals.wantFocus) {
+    const back = findByAttr(panel, "data-appr-focus", restore);
+    if (back && !typingFocus()) back.focus();
+  } else applyQueueFocus(panel);
+}
+function renderBrokerThread() {
+  const host = document.getElementById("broker-thread");
+  if (!host) return;
+  const mine = (approvalItems || []).filter(function (item) { return state.botId && item.bot_id === state.botId; });
+  const sig = mine.map(function (item) { return item.id + ":" + item.level + ":" + item.ruleset; }).join("|") + "#" + uiRev + "#" + (approvalsUnreachable() ? 1 : 0);
+  if (sig === threadSig) { patchAges(host); return; }
+  const active = document.activeElement;
+  const restore = active && host.contains(active) && active.getAttribute ? (active.getAttribute("data-appr-focus") || "") : "";
+  threadSig = sig;
+  host.replaceChildren();
+  mine.forEach(function (item) { host.append(renderApprovalCard(item, "thread")); });
+  if (restore && !typingFocus()) {
+    const back = findByAttr(host, "data-appr-focus", restore);
+    if (back) back.focus();
+  }
+}
+function rulePayload(draft) {
+  const kind = draft.kind === "pattern" ? "pattern" : "exact";
+  return {
+    kind: kind,
+    argv: kind === "exact" ? splitArgv(draft.text) : [],
+    pattern: kind === "pattern" ? String(draft.text || "").trim() : "",
+    scope: draft.scope === "global" ? "global" : "bot",
+    bot_id: draft.scope === "global" ? "" : (draft.bot_id || ""),
+    effect: draft.effect || "allow"
+  };
+}
+function fillBotPicker(select, selected) {
+  if (!select) return;
+  const cur = selected || select.value;
+  select.replaceChildren();
+  (state.bots || []).forEach(function (b) {
+    if (b.archived) return;
+    select.append(new Option(b.name || b.id, b.id));
+  });
+  if (cur && Array.from(select.options).some(function (o) { return o.value === cur; })) select.value = cur;
+}
+function setSeg(root, attr, value) {
+  if (!root) return;
+  root.querySelectorAll("[role='radio']").forEach(function (button) {
+    const on = button.getAttribute(attr) === value;
+    button.setAttribute("aria-checked", on ? "true" : "false");
+  });
+}
+function readRuleForm() {
+  const kindBtn = document.querySelector("#rule-kind [aria-checked='true']");
+  const scopeBtn = document.querySelector("#rule-scope [aria-checked='true']");
+  const effectBtn = document.querySelector("#rule-effect [aria-checked='true']");
+  return {
+    kind: kindBtn ? kindBtn.getAttribute("data-kind") : "exact",
+    scope: scopeBtn ? scopeBtn.getAttribute("data-scope") : "bot",
+    effect: effectBtn ? effectBtn.getAttribute("data-effect") : "allow",
+    text: ($("#rule-pattern") && $("#rule-pattern").value) || "",
+    bot_id: ($("#rule-bot") && $("#rule-bot").value) || ""
+  };
+}
+function openRuleSheet(preset) {
+  ruleDraft = Object.assign({ kind: "exact", scope: "bot", effect: "allow", text: "", bot_id: state.rulesBot || state.botId || "", replaceId: "" }, preset || {});
+  const sheet = $("#rule-sheet");
+  const scrim = $("#rule-scrim");
+  if (scrim) scrim.hidden = false;
+  if (sheet) sheet.hidden = false;
+  const title = $("#rule-sheet-title");
+  if (title) title.textContent = ruleDraft.replaceId ? "Edit rule" : "New rule";
+  setSeg($("#rule-kind"), "data-kind", ruleDraft.kind);
+  setSeg($("#rule-scope"), "data-scope", ruleDraft.scope);
+  setSeg($("#rule-effect"), "data-effect", ruleDraft.effect);
+  const input = $("#rule-pattern");
+  if (input) input.value = ruleDraft.text || "";
+  fillBotPicker($("#rule-bot"), ruleDraft.bot_id);
+  syncRuleForm();
+  if (input) input.focus();
+}
+function closeRuleSheet() {
+  const sheet = $("#rule-sheet");
+  const scrim = $("#rule-scrim");
+  if (sheet) sheet.hidden = true;
+  if (scrim) scrim.hidden = true;
+  ruleDraft = null;
+}
+function syncRuleForm() {
+  const draft = readRuleForm();
+  const pattern = draft.kind === "pattern";
+  const label = $("#rule-input-label");
+  const help = $("#rule-help");
+  const input = $("#rule-pattern");
+  const err = $("#rule-error");
+  const bot = $("#rule-bot");
+  if (label) label.textContent = pattern ? "Pattern" : "Exact command";
+  if (help) help.textContent = pattern ? PATTERN_HELP : EXACT_HELP;
+  if (bot) bot.hidden = draft.scope !== "bot";
+  const save = $("#rule-save");
+  if (save) save.textContent = pattern ? "Save pattern rule" : "Save exact rule";
+  let invalid = false;
+  let message = "";
+  if (!pattern) {
+    if (!String(draft.text || "").trim() || exactHasOp(draft.text)) {
+      invalid = true;
+      if (exactHasOp(draft.text)) message = patternErrorCopy("operators", "", approvals.wrappers);
+    }
+  } else if (!draft._ok) {
+    invalid = true;
+    message = draft._message || "";
+  }
+  if (input) {
+    input.setAttribute("aria-invalid", invalid && String(draft.text || "").trim() ? "true" : "false");
+  }
+  if (err) {
+    err.hidden = !message;
+    err.replaceChildren();
+    if (message) {
+      err.append(cloneTpl("tpl-alert"));
+      err.append(el("span", "", message));
+    }
+  }
+  if (save) setAriaDisabled(save, invalid || (draft.scope === "bot" && !draft.bot_id));
+  paintConsequence(draft);
+}
+function paintConsequence(draft) {
+  const node = $("#rule-cons");
+  if (!node) return;
+  const name = draft.scope === "global" ? "Every bot" : botLabel(draft.bot_id, "This bot");
+  const what = draft.kind === "pattern" ? ("`" + String(draft.text || "").trim() + "`") : ("`" + (splitArgv(draft.text).join(" ") || "this command") + "`");
+  let line = "";
+  if (draft.effect === "deny") line = name + " will deny " + what + ".";
+  else if (draft.effect === "ask") line = name + " will ask before running " + what + ".";
+  else line = name + " will run " + what + " without asking. Nothing else: a * is one word and never a flag. Commands with several parts and critical items still ask.";
+  node.classList.toggle("is-high", !!(draft._high && draft._high.length && draft.effect === "allow"));
+  node.replaceChildren();
+  if (draft._high && draft._high.length && draft.effect === "allow") node.append(cloneTpl("tpl-alert"));
+  node.append(document.createTextNode(line));
+  if (draft._high && draft._high.length && draft.effect === "allow") {
+    node.append(document.createTextNode(" High-risk matches: " + draft._high.join("; ") + "."));
+  }
+}
+let previewTimer = 0;
+function scheduleRuleCheck() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(runRuleCheck, 200);
+}
+async function runRuleCheck() {
+  const draft = readRuleForm();
+  const token = ++ruleToken;
+  draft._ok = false;
+  draft._message = "";
+  draft._high = [];
+  if (draft.kind === "pattern") {
+    const res = await brokerCall("/api/permbroker/patterns/validate", {
+      method: "POST",
+      body: JSON.stringify({ pattern: draft.text })
+    });
+    if (token !== ruleToken) return;
+    const data = res.data || {};
+    draft._ok = !!data.ok;
+    if (!data.ok) {
+      const cmd = String(draft.text || "").trim().split(/\s+/)[0] || "";
+      draft._message = patternErrorCopy(data.code, cmd, approvals.wrappers) || data.message || "";
+    }
+  } else if (exactHasOp(draft.text)) {
+    draft._ok = false;
+    draft._message = patternErrorCopy("operators", "", approvals.wrappers);
+  } else {
+    draft._ok = !!String(draft.text || "").trim();
+  }
+  const saveDisabled = (draft.kind === "pattern" && !draft._ok) || (draft.kind !== "pattern" && !draft._ok);
+  if (!saveDisabled && (draft.kind === "pattern" ? String(draft.text || "").trim() : splitArgv(draft.text).length)) {
+    const payload = rulePayload(draft);
+    const prev = await brokerCall("/api/permbroker/patterns/preview", { method: "POST", body: JSON.stringify(payload) });
+    if (token !== ruleToken) return;
+    paintPreview(prev.data, draft);
+    const hits = (prev.data && prev.data.requests) || [];
+    draft._high = hits.filter(function (hit) {
+      return hit && hit.outcome && hit.outcome !== "no_match" && (hit.level === "high" || hit.level === "critical");
+    }).map(function (hit) { return (hit.argv || []).join(" "); });
+  } else paintPreview(null, draft);
+  const current = readRuleForm();
+  current._ok = draft._ok;
+  current._message = draft._message;
+  current._high = draft._high;
+  syncRuleFormFrom(current);
+}
+function syncRuleFormFrom(draft) {
+  const input = $("#rule-pattern");
+  const err = $("#rule-error");
+  const save = $("#rule-save");
+  const invalid = !draft._ok && !!String(draft.text || "").trim();
+  if (input) input.setAttribute("aria-invalid", invalid ? "true" : "false");
+  if (err) {
+    err.hidden = !draft._message;
+    err.replaceChildren();
+    if (draft._message) {
+      err.append(cloneTpl("tpl-alert"));
+      err.append(el("span", "", draft._message));
+    }
+  }
+  if (save) setAriaDisabled(save, !draft._ok || (draft.scope === "bot" && !draft.bot_id));
+  paintConsequence(draft);
+}
+function paintPreview(data, draft) {
+  const summary = $("#rule-summary");
+  const list = $("#rule-hits");
+  if (summary) {
+    const name = draft.scope === "global" ? "" : botLabel(draft.bot_id, "");
+    summary.textContent = data && data.summary ? previewSummary(data.summary, name) : "";
+  }
+  if (!list) return;
+  list.replaceChildren();
+  ((data && data.requests) || []).forEach(function (hit) {
+    const li = document.createElement("li");
+    li.append(el("code", "", (hit.argv || []).join(" ")));
+    li.append(el("span", "", outcomeLabel(hit.outcome, hit.reason)));
+    list.append(li);
+  });
+}
+async function saveRuleFromForm() {
+  const save = $("#rule-save");
+  if (save && save.getAttribute("aria-disabled") === "true") {
+    const input = $("#rule-pattern");
+    if (input) input.focus();
+    return;
+  }
+  const draft = readRuleForm();
+  const payload = rulePayload(draft);
+  const res = await brokerCall("/api/permbroker/rules", { method: "POST", body: JSON.stringify(payload) });
+  if (res.network || res.status !== 200) {
+    const err = $("#rule-error");
+    if (err) {
+      err.hidden = false;
+      err.textContent = SEND_FAILED_COPY;
+    }
+    return;
+  }
+  const created = res.data && res.data.rule;
+  const newId = created && created.id;
+  const replaceId = ruleDraft && ruleDraft.replaceId;
+  if (replaceId && replaceId !== newId) {
+    await brokerCall("/api/permbroker/rules/" + encodeURIComponent(replaceId), { method: "DELETE" });
+  }
+  closeRuleSheet();
+  showStatusToast("Rule saved · Undo", function () {
+    if (newId) brokerCall("/api/permbroker/rules/" + encodeURIComponent(newId), { method: "DELETE" }).then(function () {
+      if (replaceId) brokerCall("/api/permbroker/rules", { method: "POST", body: JSON.stringify(ruleDraft.previous || payload) });
+      pollSoon();
+    });
+  });
+  pollSoon();
+}
+function paintRules() {
+  const root = $("#view-rules");
+  const list = $("#rules-list");
+  if (!root || !list || !root.classList.contains("on")) return;
+  const pop = root.querySelector(".rules-pop:not([hidden])");
+  if (pop && !rulesForce) return;
+  const active = document.activeElement;
+  if (active && isTypingTarget(active) && list.childElementCount && !rulesForce) return;
+  const sig = rulesFilter + "#" + (state.rulesBot || "") + "#" + JSON.stringify(approvalRules) + "#" + JSON.stringify(approvalGrants) + "#" + JSON.stringify(approvalRisk);
+  if (sig === rulesSig && !rulesForce) return;
+  rulesForce = false;
+  rulesSig = sig;
+  let focusKey = "";
+  if (active && active.getAttribute && list.contains(active)) focusKey = active.getAttribute("data-rules-focus") || "";
+  root.querySelectorAll(".rules-filters [role='radio']").forEach(function (button) {
+    button.setAttribute("aria-checked", button.getAttribute("data-filter") === rulesFilter ? "true" : "false");
+  });
+  list.replaceChildren();
+  const show = function (name) { return rulesFilter === "all" || rulesFilter === name; };
+  if (show("global") || (rulesFilter === "patterns")) {
+    const globals = (approvalRules || []).filter(function (rule) {
+      if (rule.scope !== "global") return false;
+      if (rulesFilter === "patterns") return rule.kind === "pattern";
+      return true;
+    });
+    if (rulesFilter !== "bot" && rulesFilter !== "grants" && rulesFilter !== "risk") list.append(renderRuleSection("Global", "", globals, []));
+  }
+  if (show("bot") || show("grants") || rulesFilter === "patterns" || rulesFilter === "all") {
+    const bots = {};
+    (approvalRules || []).forEach(function (rule) {
+      if (rule.scope !== "bot") return;
+      if (rulesFilter === "patterns" && rule.kind !== "pattern") return;
+      if (rulesFilter === "grants") return;
+      const id = rule.bot_id || "";
+      if (state.rulesBot && rulesFilter === "bot" && id !== state.rulesBot) return;
+      if (!bots[id]) bots[id] = { rules: [], grants: [] };
+      bots[id].rules.push(rule);
+    });
+    (approvalGrants || []).forEach(function (grant) {
+      if (!(show("grants") || show("bot") || rulesFilter === "all")) return;
+      if (rulesFilter === "patterns" || rulesFilter === "global" || rulesFilter === "risk") return;
+      const id = grant.bot_id || "";
+      if (state.rulesBot && rulesFilter === "bot" && id !== state.rulesBot) return;
+      if (!bots[id]) bots[id] = { rules: [], grants: [] };
+      bots[id].grants.push(grant);
+    });
+    Object.keys(bots).forEach(function (id) {
+      list.append(renderRuleSection(botLabel(id, "Bot"), id, bots[id].rules, bots[id].grants));
+    });
+  }
+  if (show("risk")) list.append(renderRiskSection());
+  if (focusKey) {
+    const again = findByAttr(list, "data-rules-focus", focusKey);
+    if (again && again.focus) again.focus();
+  }
+}
+function renderRuleSection(title, botId, rules, grants) {
+  const sec = el("section", "rules-sec");
+  const head = el("div", "rules-sec-h");
+  const h = document.createElement("h3");
+  h.append(document.createTextNode(title));
+  if (botId) {
+    const sub = el("span", "rules-sub");
+    sub.append(el("span", "rules-dot", " · "), document.createTextNode("Rules and task grants for this bot"));
+    h.append(sub);
+  }
+  head.append(h);
+  if (botId && rulesFilter !== "grants") {
+    const add = btn("ghost small", "+ Add rule");
+    add.setAttribute("data-rules-focus", "add:" + botId);
+    add.addEventListener("click", function () {
+      openRuleSheet({ scope: "bot", bot_id: botId, kind: "exact" });
+    });
+    head.append(add);
+  }
+  sec.append(head);
+  if (rules.length || grants.length) {
+    const cols = el("div", "rules-head");
+    ["Effect", "Command", "Scope", "Last used", ""].forEach(function (name) { cols.append(el("span", "", name)); });
+    sec.append(cols);
+  }
+  rules.forEach(function (rule) { sec.append(renderRuleRow(rule)); });
+  grants.forEach(function (grant) { sec.append(renderGrantRow(grant)); });
+  if (!rules.length && !grants.length) sec.append(el("p", "rules-subhead", "None yet."));
+  return sec;
+}
+function renderRuleRow(rule) {
+  const row = el("div", "rules-row");
+  row.append(el("span", "appr-chip " + (rule.effect || "ask"), rule.effect || "ask"));
+  const cmd = el("div", "");
+  if (rule.kind === "pattern") {
+    const line = el("div", "rules-cmd");
+    line.append(el("span", "appr-chip pattern", "PATTERN"), document.createTextNode(" " + (rule.pattern || "")));
+    cmd.append(line);
+  } else {
+    cmd.append(el("div", "rules-cmd", (rule.argv || []).join(" ") || rule.pattern || ""));
+  }
+  if (rule.source_line || rule.source) cmd.append(el("div", "rules-src", rule.source_line || rule.source));
+  if (rule.kind === "legacy") cmd.append(el("div", "rules-src", LEGACY_NOTE));
+  if (rule.needs_confirm) {
+    const confirm = btn("secondary small", "Confirm");
+    confirm.setAttribute("data-rules-focus", "rule:" + (rule.id || "") + ":confirm");
+    confirm.addEventListener("click", function () {
+      brokerCall("/api/permbroker/rules/" + encodeURIComponent(rule.id) + "/confirm", { method: "POST", body: "{}" }).then(pollSoon);
+    });
+    cmd.append(confirm);
+  }
+  row.append(cmd);
+  row.append(el("span", "", rule.scope === "global" ? "All bots" : botLabel(rule.bot_id, "One bot")));
+  const used = rule.last_used_at ? approvalAge(rule.last_used_at, Date.now(), 0) : "Never";
+  row.append(el("span", "", !rule.last_used_at || String(rule.last_used_at).indexOf("0001") === 0 ? "Never" : used));
+  const menu = el("div", "rules-menu");
+  const more = btn("icon-btn", "⋯");
+  more.setAttribute("aria-label", "Rule actions");
+  more.setAttribute("aria-expanded", "false");
+  more.setAttribute("data-rules-focus", "rule:" + (rule.id || "") + ":menu");
+  const pop = el("div", "rules-pop");
+  pop.hidden = true;
+  pop.setAttribute("role", "menu");
+  if (rule.kind !== "legacy") {
+    const edit = btn("", "Edit");
+    edit.setAttribute("role", "menuitem");
+    edit.addEventListener("click", function () {
+      pop.hidden = true;
+      openRuleSheet({
+        kind: rule.kind === "pattern" ? "pattern" : "exact",
+        text: rule.kind === "pattern" ? (rule.pattern || "") : (rule.argv || []).join(" "),
+        scope: rule.scope === "global" ? "global" : "bot",
+        bot_id: rule.bot_id || "",
+        effect: rule.effect || "allow",
+        replaceId: rule.id,
+        previous: {
+          kind: rule.kind === "pattern" ? "pattern" : "exact",
+          argv: rule.argv || [],
+          pattern: rule.pattern || "",
+          scope: rule.scope,
+          bot_id: rule.bot_id || "",
+          effect: rule.effect
+        }
+      });
+    });
+    pop.append(edit);
+    pop.append(el("div", "rules-src", "Change effect"));
+    ["allow", "ask", "deny"].forEach(function (effect) {
+      const choice = btn("", effect.charAt(0).toUpperCase() + effect.slice(1));
+      choice.setAttribute("role", "menuitem");
+      choice.addEventListener("click", function () { changeRuleEffect(rule, effect); pop.hidden = true; });
+      pop.append(choice);
+    });
+  }
+  const revoke = btn("", "Revoke");
+  revoke.setAttribute("role", "menuitem");
+  revoke.addEventListener("click", function () { pop.hidden = true; revokeRule(rule); });
+  pop.append(revoke);
+  more.addEventListener("click", function (ev) {
+    ev.stopPropagation();
+    const open = pop.hidden;
+    document.querySelectorAll("#view-rules .rules-pop").forEach(function (other) { other.hidden = true; });
+    pop.hidden = !open;
+    more.setAttribute("aria-expanded", pop.hidden ? "false" : "true");
+  });
+  menu.append(more, pop);
+  row.append(menu);
+  return row;
+}
+function renderGrantRow(grant) {
+  const row = el("div", "rules-row");
+  row.append(el("span", "appr-chip allow", "allow"));
+  const cmd = el("div", "");
+  cmd.append(el("div", "rules-cmd", grant.raw || (grant.argv || []).join(" ")));
+  cmd.append(el("div", "rules-src", "Task grant" + (grant.task_text ? " · " + grant.task_text : "")));
+  row.append(cmd);
+  row.append(el("span", "", "This task"));
+  row.append(el("span", "", grant.expires ? approvalAge(grant.expires, Date.now(), 0) : ""));
+  row.append(el("span", ""));
+  return row;
+}
+function renderRiskSection() {
+  const sec = el("section", "rules-sec");
+  const head = el("div", "rules-sec-h");
+  const h = document.createElement("h3");
+  h.append(document.createTextNode("Risk tables "), cloneTpl("tpl-lock"));
+  head.append(h);
+  sec.append(head);
+  const risk = approvalRisk || { builtin: [], stricter: [] };
+  sec.append(el("div", "rules-subhead", BUILTIN_RISK + " · " + BUILTIN_RISK_NOTE));
+  (risk.builtin || []).forEach(function (row) { sec.append(renderRiskRow(row, false)); });
+  sec.append(el("div", "rules-subhead", STRICTER_RISK + " · " + STRICTER_RISK_NOTE));
+  if (!(risk.stricter || []).length) sec.append(el("p", "rules-src", "None yet."));
+  (risk.stricter || []).forEach(function (row) { sec.append(renderRiskRow(row, true)); });
+  return sec;
+}
+function renderRiskRow(row, stricter) {
+  const line = el("div", "rules-row");
+  line.append(el("span", "appr-chip " + (row.level || ""), row.level || ""));
+  const cmd = el("div", "");
+  cmd.append(el("div", "rules-cmd", (row.matches || []).join("\n")));
+  if (stricter && row.raised_from) cmd.append(el("div", "rules-src", "Raised from " + row.raised_from + " to " + row.level));
+  line.append(cmd);
+  line.append(el("span", "", row.applies_to || ""));
+  line.append(el("span", "", "—"));
+  const lock = el("span", "appr-lock");
+  lock.append(cloneTpl("tpl-lock"));
+  lock.setAttribute("aria-label", "Read only");
+  line.append(lock);
+  return line;
+}
+async function changeRuleEffect(rule, effect) {
+  const payload = {
+    kind: rule.kind === "pattern" ? "pattern" : "exact",
+    argv: rule.argv || [],
+    pattern: rule.pattern || "",
+    scope: rule.scope,
+    bot_id: rule.bot_id || "",
+    effect: effect
+  };
+  const res = await brokerCall("/api/permbroker/rules", { method: "POST", body: JSON.stringify(payload) });
+  if (res.status !== 200) return;
+  await brokerCall("/api/permbroker/rules/" + encodeURIComponent(rule.id), { method: "DELETE" });
+  const created = res.data && res.data.rule;
+  showStatusToast("Rule saved · Undo", function () {
+    if (created && created.id) brokerCall("/api/permbroker/rules/" + encodeURIComponent(created.id), { method: "DELETE" });
+    brokerCall("/api/permbroker/rules", { method: "POST", body: JSON.stringify(Object.assign({}, payload, { effect: rule.effect })) }).then(pollSoon);
+  });
+  pollSoon();
+}
+async function revokeRule(rule) {
+  const payload = {
+    kind: rule.kind === "legacy" ? "exact" : (rule.kind === "pattern" ? "pattern" : "exact"),
+    argv: rule.argv || [],
+    pattern: rule.pattern || "",
+    scope: rule.scope,
+    bot_id: rule.bot_id || "",
+    effect: rule.effect
+  };
+  const res = await brokerCall("/api/permbroker/rules/" + encodeURIComponent(rule.id), { method: "DELETE" });
+  if (res.status !== 200) return;
+  if (rule.kind === "legacy") showStatusToast("Rule revoked.", null);
+  else showStatusToast("Rule revoked · Undo", function () {
+    brokerCall("/api/permbroker/rules", { method: "POST", body: JSON.stringify(payload) }).then(pollSoon);
+  });
+  pollSoon();
+}
+async function pollApprovals() {
+  if (approvals.polling) { pollAgain = true; return; }
+  approvals.polling = true;
+  try {
+    const pending = await brokerCall("/api/permbroker/pending");
+    if (pending.network) {
+      approvals.netDown = true;
+    } else if (pending.status === 200) {
+      approvals.netDown = false;
+      approvals.polled = true;
+      approvalItems = (pending.data && pending.data.pending) || [];
+    } else if (pending.status === 403 || pending.status === 404) {
+      approvals.netDown = false;
+      approvals.polled = true;
+      approvalItems = [];
+    }
+    const rules = await brokerCall("/api/permbroker/rules");
+    if (rules.status === 200 && rules.data) {
+      approvalRules = rules.data.rules || [];
+      approvalGrants = rules.data.task_grants || [];
+    }
+    const recent = await brokerCall("/api/permbroker/recent");
+    if (recent.status === 200 && recent.data) approvalRecent = recent.data.recent || [];
+    const risk = await brokerCall("/api/permbroker/risk-tables");
+    if (risk.status === 200) approvalRisk = risk.data;
+    if (!approvals.wrappers) {
+      const wrappers = await brokerCall("/api/permbroker/patterns/wrappers");
+      if (wrappers.status === 200 && wrappers.data) approvals.wrappers = wrappers.data.wrappers || [];
+    }
+    const live = {};
+    (approvalItems || []).forEach(function (item) { live[item.id] = true; });
+    Object.keys(cardUI).forEach(function (id) { if (!live[id]) delete cardUI[id]; });
+    renderApprovals();
+    if (typeof renderBots === "function") renderBots();
+  } finally {
+    approvals.polling = false;
+    if (pollAgain) { pollAgain = false; pollApprovals(); return; }
+    clearTimeout(pollTimer);
+    pollTimer = setTimeout(pollApprovals, APPROVAL_POLL_MS);
+  }
+}
+function pollSoon() {
+  pollAgain = true;
+  if (!approvals.polling) pollApprovals();
+}
+function startApprovals() {
+  if (approvals.started) return;
+  approvals.started = true;
+  document.querySelectorAll("button.appr-btn").forEach(function (button) {
+    button.addEventListener("click", function () {
+      if (queueOpen) closeApprovals();
+      else openApprovals({ manual: true, focus: true });
+    });
+  });
+  const scrim = $("#approvals-scrim");
+  if (scrim) scrim.addEventListener("click", closeApprovals);
+  const close = $("#approvals-close");
+  if (close) close.addEventListener("click", closeApprovals);
+  const panel = $("#approvals");
+  if (panel) panel.addEventListener("keydown", function (e) {
+    if (e.key !== "Tab" || approvalMode() === "dock") return;
+    if (typeof trapStateTab === "function") trapStateTab(e, panel, document.activeElement);
+  });
+  const alerts = $("#menu-alerts");
+  if (alerts) alerts.addEventListener("click", function () {
+    if (typeof closeRosterMenu === "function") closeRosterMenu();
+    approvals.forceAlerts = true;
+    openApprovals({ manual: true, focus: true });
+  });
+  const rules = $("#menu-rules");
+  if (rules) rules.addEventListener("click", function () {
+    if (typeof closeRosterMenu === "function") closeRosterMenu();
+    openRules("", true);
+  });
+  const profileRules = $("#open-approval-rules");
+  if (profileRules) profileRules.addEventListener("click", function () {
+    const bot = typeof currentBot === "function" ? currentBot() : null;
+    openRules(bot ? bot.id : (state.botId || ""), true);
+  });
+  const back = $("#rules-back");
+  if (back) back.addEventListener("click", function () { if (typeof navBack === "function") navBack(); });
+  const add = $("#rules-new");
+  if (add) add.addEventListener("click", function () {
+    openRuleSheet({ scope: state.rulesBot ? "bot" : "global", bot_id: state.rulesBot || state.botId || "" });
+  });
+  document.querySelectorAll("#view-rules .rules-filters [role='radio']").forEach(function (button) {
+    button.addEventListener("click", function () {
+      rulesFilter = button.getAttribute("data-filter") || "all";
+      rulesForce = true;
+      paintRules();
+    });
+  });
+  document.addEventListener("click", function () {
+    document.querySelectorAll("#view-rules .rules-pop").forEach(function (pop) { pop.hidden = true; });
+  });
+  ["#rule-kind", "#rule-scope", "#rule-effect"].forEach(function (sel) {
+    const root = $(sel);
+    if (!root) return;
+    root.addEventListener("click", function (ev) {
+      const button = ev.target.closest("[role='radio']");
+      if (!button) return;
+      const attr = sel === "#rule-kind" ? "data-kind" : sel === "#rule-scope" ? "data-scope" : "data-effect";
+      setSeg(root, attr, button.getAttribute(attr));
+      syncRuleForm();
+      scheduleRuleCheck();
+    });
+  });
+  const input = $("#rule-pattern");
+  if (input) input.addEventListener("input", function () { syncRuleForm(); scheduleRuleCheck(); });
+  const botPick = $("#rule-bot");
+  if (botPick) botPick.addEventListener("change", function () { syncRuleForm(); scheduleRuleCheck(); });
+  const save = $("#rule-save");
+  if (save) save.addEventListener("click", saveRuleFromForm);
+  const cancel = $("#rule-cancel");
+  if (cancel) cancel.addEventListener("click", closeRuleSheet);
+  const ruleClose = $("#rule-close");
+  if (ruleClose) ruleClose.addEventListener("click", closeRuleSheet);
+  const ruleScrim = $("#rule-scrim");
+  if (ruleScrim) ruleScrim.addEventListener("click", closeRuleSheet);
+  const sheet = $("#rule-sheet");
+  if (sheet) sheet.addEventListener("keydown", function (e) {
+    if (e.key === "Tab" && typeof trapStateTab === "function") trapStateTab(e, sheet, document.activeElement);
+  });
+  window.addEventListener("resize", function () { applyQueueChrome(); });
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) syncNotifications(approvalItems || []);
+  });
+  if (hashIsApprovals(location.hash)) openApprovals({ manual: true, focus: false });
+  pollApprovals();
+}
+// approvals-dom:end
+
 state.stop = freshStop();
 ensureHistory();
 paintHealth();
 renderBots();
+startApprovals();
 refreshDaemon();
 </script>
 </body>

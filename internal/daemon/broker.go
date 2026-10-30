@@ -609,11 +609,11 @@ func (a *App) clearBotSession(botID, sessionID string) {
 	}
 }
 
-func (a *App) noteUserMessage(botID, msgID string) {
+func (a *App) noteUserMessage(botID, msgID, text string) {
 	if a == nil || a.broker == nil || msgID == "" || !a.effPol(botID).BrokerHook(botID) {
 		return
 	}
-	a.broker.NoteUserMessage(botID, msgID)
+	a.broker.NoteUserText(botID, msgID, text)
 }
 
 func lastUserTask(inputs []store.Message) string {

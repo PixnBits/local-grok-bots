@@ -39,36 +39,16 @@ func HandleArgs(args []string) bool {
 
 func enterJail(jail string, cfg stage2File) error {
 	workspace, command := cfg.Workspace, cfg.Command
-	for _, d := range []string{"work", "bin", "lib", "lib64", "usr", "tmp", "dev", "etc"} {
-		if err := os.MkdirAll(filepath.Join(jail, d), 0o755); err != nil {
-			return err
-		}
+	if err := os.MkdirAll(filepath.Join(jail, "etc"), 0o755); err != nil {
+		return err
 	}
-	binds := unshareBaseBinds()
-	for _, src := range binds {
-		dst := filepath.Join(jail, strings.TrimPrefix(src, "/"))
-		if err := os.MkdirAll(dst, 0o755); err != nil {
+	for _, m := range unshareFallbackMounts() {
+		if err := applyFallbackMount(jail, workspace, m); err != nil {
 			return err
 		}
-		if err := bindReadOnly(src, dst); err != nil {
-			return err
-		}
-	}
-	if err := mountCall(workspace, filepath.Join(jail, "work"), "", unix.MS_BIND, ""); err != nil {
-		return fmt.Errorf("bind workspace: %w", err)
 	}
 	if b, err := os.ReadFile("/etc/ld.so.cache"); err == nil {
 		_ = os.WriteFile(filepath.Join(jail, "etc", "ld.so.cache"), b, 0o644)
-	}
-	nullPath := filepath.Join(jail, "dev", "null")
-	if err := os.WriteFile(nullPath, nil, 0o644); err != nil {
-		return err
-	}
-	if err := mountCall("/dev/null", nullPath, "", unix.MS_BIND, ""); err != nil {
-		return fmt.Errorf("dev/null: %w", err)
-	}
-	if err := mountCall("tmpfs", filepath.Join(jail, "tmp"), "tmpfs", 0, "size=32m,mode=1777"); err != nil {
-		return fmt.Errorf("tmpfs: %w", err)
 	}
 	for _, m := range cfg.Mounts {
 		if err := bindIntoJail(jail, m); err != nil {
@@ -107,6 +87,54 @@ func enterJail(jail string, cfg stage2File) error {
 		return unix.Exec("/bin/bash", []string{"bash", "--norc", "--noprofile", "-c", command}, env)
 	}
 	return unix.Exec("/bin/sh", []string{"sh", "-c", command}, env)
+}
+
+// applyFallbackMount creates one mount from unshareFallbackMounts.
+// "ro" bind-mounts the source read-only. "rw" at /work bind-mounts the
+// workspace. Any other "rw" entry bind-mounts its source onto a file.
+// "tmpfs" mounts a small tmpfs.
+func applyFallbackMount(jail, workspace string, m fallbackMount) error {
+	if m.Dst == "" || !strings.HasPrefix(m.Dst, "/") {
+		return fmt.Errorf("bad mount")
+	}
+	target := filepath.Join(jail, strings.TrimPrefix(m.Dst, "/"))
+	switch m.Mode {
+	case "ro":
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return err
+		}
+		return bindReadOnly(m.Src, target)
+	case "rw":
+		if m.Dst == "/work" {
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				return err
+			}
+			if err := mountCall(workspace, target, "", unix.MS_BIND, ""); err != nil {
+				return fmt.Errorf("bind workspace: %w", err)
+			}
+			return nil
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			return err
+		}
+		if err := os.WriteFile(target, nil, 0o644); err != nil {
+			return err
+		}
+		if err := mountCall(m.Src, target, "", unix.MS_BIND, ""); err != nil {
+			return fmt.Errorf("dev/null: %w", err)
+		}
+		return nil
+	case "tmpfs":
+		if err := os.MkdirAll(target, 0o755); err != nil {
+			return err
+		}
+		if err := mountCall(m.Src, target, "tmpfs", 0, "size=32m,mode=1777"); err != nil {
+			return fmt.Errorf("tmpfs: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("bad mount")
+	}
 }
 
 func bindIntoJail(jail string, m mount) error {
