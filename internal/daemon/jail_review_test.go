@@ -154,6 +154,17 @@ func TestGolden_HookSwappedMidTurnRefused(t *testing.T) {
 			if ran.status != "error" || !strings.Contains(ran.errText, "hook changed") {
 				t.Fatalf("run %s %q", ran.status, ran.errText)
 			}
+			starts := 0
+			if ev, lerr := h.app.st.ListLog(h.bot.ID, "", "", 50); lerr == nil {
+				for _, e := range ev {
+					if e.Kind == "tool_start" {
+						starts++
+					}
+				}
+			}
+			if starts != 1 {
+				t.Fatalf("tool events after the hook change were not stopped: %d tool_start", starts)
+			}
 		case <-time.After(20 * time.Second):
 			t.Fatal("turn did not end")
 		}

@@ -176,6 +176,10 @@ func TestGolden_CdTrackingJoinsCritical(t *testing.T) {
 	if d.Level != LevelCritical {
 		t.Fatalf("joined %+v", d)
 	}
+	seq := "cd " + filepath.Join(root, "a", "b") + "; touch ../crit/marker"
+	if s := e.Evaluate(ctx, bashReq("bot", "sess", "task", start, seq)); s.Level != LevelCritical {
+		t.Fatalf("sequence %+v", s)
+	}
 	alone := e.Evaluate(ctx, bashReq("bot", "sess", "task", start, "touch ../crit/marker"))
 	if alone.Level == LevelCritical {
 		t.Fatalf("argument alone %+v", alone)

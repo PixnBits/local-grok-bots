@@ -70,6 +70,15 @@ func TestGolden_RunShellCmdAliasGated(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "pending approval") {
 			t.Fatalf("args %v err %v", args, err)
 		}
+		gated := false
+		for _, p := range app.broker.ListPending() {
+			if p.Command == cmd && p.Level == permbroker.LevelCritical {
+				gated = true
+			}
+		}
+		if !gated {
+			t.Fatalf("args %v: the gate did not see the command", args)
+		}
 	}
 }
 
