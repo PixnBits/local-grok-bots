@@ -46,7 +46,11 @@ func TestMain(m *testing.M) {
 	}
 	// Fake CLIs don't need bubblewrap and socat; sandbox tests set their own.
 	claudeSandboxMissing = func() []string { return nil }
-	os.Exit(m.Run())
+	code := m.Run()
+	for _, dir := range hookKeep {
+		_ = os.RemoveAll(dir)
+	}
+	os.Exit(code)
 }
 
 type fakeModel struct {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -113,18 +114,117 @@ func (a *App) prepareBrokerHook(bot store.Bot, ws, home string) (string, error) 
 	if err != nil {
 		return "", a.refuseBrokerHook(bot.ID, err)
 	}
+	if err := a.hookChanged(bin); err != nil {
+		a.noteHookChange(bot.ID, err)
+		return "", a.refuseBrokerHook(bot.ID, err)
+	}
 	if err := permbroker.CheckHookBinary(bin, []string{ws, home, a.ws}); err != nil {
 		return "", a.refuseBrokerHook(bot.ID, err)
+	}
+	if _, err := a.brokerSockPath(bot.ID); err != nil {
+		return "", a.refuseBrokerHook(bot.ID, err)
+	}
+	if err := a.checkClaudeBrokerVersion(); err != nil {
+		return "", a.refuseBrokerCLI(bot.ID, err)
 	}
 	sock, err := a.brokerSocket(bot.ID)
 	if err != nil {
 		return "", a.refuseBrokerHook(bot.ID, err)
 	}
+	a.hookMu.Lock()
+	a.hookBin = bin
+	a.hookMu.Unlock()
 	a.setBrokerOn(bot.ID, true)
 	if a.broker != nil {
 		a.broker.SetBotContext(bot.ID, a.ws, a.effPol(bot.ID).EffectiveGitHubRepos(bot.GitHubAllow))
+		a.broker.AddCriticalPaths(a.brokerCriticalPaths(bin, "", "")...)
 	}
 	return permbroker.HookCommand(bin, sock), nil
+}
+
+func (a *App) pinBrokerHook(p policy.Policy) {
+	if a == nil {
+		return
+	}
+	a.hookMu.Lock()
+	defer a.hookMu.Unlock()
+	a.hookPin = nil
+	if p.Broker != "hook" {
+		return
+	}
+	bin, err := brokerHookBinary(p)
+	if err != nil {
+		return
+	}
+	if err := permbroker.CheckHookBinary(bin, cleanRoots(a.ws)); err != nil {
+		return
+	}
+	pin, err := permbroker.PinHook(bin)
+	if err != nil {
+		return
+	}
+	a.hookPin = &pin
+	a.hookBin = bin
+}
+
+func (a *App) hookChanged(bin string) error {
+	a.hookMu.Lock()
+	pin := a.hookPin
+	a.hookMu.Unlock()
+	if pin == nil {
+		return nil
+	}
+	return pin.Diff(bin)
+}
+
+func (a *App) noteHookChange(botID string, err error) {
+	if a == nil || a.broker == nil || err == nil {
+		return
+	}
+	a.broker.Note(botID, "deny", err.Error())
+}
+
+func (a *App) checkClaudeBrokerVersion() error {
+	path, err := exec.LookPath("claude")
+	if err != nil {
+		return fmt.Errorf("version cannot be read")
+	}
+	return clisession.CheckClaudeBrokerVersion(context.Background(), path)
+}
+
+func (a *App) refuseBrokerCLI(botID string, err error) error {
+	reason := brokerHookReason(err)
+	a.log(botID, "permbroker", map[string]any{"error": reason})
+	return fmt.Errorf("permission broker is enabled but the Claude CLI cannot be used (%s), so the turn was refused", reason)
+}
+
+func (a *App) brokerCriticalPaths(bin, settings, settingsDir string) []string {
+	dir := ""
+	if a != nil && a.cfg.DataDir != "" {
+		dir = filepath.Join(a.cfg.DataDir, "permbroker")
+	}
+	return cleanCriticalPaths(bin, dir, settings, settingsDir)
+}
+
+func cleanCriticalPaths(paths ...string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
+		p = filepath.Clean(p)
+		if p == "" || p == "." || p == "/" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		out = append(out, p)
+	}
+	return out
 }
 
 // brokerHookBinary is the configured hook, or lgb-permhook next to this
@@ -194,15 +294,7 @@ func (a *App) refuseBrokerHook(botID string, err error) error {
 	return fmt.Errorf("permission broker is enabled but its hook cannot be used (%s), so the turn was refused", reason)
 }
 
-func (a *App) brokerSocket(botID string) (string, error) {
-	a.brokerMu.Lock()
-	defer a.brokerMu.Unlock()
-	if a.brokerLn == nil {
-		a.brokerLn = map[string]*permbroker.Listener{}
-	}
-	if ln := a.brokerLn[botID]; ln != nil {
-		return ln.Path(), nil
-	}
+func (a *App) brokerSockPath(botID string) (string, error) {
 	if !safeBotID(botID) {
 		return "", errors.New("invalid bot id")
 	}
@@ -213,6 +305,22 @@ func (a *App) brokerSocket(botID string) (string, error) {
 	// Linux sun_path holds 108 bytes including the trailing NUL.
 	if len(path) >= 108 {
 		return "", errors.New("socket path is too long")
+	}
+	return path, nil
+}
+
+func (a *App) brokerSocket(botID string) (string, error) {
+	path, err := a.brokerSockPath(botID)
+	if err != nil {
+		return "", err
+	}
+	a.brokerMu.Lock()
+	defer a.brokerMu.Unlock()
+	if a.brokerLn == nil {
+		a.brokerLn = map[string]*permbroker.Listener{}
+	}
+	if ln := a.brokerLn[botID]; ln != nil {
+		return ln.Path(), nil
 	}
 	ln, err := a.broker.Listen(botID, path)
 	if err != nil {
@@ -290,7 +398,11 @@ func (a *App) armBrokerSpec(botID, sessionID, runID string, inputs []store.Messa
 	if err != nil {
 		return err
 	}
-	if err := clisession.AssertBrokerLaunch(argv); err != nil {
+	settings := ""
+	if spec.Isolate != nil {
+		settings = spec.Isolate.SettingsPath
+	}
+	if err := clisession.AssertBrokerLaunch(argv, settings, spec.MCPConfig); err != nil {
 		return err
 	}
 	a.noteBrokerTurn(botID, sessionID, runID, inputs)

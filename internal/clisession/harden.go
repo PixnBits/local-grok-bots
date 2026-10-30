@@ -60,7 +60,7 @@ func claudeSettingsJSON(o IsolationOptions) ([]byte, error) {
 			deny = append(deny, "Bash("+c+")", "Bash("+c+" *)")
 		}
 	}
-	paths := protectedPaths(o.UserHome, o.Protect, nil)
+	paths := protectedPaths(o.UserHome, append(append([]string{}, o.Protect...), o.BrokerDeny...), nil)
 	if o.Grants.SSH && o.UserHome != "" {
 		paths = without(paths, filepath.Join(o.UserHome, ".ssh"))
 	}

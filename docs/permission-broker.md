@@ -24,6 +24,15 @@ stays on the locked-down settings (`disableAllHooks`). When `broker` is
 `hook` and the hook binary is not safe to run, startup prints a warning
 with the other policy warnings.
 
+While `broker` is `hook`, policy load records the hook binary: a content
+hash, device, inode, owner, mode, size, and mtime. Every armed launch
+compares the file again. A difference refuses the turn and appends an
+audit row. Publishing policy again records the file as it is then. The
+binary must be owned by the daemon user or root. Each directory from the
+file up to `/` must not be group or world writable, including a sticky
+directory. A symlink component is resolved and those directories are
+checked the same way. The path must not sit inside a jail-writable root.
+
 A policy value other than `off` or `hook` is a startup error. A risk row
 that lowers a shipped level, or names an unknown level, is a startup error.
 Policy may raise a level or repeat it.
@@ -46,10 +55,24 @@ settings are not loaded. `allowManagedHooksOnly` in this file does not
 lock hooks; that key applies only in managed settings. Installing
 `/etc/claude-code/managed-settings.json` is out of scope.
 
+The settings deny list also names the hook binary, that settings file and
+its directory, and `DATA_DIR/permbroker`. A tool call that touches one of
+those paths is critical: it always asks, and it is never a rule.
+
 The launch refuses bypass flags, `acceptEdits`, `dontAsk`,
-`bypassPermissions`, and `--allowedTools`. `--disallowedTools` may stay.
-Headless asks, including stream-json control, are denied and do not open a
-card.
+`bypassPermissions`, `--allowedTools`, `--add-dir`, and `--plugin-dir`.
+It requires this settings file and exactly one empty `--setting-sources`.
+An MCP config is refused unless it is the daemon's own file.
+`--disallowedTools` may stay. Headless asks, including stream-json
+control, are denied and do not open a card.
+
+The broker arms only when `claude --version` is at least 2.1.295. The
+result is cached for that binary's path, size, and mtime. An older
+release, or a version that cannot be read, refuses the turn before the
+CLI starts. A hook failure other than a normal allow or an exit-2 deny
+blocks the tool because `onFailure` is `block`. Without that field, a
+Read, Glob, or Grep would run and Bash would follow the locked-down
+permission flow.
 
 Claude is not inside the daemon's bubblewrap jail, so the hook command uses
 the host socket path. The hook talks to a per-bot Unix socket under
@@ -59,7 +82,8 @@ path has to fit in the platform's Unix address (108 bytes on Linux,
 including the trailing NUL). A path that does not fit refuses the turn.
 
 The hook is stdlib only. It waits at most 2.5 seconds, under the 30 second
-settings timeout. Exit 0 with a verdict of exactly `allow` is the only
+settings timeout. The socket evaluate itself stops at 2 seconds and the
+deadline is a deny. Exit 0 with a verdict of exactly `allow` is the only
 allow. Every doubt exits 2 and prints a PreToolUse deny. Exit 2 blocks the
 tool even if the JSON says allow. The hook never waits for a person.
 
@@ -67,7 +91,10 @@ On an ask, the daemon records a pending item and the hook denies with
 `pending approval <id>; retry the identical command after approval`. A
 human approves that item, then the same command may be retried once. A
 second retry, a different argv, a different cwd, or a different session
-does not use that approval.
+does not use that approval. The once token is also bound to the tool
+name. Claude Bash and `run_shell` share one shell name. A token for a
+Read does not allow an Edit of the same bytes. A command that is critical
+at retry time is not allowed by a token issued earlier; it asks again.
 
 A deny does not stop the run. The model keeps the reason. The run stays
 `done`. "Stopped after denial" remains the Grok card path.
@@ -88,7 +115,9 @@ compound is not a rule. Critical commands cannot be saved as a rule.
 Unclassified and high stop at per-bot. Global rules are only for low
 and medium. One approval can be once, for the task, for the bot, or
 global, within that ladder. The once token is bound to the bot, the
-session, the input hash, and the cwd, and it is consumed on first use.
+session, the tool name, the input hash, and the cwd, and it is consumed
+on first use. A policy reload bumps the ruleset. That cancels pending
+items, once-tokens, and task grants, and the cancel is audited.
 
 Shipped tables set levels for git, gh, path classes, and non-Bash tool
 kinds. They do not allow a call. Policy may raise a level or repeat it.
@@ -167,9 +196,11 @@ go test -v ./web/... | grep -i skip
 - daemon stopped
 - an unusable hook refuses the turn before the CLI starts
 - daemon hangs past the hook deadline
-- hook killed (the fake CLI treats SIGKILL as a non-blocking hook error,
-  then the launch config denies, and the tool marker is absent)
-- hook over the CLI timeout (same fall-through, without waiting 30 seconds)
+- hook killed (the fake CLI treats SIGKILL as a non-blocking hook error;
+  `onFailure` `block` denies a Read, and the tool marker is absent)
+- hook over the CLI timeout (same block, without waiting 30 seconds)
+- an older Claude release refuses the turn before the CLI starts
+- a hook binary that changes after startup refuses the turn before the CLI starts
 - garbage, empty, unknown, and oversized verdicts
 - ask, approve, identical retry once
 - second retry, and a different argv, cwd, or session, blocked

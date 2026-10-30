@@ -113,6 +113,17 @@ func TestCLIGrokTurnStoresOnlyTheTailAsReply(t *testing.T) {
 	}
 }
 
+func TestCLIToolResultErrorIsNotOK(t *testing.T) {
+	fixture := `{"type":"assistant","session_id":"s","message":{"content":[{"type":"tool_use","id":"t","name":"Read","input":{"file_path":"notes.txt"}}]}}
+{"type":"user","session_id":"s","message":{"content":[{"type":"tool_result","tool_use_id":"t","is_error":true,"content":"blocked"}]}}
+{"type":"result","result":"blocked","session_id":"s"}
+`
+	_, _, _, recs := runFixture(t, "claude", fixture)
+	if len(recs) != 1 || recs[0].Kind != "call" || recs[0].Name != "Read" || recs[0].OK || recs[0].Result != "blocked" {
+		t.Fatalf("records %+v", recs)
+	}
+}
+
 func TestCLIToolWithoutResultIsStoredNotOK(t *testing.T) {
 	fixture := `{"type":"assistant","session_id":"s","message":{"content":[{"type":"tool_use","id":"t","name":"Edit","input":{"file_path":"x"}}]}}
 {"type":"result","result":"Stopped.","session_id":"s"}

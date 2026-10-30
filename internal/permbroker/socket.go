@@ -10,7 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
+
+// evaluateTimeout is how long one socket evaluate may run.
+// The deadline is a deny, including when the engine would have allowed.
+const evaluateTimeout = 2 * time.Second
 
 // Listener is one bot's evaluate socket. The directory is 0700 and the
 // socket is 0600. Identity is the socket plus SO_PEERCRED, not a bot id
@@ -125,7 +130,23 @@ func (l *Listener) serve(c net.Conn) {
 		l.eng.auditPeer(l.bot, uid, pid)
 		return
 	}
-	d := l.eng.Evaluate(context.Background(), waitRequest(l.bot, turn, msg, uid, pid))
+	ctx, cancel := context.WithTimeout(context.Background(), evaluateTimeout)
+	defer cancel()
+	done := make(chan Decision, 1)
+	go func() {
+		done <- l.eng.Evaluate(ctx, waitRequest(l.bot, turn, msg, uid, pid))
+	}()
+	var d Decision
+	select {
+	case d = <-done:
+	case <-ctx.Done():
+		l.reply(c, wireReply{Verdict: VerdictDeny, Reason: "denied"})
+		return
+	}
+	if ctx.Err() != nil {
+		l.reply(c, wireReply{Verdict: VerdictDeny, Reason: "denied"})
+		return
+	}
 	reason := d.Reason
 	if reason == "" {
 		reason = "denied"

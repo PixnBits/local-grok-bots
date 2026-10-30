@@ -10,10 +10,12 @@ import (
 )
 
 // runFakeHook starts the hook in its own process group.
-// LGB_FAKE_HOOK=kill always falls through, which is what a SIGKILL of the
-// hook is: a non-blocking error, not exit 2.
+// LGB_FAKE_HOOK=kill returns a non-blocking failure, which is what a
+// SIGKILL of the hook is: not exit 2. The caller blocks only when the
+// settings entry says onFailure block.
 // LGB_FAKE_HOOK=timeout waits LGB_FAKE_HOOK_TIMEOUT_MS (default 200) and
-// then falls through. It does not wait the 30s settings timeout.
+// then returns the same non-blocking failure. It does not wait the 30s
+// settings timeout.
 func runFakeHook(command string, stdin []byte, mode string) (block, allow bool) {
 	cmd := exec.Command("sh", "-c", command)
 	cmd.Stdin = bytes.NewReader(stdin)

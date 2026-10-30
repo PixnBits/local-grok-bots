@@ -710,14 +710,16 @@ func shellQuote(s string) string {
 
 func fakeClaudeMain() {
 	args := os.Args[2:]
-	if p := os.Getenv("LGB_ARGV_LOG"); p != "" {
-		f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-		if err == nil {
-			fmt.Fprintln(f, strings.Join(args, "\n"))
-			fmt.Fprintln(f, "---")
-			f.Close()
+	if fakeVersionOnly(args) {
+		logFakeArgv(args)
+		ver := os.Getenv("LGB_FAKE_CLAUDE_VERSION")
+		if strings.TrimSpace(ver) == "" {
+			ver = "2.1.295 (Claude Code)"
 		}
+		fmt.Println(ver)
+		os.Exit(0)
 	}
+	logFakeArgv(args)
 	if os.Getenv("LGB_FAKE_ASKS") != "" {
 		fakeMulti(args)
 		return
@@ -725,12 +727,11 @@ func fakeClaudeMain() {
 	// Hook mode only when this launch's --settings file has our PreToolUse
 	// command. Older tests write disableAllHooks and no hooks, so they stay
 	// on the permission-host path.
-	// Semantics checked 2026-10-29 against
-	// https://code.claude.com/docs/en/hooks
 	// Exit 2 or JSON permissionDecision deny blocks the tool. Any other
-	// failure, including a killed hook or a timeout, does not block by
-	// itself. The tool then follows the normal permission flow. Our launch
-	// has no allow list and no bypass flag, so that flow denies.
+	// failure, including a killed hook or a timeout, blocks only when that
+	// hook entry says onFailure block. Otherwise a Read, Glob, or Grep runs
+	// and Bash follows the normal permission flow. Our launch has no allow
+	// list and no bypass flag, so that flow denies Bash.
 	if cmd := preToolUseCommand(args); cmd != "" {
 		fakeHookClaude(args, cmd)
 		return
@@ -774,33 +775,79 @@ func fakeClaudeMain() {
 
 // preToolUseCommand is the first command hook in --settings. An unreadable
 // file or a settings object with no command hook returns "".
-func preToolUseCommand(args []string) string {
+func logFakeArgv(args []string) {
+	p := os.Getenv("LGB_ARGV_LOG")
+	if p == "" {
+		return
+	}
+	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	fmt.Fprintln(f, strings.Join(args, "\n"))
+	fmt.Fprintln(f, "---")
+	f.Close()
+}
+
+func fakeVersionOnly(args []string) bool {
+	saw := false
+	for _, a := range args {
+		if a == "--version" {
+			saw = true
+			continue
+		}
+		if a == "-p" || a == "--settings" || strings.HasPrefix(a, "--settings=") {
+			return false
+		}
+	}
+	return saw
+}
+
+type fakeHookEntry struct {
+	Type      string `json:"type"`
+	Command   string `json:"command"`
+	OnFailure string `json:"onFailure"`
+}
+
+func preToolUseHooks(args []string) []fakeHookEntry {
 	path := flagValue(args, "--settings")
 	if path == "" {
-		return ""
+		return nil
 	}
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return nil
 	}
 	var doc struct {
 		Hooks struct {
 			PreToolUse []struct {
-				Hooks []struct {
-					Type    string `json:"type"`
-					Command string `json:"command"`
-				} `json:"hooks"`
+				Hooks []fakeHookEntry `json:"hooks"`
 			} `json:"PreToolUse"`
 		} `json:"hooks"`
 	}
 	if json.Unmarshal(b, &doc) != nil {
-		return ""
+		return nil
 	}
+	var out []fakeHookEntry
 	for _, group := range doc.Hooks.PreToolUse {
-		for _, h := range group.Hooks {
-			if h.Type == "command" && strings.TrimSpace(h.Command) != "" {
-				return h.Command
-			}
+		out = append(out, group.Hooks...)
+	}
+	return out
+}
+
+func preToolUseCommand(args []string) string {
+	for _, h := range preToolUseHooks(args) {
+		if h.Type == "command" && strings.TrimSpace(h.Command) != "" {
+			return h.Command
+		}
+	}
+	return ""
+}
+
+func hookOnFailure(args []string) string {
+	for _, h := range preToolUseHooks(args) {
+		if h.Type == "command" && strings.TrimSpace(h.Command) != "" {
+			return h.OnFailure
 		}
 	}
 	return ""
@@ -821,21 +868,34 @@ func fakeHookClaude(args []string, command string) {
 	if err != nil {
 		cwd = ""
 	}
+	tool := strings.TrimSpace(os.Getenv("LGB_FAKE_TOOL"))
+	if tool == "" {
+		tool = "Bash"
+	}
+	input := map[string]any{"command": "echo hi"}
+	switch strings.ToLower(tool) {
+	case "read", "glob", "grep":
+		file := os.Getenv("LGB_FAKE_READ_FILE")
+		if file == "" {
+			file = filepath.Join(cwd, "readme.txt")
+		}
+		input = map[string]any{"file_path": file}
+	}
 	payload, err := json.Marshal(map[string]any{
 		"hook_event_name": "PreToolUse",
 		"session_id":      sid,
 		"cwd":             cwd,
-		"tool_name":       "Bash",
-		"tool_input":      map[string]string{"command": "echo hi"},
+		"tool_name":       tool,
+		"tool_input":      input,
 		"tool_use_id":     "tu_hook",
 	})
 	if err != nil {
 		payload = []byte(`{}`)
 	}
 	block, allow := runFakeHook(command, payload, os.Getenv("LGB_FAKE_HOOK"))
-	ran := allow
-	if !block && !allow && fakeFallthroughAllows(args) {
-		ran = true
+	ran := fakeHookPermits(args, tool, block, allow)
+	if os.Getenv("LGB_FAKE_RESIDUAL") == "1" {
+		fmt.Printf("{\"type\":\"system\",\"subtype\":\"permission_denied\",\"session_id\":%q,\"tool\":%q}\n", sid, tool)
 	}
 	if ran {
 		if p := os.Getenv("LGB_TOOL_MARKER"); p != "" {
@@ -846,6 +906,31 @@ func fakeHookClaude(args []string, command string) {
 	}
 	fmt.Printf("{\"type\":\"result\",\"result\":%q,\"session_id\":%q}\n", "continued", sid)
 	os.Exit(0)
+}
+
+// fakeHookPermits reports whether the tool runs after the hook returns.
+// A blocking hook result never runs the tool. A non-blocking failure
+// blocks only when the settings entry says onFailure block. Otherwise
+// Read, Glob, and Grep run, and Bash follows fakeFallthroughAllows.
+func fakeHookPermits(args []string, tool string, block, allow bool) bool {
+	if block {
+		return false
+	}
+	if allow {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(hookOnFailure(args)), "block") {
+		return false
+	}
+	if fakeFallthroughAllows(args) {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(tool)) {
+	case "read", "glob", "grep":
+		return true
+	default:
+		return false
+	}
 }
 
 // fakeFallthroughAllows is the normal permission flow after a hook error.

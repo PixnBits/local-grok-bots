@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -143,35 +144,65 @@ func TestUserMessageEndsPreviousTask(t *testing.T) {
 }
 
 func TestGolden_HookSIGKILLed(t *testing.T) {
-	hook := writeHookScript(t, "#!/bin/sh\nprintf '%s\\n' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"permissionDecisionReason\":\"allowed\"}}'\nexit 0\n")
-	t.Setenv("LGB_FAKE_HOOK", "kill")
-	ran := runBrokerClaude(t, hook, nil)
-	if ran.marker {
-		t.Fatal("tool ran after the hook was killed")
-	}
-	if ran.status != "done" || ran.errText != "" {
-		t.Fatalf("run %s %s", ran.status, ran.errText)
-	}
-	if strings.Contains(ran.argv, "--allowedTools") || strings.Contains(ran.argv, "dangerously-skip-permissions") {
-		t.Fatalf("launch can allow:\n%s", ran.argv)
-	}
+	t.Run("read", func(t *testing.T) {
+		hook := writeHookScript(t, "#!/bin/sh\nprintf '%s\\n' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\",\"permissionDecisionReason\":\"allowed\"}}'\nexit 0\n")
+		t.Setenv("LGB_FAKE_HOOK", "kill")
+		t.Setenv("LGB_FAKE_TOOL", "Read")
+		ran := runBrokerClaude(t, hook, nil)
+		if ran.marker {
+			t.Fatal("read ran after the hook was killed")
+		}
+		if ran.status != "done" || ran.errText != "" {
+			t.Fatalf("run %s %s", ran.status, ran.errText)
+		}
+		if strings.Contains(ran.argv, "--allowedTools") || strings.Contains(ran.argv, "dangerously-skip-permissions") {
+			t.Fatalf("launch can allow:\n%s", ran.argv)
+		}
+	})
+	t.Run("bash", func(t *testing.T) {
+		hook := writeHookScript(t, "#!/bin/sh\nprintf '%s\\n' '{\"hookSpecificOutput\":{\"permissionDecision\":\"allow\"}}'\nexit 0\n")
+		t.Setenv("LGB_FAKE_HOOK", "kill")
+		ran := runBrokerClaude(t, hook, nil)
+		if ran.marker {
+			t.Fatal("bash ran after the hook was killed")
+		}
+		if ran.status != "done" || ran.errText != "" {
+			t.Fatalf("run %s %s", ran.status, ran.errText)
+		}
+	})
 }
 
 func TestGolden_HookOverCLITimeout(t *testing.T) {
-	hook := writeHookScript(t, "#!/bin/sh\nsleep 30\nprintf '%s\\n' '{\"hookSpecificOutput\":{\"permissionDecision\":\"allow\"}}'\nexit 0\n")
-	t.Setenv("LGB_FAKE_HOOK", "timeout")
-	t.Setenv("LGB_FAKE_HOOK_TIMEOUT_MS", "200")
-	start := time.Now()
-	ran := runBrokerClaude(t, hook, nil)
-	if time.Since(start) > 10*time.Second {
-		t.Fatalf("timeout case waited %s", time.Since(start))
-	}
-	if ran.marker {
-		t.Fatal("tool ran after the hook timed out")
-	}
-	if ran.status != "done" || ran.errText != "" {
-		t.Fatalf("run %s %s", ran.status, ran.errText)
-	}
+	t.Run("read", func(t *testing.T) {
+		hook := writeHookScript(t, "#!/bin/sh\nsleep 30\nprintf '%s\\n' '{\"hookSpecificOutput\":{\"permissionDecision\":\"allow\"}}'\nexit 0\n")
+		t.Setenv("LGB_FAKE_HOOK", "timeout")
+		t.Setenv("LGB_FAKE_HOOK_TIMEOUT_MS", "200")
+		t.Setenv("LGB_FAKE_TOOL", "Read")
+		start := time.Now()
+		ran := runBrokerClaude(t, hook, nil)
+		if time.Since(start) > 10*time.Second {
+			t.Fatalf("timeout case waited %s", time.Since(start))
+		}
+		if ran.marker {
+			t.Fatal("read ran after the hook timed out")
+		}
+		if ran.status != "done" || ran.errText != "" {
+			t.Fatalf("run %s %s", ran.status, ran.errText)
+		}
+	})
+	t.Run("bash", func(t *testing.T) {
+		hook := writeHookScript(t, "#!/bin/sh\nsleep 30\nexit 0\n")
+		t.Setenv("LGB_FAKE_HOOK", "timeout")
+		t.Setenv("LGB_FAKE_HOOK_TIMEOUT_MS", "200")
+		start := time.Now()
+		ran := runBrokerClaude(t, hook, nil)
+		if time.Since(start) > 10*time.Second {
+			t.Fatalf("timeout case waited %s", time.Since(start))
+		}
+		if ran.marker {
+			t.Fatal("bash ran after the hook timed out")
+		}
+	})
 }
 
 func TestGolden_DenyLetsRunContinue(t *testing.T) {
@@ -468,7 +499,24 @@ type brokerRun struct {
 	logs    string
 }
 
+type brokerHarness struct {
+	app      *App
+	srv      *httptest.Server
+	bot      store.Bot
+	argvPath string
+	marker   string
+}
+
 func runBrokerClaude(t *testing.T, hook string, before func(ws string)) brokerRun {
+	t.Helper()
+	h := startBrokerClaude(t, hook, "hook")
+	if before != nil {
+		before(filepath.Join(h.app.ws, "bots", h.bot.ID))
+	}
+	return h.post(t)
+}
+
+func startBrokerClaude(t *testing.T, hook, broker string) brokerHarness {
 	t.Helper()
 	// The per-bot socket path has to fit in a Unix sun_path (108 bytes).
 	// t.TempDir includes the test name and is too long for that.
@@ -477,6 +525,11 @@ func runBrokerClaude(t *testing.T, hook string, before func(ws string)) brokerRu
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return startBrokerClaudeDir(t, dir, hook, broker)
+}
+
+func startBrokerClaudeDir(t *testing.T, dir, hook, broker string) brokerHarness {
+	t.Helper()
 	installFakeClaude(t, dir)
 	argvPath := filepath.Join(dir, "argv.log")
 	marker := filepath.Join(dir, "tool-marker")
@@ -487,8 +540,10 @@ func runBrokerClaude(t *testing.T, hook string, before func(ws string)) brokerRu
 	app.editPol(func(p *policy.Policy) {
 		p.Backend = "claude"
 		p.CLIPermitted = true
-		p.Broker = "hook"
-		p.HookPath = hook
+		p.Broker = broker
+		if hook != "" {
+			p.HookPath = hook
+		}
 		p.UIPrompts = false
 		p.ClaudeTransport = policy.TransportNone
 		p.TimersEnabled = true
@@ -502,37 +557,46 @@ func runBrokerClaude(t *testing.T, hook string, before func(ws string)) brokerRu
 	}
 	var bot store.Bot
 	decodeJSON(t, b, &bot)
-	if before != nil {
-		before(filepath.Join(app.ws, "bots", bot.ID))
-	}
-	res, b = do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]any{"content": "go"}, "")
+	return brokerHarness{app: app, srv: srv, bot: bot, argvPath: argvPath, marker: marker}
+}
+
+func (h brokerHarness) post(t *testing.T) brokerRun {
+	t.Helper()
+	res, b := do(t, "POST", h.srv.URL+"/api/bots/"+h.bot.ID+"/thread/messages", map[string]any{"content": "go"}, "")
 	if res.StatusCode != 200 {
 		t.Fatalf("post %d %s", res.StatusCode, b)
 	}
-	waitIdle(t, srv.URL, bot.ID, "")
-	got, err := app.st.GetBot(bot.ID)
+	waitIdle(t, h.srv.URL, h.bot.ID, "")
+	got, err := h.app.st.GetBot(h.bot.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, statErr := os.Stat(marker)
+	_, statErr := os.Stat(h.marker)
 	reply := ""
-	for _, m := range thread(t, srv.URL, bot.ID) {
+	for _, m := range thread(t, h.srv.URL, h.bot.ID) {
 		if m.Role == "bot" {
 			reply = m.Content
 		}
 	}
 	var logs strings.Builder
-	if ev, lerr := app.st.ListLog(bot.ID, "", "", 50); lerr == nil {
+	if ev, lerr := h.app.st.ListLog(h.bot.ID, "", "", 50); lerr == nil {
 		for _, e := range ev {
 			if e.Kind == "permbroker" || e.Kind == "cli_override" || e.Kind == "model_call" {
 				fmt.Fprintf(&logs, "%s %s\n", e.Kind, e.Detail)
 			}
 		}
 	}
+	// A turn refused before the CLI starts never creates the argv log.
+	argv := ""
+	if body, rerr := os.ReadFile(h.argvPath); rerr == nil {
+		argv = string(body)
+	} else if !os.IsNotExist(rerr) {
+		t.Fatal(rerr)
+	}
 	return brokerRun{
 		status: got.LastRunStatus, errText: got.LastRunError, reply: reply,
-		argv: readArgv(t, argvPath), marker: statErr == nil,
-		pending: app.broker.ListPending(), logs: logs.String(),
+		argv: argv, marker: statErr == nil,
+		pending: h.app.broker.ListPending(), logs: logs.String(),
 	}
 }
 
@@ -692,13 +756,37 @@ func settingsArg(t *testing.T, argv string) string {
 	return ""
 }
 
-func writeHookScript(t *testing.T, body string) string {
+// hookHome is the real user home captured before tests replace HOME.
+// Hook binaries cannot live under a group or world writable directory.
+var hookHome string
+
+func init() {
+	home, err := os.UserHomeDir()
+	if err == nil {
+		hookHome = home
+	}
+}
+
+func hookTempDir(t *testing.T, pattern string) string {
 	t.Helper()
-	dir, err := os.MkdirTemp("", "lgb-hook-script-")
+	if hookHome == "" {
+		t.Fatal("home is unknown")
+	}
+	dir, err := os.MkdirTemp(hookHome, pattern)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		_ = os.RemoveAll(dir)
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+func writeHookScript(t *testing.T, body string) string {
+	t.Helper()
+	dir := hookTempDir(t, ".lgb-hook-")
 	path := filepath.Join(dir, "hook")
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
@@ -713,6 +801,7 @@ var (
 	builtHookOnce sync.Once
 	builtHookBin  string
 	builtHookErr  error
+	hookKeep      []string
 )
 
 func builtHook(t *testing.T) string {
@@ -723,8 +812,16 @@ func builtHook(t *testing.T) string {
 			builtHookErr = err
 			return
 		}
-		dir, err := os.MkdirTemp("", "lgb-permhook-bin-")
+		if hookHome == "" {
+			builtHookErr = errors.New("home is unknown")
+			return
+		}
+		dir, err := os.MkdirTemp(hookHome, ".lgb-permhook-bin-")
 		if err != nil {
+			builtHookErr = err
+			return
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
 			builtHookErr = err
 			return
 		}
@@ -741,6 +838,7 @@ func builtHook(t *testing.T) string {
 			return
 		}
 		builtHookBin = bin
+		hookKeep = append(hookKeep, dir)
 	})
 	if builtHookErr != nil {
 		t.Fatal(builtHookErr)

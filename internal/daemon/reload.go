@@ -35,6 +35,7 @@ func (a *App) setPol(p policy.Policy) {
 			return
 		}
 	}
+	a.pinBrokerHook(p)
 	cp := p
 	a.polCur.Store(&cp)
 }

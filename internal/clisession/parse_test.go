@@ -12,8 +12,16 @@ func TestParseClaudeStream(t *testing.T) {
 		t.Fatalf("%+v", ev)
 	}
 	ev, ok = Parse(`{"type":"user","session_id":"s1","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}}`)
-	if !ok || ev.Kind != "tool_result" || ev.Text != "ok" {
+	if !ok || ev.Kind != "tool_result" || ev.Text != "ok" || ev.Failed {
 		t.Fatalf("%+v", ev)
+	}
+	ev, ok = Parse(`{"type":"user","session_id":"s1","message":{"content":[{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"blocked"}]}}`)
+	if !ok || ev.Kind != "tool_result" || ev.Text != "blocked" || !ev.Failed {
+		t.Fatalf("is_error %+v", ev)
+	}
+	ev, ok = Parse(`{"type":"tool_result","toolName":"Read","result":"no","is_error":true,"session_id":"s1"}`)
+	if !ok || !ev.Failed || ev.Text != "no" {
+		t.Fatalf("top level is_error %+v", ev)
 	}
 	ev, ok = Parse(`{"type":"result","result":"hi","session_id":"s1"}`)
 	if !ok || ev.Kind != "end" || !ev.Final || ev.Text != "hi" {

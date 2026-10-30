@@ -152,6 +152,9 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	// when that UI is absent; the broker still denies residual asks.
 	// none, and mcp with no host, pass --permission-prompts none.
 	cliDenySource := "cli"
+	if strings.EqualFold(backend, "claude") && a.brokerHooksOn(bot.ID) {
+		cliDenySource = "broker"
+	}
 	eventTransport := ""
 	var cardDenied atomic.Bool
 	permOrigin := a.mcpHostBase()
@@ -191,7 +194,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	case transport == policy.TransportNone:
 		spec.PermissionPrompts = "none"
 		eventTransport = policy.TransportNone
-		cliDenySource = cliNoHostSource(turnPol.UIPrompts)
+		cliDenySource = a.residualDenySource(bot.ID, turnPol.UIPrompts)
 	case turnPol.UIPrompts && host && !a.brokerHooksOn(bot.ID):
 		tok := a.registerPerm(bot.ID, runID, sessionID)
 		defer a.unregisterPerm(tok)
@@ -213,7 +216,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	default:
 		spec.PermissionPrompts = "none"
 		eventTransport = policy.TransportNone
-		cliDenySource = cliNoHostSource(turnPol.UIPrompts)
+		cliDenySource = a.residualDenySource(bot.ID, turnPol.UIPrompts)
 	}
 	if err := a.armBrokerSpec(bot.ID, sessionID, runID, inputs, &spec); err != nil {
 		if fresh {
@@ -508,6 +511,20 @@ func (a *App) cliIsolation(bot store.Bot, backend, ws, runID string) (*clisessio
 			return nil, herr
 		}
 		opts.PermHookCommand = hook
+		if hook != "" {
+			settingsPath, serr := clisession.ClaudeSettingsPath(opts)
+			if serr != nil {
+				a.setBrokerOn(bot.ID, false)
+				return nil, serr
+			}
+			a.hookMu.Lock()
+			bin := a.hookBin
+			a.hookMu.Unlock()
+			opts.BrokerDeny = a.brokerCriticalPaths(bin, settingsPath, filepath.Dir(settingsPath))
+			if a.broker != nil {
+				a.broker.AddCriticalPaths(opts.BrokerDeny...)
+			}
+		}
 	}
 	var iso clisession.Isolation
 	var err error
@@ -1552,6 +1569,16 @@ func cliNoHostSource(ui bool) string {
 	return "policy"
 }
 
+// residualDenySource is the permission row source for a denial the CLI
+// reported and the broker did not already decide. An armed broker records
+// broker. Otherwise a headless turn with no UI records no_ui.
+func (a *App) residualDenySource(botID string, ui bool) string {
+	if a.brokerHooksOn(botID) {
+		return "broker"
+	}
+	return cliNoHostSource(ui)
+}
+
 func (a *App) decideStreamControl(ctx context.Context, botID, runID, sessionID string, ask clisession.ControlAsk) clisession.ControlDecision {
 	// The hook is the ask path when the broker is armed. Do not open a card
 	// and do not mark the turn as stopped after a denial.
@@ -1858,7 +1885,7 @@ func (a *App) cliBoundary(botID string) string {
 	tail := "You run directly on the host, not inside the daemon's jail, and the daemon's own tools (run_shell, timers, memory, other bots) are not available to you. Some actions need the user's approval; a denied action is final for this turn.\n"
 	if turnPol.CLILGB && lgbSupported {
 		tail = "You run directly on the host, not inside the daemon's jail; the daemon's run_shell, read_file, and write_file are not available. Some actions need the user's approval; a denied action is final for this turn.\n" +
-			"For timers, your memory notes, other bots, and direct messages, run the lgb command in your shell (run `lgb help` for usage), for example `lgb timer in 5m Remind the user to stretch` or `lgb memory set favorite_color blue`. Run each lgb command as its own shell call, with nothing chained (no ;, &&, pipes, or $?), so it is approved without asking. lgb works only during this turn.\n"
+			"For timers, your memory notes, other bots, and direct messages, run the lgb command in your shell (run `lgb help` for usage), for example `lgb timer in 5m Remind the user to stretch` or `lgb memory set favorite_color blue`. Run each lgb command as its own shell call, with nothing chained (no ;, &&, pipes, or $?). It may need approval. lgb works only during this turn.\n"
 	}
 	switch turnPol.EffectiveBackend() {
 	case "grok":

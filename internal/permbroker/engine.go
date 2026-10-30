@@ -146,6 +146,7 @@ type Pending struct {
 type token struct {
 	BotID     string
 	SessionID string
+	Tool      string
 	Hash      string
 	Cwd       string
 }
@@ -162,14 +163,23 @@ type grant struct {
 // Engine decides tool calls and stores rules outside the jail.
 type Engine struct {
 	mu         sync.Mutex
+	writeMu    sync.Mutex
 	dir        string
 	rulesPath  string
 	rules      rulesFile
+	dirty      bool
+	closed     bool
+	stopCh     chan struct{}
+	flushCh    chan struct{}
+	flushWG    sync.WaitGroup
 	table      table
 	audit      *fileAudit
 	auditor    Auditor
 	classifier Classifier
 	now        func() time.Time
+	critical   []string
+	// inspectHook runs outside the engine lock. Tests use it to stall one bot.
+	inspectHook func(context.Context, Request)
 
 	byID   map[string]*pendingItem
 	byKey  map[string]string
@@ -237,16 +247,30 @@ func Open(dir string, risks []RiskEntry, auditor Auditor) (*Engine, error) {
 		resolver:   resolvePinned,
 		bots:       map[string]botCtx{},
 		userTask:   map[string]string{},
+		stopCh:     make(chan struct{}),
+		flushCh:    make(chan struct{}, 1),
 	}
+	e.flushWG.Add(1)
+	go e.flushLoop()
 	return e, nil
 }
 
-// Close closes the audit file and every listener the caller stopped
-// separately. It does not delete rules.
+// Close flushes rule-use counts, stops that flusher, and closes the audit file.
+// It does not delete rules. A second call does nothing.
 func (e *Engine) Close() error {
 	if e == nil {
 		return nil
 	}
+	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		return nil
+	}
+	e.closed = true
+	close(e.stopCh)
+	e.mu.Unlock()
+	e.flushWG.Wait()
+	e.flushRules()
 	e.audit.close()
 	return nil
 }
@@ -275,15 +299,84 @@ func (e *Engine) SetClassifier(c Classifier) {
 }
 
 // SetRisks replaces policy raises. A lower shipped level is refused and
-// the previous table stays.
+// the previous table stays. A successful replace bumps the ruleset, which
+// cancels pending items, once-tokens, and task grants, and is audited.
 func (e *Engine) SetRisks(risks []RiskEntry) error {
 	if err := ValidateRisk(risks); err != nil {
 		return err
 	}
 	e.mu.Lock()
+	defer e.mu.Unlock()
+	// The daemon publishes the policy it just opened. That call carries
+	// the same raises and has nothing open, so it must not write an
+	// audit row. A later publish that changes the raises, or that finds
+	// a pending item, once-token, or task grant, still cancels them.
+	if sameRisks(e.table.extra, risks) && len(e.byID) == 0 && len(e.tokens) == 0 && len(e.grants) == 0 {
+		return nil
+	}
 	e.table.extra = append([]RiskEntry(nil), risks...)
-	e.mu.Unlock()
+	e.rules.Version++
+	e.invalidateLocked()
+	e.auditDecision(Request{}, inspected{ClassNote: "none", Raw: "policy risks replaced"}, "invalidate", "invalidate", "", "policy", "", "")
+	e.dirty = true
+	e.pokeFlushLocked()
 	return nil
+}
+
+func sameRisks(a, b []RiskEntry) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Tool != b[i].Tool || a[i].Level != b[i].Level || !argvEqual(a[i].Argv, b[i].Argv) {
+			return false
+		}
+	}
+	return true
+}
+
+// AddCriticalPaths marks paths that always ask. A call that names one is
+// critical and is never allowed by a rule or a once-token.
+func (e *Engine) AddCriticalPaths(paths ...string) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.critical = mergeCritical(e.critical, paths)
+}
+
+// SetCriticalPaths replaces the critical path list. Tests use an empty
+// list to drop paths added earlier.
+func (e *Engine) SetCriticalPaths(paths []string) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.critical = mergeCritical(nil, paths)
+}
+
+// SetInspectHook installs a function that runs before each evaluate,
+// outside the engine lock. Nil clears it.
+func (e *Engine) SetInspectHook(fn func(context.Context, Request)) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	e.inspectHook = fn
+	e.mu.Unlock()
+}
+
+// Note appends an audit row that is not a tool verdict. The decision is
+// stored as given. Callers use it for a hook identity mismatch.
+func (e *Engine) Note(bot, decision, input string) {
+	if e == nil || decision == "" {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.auditDecision(Request{BotID: bot}, inspected{Raw: input, ClassNote: "none"}, decision, decision, "", "fail-closed", "", "")
 }
 
 // Ruleset is the current rules file version.
@@ -369,11 +462,16 @@ func (e *Engine) SaveRule(rule Rule) (Rule, error) {
 	if e == nil {
 		return Rule{}, ErrScope
 	}
+	e.writeMu.Lock()
+	defer e.writeMu.Unlock()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	rule.Tool = normTool(rule.Tool)
 	rule.Argv = append([]string(nil), rule.Argv...)
 	if rule.Tool != ToolShell || len(rule.Argv) == 0 {
+		return Rule{}, ErrScope
+	}
+	if hitsCritical(Request{ToolName: ToolShell}, inspected{Argv: rule.Argv, Raw: strings.Join(rule.Argv, " ")}, e.critical) {
 		return Rule{}, ErrScope
 	}
 	switch rule.Effect {
@@ -409,6 +507,7 @@ func (e *Engine) SaveRule(rule Rule) (Rule, error) {
 		return Rule{}, err
 	}
 	e.rules = next
+	e.dirty = false
 	e.invalidateLocked()
 	e.auditRule(rule, lvl)
 	return rule, nil
@@ -529,13 +628,29 @@ func (e *Engine) dropTaskLocked(bot, session, keepTask string) {
 }
 
 // Evaluate decides one call. It does not wait for a person.
+// Filesystem work runs before the engine lock is taken. The once-token
+// check and the final level both happen under the lock.
 func (e *Engine) Evaluate(ctx context.Context, req Request) Decision {
 	if e == nil {
 		return Decision{Verdict: VerdictDeny, Reason: "denied", Actor: "fail-closed"}
 	}
+	snap := e.capture(req)
+	if snap.hook != nil {
+		snap.hook(ctx, req)
+	}
+	if ctx.Err() != nil {
+		return e.failClosed(req)
+	}
+	in := inspectSnap(ctx, req, snap)
+	if ctx.Err() != nil {
+		return e.failClosed(req)
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	in := e.inspect(ctx, req)
+	if ctx.Err() != nil {
+		return e.finish(req, in, VerdictDeny, "denied", "", "fail-closed", "")
+	}
+	in = e.raiseToCurrent(req, in)
 	if strings.TrimSpace(req.BotID) == "" || strings.TrimSpace(req.SessionID) == "" {
 		return e.finish(req, in, VerdictDeny, "denied", "", "fail-closed", "")
 	}
@@ -543,7 +658,7 @@ func (e *Engine) Evaluate(ctx context.Context, req Request) Decision {
 		e.touch(rule)
 		return e.finish(req, in, VerdictDeny, "denied by rule "+rule.ID, "", rule.ID, rule.ID)
 	}
-	if e.consumeToken(req, in.Hash) {
+	if e.consumeToken(req, in.Hash, in.Level) {
 		return e.finish(req, in, VerdictAllow, "approved", "", "human", "")
 	}
 	if in.Level == LevelCritical || !in.Eligible {
@@ -660,6 +775,8 @@ func (e *Engine) Decide(id, decision, scope string) error {
 	if e == nil {
 		return ErrNotFound
 	}
+	e.writeMu.Lock()
+	defer e.writeMu.Unlock()
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if _, dead := e.dead[id]; dead {
@@ -685,7 +802,7 @@ func (e *Engine) Decide(id, decision, scope string) error {
 		}
 		switch scope {
 		case ScopeOnce:
-			e.tokens = append(e.tokens, token{BotID: item.BotID, SessionID: item.SessionID, Hash: item.InputHash, Cwd: item.Cwd})
+			e.tokens = append(e.tokens, token{BotID: item.BotID, SessionID: item.SessionID, Tool: item.Tool, Hash: item.InputHash, Cwd: item.Cwd})
 		case ScopeTask:
 			exp := e.now().Add(TaskGrantCap)
 			if len(item.Parts) > 0 {
@@ -785,6 +902,7 @@ func (e *Engine) addRuleLocked(item *pendingItem, scope string) error {
 		return err
 	}
 	e.rules = next
+	e.dirty = false
 	e.invalidateLocked()
 	e.auditRule(rule, item.Level)
 	return nil
@@ -793,7 +911,8 @@ func (e *Engine) addRuleLocked(item *pendingItem, scope string) error {
 func (e *Engine) touch(rule *Rule) {
 	rule.Uses++
 	rule.LastUsedAt = e.now()
-	_ = saveRules(e.rulesPath, e.rules)
+	e.dirty = true
+	e.pokeFlushLocked()
 }
 
 func (e *Engine) invalidateLocked() {
@@ -807,8 +926,18 @@ func (e *Engine) invalidateLocked() {
 	e.denied = map[string]struct{}{}
 }
 
-func (e *Engine) consumeToken(req Request, hash string) bool {
+func (e *Engine) consumeToken(req Request, hash string, level Level) bool {
+	if level == LevelCritical {
+		return false
+	}
+	want := normTool(req.ToolName)
+	if want == "" {
+		return false
+	}
 	for i, t := range e.tokens {
+		if t.Tool == "" || t.Tool != want {
+			continue
+		}
 		if t.BotID == req.BotID && t.SessionID == req.SessionID && t.Hash == hash && t.Cwd == req.Cwd {
 			e.tokens = append(e.tokens[:i], e.tokens[i+1:]...)
 			return true
@@ -907,155 +1036,6 @@ type inspected struct {
 	Level     Level
 	Parts     []Part
 	ClassNote string
-}
-
-func (e *Engine) inspect(ctx context.Context, req Request) inspected {
-	in := inspected{}
-	ws, repos := e.contextOf(req)
-	if isShellTool(req.ToolName) {
-		raw, _ := commandOf(req.ToolInput)
-		in.Raw = raw
-		parsed := ParseCommand(raw)
-		in.Compound = parsed.Compound
-		in.Argv = append([]string(nil), parsed.Argv...)
-		cwd := req.Cwd
-		grantable := parsed.Grantable
-		if parsed.LeadingCD != "" {
-			if !resolvesInside(parsed.LeadingCD, cwd, ws) {
-				grantable = false
-			} else if cwd != "" {
-				cwd = filepath.Join(cwd, parsed.LeadingCD)
-			}
-		}
-		parts := parsed.Parts
-		if parsed.LeadingCD != "" && len(parts) > 0 && len(parts[0].Argv) > 0 && baseName(parts[0].Argv[0]) == "cd" {
-			parts = parts[1:]
-		}
-		max := LevelUnclassified
-		for _, p := range parts {
-			cls := classifyArgv(p.Argv, cwd, ws, repos, e.resolver)
-			lvl := maxLevel(e.table.level(ToolShell, p.Argv), cls.Level)
-			if Rank(lvl) > Rank(max) {
-				max = lvl
-			}
-			p.Hash = hashParts(ToolShell, p.Argv)
-			in.Parts = append(in.Parts, p)
-			if cls.Hard || !cls.Eligible || lvl == LevelCritical {
-				grantable = false
-			}
-		}
-		if parsed.Eligible && len(parsed.Argv) > 0 {
-			cls := classifyArgv(parsed.Argv, cwd, ws, repos, e.resolver)
-			in.Level = maxLevel(e.table.level(ToolShell, parsed.Argv), cls.Level)
-			in.Eligible = cls.Eligible && !cls.Hard && in.Level != LevelCritical
-			in.HardAsk = !in.Eligible
-			in.Hash = hashParts(ToolShell, parsed.Argv)
-		} else if len(in.Parts) > 0 {
-			if Rank(max) < Rank(LevelMedium) {
-				max = LevelMedium
-			}
-			in.Level = max
-			in.Eligible = false
-			in.HardAsk = !grantable || in.Level == LevelCritical
-			in.Hash = hashRaw(req.ToolName, raw)
-		} else {
-			in.Eligible = false
-			in.HardAsk = true
-			in.Level = LevelUnclassified
-			if len(parsed.Argv) > 0 {
-				cls := classifyArgv(parsed.Argv, cwd, ws, repos, e.resolver)
-				in.Level = maxLevel(e.table.level(ToolShell, parsed.Argv), cls.Level)
-			}
-			in.Hash = hashRaw(req.ToolName, raw)
-		}
-		if in.Level == LevelCritical {
-			in.Eligible = false
-			in.HardAsk = true
-		}
-		if e.gitDrift(req, ws, parsed) {
-			in.Eligible = false
-			in.HardAsk = true
-		}
-	} else {
-		canon, ok := canonicalJSON(req.ToolInput)
-		if !ok {
-			canon = string(req.ToolInput)
-		}
-		in.Raw = canon
-		in.Hash = hashRaw(req.ToolName, canon)
-		paths := toolPaths(req.ToolInput)
-		in.Level = maxLevel(e.table.level(req.ToolName, paths), otherBuiltin(req.ToolName, paths))
-		in.Eligible = false
-		in.HardAsk = false
-		for _, p := range paths {
-			if ws != "" && !resolvesInside(p, req.Cwd, ws) {
-				if Rank(in.Level) < Rank(LevelHigh) {
-					in.Level = LevelHigh
-				}
-				in.HardAsk = true
-			}
-		}
-		if in.Level == LevelCritical {
-			in.HardAsk = true
-		}
-	}
-	if e.classifier == nil {
-		e.classifier = NopClassifier{}
-	}
-	raised, why := e.classifier.Escalate(ctx, ClassInput{
-		Tool: req.ToolName, Argv: in.Argv, Raw: in.Raw, Cwd: req.Cwd,
-		Eligible: in.Eligible, Compound: in.Compound, Level: in.Level,
-	})
-	if Rank(raised) > Rank(in.Level) {
-		in.Level = raised
-		if why == "" {
-			why = "escalated"
-		}
-		in.ClassNote = why
-	}
-	if in.ClassNote == "" {
-		in.ClassNote = "none"
-	}
-	if in.Level == LevelCritical {
-		in.Eligible = false
-		in.HardAsk = true
-	}
-	return in
-}
-
-func (e *Engine) contextOf(req Request) (string, []string) {
-	ws := req.Workspace
-	repos := req.Repos
-	if b, ok := e.bots[req.BotID]; ok {
-		if ws == "" {
-			ws = b.Workspace
-		}
-		if repos == nil {
-			repos = b.Repos
-		}
-	}
-	if ws == "" {
-		ws = req.Cwd
-	}
-	return ws, repos
-}
-
-func (e *Engine) gitDrift(req Request, ws string, parsed Parse) bool {
-	if !e.snapSet || !claudeBash(req.ToolName) || !commandUsesGit(parsed) {
-		return false
-	}
-	if ws == "" {
-		return true
-	}
-	gitData, gitOK := readGitBaseline(ws)
-	if baselineDrift(e.snapGit, e.snapGitOK, gitData, gitOK) {
-		return true
-	}
-	attr, attrOK := readBaselineFile(filepath.Join(ws, ".gitattributes"))
-	if baselineDrift(e.snapAttr, e.snapAttrOK, attr, attrOK) {
-		return true
-	}
-	return subdirGit(req.Cwd, ws)
 }
 
 func baselineDrift(prev []byte, prevOK bool, cur []byte, curOK bool) bool {

@@ -77,6 +77,11 @@ type App struct {
 	brokerMu sync.Mutex
 	brokerLn map[string]*permbroker.Listener
 	brokerOn map[string]bool
+	// hookPin is the hook binary recorded at the last policy publish.
+	// hookBin is the path the current armed launch checked.
+	hookMu  sync.Mutex
+	hookPin *permbroker.HookPin
+	hookBin string
 	// permBase is the HTTP origin the CLI calls back, such as http://127.0.0.1:8787.
 	// Empty means there is no permission host. A headless prompt still fails closed.
 	// The permission callback listener does not replace this except when the
