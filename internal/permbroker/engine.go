@@ -42,10 +42,11 @@ const (
 )
 
 var (
-	ErrStale       = errors.New("pending item is cancelled or stale")
-	ErrNotFound    = errors.New("pending item not found")
-	ErrScope       = errors.New("scope is not allowed for this command")
-	ErrBadDecision = errors.New("decision must be approve or deny")
+	ErrStale        = errors.New("pending item is cancelled or stale")
+	ErrNotFound     = errors.New("pending item not found")
+	ErrRuleNotFound = errors.New("rule not found")
+	ErrScope        = errors.New("scope is not allowed for this command")
+	ErrBadDecision  = errors.New("decision must be approve or deny")
 )
 
 // Request is one tool call. The socket fills BotID, SessionID, RunID,
@@ -771,6 +772,99 @@ func (e *Engine) SaveRule(rule Rule) (Rule, error) {
 	return rule, nil
 }
 
+// RuleView is one saved rule for an admin list. Argv and pattern text
+// are redacted. Kind is exact when the stored kind is empty.
+type RuleView struct {
+	ID         string    `json:"id"`
+	Effect     string    `json:"effect"`
+	Scope      string    `json:"scope"`
+	BotID      string    `json:"bot_id,omitempty"`
+	Argv       []string  `json:"argv,omitempty"`
+	Pattern    string    `json:"pattern,omitempty"`
+	Kind       string    `json:"kind"`
+	Source     string    `json:"source,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	LastUsedAt time.Time `json:"last_used_at,omitempty"`
+	Uses       int       `json:"uses"`
+}
+
+// ListRules returns bot and global rules. The hook socket does not call this.
+func (e *Engine) ListRules() []RuleView {
+	if e == nil {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]RuleView, 0, len(e.rules.Rules))
+	for _, rule := range e.rules.Rules {
+		out = append(out, ruleView(rule))
+	}
+	return out
+}
+
+func ruleView(rule Rule) RuleView {
+	kind := rule.Kind
+	if kind == "" {
+		kind = "exact"
+	}
+	view := RuleView{
+		ID: rule.ID, Effect: rule.Effect, Scope: rule.Scope, BotID: rule.BotID,
+		Argv: redactArgv(rule.Argv), Kind: kind, Source: rule.Source,
+		CreatedAt: rule.CreatedAt, LastUsedAt: rule.LastUsedAt, Uses: rule.Uses,
+	}
+	if rule.Pattern != "" {
+		view.Pattern = Redact(rule.Pattern)
+	}
+	return view
+}
+
+// RevokeRule removes one saved rule, including a read-only legacy row.
+// The ruleset bumps, which cancels pending items, tokens, and grants.
+// The audit row records ids and hashes and does not record argv text.
+func (e *Engine) RevokeRule(id string) error {
+	if e == nil {
+		return ErrRuleNotFound
+	}
+	e.writeMu.Lock()
+	defer e.writeMu.Unlock()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	id = strings.TrimSpace(id)
+	idx := -1
+	for i, rule := range e.rules.Rules {
+		if rule.ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return ErrRuleNotFound
+	}
+	rule := e.rules.Rules[idx]
+	next := e.rules
+	next.Version++
+	next.Rules = append([]Rule(nil), e.rules.Rules...)
+	next.Rules = append(next.Rules[:idx], next.Rules[idx+1:]...)
+	if err := saveRules(e.rulesPath, next); err != nil {
+		return err
+	}
+	e.rules = next
+	e.dirty = false
+	e.invalidateLocked()
+	e.auditRevoke(rule)
+	return nil
+}
+
+func (e *Engine) auditRevoke(rule Rule) {
+	argvHash := hashParts(normTool(rule.Tool), rule.Argv)
+	if len(rule.Argv) == 0 && rule.Pattern != "" {
+		argvHash = hashRaw(rule.Kind, rule.Pattern)
+	}
+	e.auditDecision(Request{BotID: rule.BotID, ToolName: rule.Tool}, inspected{
+		Hash: hashRevoke(rule.ID, rule.Effect, argvHash), ClassNote: "none",
+	}, "revoke", "revoke", "", "human", rule.ID, rule.Scope)
+}
+
 // NoteTurn records the session the hook must use. A new task id ends
 // grants and pending items for the previous task of this session.
 func (e *Engine) NoteTurn(bot, session, run, task string) {
@@ -1344,7 +1438,7 @@ func (e *Engine) matchScoped(bot string, in inspected, scope string) *Rule {
 	if !in.Eligible || in.Compound || in.Level == LevelCritical || in.GitRisk != "" {
 		return nil
 	}
-	var ask, allow *Rule
+	var exactAsk, flexAsk, exactAllow, flexAllow *Rule
 	for i := range e.rules.Rules {
 		rule := &e.rules.Rules[i]
 		if rule.Scope != scope {
@@ -1356,17 +1450,32 @@ func (e *Engine) matchScoped(bot string, in inspected, scope string) *Rule {
 		if !ruleHit(rule, in, false) {
 			continue
 		}
+		flex := storedKind(rule) != "exact"
 		switch rule.Effect {
 		case EffectAsk:
-			ask = rule
+			if flex {
+				flexAsk = rule
+			} else {
+				exactAsk = rule
+			}
 		case EffectAllow:
-			allow = rule
+			if flex {
+				flexAllow = rule
+			} else {
+				exactAllow = rule
+			}
 		}
 	}
-	if ask != nil {
-		return ask
+	switch {
+	case exactAsk != nil:
+		return exactAsk
+	case flexAsk != nil:
+		return flexAsk
+	case exactAllow != nil:
+		return exactAllow
+	default:
+		return flexAllow
 	}
-	return allow
 }
 
 func (e *Engine) matchFlexAsk(bot string, in inspected) *Rule {
@@ -1621,6 +1730,17 @@ func hashParts(kind string, argv []string) string {
 		_, _ = h.Write([]byte{0})
 		_, _ = io.WriteString(h, a)
 	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func hashRevoke(id, effect, argvHash string) string {
+	h := sha256.New()
+	_, _ = io.WriteString(h, "v1\x00revoke\x00")
+	_, _ = io.WriteString(h, id)
+	_, _ = h.Write([]byte{0})
+	_, _ = io.WriteString(h, effect)
+	_, _ = h.Write([]byte{0})
+	_, _ = io.WriteString(h, argvHash)
 	return hex.EncodeToString(h.Sum(nil))
 }
 

@@ -172,7 +172,7 @@ func TestGolden_JailSocketCannotApproveOrCreateRules(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	before := e.Ruleset()
-	for _, op := range []string{"approve", "deny", "create-rule", "list"} {
+	for _, op := range []string{"approve", "deny", "create-rule", "list", "list-rules", "revoke"} {
 		rep := sockRound(t, sock, map[string]any{"op": op, "id": "p_x"})
 		if rep.Verdict != VerdictDeny {
 			t.Fatalf("op %s %+v", op, rep)
@@ -191,6 +191,22 @@ func TestGolden_JailSocketCannotApproveOrCreateRules(t *testing.T) {
 	}
 	if len(e.ListPending()) != 1 {
 		t.Fatalf("pending %+v", e.ListPending())
+	}
+	saved, err := e.SaveRule(Rule{Effect: EffectAllow, Argv: []string{"git", "status"}, Tool: ToolShell, Scope: ScopeBot, BotID: "bot"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeSet, beforeCount := e.Ruleset(), e.RuleCount()
+	rev := sockRound(t, sock, map[string]any{"op": "revoke", "id": saved.ID})
+	listed := sockRound(t, sock, map[string]any{"op": "list-rules"})
+	if rev.Verdict != VerdictDeny || listed.Verdict != VerdictDeny {
+		t.Fatalf("socket revoke %+v list %+v", rev, listed)
+	}
+	if e.Ruleset() != beforeSet || e.RuleCount() != beforeCount {
+		t.Fatal("socket revoke changed rules")
+	}
+	if e.ListRules()[0].ID != saved.ID {
+		t.Fatal("socket removed a rule")
 	}
 }
 

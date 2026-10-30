@@ -45,6 +45,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("POST /api/permbroker/pending/deny-all", a.handleBrokerDenyAll)
 	mux.HandleFunc("POST /api/permbroker/pending/{id}", a.handleBrokerDecide)
 	mux.HandleFunc("POST /api/permbroker/hook/repin", a.handleBrokerRepin)
+	mux.HandleFunc("GET /api/permbroker/rules", a.handleBrokerRules)
+	mux.HandleFunc("DELETE /api/permbroker/rules/{id}", a.handleBrokerRevokeRule)
 	mux.HandleFunc("GET /api/bots/{id}/memory", a.handleListMemory)
 	mux.HandleFunc("POST /api/bots/{id}/memory", a.handlePutMemory)
 	mux.HandleFunc("DELETE /api/bots/{id}/memory/{key}", a.handleDeleteMemory)

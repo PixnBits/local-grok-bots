@@ -13,7 +13,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/audit"
@@ -181,7 +180,6 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		cliDenySource = "broker"
 	}
 	eventTransport := ""
-	var cardDenied atomic.Bool
 	permOrigin := a.mcpHostBase()
 	host := strings.TrimSpace(permOrigin) != ""
 	switch {
@@ -190,11 +188,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		botID := bot.ID
 		spec.ACP = &clisession.ACPHooks{
 			Decide: func(ctx context.Context, ask clisession.ACPAsk) (clisession.ACPDecision, error) {
-				dec, err := a.decideGrokACP(ctx, botID, runID, sessionID, ask, envField(iso.Env, "GROK_HOME"))
-				if dec.UserDenied {
-					cardDenied.Store(true)
-				}
-				return dec, err
+				return a.decideGrokACP(ctx, botID, runID, sessionID, ask, envField(iso.Env, "GROK_HOME"))
 			},
 			Fail: func(tool string, args map[string]any, reason string) {
 				a.recordACPHostFail(botID, runID, tool, args, reason)
@@ -426,25 +420,9 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		if text != "" {
 			a.persistBotText(bot.ID, runID, text, false)
 		}
-		// A Grok card denial cancels the turn. A broker-hook denial does not:
-		// the model keeps the reason and the run stays done. Other denials
-		// keep the existing end state.
-		if cardDenied.Load() && cancelledStop(res.StopReason) && !a.brokerHooksOn(bot.ID) {
-			_, _ = a.finishRun(runID, "stopped", "stopped after denial")
-			a.bus.Publish(runID, "done", map[string]any{"run_id": runID, "status": "stopped", "reason": "stopped after denial"})
-			break
-		}
+		// A denial is a tool result. Only an explicit stop finishes the run as cancelled.
 		_, _ = a.finishRun(runID, "done", "")
 		a.bus.Publish(runID, "done", map[string]any{"run_id": runID})
-	}
-}
-
-func cancelledStop(reason string) bool {
-	switch strings.ToLower(strings.TrimSpace(reason)) {
-	case "cancelled", "canceled":
-		return true
-	default:
-		return false
 	}
 }
 

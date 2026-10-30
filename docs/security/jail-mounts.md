@@ -28,8 +28,10 @@ and a git binary other than the wrapped `/usr/bin/git` is the real binary.
 `run_shell` therefore uses the same git-config hard ask as Claude. The
 ask reads that bot's repo, homes, and stored environment.
 
-Daemon file tools still read and write the shared workspace root. That is
-outside the jail. Moving those tools onto the bot directory is deferred.
+Daemon file tools (`read_file`, `write_file`, `edit_file`, `delete_file`)
+resolve against the same bot directory `run_shell` binds at `/work`. A
+path into another bot, the shared workspace root, `..`, or a symlink out
+of that directory is refused.
 
 A hook path that lives under the read-only `/usr`, `/bin`, or `/lib` bind
 stays readable inside the jail. Hiding that one path would remove part of
@@ -59,6 +61,7 @@ because a missing deny path refuses the launch.
 ## Fixes in this pass
 
 - `run_shell` binds the bot directory at `/work`.
+- Native file tools use that same bot directory.
 - A shell `git push` resolves the repo in that directory.
 - `run_shell` git config uses the hard ask.
 - The Claude deny list includes the per-launch hook copy directory.
@@ -66,5 +69,4 @@ because a missing deny path refuses the launch.
 
 ## Deferred
 
-- Daemon file tools remain on the shared workspace root.
 - A hook installed inside the read-only system library bind is still visible to the shell jail.

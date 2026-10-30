@@ -375,6 +375,7 @@ func TestGolden_LegacyRuleMigration(t *testing.T) {
 		{BotID: "bot", Effect: EffectAllow, Text: "Bash(git diff -- *)"},
 		{BotID: "bot", Effect: EffectDeny, Text: "Bash(git log **)"},
 		{BotID: "bot", Effect: EffectAllow, Text: "Bash(gh **)"},
+		{BotID: "bot", Effect: EffectAllow, Text: "Bash(git diff * --stat)"},
 	}
 	if err := e.MigrateLegacy(rules); err != nil {
 		t.Fatal(err)
@@ -430,6 +431,18 @@ func TestGolden_LegacyRuleMigration(t *testing.T) {
 	legacyCompound := bashReq("bot", "sess", "task", ws, "git diff -- notes.txt && true")
 	if d := e.Evaluate(ctx, legacyCompound); d.Verdict == VerdictAllow {
 		t.Fatalf("legacy compound %+v", d)
+	}
+	narrow := bashReq("bot", "sess", "task", ws, "git diff HEAD --stat")
+	if d := e.Evaluate(ctx, narrow); d.Verdict != VerdictAllow {
+		t.Fatalf("narrow pattern %+v", d)
+	}
+	slash := bashReq("bot", "sess", "task", ws, "git diff a/b --stat")
+	if d := e.Evaluate(ctx, slash); d.Verdict == VerdictAllow {
+		t.Fatalf("pattern matched a path token %+v", d)
+	}
+	flag := bashReq("bot", "sess", "task", ws, "git diff -p --stat")
+	if d := e.Evaluate(ctx, flag); d.Verdict == VerdictAllow {
+		t.Fatalf("pattern matched a flag %+v", d)
 	}
 	denied := bashReq("bot", "sess", "task", ws, "git log --oneline")
 	if d := e.Evaluate(ctx, denied); d.Verdict != VerdictDeny || d.PendingID != "" {

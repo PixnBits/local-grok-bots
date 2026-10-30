@@ -33,16 +33,16 @@ Paths inside `DATA_DIR`:
 
 ```
 data/state.db      bots, messages, memory, timers, runs, log
-data/workspace/    the only tree bots may read, write, or shell in
+data/workspace/    shared tree; each bot's files and shell are under workspace/bots/<id>
 ```
 
 `state.db` is SQLite in WAL mode. Names are unique case-insensitively; threads stay attached to the bot id across renames.
 
 ## Workspace
 
-File tools resolve against `workspace/` and reject `..`, absolute host paths, and symlink escapes.
+File tools (`read_file`, `write_file`, `edit_file`, `delete_file`) and `run_shell` use that bot's directory, `workspace/bots/<id>`. They reject `..`, absolute host paths, and symlink escapes. Another bot's directory is outside that root.
 
-`run_shell` uses bubblewrap when `bwrap` is installed, and otherwise `unshare` with a chroot. The workspace is bind-mounted at `/work`. The host filesystem outside it is not visible, and the shell starts with no network. If it reports its workspace as `/work`, that is the jail path, not the host path. If neither `bwrap` nor `unshare` can build the jail, the shell fails closed and the daemon still serves. With the `build` grant, each `SANDBOX_BUILD_BINDS` path is opened without following symlinks. Bubblewrap mounts that file descriptor (`--ro-bind-fd`) and does not fall back to a path bind. The unshare fallback refuses the bind with a daemon-generated `sandbox_block` (`refused bind <path>: unsupported without bwrap`) and does not mount the path.
+`run_shell` uses bubblewrap when `bwrap` is installed, and otherwise `unshare` with a chroot. That bot directory is bind-mounted at `/work`. The host filesystem outside it is not visible, and the shell starts with no network. If it reports its workspace as `/work`, that is the jail path, not the host path. If neither `bwrap` nor `unshare` can build the jail, the shell fails closed and the daemon still serves. With the `build` grant, each `SANDBOX_BUILD_BINDS` path is opened without following symlinks. Bubblewrap mounts that file descriptor (`--ro-bind-fd`) and does not fall back to a path bind. The unshare fallback refuses the bind with a daemon-generated `sandbox_block` (`refused bind <path>: unsupported without bwrap`) and does not mount the path.
 
 On macOS, `run_shell` runs under `/usr/bin/sandbox-exec` with a generated Seatbelt profile. It denies by default, reads system paths and the workspace, writes only the workspace and a private temp dir, never writes `.git/hooks`, and has no network. There is no `/work` mount, so the shell starts in the real workspace path. `net` and `ssh` grants are denied on macOS because the connect proxy needs `LD_PRELOAD`. A missing `sandbox-exec` fails closed. Apple marks `sandbox-exec` deprecated; it still ships, but this path has only been compile-checked, not run on a Mac. Behavior change: before this release `run_shell` always failed closed on macOS; Ollama bots with `run_shell` now run commands there.
 
@@ -50,7 +50,11 @@ Grants on the bot (`net`, `git`, `ssh`, `build`) are set from the profile. A mis
 
 User-configured connectors (COIs) are mediated the same way: credentials stay on the host, the daemon performs the real call, and the sandbox sees only a tool or a narrow call site. See the COI section in `docs/sandbox.md`.
 
-To give a bot material, copy or mount it into `workspace/`. The shell PATH includes `/usr/bin`, `/bin`, and toolchain directories already on the read-only `/usr` mount, such as `/usr/local/go/bin` and `/usr/local/bin` when they exist. Home directories and `/snap` are not added.
+## Permission broker
+
+`broker = "hook"` asks before a Claude tool call (through `lgb-permhook`) and before `run_shell`. The flag is daemon-wide. `broker_bots` only chooses which bots use it. Build and install are in [docs/deploy-permission-broker.md](docs/deploy-permission-broker.md). Risk levels, rules, and the admin API are in [docs/permission-broker.md](docs/permission-broker.md).
+
+To give a bot material, copy or mount it into that bot's directory under `workspace/bots/<id>`. The shell PATH includes `/usr/bin`, `/bin`, and toolchain directories already on the read-only `/usr` mount, such as `/usr/local/go/bin` and `/usr/local/bin` when they exist. Home directories and `/snap` are not added.
 
 ## Startup changes
 

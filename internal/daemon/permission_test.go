@@ -760,6 +760,9 @@ func fakeClaudeMain() {
 			fmt.Printf("{\"type\":\"result\",\"is_error\":true,\"result\":%q,\"session_id\":%q}\n", err.Error(), sid)
 			os.Exit(1)
 		}
+		if behavior == "deny" {
+			detail = "continued after deny"
+		}
 	}
 	if behavior == "allow" || mode == "question" || mode == "question-timeout" {
 		word := "approved"

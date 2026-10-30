@@ -599,7 +599,7 @@ func TestACPCardAllowOnceDenyAndSession(t *testing.T) {
 		id, _ := f.waitCard()
 		f.decide(id, "deny")
 		got := f.waitDone()
-		if got.LastRunStatus != "stopped" || got.LastRunError != "stopped after denial" {
+		if got.LastRunStatus != "done" || got.LastRunError != "" {
 			t.Fatalf("run %s %s", got.LastRunStatus, got.LastRunError)
 		}
 		raw := f.auditText()
@@ -627,13 +627,17 @@ func TestACPCardAllowOnceDenyAndSession(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		sawText := false
 		sawNotice := false
 		for _, m := range msgs {
 			if m.Content == "Notice: Stopped after denial." {
 				sawNotice = true
 			}
+			if m.Role == "bot" && strings.Contains(m.Content, "continued after deny") {
+				sawText = true
+			}
 		}
-		if !sawNotice {
+		if sawNotice || !sawText {
 			t.Fatalf("thread %+v", msgs)
 		}
 	})

@@ -15,9 +15,11 @@ type LegacyRule struct {
 }
 
 // MigrateLegacy copies profile rules into the broker file. An exact
-// command becomes an exact rule. A single-word glob with a literal first
-// word becomes a pattern. Anything else is kept as a legacy record and
-// still applies, but an allow never covers a critical or compound command.
+// command becomes an exact rule. A glob becomes a pattern only when the
+// pattern syntax accepts it and every argv that pattern matches also
+// matched the original glob. Anything else is kept as a legacy record.
+// A legacy or pattern allow never covers a critical command, a compound,
+// or a wrapper.
 // The call is idempotent, bumps the ruleset once, and does not remove the
 // caller's copy of the rules.
 func (e *Engine) MigrateLegacy(in []LegacyRule) error {
@@ -124,7 +126,8 @@ func classifyLegacy(text string) (kind, tool string, argv []string, pattern stri
 		}
 		return "exact", ToolShell, fields, ""
 	}
-	if patternSyntax(inner) {
+	fields := strings.Fields(inner)
+	if ValidatePattern(inner) == nil && patternNarrows(inner, fields) {
 		return "pattern", ToolShell, nil, inner
 	}
 	return "legacy", ToolShell, nil, inner
@@ -158,68 +161,6 @@ func legacySyntax(inner string) bool {
 	return false
 }
 
-func patternSyntax(inner string) bool {
-	words := strings.Fields(inner)
-	if len(words) == 0 {
-		return false
-	}
-	if strings.ContainsAny(words[0], "*?[") {
-		return false
-	}
-	for i, w := range words {
-		if w == "**" {
-			return i == len(words)-1
-		}
-		if w == "*" || w == "?" || strings.HasPrefix(w, "[") {
-			return false
-		}
-		if strings.ContainsAny(w, "?[") {
-			return false
-		}
-		if strings.Contains(w, "*") && strings.Trim(w, "*") == "" {
-			return false
-		}
-	}
-	return true
-}
-
-func patternMatch(pat string, argv []string) bool {
-	words := strings.Fields(pat)
-	if len(words) == 0 || len(argv) == 0 {
-		return false
-	}
-	if argv[0] != words[0] && baseName(argv[0]) != words[0] {
-		return false
-	}
-	ai := 1
-	for wi := 1; wi < len(words); wi++ {
-		w := words[wi]
-		if w == "**" && wi == len(words)-1 {
-			return true
-		}
-		if ai >= len(argv) {
-			return false
-		}
-		if !wordMatch(w, argv[ai]) {
-			return false
-		}
-		ai++
-	}
-	return ai == len(argv)
-}
-
-func wordMatch(pattern, value string) bool {
-	if pattern == value {
-		return true
-	}
-	ok, err := filepath.Match(pattern, value)
-	if err == nil && ok {
-		return true
-	}
-	ok, err = filepath.Match(pattern, baseName(value))
-	return err == nil && ok
-}
-
 func legacyMatch(pat, raw string) bool {
 	raw = strings.TrimSpace(raw)
 	if pat == "" || raw == "" {
@@ -229,17 +170,24 @@ func legacyMatch(pat, raw string) bool {
 	return err == nil && ok
 }
 
-func ruleHit(rule *Rule, in inspected, forDeny bool) bool {
-	if rule == nil || normTool(rule.Tool) != ToolShell {
-		return false
-	}
+func storedKind(rule *Rule) string {
 	kind := rule.Kind
 	if kind == "" {
 		kind = "exact"
 	}
-	switch kind {
+	if kind == "pattern" && ValidatePattern(rule.Pattern) != nil {
+		return "legacy"
+	}
+	return kind
+}
+
+func ruleHit(rule *Rule, in inspected, forDeny bool) bool {
+	if rule == nil || normTool(rule.Tool) != ToolShell {
+		return false
+	}
+	switch storedKind(rule) {
 	case "exact":
-		if !in.Eligible && !forDeny {
+		if !forDeny && (!in.Eligible || in.Compound) {
 			return false
 		}
 		return argvEqual(rule.Argv, in.Argv)
@@ -263,11 +211,11 @@ func ruleHit(rule *Rule, in inspected, forDeny bool) bool {
 		if rule.Effect == EffectAllow && !allowFlex(in) {
 			return false
 		}
+		if rule.Effect == EffectAllow {
+			return legacyAllowMatch(rule.Pattern, in.Raw)
+		}
 		if legacyMatch(rule.Pattern, in.Raw) {
 			return true
-		}
-		if rule.Effect == EffectAllow {
-			return false
 		}
 		for _, p := range in.Parts {
 			if legacyMatch(rule.Pattern, p.Raw) {
@@ -280,6 +228,18 @@ func ruleHit(rule *Rule, in inspected, forDeny bool) bool {
 	}
 }
 
+// legacyAllowMatch keeps a legacy allow inside the original glob and
+// refuses a longer argv than the glob's word count.
+func legacyAllowMatch(pat, raw string) bool {
+	if !legacyMatch(pat, raw) {
+		return false
+	}
+	return len(strings.Fields(raw)) <= len(strings.Fields(pat))
+}
+
 func allowFlex(in inspected) bool {
-	return in.Eligible && !in.Compound && in.Level != LevelCritical && in.GitRisk == ""
+	if !in.Eligible || in.Compound || in.Level == LevelCritical || in.GitRisk != "" {
+		return false
+	}
+	return !wrapperArgv(in.Argv)
 }

@@ -15,7 +15,7 @@ func brokerAdminPath(r *http.Request) bool {
 		return false
 	}
 	p := r.URL.Path
-	return p == "/api/permbroker/pending" || strings.HasPrefix(p, "/api/permbroker/pending/") || p == "/api/permbroker/hook/repin"
+	return p == "/api/permbroker/pending" || strings.HasPrefix(p, "/api/permbroker/pending/") || p == "/api/permbroker/hook/repin" || p == "/api/permbroker/rules" || strings.HasPrefix(p, "/api/permbroker/rules/")
 }
 
 func (a *App) brokerPostOK(w http.ResponseWriter, r *http.Request) bool {
@@ -32,6 +32,29 @@ func (a *App) handleBrokerRepin(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := a.repinBrokerHook(); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook cannot be pinned"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (a *App) handleBrokerRules(w http.ResponseWriter, r *http.Request) {
+	if a.broker == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"rules": []any{}})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rules": a.broker.ListRules()})
+}
+
+func (a *App) handleBrokerRevokeRule(w http.ResponseWriter, r *http.Request) {
+	if !a.brokerPostOK(w, r) {
+		return
+	}
+	if a.broker == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "rule not found"})
+		return
+	}
+	if err := a.broker.RevokeRule(r.PathValue("id")); err != nil {
+		writeBrokerErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -113,7 +136,7 @@ func writeBrokerErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, permbroker.ErrStale):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
-	case errors.Is(err, permbroker.ErrNotFound):
+	case errors.Is(err, permbroker.ErrNotFound), errors.Is(err, permbroker.ErrRuleNotFound):
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
 	case errors.Is(err, permbroker.ErrScope), errors.Is(err, permbroker.ErrBadDecision):
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})

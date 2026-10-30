@@ -35,9 +35,10 @@ func TestWorkspaceOwnedForJail(t *testing.T) {
 	if _, err := app.toolWriteFile("bot", map[string]any{"path": "sub/dir/note.txt", "content": "hi"}); err != nil {
 		t.Fatal(err)
 	}
-	assertOwned(t, calls, filepath.Join(app.ws, "sub"), uid, gid, 0o700)
-	assertOwned(t, calls, filepath.Join(app.ws, "sub", "dir"), uid, gid, 0o700)
-	got, err := os.ReadFile(filepath.Join(app.ws, "sub", "dir", "note.txt"))
+	root := app.botWorkspace("bot")
+	assertOwned(t, calls, filepath.Join(root, "sub"), uid, gid, 0o700)
+	assertOwned(t, calls, filepath.Join(root, "sub", "dir"), uid, gid, 0o700)
+	got, err := os.ReadFile(filepath.Join(root, "sub", "dir", "note.txt"))
 	if err != nil || string(got) != "hi" {
 		t.Fatalf("file %q %v", got, err)
 	}
@@ -100,9 +101,10 @@ func TestWorkspaceNonRootSkipsChown(t *testing.T) {
 	if len(calls) != 0 {
 		t.Fatalf("chown calls %v", calls)
 	}
+	root := app.botWorkspace("bot")
 	assertDirMode(t, app.ws, 0o750)
-	assertDirMode(t, filepath.Join(app.ws, "sub"), 0o700)
-	assertDirMode(t, filepath.Join(app.ws, "sub", "dir"), 0o700)
+	assertDirMode(t, filepath.Join(root, "sub"), 0o700)
+	assertDirMode(t, filepath.Join(root, "sub", "dir"), 0o700)
 	if err := filepath.WalkDir(app.ws, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err

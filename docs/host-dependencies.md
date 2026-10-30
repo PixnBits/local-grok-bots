@@ -19,6 +19,8 @@ sudo apt install bubblewrap socat util-linux gcc
 | `bwrap` | Host CLI broker (`tools.cli` / `coi`). No `unshare` fallback. | The call is denied before the hourly slot. Bot log and audit event `coi_sandbox_unavailable`. An invalid `sandbox_bin` is the same event. |
 | `bwrap`, else `unshare` | Ollama `run_shell`. | If both are missing, the tool returns `shell sandbox unavailable`. The daemon keeps serving. Bot log kinds `tool_start` and `tool_end` (`ok` false). There is no separate sandbox audit event. |
 | `gcc` | `run_shell` `net` and `ssh` grants. The preload redirects connects to the daemon proxy. | The shell still runs, with no network. Bot log kind `grant_denied`, detail `network proxy unavailable`, for each of those grants. |
+| Claude Code `>= 2.1.295` | The permission-broker hook. The launch reads `onFailure`. | An older release, or a version that cannot be read, refuses the turn before the CLI starts. |
+| `lgb-permhook` | The Claude PreToolUse hook when `broker` is `hook`. Build it with `deploy/build.sh`. An empty `hook_path` uses the copy beside the daemon binary. | The turn is refused before the CLI starts, and startup warns that the hook cannot be used. |
 
 ## macOS
 
