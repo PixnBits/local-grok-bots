@@ -161,6 +161,7 @@ func TestGolden_TaskGrantExpires(t *testing.T) {
 	start := time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
 	now := start
 	e.now = func() time.Time { return now }
+	e.SetApprovalTTL(24 * time.Hour)
 	e.NoteUserMessage("bot", "m1")
 	req := shellReq("Bash", "git status")
 	req.TaskID = "m1"
@@ -281,7 +282,7 @@ func TestGolden_GitBaselineDriftAsks(t *testing.T) {
 	if d := e.Evaluate(context.Background(), req); d.Verdict != VerdictAllow {
 		t.Fatalf("baseline %+v", d)
 	}
-	if err := os.WriteFile(configPath, []byte("[core]\n\thooksPath = x\n"), 0o644); err != nil {
+	if err := os.WriteFile(configPath, []byte("[user]\n\tname = ada\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if d := e.Evaluate(context.Background(), req); d.Verdict == VerdictAllow {
@@ -290,8 +291,8 @@ func TestGolden_GitBaselineDriftAsks(t *testing.T) {
 	run := shellReq("run_shell", "git status")
 	run.Cwd = ws
 	run.Workspace = ws
-	if d := e.Evaluate(context.Background(), run); d.Verdict != VerdictAllow {
-		t.Fatalf("daemon git %+v", d)
+	if d := e.Evaluate(context.Background(), run); d.Verdict == VerdictAllow {
+		t.Fatalf("daemon git drift %+v", d)
 	}
 }
 

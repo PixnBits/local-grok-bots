@@ -431,7 +431,7 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		}
 		return `{"ok":true}`, nil
 	case "read_file":
-		return a.toolReadFile(args)
+		return a.toolReadFile(bot.ID, args)
 	case "write_file":
 		return a.toolWriteFile(bot.ID, args)
 	case "edit_file":
@@ -505,8 +505,12 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		if gerr != nil {
 			return "", gerr
 		}
+		shellWS, werr := a.shellWorkspace(current.ID)
+		if werr != nil {
+			return "", werr
+		}
 		res, err := sandbox.Run(shellCtx, sandbox.Request{
-			Workspace:       a.ws,
+			Workspace:       shellWS,
 			Command:         command,
 			CleanBash:       cleanBash,
 			Grants:          current.Grants,

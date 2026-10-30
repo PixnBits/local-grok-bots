@@ -173,6 +173,26 @@ func acpFakeMain() {
 				os.Exit(0)
 			}
 			if acpOption(sc.Text()) == "reject-once" {
+				// The tool result is recorded before the continuation, so
+				// that text stays the reply. stopReason cancelled is still
+				// the prompt result; it does not end the run.
+				tid := fmt.Sprintf("t%d", 10+i)
+				writeACPUpdate(sid, map[string]any{
+					"sessionUpdate": "tool_call",
+					"toolCallId":    tid,
+					"kind":          "execute",
+					"title":         "tool",
+				})
+				writeACPUpdate(sid, map[string]any{
+					"sessionUpdate": "tool_call_update",
+					"toolCallId":    tid,
+					"status":        "failed",
+					"content":       map[string]any{"type": "text", "text": "denied"},
+				})
+				writeACPUpdate(sid, map[string]any{
+					"sessionUpdate": "agent_message_chunk",
+					"content":       map[string]any{"type": "text", "text": "continued after deny"},
+				})
 				writeACPResult(prompt, map[string]any{"stopReason": "cancelled"})
 				os.Exit(0)
 			}

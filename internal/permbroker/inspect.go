@@ -1,6 +1,7 @@
 package permbroker
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"strings"
@@ -9,19 +10,20 @@ import (
 // evalSnap is the engine state one evaluate may read without the lock.
 // repos nil is preserved: an empty slice is a different answer.
 type evalSnap struct {
-	table      table
-	resolver   func(string) (string, bool)
-	classifier Classifier
-	ws         string
-	repos      []string
-	snapSet    bool
-	snapWS     string
-	snapGit    []byte
-	snapGitOK  bool
-	snapAttr   []byte
-	snapAttrOK bool
-	critical   []string
-	hook       func(context.Context, Request)
+	table           table
+	resolver        func(string) (string, bool)
+	classifier      Classifier
+	ws              string
+	repos           []string
+	snapSet         bool
+	snapWS          string
+	snapBlob        []byte
+	baselineCorrupt bool
+	critical        []string
+	hook            func(context.Context, Request)
+	perBot          bool
+	homes           []string
+	env             []string
 }
 
 func (e *Engine) capture(req Request) evalSnap {
@@ -33,27 +35,39 @@ func (e *Engine) capture(req Request) evalSnap {
 		extra[i] = row
 	}
 	snap := evalSnap{
-		table:      table{extra: extra},
-		resolver:   e.resolver,
-		classifier: e.classifier,
-		snapSet:    e.snapSet,
-		snapWS:     e.snapWS,
-		snapGit:    append([]byte(nil), e.snapGit...),
-		snapGitOK:  e.snapGitOK,
-		snapAttr:   append([]byte(nil), e.snapAttr...),
-		snapAttrOK: e.snapAttrOK,
-		critical:   append([]string(nil), e.critical...),
-		hook:       e.inspectHook,
+		table:           table{extra: extra},
+		resolver:        e.resolver,
+		classifier:      e.classifier,
+		snapSet:         e.snapSet,
+		snapWS:          e.snapWS,
+		snapBlob:        append([]byte(nil), e.snapBlob...),
+		baselineCorrupt: e.baselineCorrupt,
+		critical:        append([]string(nil), e.critical...),
+		hook:            e.inspectHook,
 	}
 	ws := req.Workspace
 	var repos []string
 	if b, ok := e.bots[req.BotID]; ok {
-		if ws == "" {
+		if b.Workspace != "" {
+			ws = b.Workspace
+			snap.perBot = true
+			if b.snapSet {
+				snap.snapSet = true
+				snap.snapWS = b.Workspace
+				snap.snapBlob = append([]byte(nil), b.snapBlob...)
+			} else {
+				snap.snapSet = false
+				snap.snapWS = ""
+				snap.snapBlob = nil
+			}
+		} else if ws == "" {
 			ws = b.Workspace
 		}
 		if req.Repos == nil {
 			repos = b.Repos
 		}
+		snap.homes = homesOf(b)
+		snap.env = append([]string(nil), b.Env...)
 	}
 	if req.Repos != nil {
 		repos = append([]string(nil), req.Repos...)
@@ -90,7 +104,7 @@ func (e *Engine) raiseToCurrent(req Request, in inspected) inspected {
 	} else if lvl := e.table.level(req.ToolName, toolPaths(req.ToolInput)); Rank(lvl) > Rank(in.Level) {
 		in.Level = lvl
 	}
-	if hitsCritical(req, in, e.critical) {
+	if hitsCriticalWith(req, in, e.critical, e.critEnvLocked(req.BotID)) {
 		in.Level = LevelCritical
 	}
 	if in.Level == LevelCritical {
@@ -163,9 +177,20 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 			in.Eligible = false
 			in.HardAsk = true
 		}
-		if gitDriftSnap(snap, req, ws, parsed) {
+		drifted := gitDriftSnap(snap, req, ws, parsed)
+		if gitRiskTool(req.ToolName) && commandUsesGit(parsed) {
+			if why := gitConfigRisk(ws, snap.homes, snap.env); why != "" {
+				in.GitRisk = why
+				in.Eligible = false
+				in.HardAsk = true
+			}
+		}
+		if drifted {
 			in.Eligible = false
 			in.HardAsk = true
+			if in.GitRisk == "" {
+				in.GitRisk = "baseline"
+			}
 		}
 	} else {
 		canon, ok := canonicalJSON(req.ToolInput)
@@ -208,10 +233,20 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 		}
 		in.ClassNote = why
 	}
-	if in.ClassNote == "" {
+	if in.GitRisk != "" {
+		note := "git config " + in.GitRisk
+		if in.ClassNote == "" || in.ClassNote == "none" {
+			in.ClassNote = note
+		} else if !strings.Contains(in.ClassNote, in.GitRisk) {
+			in.ClassNote = in.ClassNote + "; " + note
+		}
+	} else if in.ClassNote == "" {
 		in.ClassNote = "none"
 	}
-	if hitsCritical(req, in, snap.critical) {
+	// A classifier cannot allow a call. ClassifierMayAllow is the gate any
+	// future allow has to pass, and it is false without this bot's
+	// workspace and git baseline.
+	if hitsCriticalWith(req, in, snap.critical, critEnv{homes: snap.homes, env: snap.env}) {
 		in.Level = LevelCritical
 	}
 	if in.Level == LevelCritical {
@@ -222,24 +257,35 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 }
 
 func gitDriftSnap(snap evalSnap, req Request, ws string, parsed Parse) bool {
-	if !snap.snapSet || !claudeBash(req.ToolName) || !commandUsesGit(parsed) {
+	if !gitRiskTool(req.ToolName) || !commandUsesGit(parsed) {
+		return false
+	}
+	// An unreadable baseline file asks until an admin records one.
+	// A bot an admin just recorded still compares that record.
+	if snap.baselineCorrupt && !snap.snapSet {
+		return true
+	}
+	if snap.perBot {
+		if !snap.snapSet {
+			return true
+		}
+	} else if !snap.snapSet {
 		return false
 	}
 	if ws == "" {
 		return true
 	}
-	gitData, gitOK := readGitBaseline(ws)
-	if baselineDrift(snap.snapGit, snap.snapGitOK, gitData, gitOK) {
-		return true
-	}
-	attr, attrOK := readBaselineFile(filepath.Join(ws, ".gitattributes"))
-	if baselineDrift(snap.snapAttr, snap.snapAttrOK, attr, attrOK) {
+	if !bytes.Equal(snap.snapBlob, gitBaselineBlob(ws, snap.homes)) {
 		return true
 	}
 	return subdirGit(req.Cwd, ws)
 }
 
 func hitsCritical(req Request, in inspected, crit []string) bool {
+	return hitsCriticalWith(req, in, crit, critEnv{})
+}
+
+func hitsCriticalWith(req Request, in inspected, crit []string, ce critEnv) bool {
 	crit = normalizeCritical(crit)
 	if len(crit) == 0 {
 		return false
@@ -256,7 +302,31 @@ func hitsCritical(req Request, in inspected, crit []string) bool {
 			return true
 		}
 	}
-	return false
+	return resolvedCritical(req, in, crit, ce)
+}
+
+func (e *Engine) critEnvLocked(bot string) critEnv {
+	b := e.bots[bot]
+	return critEnv{homes: homesOf(b), env: append([]string(nil), b.Env...)}
+}
+
+func homesOf(b botCtx) []string {
+	var out []string
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return
+		}
+		for _, have := range out {
+			if have == s {
+				return
+			}
+		}
+		out = append(out, s)
+	}
+	add(b.Home)
+	add(b.UserHome)
+	return out
 }
 
 // BrokerCriticalPaths is the set the daemon marks critical: the hook

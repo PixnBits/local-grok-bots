@@ -21,19 +21,27 @@ const (
 	ToolShell = "shell"
 )
 
-// Rule is an exact argv match. Pattern rules are a later change.
+// Rule is an exact argv match, a pattern, or a migrated legacy record.
 // Scope is bot or global. Once and task are grants, not rules.
+// Kind is exact, pattern, or legacy. Empty means exact.
 type Rule struct {
-	ID          string    `json:"id"`
-	Effect      string    `json:"effect"`
-	Argv        []string  `json:"argv"`
-	Tool        string    `json:"tool"`
-	Scope       string    `json:"scope"`
-	BotID       string    `json:"bot_id,omitempty"`
-	CreatedFrom string    `json:"created_from,omitempty"`
-	CreatedAt   time.Time `json:"created_at"`
-	LastUsedAt  time.Time `json:"last_used_at,omitempty"`
-	Uses        int       `json:"uses"`
+	ID           string    `json:"id"`
+	Effect       string    `json:"effect"`
+	Argv         []string  `json:"argv,omitempty"`
+	Tool         string    `json:"tool"`
+	Scope        string    `json:"scope"`
+	BotID        string    `json:"bot_id,omitempty"`
+	CreatedFrom  string    `json:"created_from,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	LastUsedAt   time.Time `json:"last_used_at,omitempty"`
+	Uses         int       `json:"uses"`
+	Kind         string    `json:"kind,omitempty"`
+	Pattern      string    `json:"pattern,omitempty"`
+	Text         string    `json:"text,omitempty"`
+	Source       string    `json:"source,omitempty"`
+	Readonly     bool      `json:"readonly,omitempty"`
+	Active       *bool     `json:"active,omitempty"`
+	NeedsConfirm bool      `json:"needs_confirm,omitempty"`
 }
 
 type rulesFile struct {

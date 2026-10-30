@@ -47,6 +47,70 @@ func PinHook(path string) (HookPin, error) {
 	}, nil
 }
 
+// CopyPinnedHook writes a daemon-owned copy of the pinned file.
+// dir is created at mode 0700. The file is mode 0500. The copy's sha256
+// must equal the pin immediately after the write.
+func CopyPinnedHook(pin HookPin, dir string) (string, error) {
+	if pin.Sum == "" || strings.TrimSpace(pin.Path) == "" {
+		return "", fmt.Errorf("hook changed")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return "", err
+	}
+	src, err := os.Open(pin.Path)
+	if err != nil {
+		return "", fmt.Errorf("hook changed")
+	}
+	defer src.Close()
+	dst := filepath.Join(dir, "hook")
+	tmp := dst + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return "", err
+	}
+	_, copyErr := io.Copy(out, src)
+	closeErr := out.Close()
+	if copyErr != nil || closeErr != nil {
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("hook changed")
+	}
+	sum, err := hashFile(tmp)
+	if err != nil || sum != pin.Sum {
+		_ = os.Remove(tmp)
+		return "", fmt.Errorf("hook changed")
+	}
+	if err := os.Chmod(tmp, 0o500); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		return "", err
+	}
+	if err := os.Chmod(dst, 0o500); err != nil {
+		_ = os.Remove(dst)
+		return "", err
+	}
+	sum, err = hashFile(dst)
+	if err != nil || sum != pin.Sum {
+		_ = os.Remove(dst)
+		return "", fmt.Errorf("hook changed")
+	}
+	return dst, nil
+}
+
+// CopySum reports whether path's content still matches the pin.
+func (p HookPin) CopySum(path string) error {
+	sum, err := hashFile(path)
+	if err != nil || sum != p.Sum {
+		return fmt.Errorf("hook changed")
+	}
+	return nil
+}
+
 // Diff reports whether path still matches the pin.
 // A difference uses a fixed sentence so the turn error and the audit row match.
 func (p HookPin) Diff(path string) error {

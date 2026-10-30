@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -47,6 +48,9 @@ type Isolation struct {
 	// disableAllHooks. Claude is not in the Grok jail, so this command
 	// uses host paths.
 	PermHookCommand string
+	// PathNote is set when the managed environment had no PATH and a
+	// fallback was written. Empty means the managed PATH was kept.
+	PathNote string
 }
 
 // JailProxySock is the credential proxy inside the Grok network namespace.
@@ -394,6 +398,7 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 			}
 		}
 	}
+	iso.PathNote = applyEmptyPATH(env)
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
@@ -403,6 +408,23 @@ func PrepareIsolation(o IsolationOptions) (Isolation, error) {
 		iso.Env = append(iso.Env, k+"="+env[k])
 	}
 	return iso, nil
+}
+
+// applyEmptyPATH fills PATH when the managed environment has none.
+// A non-empty PATH is left alone. The returned sentence names the PATH
+// that will be used to resolve the CLI. An empty sentence means no fill.
+func applyEmptyPATH(env map[string]string) string {
+	if strings.TrimSpace(env["PATH"]) != "" {
+		return ""
+	}
+	path := strings.TrimSpace(os.Getenv("PATH"))
+	which := "process PATH"
+	if path == "" {
+		path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+		which = "default PATH"
+	}
+	env["PATH"] = path
+	return "cli isolation PATH is empty; resolving the CLI with " + which + " " + path
 }
 
 // ClaudeSettingsPath is the file writeClaudeSettings will replace.

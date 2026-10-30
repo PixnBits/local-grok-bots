@@ -177,8 +177,11 @@ func TestGolden_HookIntegrityChangeRefusesTurn(t *testing.T) {
 		}
 		h.app.editPol(func(p *policy.Policy) { p.HookPath = hook })
 		ran := h.post(t)
-		if ran.status != "done" || ran.errText != "" || !strings.Contains(ran.argv, "--settings") {
+		if ran.status != "error" || !strings.Contains(ran.errText, "hook changed") {
 			t.Fatalf("run %s %q", ran.status, ran.errText)
+		}
+		if strings.Contains(ran.argv, "-p") || ran.marker {
+			t.Fatalf("claude started argv %q marker %v", ran.argv, ran.marker)
 		}
 	})
 	t.Run("deny list", func(t *testing.T) {

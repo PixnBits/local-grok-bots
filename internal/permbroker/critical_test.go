@@ -2,6 +2,7 @@ package permbroker
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -156,6 +157,76 @@ func TestGolden_CriticalPathsStillCritical(t *testing.T) {
 		}
 		if d := e.Evaluate(ctx, tc.req); d.Verdict == VerdictAllow {
 			t.Fatalf("%s token reused %+v", tc.name, d)
+		}
+	}
+}
+
+func TestGolden_CriticalPathForms(t *testing.T) {
+	e, set := criticalEngine(t)
+	ctx := context.Background()
+	critDir := filepath.Join(set.data, "permbroker")
+	if err := os.MkdirAll(critDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settingsDir := filepath.Dir(set.settings)
+	if err := os.MkdirAll(filepath.Join(settingsDir, "a", "b"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(set.settings, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := t.TempDir()
+	link := filepath.Join(linkDir, "via")
+	if err := os.Symlink(settingsDir, link); err != nil {
+		t.Fatal(err)
+	}
+	fileLink := filepath.Join(linkDir, "settings-file")
+	if err := os.Symlink(set.settings, fileLink); err != nil {
+		t.Fatal(err)
+	}
+	home := settingsDir
+	t.Setenv("HOME", home)
+	t.Setenv("CRITDIR", settingsDir)
+
+	cases := []struct {
+		name string
+		cwd  string
+		cmd  string
+		read string
+	}{
+		{name: "bare-in-critical-dir", cwd: critDir, cmd: "cat audit.jsonl"},
+		{name: "cd-and-relative", cwd: set.data, cmd: "cd permbroker && cat audit.jsonl"},
+		{name: "symlink-component", cwd: "/work", cmd: "cat " + filepath.Join(link, "claude-settings.json")},
+		{name: "tilde", cwd: "/work", cmd: "cat ~/claude-settings.json"},
+		{name: "home-var", cwd: "/work", cmd: "cat $HOME/claude-settings.json"},
+		{name: "dollar-var", cwd: "/work", cmd: "cat $CRITDIR/claude-settings.json"},
+		{name: "braced-var", cwd: "/work", cmd: "cat ${CRITDIR}/claude-settings.json"},
+		{name: "glob-base", cwd: "/work", cmd: "cat permb*"},
+		{name: "glob-segment", cwd: "/work", cmd: "cat */audit.jsonl"},
+		{name: "glued-short", cwd: "/work", cmd: "echo -o" + set.settings},
+		{name: "long-flag-rel", cwd: filepath.Join(settingsDir, "a"), cmd: "echo --file=../claude-settings.json"},
+		{name: "relative-redirect", cwd: filepath.Join(settingsDir, "a", "b"), cmd: "cat notes.txt > ../../claude-settings.json"},
+		{name: "read-symlink", read: fileLink},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var req Request
+			if tc.read != "" {
+				req = readReq("bot", "/work", "/work", tc.read)
+			} else {
+				req = bashReq("bot", "sess", "task", tc.cwd, tc.cmd)
+			}
+			d := e.Evaluate(ctx, req)
+			if d.Level != LevelCritical {
+				t.Fatalf("%s not critical %+v", tc.name, d)
+			}
+		})
+	}
+	benignCwd := t.TempDir()
+	for _, cmd := range []string{"git status", "touch canary_a", "ls", "cat notes.txt"} {
+		d := e.Evaluate(ctx, bashReq("bot", "sess", "task", benignCwd, cmd))
+		if d.Level == LevelCritical {
+			t.Fatalf("%s became critical %+v", cmd, d)
 		}
 	}
 }

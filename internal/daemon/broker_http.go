@@ -15,7 +15,11 @@ func brokerAdminPath(r *http.Request) bool {
 		return false
 	}
 	p := r.URL.Path
-	return p == "/api/permbroker/pending" || strings.HasPrefix(p, "/api/permbroker/pending/")
+	if p == "/api/permbroker/pending" || strings.HasPrefix(p, "/api/permbroker/pending/") || p == "/api/permbroker/hook/repin" || p == "/api/permbroker/rules" || strings.HasPrefix(p, "/api/permbroker/rules/") {
+		return true
+	}
+	parts := strings.Split(strings.Trim(p, "/"), "/")
+	return len(parts) == 5 && parts[0] == "api" && parts[1] == "permbroker" && parts[2] == "bots" && parts[3] != "" && parts[4] == "git-baseline"
 }
 
 func (a *App) brokerPostOK(w http.ResponseWriter, r *http.Request) bool {
@@ -24,6 +28,90 @@ func (a *App) brokerPostOK(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+func (a *App) handleBrokerRepin(w http.ResponseWriter, r *http.Request) {
+	if !a.brokerPostOK(w, r) {
+		return
+	}
+	if err := a.repinBrokerHook(); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook cannot be pinned"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (a *App) handleBrokerRules(w http.ResponseWriter, r *http.Request) {
+	if a.broker == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"rules": []any{}})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rules": a.broker.ListRules()})
+}
+
+func (a *App) handleBrokerConfirmRule(w http.ResponseWriter, r *http.Request) {
+	if !a.brokerPostOK(w, r) {
+		return
+	}
+	if a.broker == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "rule not found"})
+		return
+	}
+	id := r.PathValue("id")
+	sum, err := a.broker.ConfirmRule(id)
+	if err != nil {
+		writeBrokerErr(w, err)
+		return
+	}
+	if a.audit != nil && a.audit.Enabled() {
+		a.audit.Write(map[string]any{
+			"event": "permbroker", "action": "rule_confirm",
+			"rule_id": id, "input_hash": sum,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (a *App) handleBrokerGitBaseline(w http.ResponseWriter, r *http.Request) {
+	if !a.brokerPostOK(w, r) {
+		return
+	}
+	if a.broker == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "pending item not found"})
+		return
+	}
+	id := r.PathValue("id")
+	if err := a.broker.RebaselineBot(id); err != nil {
+		writeBrokerErr(w, err)
+		return
+	}
+	if a.audit != nil && a.audit.Enabled() {
+		a.audit.Write(map[string]any{
+			"event": "permbroker", "action": "git_rebaseline", "bot_id": id,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (a *App) handleBrokerRevokeRule(w http.ResponseWriter, r *http.Request) {
+	if !a.brokerPostOK(w, r) {
+		return
+	}
+	if a.broker == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "rule not found"})
+		return
+	}
+	id := r.PathValue("id")
+	if err := a.broker.RevokeRule(id); err != nil {
+		writeBrokerErr(w, err)
+		return
+	}
+	if a.audit != nil && a.audit.Enabled() {
+		a.audit.Write(map[string]any{
+			"event": "permbroker", "action": "rule_revoke", "rule_id": id,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
 func (a *App) handleBrokerPending(w http.ResponseWriter, r *http.Request) {
@@ -102,9 +190,9 @@ func writeBrokerErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, permbroker.ErrStale):
 		writeJSON(w, http.StatusConflict, map[string]string{"error": err.Error()})
-	case errors.Is(err, permbroker.ErrNotFound):
+	case errors.Is(err, permbroker.ErrNotFound), errors.Is(err, permbroker.ErrRuleNotFound):
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
-	case errors.Is(err, permbroker.ErrScope), errors.Is(err, permbroker.ErrBadDecision):
+	case errors.Is(err, permbroker.ErrScope), errors.Is(err, permbroker.ErrBadDecision), errors.Is(err, permbroker.ErrNotConfirmable):
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})

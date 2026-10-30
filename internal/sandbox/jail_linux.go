@@ -44,10 +44,7 @@ func enterJail(jail string, cfg stage2File) error {
 			return err
 		}
 	}
-	binds := []string{"/bin", "/lib", "/usr"}
-	if st, err := os.Stat("/lib64"); err == nil && st.IsDir() {
-		binds = append(binds, "/lib64")
-	}
+	binds := unshareBaseBinds()
 	for _, src := range binds {
 		dst := filepath.Join(jail, strings.TrimPrefix(src, "/"))
 		if err := os.MkdirAll(dst, 0o755); err != nil {
@@ -142,6 +139,47 @@ func bindIntoJail(jail string, m mount) error {
 		}
 	}
 	return nil
+}
+
+// fallbackMount is one mount the unshare fallback creates before
+// caller-supplied binds. Mode is "ro", "rw", or "tmpfs".
+type fallbackMount struct {
+	Src  string
+	Dst  string
+	Mode string
+}
+
+// unshareBaseBinds is the read-only system trees enterJail mounts.
+// /lib64 is included only when that directory exists.
+func unshareBaseBinds() []string {
+	binds := []string{"/bin", "/lib", "/usr"}
+	if st, err := os.Stat("/lib64"); err == nil && st.IsDir() {
+		binds = append(binds, "/lib64")
+	}
+	return binds
+}
+
+// unshareNamespaceArgs is the namespace set passed to unshare.
+// There is no pid namespace.
+func unshareNamespaceArgs() []string {
+	return []string{"--user", "--mount", "--net", "--map-root-user", "--propagation", "private"}
+}
+
+// unshareFallbackMounts is the mount plan enterJail applies before extra
+// binds. There is no /proc mount. /dev is only /dev/null. The workspace
+// is bind-mounted read-write at /work. /etc/ld.so.cache is copied as a
+// file and is not a mount.
+func unshareFallbackMounts() []fallbackMount {
+	var mounts []fallbackMount
+	for _, src := range unshareBaseBinds() {
+		mounts = append(mounts, fallbackMount{Src: src, Dst: src, Mode: "ro"})
+	}
+	mounts = append(mounts,
+		fallbackMount{Dst: "/work", Mode: "rw"},
+		fallbackMount{Src: "/dev/null", Dst: "/dev/null", Mode: "rw"},
+		fallbackMount{Src: "tmpfs", Dst: "/tmp", Mode: "tmpfs"},
+	)
+	return mounts
 }
 
 func bindReadOnly(src, dst string) error {

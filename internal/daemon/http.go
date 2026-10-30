@@ -44,6 +44,11 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/permbroker/pending", a.handleBrokerPending)
 	mux.HandleFunc("POST /api/permbroker/pending/deny-all", a.handleBrokerDenyAll)
 	mux.HandleFunc("POST /api/permbroker/pending/{id}", a.handleBrokerDecide)
+	mux.HandleFunc("POST /api/permbroker/hook/repin", a.handleBrokerRepin)
+	mux.HandleFunc("GET /api/permbroker/rules", a.handleBrokerRules)
+	mux.HandleFunc("DELETE /api/permbroker/rules/{id}", a.handleBrokerRevokeRule)
+	mux.HandleFunc("POST /api/permbroker/rules/{id}/confirm", a.handleBrokerConfirmRule)
+	mux.HandleFunc("POST /api/permbroker/bots/{id}/git-baseline", a.handleBrokerGitBaseline)
 	mux.HandleFunc("GET /api/bots/{id}/memory", a.handleListMemory)
 	mux.HandleFunc("POST /api/bots/{id}/memory", a.handlePutMemory)
 	mux.HandleFunc("DELETE /api/bots/{id}/memory/{key}", a.handleDeleteMemory)
@@ -71,9 +76,23 @@ func (a *App) withAuth(next http.Handler) http.Handler {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 			return
 		}
-		// A live lgb token or MCP permission token must not decide a card,
-		// including when the admin token is unset. Other routes stay 401.
-		if permissionDecisionPath(r) || pendingPermissionsPath(r) || durablePermissionPath(r) || brokerAdminPath(r) {
+		// Broker admin routes fail closed. With no admin token they are
+		// refused. A live run token cannot pass them. Other routes stay
+		// open when no token is configured.
+		if brokerAdminPath(r) {
+			if !a.tokensConfigured() {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
+				return
+			}
+			if tok, ok := bearerToken(r); ok && a.liveRunCredential(tok) {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "run token cannot decide permissions"})
+				return
+			}
+			if !a.credentialAccepted(r) {
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+				return
+			}
+		} else if permissionDecisionPath(r) || pendingPermissionsPath(r) || durablePermissionPath(r) {
 			if tok, ok := bearerToken(r); ok && a.liveRunCredential(tok) {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": "run token cannot decide permissions"})
 				return

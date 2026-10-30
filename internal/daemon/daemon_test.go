@@ -352,11 +352,15 @@ func TestWorkspaceJail(t *testing.T) {
 	_, b := do(t, "POST", srv.URL+"/api/bots", map[string]string{"name": "IO", "instructions": "files"}, "")
 	var bot store.Bot
 	decodeJSON(t, b, &bot)
-	os.Symlink("/tmp", filepath.Join(app.ws, "tmplink"))
+	root := app.botWorkspace(bot.ID)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.Symlink("/tmp", filepath.Join(root, "tmplink"))
 	do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]string{"content": "write"}, "")
 	waitIdle(t, srv.URL, bot.ID, "")
 
-	ok, err := os.ReadFile(filepath.Join(app.ws, "notes", "ok.txt"))
+	ok, err := os.ReadFile(filepath.Join(root, "notes", "ok.txt"))
 	if err != nil || string(ok) != "hello" {
 		t.Fatalf("workspace write: %v %q", err, ok)
 	}

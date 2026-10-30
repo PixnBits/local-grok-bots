@@ -49,7 +49,7 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	ws := ""
 	if a != nil {
 		repos = turnPol.EffectiveGitHubRepos(bot.GitHubAllow)
-		ws = a.ws
+		ws = a.botWorkspace(bot.ID)
 	}
 	owner, repo, reason := pushTarget(parsed, repos)
 	claimedFrom := ""

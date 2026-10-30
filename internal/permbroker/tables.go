@@ -570,6 +570,15 @@ func protectedPath(tok string) bool {
 	if strings.HasSuffix(t, ".git/config") {
 		return true
 	}
+	if strings.Contains(t, ".git/info/") || strings.HasSuffix(t, ".git/info") {
+		return true
+	}
+	if pathBase(t) == ".gitmodules" || strings.HasSuffix(t, "/.gitmodules") {
+		return true
+	}
+	if strings.Contains(t, ".config/git/") || strings.HasSuffix(t, ".config/git") {
+		return true
+	}
 	if strings.Contains(t, ".config/gh/") || strings.HasSuffix(t, ".config/gh") {
 		return true
 	}

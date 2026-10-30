@@ -10,12 +10,16 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 )
 
-func (a *App) toolReadFile(args map[string]any) (string, error) {
-	rel, err := workspaceRel(a.ws, strArg(args, "path"))
+func (a *App) toolReadFile(botID string, args map[string]any) (string, error) {
+	root, err := a.shellWorkspace(botID)
 	if err != nil {
 		return "", err
 	}
-	b, err := clisession.ReadRegularInDir(a.ws, rel)
+	rel, err := workspaceRel(root, strArg(args, "path"))
+	if err != nil {
+		return "", err
+	}
+	b, err := clisession.ReadRegularInDir(root, rel)
 	if err != nil {
 		return "", fileErr(err)
 	}
@@ -28,11 +32,15 @@ func (a *App) toolReadFile(args map[string]any) (string, error) {
 }
 
 func (a *App) toolWriteFile(botID string, args map[string]any) (string, error) {
-	rel, err := workspaceRel(a.ws, strArg(args, "path"))
+	root, err := a.shellWorkspace(botID)
 	if err != nil {
 		return "", err
 	}
-	if err := sandbox.CheckWrite(a.ws, filepath.Join(a.ws, rel)); err != nil {
+	rel, err := workspaceRel(root, strArg(args, "path"))
+	if err != nil {
+		return "", err
+	}
+	if err := sandbox.CheckWrite(root, filepath.Join(root, rel)); err != nil {
 		a.log(botID, "sandbox_block", map[string]any{"path": rel, "detail": err.Error()})
 		return "", err
 	}
@@ -40,21 +48,25 @@ func (a *App) toolWriteFile(botID string, args map[string]any) (string, error) {
 	if len(content) > 1<<20 {
 		return "", errors.New("content too large")
 	}
-	if err := clisession.WriteRegularInDir(a.ws, rel, []byte(content), 0o644); err != nil {
+	if err := clisession.WriteRegularInDir(root, rel, []byte(content), 0o644); err != nil {
 		return "", fileErr(err)
 	}
-	if err := ownWorkspaceParents(a.ws, filepath.Join(a.ws, rel)); err != nil {
+	if err := ownWorkspaceParents(root, filepath.Join(root, rel)); err != nil {
 		return "", err
 	}
 	return `{"ok":true}`, nil
 }
 
 func (a *App) toolEditFile(botID string, args map[string]any) (string, error) {
-	rel, err := workspaceRel(a.ws, strArg(args, "path"))
+	root, err := a.shellWorkspace(botID)
 	if err != nil {
 		return "", err
 	}
-	if err := sandbox.CheckWrite(a.ws, filepath.Join(a.ws, rel)); err != nil {
+	rel, err := workspaceRel(root, strArg(args, "path"))
+	if err != nil {
+		return "", err
+	}
+	if err := sandbox.CheckWrite(root, filepath.Join(root, rel)); err != nil {
 		a.log(botID, "sandbox_block", map[string]any{"path": rel, "detail": err.Error()})
 		return "", err
 	}
@@ -70,7 +82,7 @@ func (a *App) toolEditFile(botID string, args map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	b, err := clisession.ReadRegularInDir(a.ws, rel)
+	b, err := clisession.ReadRegularInDir(root, rel)
 	if err != nil {
 		return "", fileErr(err)
 	}
@@ -85,22 +97,26 @@ func (a *App) toolEditFile(botID string, args map[string]any) (string, error) {
 	if len(next) > 1<<20 {
 		return "", errors.New("content too large")
 	}
-	if err := clisession.WriteRegularInDir(a.ws, rel, []byte(next), 0o644); err != nil {
+	if err := clisession.WriteRegularInDir(root, rel, []byte(next), 0o644); err != nil {
 		return "", fileErr(err)
 	}
 	return fmt.Sprintf(`{"ok":true,"replacements":%d}`, n), nil
 }
 
 func (a *App) toolDeleteFile(botID string, args map[string]any) (string, error) {
-	rel, err := workspaceRel(a.ws, strArg(args, "path"))
+	root, err := a.shellWorkspace(botID)
 	if err != nil {
 		return "", err
 	}
-	if err := sandbox.CheckWrite(a.ws, filepath.Join(a.ws, rel)); err != nil {
+	rel, err := workspaceRel(root, strArg(args, "path"))
+	if err != nil {
+		return "", err
+	}
+	if err := sandbox.CheckWrite(root, filepath.Join(root, rel)); err != nil {
 		a.log(botID, "sandbox_block", map[string]any{"path": rel, "detail": err.Error()})
 		return "", err
 	}
-	if err := clisession.RemoveRegularInDir(a.ws, rel); err != nil {
+	if err := clisession.RemoveRegularInDir(root, rel); err != nil {
 		return "", fileErr(err)
 	}
 	return `{"ok":true}`, nil

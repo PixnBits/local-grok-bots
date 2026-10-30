@@ -296,8 +296,14 @@ func TestGolden_AdminPendingIsAdminOnly(t *testing.T) {
 	app := newApp(t, "", nil)
 	srv := serve(t, app)
 	base := srv.URL
+	const token = "lgbr_admintesttokenvalue"
+	app.cfg.AuthToken = token
 	first := askPending(t, app, "echo hi")
 	res, body := do(t, "GET", base+"/api/permbroker/pending", nil, "")
+	if res.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("no token %d %s", res.StatusCode, body)
+	}
+	res, body = do(t, "GET", base+"/api/permbroker/pending", nil, token)
 	if res.StatusCode != 200 || !strings.Contains(string(body), first) {
 		t.Fatalf("list %d %s", res.StatusCode, body)
 	}
@@ -319,6 +325,7 @@ func TestGolden_AdminPendingIsAdminOnly(t *testing.T) {
 	}
 	req.Host = req.URL.Host
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Sec-Fetch-Site", "cross-site")
 	resHTTP, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -328,7 +335,7 @@ func TestGolden_AdminPendingIsAdminOnly(t *testing.T) {
 	if resHTTP.StatusCode != 403 {
 		t.Fatalf("cross-site %d", resHTTP.StatusCode)
 	}
-	res, body = do(t, "POST", base+"/api/permbroker/pending/"+first, map[string]string{"decision": "approve", "scope": "once"}, "")
+	res, body = do(t, "POST", base+"/api/permbroker/pending/"+first, map[string]string{"decision": "approve", "scope": "once"}, token)
 	if res.StatusCode != 200 {
 		t.Fatalf("approve %d %s", res.StatusCode, body)
 	}
@@ -336,29 +343,29 @@ func TestGolden_AdminPendingIsAdminOnly(t *testing.T) {
 		t.Fatalf("retry %+v", d)
 	}
 	crit := askPending(t, app, "gh auth token")
-	res, body = do(t, "POST", base+"/api/permbroker/pending/"+crit, map[string]string{"decision": "approve", "scope": "bot"}, "")
+	res, body = do(t, "POST", base+"/api/permbroker/pending/"+crit, map[string]string{"decision": "approve", "scope": "bot"}, token)
 	if res.StatusCode != 400 {
 		t.Fatalf("critical bot rule %d %s", res.StatusCode, body)
 	}
 	app.broker.CancelSession("b1", "s1")
-	res, body = do(t, "POST", base+"/api/permbroker/pending/"+crit, map[string]string{"decision": "approve", "scope": "once"}, "")
+	res, body = do(t, "POST", base+"/api/permbroker/pending/"+crit, map[string]string{"decision": "approve", "scope": "once"}, token)
 	if res.StatusCode != 409 {
 		t.Fatalf("stale %d %s", res.StatusCode, body)
 	}
 	keep := askPending(t, app, "echo ok")
 	other := askPending(t, app, "echo no")
-	res, body = do(t, "POST", base+"/api/permbroker/pending/deny-all", map[string]any{"ids": []string{keep, "missing"}}, "")
+	res, body = do(t, "POST", base+"/api/permbroker/pending/deny-all", map[string]any{"ids": []string{keep, "missing"}}, token)
 	if res.StatusCode != 404 {
 		t.Fatalf("partial deny-all %d %s", res.StatusCode, body)
 	}
 	if len(app.broker.ListPending()) != 2 {
 		t.Fatalf("partial deny changed state %+v", app.broker.ListPending())
 	}
-	res, body = do(t, "POST", base+"/api/permbroker/pending/deny-all", map[string]any{"ids": []string{}}, "")
+	res, body = do(t, "POST", base+"/api/permbroker/pending/deny-all", map[string]any{"ids": []string{}}, token)
 	if res.StatusCode != 200 || len(app.broker.ListPending()) != 2 {
 		t.Fatalf("empty deny-all %d %s pending %d", res.StatusCode, body, len(app.broker.ListPending()))
 	}
-	res, body = do(t, "POST", base+"/api/permbroker/pending/deny-all", map[string]any{}, "")
+	res, body = do(t, "POST", base+"/api/permbroker/pending/deny-all", map[string]any{}, token)
 	if res.StatusCode != 200 || len(app.broker.ListPending()) != 0 {
 		t.Fatalf("deny-all %d %s pending %+v", res.StatusCode, body, app.broker.ListPending())
 	}
@@ -455,6 +462,8 @@ func TestStaleApprovalWritesNoAllow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			app := newApp(t, "", nil)
 			srv := serve(t, app)
+			const token = "lgbr_admintesttokenvalue"
+			app.cfg.AuthToken = token
 			id := askPending(t, app, "echo hi")
 			if tc.end == "session" {
 				app.broker.CancelSession("b1", "s1")
@@ -464,7 +473,7 @@ func TestStaleApprovalWritesNoAllow(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			res, body := do(t, "POST", srv.URL+"/api/permbroker/pending/"+id, map[string]string{"decision": "approve", "scope": "once"}, "")
+			res, body := do(t, "POST", srv.URL+"/api/permbroker/pending/"+id, map[string]string{"decision": "approve", "scope": "once"}, token)
 			if res.StatusCode != http.StatusConflict {
 				t.Fatalf("status %d %s", res.StatusCode, body)
 			}

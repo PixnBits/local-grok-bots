@@ -14,8 +14,9 @@ import (
 )
 
 // evaluateTimeout is how long one socket evaluate may run.
-// The deadline is a deny, including when the engine would have allowed.
-// A late evaluation must not spend a one-time approval or a task grant.
+// A result that is ready is the reply, including when the deadline has
+// also fired. If the deadline wins before that result is stored, a
+// once-token taken for the call is put back and the reply is a deny.
 const evaluateTimeout = 2 * time.Second
 
 // Listener is one bot's evaluate socket. The directory is 0700 and the
@@ -102,6 +103,11 @@ func (l *Listener) serve(c net.Conn) {
 		l.eng.auditPeer(l.bot, uid, pid)
 		return
 	}
+	if !l.eng.peerStrict(pid, l.bot) {
+		l.reply(c, wireReply{Verdict: VerdictDeny, Reason: "permission broker unavailable"})
+		l.eng.auditUnavailable(l.bot, uid, pid)
+		return
+	}
 	body, err := io.ReadAll(io.LimitReader(c, MaxRequest+1))
 	if err != nil || len(body) == 0 || len(body) > MaxRequest {
 		l.reply(c, wireReply{Verdict: VerdictDeny, Reason: "denied"})
@@ -144,10 +150,6 @@ func (l *Listener) serve(c net.Conn) {
 		l.reply(c, wireReply{Verdict: VerdictDeny, Reason: "denied"})
 		return
 	}
-	if ctx.Err() != nil {
-		l.reply(c, wireReply{Verdict: VerdictDeny, Reason: "denied"})
-		return
-	}
 	reason := d.Reason
 	if reason == "" {
 		reason = "denied"
@@ -178,6 +180,17 @@ func (e *Engine) auditPeer(bot string, uid, pid int) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	e.auditDecision(Request{BotID: bot, PeerUID: uid, PeerPID: pid}, inspected{ClassNote: "none"}, VerdictDeny, "denied", "", "fail-closed", "", "")
+}
+
+func (e *Engine) auditUnavailable(bot string, uid, pid int) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.auditDecision(Request{BotID: bot, PeerUID: uid, PeerPID: pid}, inspected{
+		Raw: "permission broker unavailable", ClassNote: "none",
+	}, VerdictDeny, "permission broker unavailable", "", "fail-closed", "", "")
 }
 
 // wireRequest matches cmd/lgb-permhook. Keep the JSON keys aligned.

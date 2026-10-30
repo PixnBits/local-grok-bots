@@ -24,17 +24,49 @@ stays on the locked-down settings (`disableAllHooks`). When `broker` is
 `hook` and the hook binary is not safe to run, startup prints a warning
 with the other policy warnings.
 
-While `broker` is `hook`, policy load records the hook binary: a content
-hash, device, inode, owner, mode, size, and mtime. Every armed launch
+While `broker` is `hook`, the first policy load that finds a usable hook
+records it: a content hash, device, inode, owner, mode, size, and mtime.
+A later publish does not record a new pin. An unchanged path whose file
+still matches the pin keeps it. A different `hook_path`, or a file that
+no longer matches, keeps the old pin, audits `hook changed; re-pin required`,
+and refuses later launches until an admin repin. Every armed launch
 compares the file again. A difference refuses the turn and appends an
 audit row. If the hook was missing or not usable when policy loaded, the
 turn is refused even when the file is usable later. The refusal says the
-hook was not pinned when the policy loaded. Publishing policy again
-records the file as it is then. The
+hook was not pinned when the policy loaded. The
 binary must be owned by the daemon user or root. Each directory from the
 file up to `/` must not be group or world writable, including a sticky
 directory. A symlink component is resolved and those directories are
 checked the same way. The path must not sit inside a jail-writable root.
+
+## Install the hook
+
+Build both binaries from this repo. The script takes the repo and the
+output directory from the environment or from its arguments. It does not
+fetch, and it does not install.
+
+```sh
+LGB_REPO=. LGB_OUT_DIR=/var/tmp/lgb-build-placeholder bash deploy/build.sh
+```
+
+Install `lgb-permhook` as `root:root` mode `0755` at
+`/usr/local/bin/lgb-permhook`. The directory and every parent up to `/`
+must not be group or world writable. A mode `0775` directory fails that
+check even when the file itself is `0755` and owned by root. The error
+is `hook parent directory is group or world writable`. Set
+`[cli.permission] hook_path` to that absolute path. An empty `hook_path`
+uses `lgb-permhook` in the same directory as the daemon binary
+(`os.Executable`). After the hook file is replaced, an admin calls
+`POST /api/permbroker/hook/repin`. Publish does not record a new pin.
+
+Each armed launch runs a copy of the pinned hook. The copy is mode 0500
+in a mode 0700 directory under `DATA_DIR/permbroker/<bot-id>/launch/<run-id>/`.
+Its sha256 is checked against the pin immediately after the copy. That
+directory is on the critical set and the Claude deny list, with the
+original hook path. Every evaluate, and every tool call seen on the CLI
+stream, checks the pin and the copy again. A change denies that call,
+ends the run with `hook changed`, and refuses further launches until the
+admin repin.
 
 A policy value other than `off` or `hook` is a startup error. A risk row
 that lowers a shipped level, or names an unknown level, is a startup error.
@@ -60,23 +92,31 @@ lock hooks; that key applies only in managed settings. Installing
 
 The settings deny list also names the hook binary, that settings file and
 its directory, and `DATA_DIR/permbroker`. A tool call that touches one of
-those paths is critical: it always asks, and it is never a rule. A bare
-command word is not one of those paths. Containment uses an absolute
-path, or a relative path resolved from the request's working directory
-when that directory is absolute. Text that contains an absolute critical
-path, such as a flag value, still counts.
+those paths is critical: it always asks, and it is never a rule, a grant,
+or a once-token. The Claude deny list is a second layer. Before that
+check, each argv token and each redirect target is resolved: the working
+directory after a leading `cd`, a short option glued to its value,
+`--name=value`, and redirect targets. A relative path is joined to that
+directory. Symlinks are resolved on the longest prefix that exists. `~`
+and `$HOME` expand to the bot home and the user home. Other variables
+expand from the bot's managed environment. A token whose base name is the
+hook file, `permbroker`, or a settings file name is critical, and so is a
+glob that can match one of those names. Writes under `.git/info/`, `.gitmodules`, and
+`~/.config/git/` (the bot home and the user home) ask at high or above.
 
 The launch refuses bypass flags, `acceptEdits`, `dontAsk`,
-`bypassPermissions`, `--allowedTools`, `--add-dir`, and `--plugin-dir`.
-It requires this settings file and exactly one empty `--setting-sources`.
-An MCP config is refused unless it is the daemon's own file.
-`--disallowedTools` may stay. Headless asks, including stream-json
-control, are denied and do not open a card.
+`bypassPermissions`, `--dangerously-skip-permissions`, and the
+allowed-tools spellings `--allowedTools`, `--allowed-tools`, and
+`--allowed_tools`, including the `=` forms. It also refuses `--add-dir`
+and `--plugin-dir`. It requires this settings file and exactly one empty
+`--setting-sources`. An MCP config is refused unless it is the daemon's
+own file. `--disallowedTools` may stay. Headless asks, including
+stream-json control, are denied and do not open a card.
 
 The broker arms only when the Claude binary the launch will run prints at
-least 2.1.295. That binary is resolved the same way the launch resolves
-it, using the launch environment's PATH, and the check runs that file
-with `--version`. The first stdout line must be `N.N.N (Claude Code)`,
+least 2.1.295. That check resolves the name with the launch environment's
+PATH and runs that file with `--version`. The launch executes that same
+absolute path. It does not look the name up again. The first stdout line must be `N.N.N (Claude Code)`,
 with trailing whitespace allowed. Stderr is ignored. A non-zero exit, any
 other text, or an older release refuses the turn before the CLI starts.
 The result is cached for that binary's path, size, and mtime. A hook
@@ -88,14 +128,22 @@ permission flow.
 Claude is not inside the daemon's bubblewrap jail, so the hook command uses
 the host socket path. The hook talks to a per-bot Unix socket under
 `DATA_DIR/permbroker/<bot-id>/sock`. The directory is mode 0700 and the
-socket is mode 0600. The peer's uid must be the daemon's uid. The socket
+socket is mode 0600. The peer's uid must be the daemon's uid. On Linux
+the peer must also be the pinned hook binary: the device and inode of
+`/proc/<pid>/exe` match the pinned file or a daemon-owned copy, and the
+process is the CLI the daemon launched for that bot or a descendant of
+it (parent walk, at most 64 steps). A
+platform that cannot name the peer still denies. Any other peer is
+denied with `permission broker unavailable`, audited, and does not use a
+token or open a pending item. The socket
 path has to fit in the platform's Unix address (108 bytes on Linux,
 including the trailing NUL). A path that does not fit refuses the turn.
 
 The hook is stdlib only. It waits at most 2.5 seconds, under the 30 second
-settings timeout. The socket evaluate itself stops at 2 seconds and the
-deadline is a deny. A deadline deny does not spend a one-time approval or
-a task grant. Exit 0 with a verdict of exactly `allow` is the only
+settings timeout. The socket evaluate itself stops at 2 seconds. A result
+that is already ready is the reply. If the deadline wins before that
+result is stored, a once-token taken for the call is put back and the
+reply is a deny. Exit 0 with a verdict of exactly `allow` is the only
 allow. Every doubt exits 2 and prints a PreToolUse deny. Exit 2 blocks the
 tool even if the JSON says allow. The hook never waits for a person.
 
@@ -104,12 +152,22 @@ On an ask, the daemon records a pending item and the hook denies with
 human approves that item, then the same command may be retried once. A
 second retry, a different argv, a different cwd, or a different session
 does not use that approval. The once token is also bound to the tool
-name. Claude Bash and `run_shell` share one shell name. A token for a
+name, and it expires. The default lifetime is 15 minutes.
+`[cli.permission] approval_ttl` sets it. The accepted range is 1 minute
+to 24 hours inclusive. A value outside that range makes the policy fail
+to load. The failure is fail closed: the jail stays on and CLI backends
+are off. The value is not clamped into range. The cwd compared at use is the cleaned path, with symlinks
+resolved when the directory exists. A trailing slash, a `.` or `..`
+component, and a symlink to the same directory match. A different
+directory does not. Claude Bash and `run_shell` share one shell name. A token for a
 Read does not allow an Edit of the same bytes. A command that is critical
 at retry time is not allowed by a token issued earlier; it asks again.
+The same is true when the command's git config is a hard ask.
 
-A deny does not stop the run. The model keeps the reason. The run stays
-`done`. "Stopped after denial" remains the Grok card path.
+A deny does not stop the run, on any backend. The model keeps the reason
+and the run stays `done`. Only an explicit stop stores `cancelled`.
+A row stored earlier may still display "Stopped after denial." Nothing
+new writes that status.
 
 ## Decisions
 
@@ -136,17 +194,58 @@ kinds. They do not allow a call. Policy may raise a level or repeat it.
 A task grant may cover a compound only when every part is granted and
 each part still passes critical and deny at request time. The grant is
 bound to the bot, the session, and the user-message id. It ends on the
-next user message for that bot, when the session ends, or after 4 hours.
+next user message for that bot, when the session ends, or at the shorter
+of 4 hours and `approval_ttl`. Grant cwd stays the raw string.
 
 Daemon-run shells use a pinned PATH of root-owned directories and an
 environment allowlist. A rule names a command only when argv0 resolves
 to an allowlisted binary on that PATH. An assignment prefix is never
-eligible. The jail git wrapper forces a safe config for `run_shell`,
+eligible. The jail git wrapper sets a narrow config for `run_shell`,
 including an empty fsmonitor, no external diff, and a protocol list of
 https and ssh. http is added only while the loopback credential proxy
-is on. Claude is not rewritten. The daemon records `.git/config` and
-`.gitattributes` at startup; a later change makes a Claude git command
-ask until the daemon restarts.
+is on. That wrapper is not treated as proof that every git invocation
+inside the jail has those keys forced off. Claude is not rewritten.
+Inside-workspace checks and the git baseline use that bot's directory
+(`<workspace>/bots/<id>`), not the shared root. The shell jail binds
+that same directory at `/work`. Another bot's tree is outside. The
+baseline is `DATA_DIR/permbroker/git-baseline.json` (mode `0600`,
+directory mode `0700`). Startup loads it. A bot with no stored baseline
+is recorded once, at boot or on the first turn or shell that has a
+workspace. A later turn does not record it again. Drift from that
+baseline makes a git command ask, for Claude and for `run_shell`, even
+when an allow rule matches. Only
+`POST /api/permbroker/bots/{id}/git-baseline` records a new baseline.
+An unreadable baseline file makes those git commands ask until an admin
+records one for that bot.
+
+A Claude git command and a `run_shell` git command also ask, and cannot
+be covered by a once-token, a task grant, or an allow rule, when the
+scan finds any of the following. Config keys, in any subsection, are
+`core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, `core.pager`,
+`core.editor`, `core.attributesFile`, `core.askPass`, `core.gitProxy`,
+`diff.external`, `diff.<name>.textconv`, `diff.<name>.command`,
+`merge.<name>.driver`, `alias.*`, `credential.helper`, `filter.*`,
+`gpg.program`, `gpg.<format>.program`, `sequence.editor`,
+`uploadpack.packObjectsHook`, `protocol.allow` set to `always`, and
+`protocol.ext.allow` set to anything other than `never`. A
+`url.<base>.insteadOf` or `pushInsteadOf` whose value starts with
+`ext::` asks as well. `include` and `includeIf` still ask. Attribute
+files ask when `diff`, `merge`, or `filter` is set to a driver name. A
+bare `diff`, `-diff`, or `binary` does not. The scan reads the repo
+config and include targets that resolve, `<workspace>/.gitattributes`,
+`<git-dir>/info/attributes`, each home's `.gitconfig`,
+`~/.config/git/config`, and `~/.config/git/attributes`, the file named
+by `core.attributesFile`, and `GIT_*` variables in the environment
+stored for that bot. A hook in `<git-dir>/hooks` asks when it is a
+symlink or an executable file and its name does not end in `.sample`.
+`core.hooksPath` is not followed. The baseline covers the repo config,
+a digest of that hooks directory, the attribute files above, and each
+home's git config and attributes. The reason is recorded.
+
+If the managed isolation environment has no PATH, the daemon fills one
+and logs a single startup warning naming the PATH used to resolve the
+CLI: the process PATH, or `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`
+when the process PATH is empty. A non-empty managed PATH is kept.
 
 Pending items do not expire. They are cancelled when the session ends,
 when the bot is deleted or the daemon restarts, or when the ruleset
@@ -154,22 +253,96 @@ changes. Approving a cancelled item is refused (HTTP 409). Identical asks
 collapse, including a repeat after a human deny.
 
 `git push` as a literal simple command still uses the existing push
-approval card. The broker does not rewrite git arguments. The jail
-ignores the user's git config. A compound command that contains a push
-goes through the broker instead. The audit row includes the shipped
+approval card. The broker does not rewrite git arguments. Risky git
+config still asks, for Claude and for `run_shell`. A compound command
+that contains a push goes through the broker instead. The audit row includes the shipped
 table version.
 
 `run_shell` calls the same engine in-process. A deny is the tool error.
 The model can continue. The shell is not started.
 
 The classifier stub can only raise a level. It cannot allow a call, and
-it makes no model request.
+it makes no model request. `ClassifierMayAllow` is false unless that bot
+has a workspace and a git baseline. A later classifier contribution to
+an allow has to pass that guard.
+
+## Risk levels
+
+The shipped table is `builtin-2026-10-29.2`. The five levels are
+`critical`, `high`, `medium`, `unclassified`, and `low`. Policy may
+raise a level or repeat it. A lower level, or an unknown name, is a
+startup error. A command the table does not list is `unclassified`.
+
+| Level | What the table ships | Saved rule |
+| --- | --- | --- |
+| critical | `git config`, `git remote`, `gh auth`, `gh secret`, `gh ssh-key`, and a protected path | once only |
+| high | `git push`, `gh pr merge`, and `gh` `api`, `alias`, `extension`, `config`, `variable`, `gpg-key`, `browse`. Non-shell `WebFetch`, `WebSearch`, `Task`, and `mcp__*` | bot, not global. `gh` rows above that are hard are once only |
+| medium | git writes (`add`, `commit`, `checkout`, and the other write subcommands) and gh writes (`pr create`, `issue comment`, and the other write subcommands). Non-shell `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | bot or global |
+| low | git reads (`status`, `log`, `diff`, `show`, and the other read subcommands), gh reads (`pr view`, `issue list`, and the other read subcommands), and `head`, `tail`, `wc`, `sort`, `uniq`, `cut`, `grep`, `jq` when the flags are in the table. Non-shell `Read`, `Glob`, `Grep` | bot or global |
+| unclassified | any other command, including `ls`, `pwd`, and `echo` | once only. Not a task grant |
+
+`ls`, `pwd`, and `echo` are unclassified. They are a hard ask, once
+only. They are not task-grantable and not eligible for a bot or global
+allow. The profile auto-allow list in `docs/cli-permissions.md` is a
+different classifier.
+
+A stricter row is:
+
+```toml
+[[cli.permission.risk]]
+tool = "run_shell"   # shell, bash, and run_shell are the same name; empty means shell
+argv = ["git", "status"]
+level = "high"
+```
+
+## Rules file
+
+Saved rules are `DATA_DIR/permbroker/rules.json` (mode `0600`, directory
+mode `0700`). A row has an id, effect, scope, bot, argv or pattern,
+kind (`exact`, `pattern`, or `legacy`; empty means exact), source,
+whether an imported allow is still inactive, and created, last used,
+and use count. `GET /api/permbroker/rules` lists them.
+`DELETE /api/permbroker/rules/{id}` revokes one, including a
+migrated legacy row. Revoke writes an audit row of ids and hashes,
+bumps the ruleset, and the next evaluation asks again. The per-bot hook
+socket cannot list or revoke.
+
+## Rule migration
+
+On startup the daemon copies each active profile permission rule into
+the broker rules file. An exact command becomes an exact broker rule
+with the same effect. A glob becomes a pattern only when every argv
+that pattern matches also matched the original glob, and only when the
+pattern syntax accepts it: the same number of tokens, `*` is one whole
+token and is not a flag or a path separator, the first and last tokens
+are literal, `*` is not inside a word, and the first token is not a
+wrapper or interpreter. Anything else is a read-only legacy row. The
+legacy allow keeps the original glob and does not grow to a longer
+argv. An allow, whether pattern or legacy, never covers a critical
+command, a compound, or a wrapper. A legacy or pattern allow copied
+from a profile rule is stored inactive (`active` false,
+`needs_confirm` true) and does not allow. A matching call asks until
+an admin confirms that row with
+`POST /api/permbroker/rules/{id}/confirm`. An exact command copied from
+a profile rule, and an exact rule the broker saved, stays active.
+Confirm writes an audit row with the id and a hash and bumps the
+ruleset. A legacy deny or ask still matches, and its `*` may cross a
+slash. Pattern syntax is unchanged: `*` is one non-flag token and does
+not cross a slash. A task grant may cover a compound only when every
+part is granted and none of those parts is a hard ask. A saved rule
+does not. Each new row records source `migrated` and the original
+text, and one audit row is written. The ruleset bumps once per batch.
+The profile source is not deleted. A second start does not add
+duplicates.
 
 ## Admin API
 
-These routes use the existing admin token, the host allowlist, and the
-same cross-site check as other mutating admin routes (`Sec-Fetch-Site`
-and `Origin`). A live run token is 403 even when the admin token is unset.
+These routes require an admin token. When none is configured the
+response is 403 `{"error":"admin token required"}`. When one is
+configured, a missing credential is 401 and a live run token is 403.
+Other routes stay open when no admin token is configured. The routes
+also use the host allowlist and the same cross-site check as other
+mutating admin routes (`Sec-Fetch-Site` and `Origin`).
 
 - `GET /api/permbroker/pending` lists open items. Command text is redacted.
 - `POST /api/permbroker/pending/{id}` with `{"decision":"approve","scope":"once"}`
@@ -177,9 +350,69 @@ and `Origin`). A live run token is 403 even when the admin token is unset.
 - `POST /api/permbroker/pending/deny-all` denies every current item.
   `{"ids":["..."]}` denies that set, or nothing if any id is missing.
   `{"ids":[]}` denies none.
+- `POST /api/permbroker/hook/repin` records the current hook file as the
+  pin. Policy publish does not do this. The call is audited. A hook that
+  is missing or not safe to run is refused and the old pin stays.
+- `POST /api/permbroker/rules/{id}/confirm` activates one imported allow
+  that is waiting for review. The call is audited with the id and a
+  hash, and it bumps the ruleset. A row that is already active is refused.
+- `POST /api/permbroker/bots/{id}/git-baseline` records that bot's git
+  baseline again. It does not bump the ruleset. The call is audited
+  with the bot id.
+- `GET /api/permbroker/rules` lists saved rules.
+- `DELETE /api/permbroker/rules/{id}` revokes one saved rule, including a
+  read-only legacy row. The call is audited with the action and the id.
 
-The socket accepts only `evaluate`. Approve, deny, and create-rule on the
-socket are denies and do not change state.
+The socket accepts only `evaluate`. Approve, deny, create-rule, list, and
+revoke on the socket are denies and do not change state.
+
+`GET /api/permbroker/pending` returns the open items. Command text is
+redacted. One item looks like:
+
+```json
+{
+  "pending": [
+    {
+      "id": "p_example",
+      "bot_id": "bot-id",
+      "session_id": "sess",
+      "run_id": "run",
+      "task_id": "task",
+      "tool": "shell",
+      "argv": ["git", "status"],
+      "command": "git status",
+      "cwd": "/work",
+      "level": "low",
+      "input_hash": "0123456789abcdef",
+      "created_at": "2026-10-30T00:00:00Z",
+      "ruleset": 1
+    }
+  ]
+}
+```
+
+On a host that is already on the allowlist, with the admin token in
+`LGB_ADMIN_TOKEN`:
+
+```sh
+curl -sS -H "Authorization: Bearer $LGB_ADMIN_TOKEN" \
+  "https://myhost.tailnet-example.ts.net/api/permbroker/pending"
+curl -sS -X POST -H "Authorization: Bearer $LGB_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"decision":"approve","scope":"once"}' \
+  "https://myhost.tailnet-example.ts.net/api/permbroker/pending/p_example"
+curl -sS -H "Authorization: Bearer $LGB_ADMIN_TOKEN" \
+  "https://myhost.tailnet-example.ts.net/api/permbroker/rules"
+curl -sS -X DELETE -H "Authorization: Bearer $LGB_ADMIN_TOKEN" \
+  "https://myhost.tailnet-example.ts.net/api/permbroker/rules/r_example"
+curl -sS -X POST -H "Authorization: Bearer $LGB_ADMIN_TOKEN" \
+  "https://myhost.tailnet-example.ts.net/api/permbroker/rules/r_example/confirm"
+curl -sS -X POST -H "Authorization: Bearer $LGB_ADMIN_TOKEN" \
+  "https://myhost.tailnet-example.ts.net/api/permbroker/bots/bot-id/git-baseline"
+```
+
+The broker flag is daemon-wide. `broker_bots` only limits which bots use
+it. An empty list means every bot.
 
 ## Audit
 
@@ -217,7 +450,14 @@ go test -v ./web/... | grep -i skip
 - a hook that was not pinned when policy loaded refuses the turn
 - with the daemon critical paths set, a benign command can be approved once, granted for the task, or saved as a bot rule
 - a command that touches a critical path stays critical
-- a deadline deny leaves a one-time approval unused
+- a deadline that wins before the result is stored leaves a one-time approval unused
+- a deadline after the token was taken either returns that result or puts the token back
+- risky git config is a hard ask for run_shell as well as Claude git
+- the shell jail binds the bot directory, and the Claude deny list names the hook, settings, permbroker, and the token file
+- only an admin repin records a changed hook
+- a hook that changes during a turn ends the run
+- the launch executes the Claude path the version check accepted
+- allowed-tools aliases are refused on a broker launch
 - garbage, empty, unknown, and oversized verdicts
 - ask, approve, identical retry once
 - second retry, and a different argv, cwd, or session, blocked
@@ -233,6 +473,22 @@ go test -v ./web/... | grep -i skip
 - one argv rule applies to Claude Bash and run_shell
 - a deny rule beats a task grant
 - a critical part inside a granted compound still asks
+- another bot's workspace is outside this bot
+- risky git config is a hard ask for Claude git
+- writes under `.git/info/`, `.gitmodules`, and `~/.config/git/` ask
+- a classifier allow does not allow, and the guard is false without per-bot context
+- resolved critical-path forms, including a relative `cd`, a symlink, and a glob
+- once-tokens and task grants expire at `approval_ttl`; pending items do not
+- a same-uid process that is not the hook under the launched CLI is denied
+- a once-token cwd matches the canonical directory
+- profile rules migrate once and do not allow a critical command
+- a pattern is token for token; a star is one argv token and is not a flag
+- migration stores a pattern only when it is a subset of the original glob
+- a legacy or pattern allow does not cover a wrapper, a critical command, or a compound
+- a task grant covers a compound only when every part is granted and none is a hard ask
+- a single deny and deny-all leave the run `done` on Ollama, Grok, and Claude
+- listing and revoking rules is admin-only and takes effect on the next evaluation
+- native file tools stay inside that bot's directory
 
 The fake Claude enters hook mode only when `--settings` contains a
 PreToolUse command. Launches that still set `disableAllHooks` keep the
