@@ -121,6 +121,9 @@ func (a *App) prepareBrokerHook(bot store.Bot, ws, home string) (string, error) 
 	if err := permbroker.CheckHookBinary(bin, []string{ws, home, a.ws}); err != nil {
 		return "", a.refuseBrokerHook(bot.ID, err)
 	}
+	if !a.hookPinned() {
+		return "", a.refuseBrokerHook(bot.ID, fmt.Errorf("hook was not pinned when the policy loaded"))
+	}
 	if _, err := a.brokerSockPath(bot.ID); err != nil {
 		return "", a.refuseBrokerHook(bot.ID, err)
 	}
@@ -175,6 +178,12 @@ func (a *App) hookChanged(bin string) error {
 		return nil
 	}
 	return pin.Diff(bin)
+}
+
+func (a *App) hookPinned() bool {
+	a.hookMu.Lock()
+	defer a.hookMu.Unlock()
+	return a.hookPin != nil
 }
 
 func (a *App) noteHookChange(botID string, err error) {
