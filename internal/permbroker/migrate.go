@@ -20,8 +20,9 @@ type LegacyRule struct {
 // matched the original glob. Anything else is kept as a legacy record.
 // A legacy or pattern allow never covers a critical command, a compound,
 // or a wrapper.
-// The call is idempotent, bumps the ruleset once, and does not remove the
-// caller's copy of the rules.
+// A legacy or pattern allow is stored inactive until an admin confirms
+// it. An exact command stays active. The call is idempotent, bumps the
+// ruleset once, and does not remove the caller's copy of the rules.
 func (e *Engine) MigrateLegacy(in []LegacyRule) error {
 	if e == nil || len(in) == 0 {
 		return nil
@@ -100,6 +101,11 @@ func legacyToRule(bot, effect, text string, now time.Time) Rule {
 	}
 	if kind == "exact" {
 		rule.Pattern = ""
+	}
+	if effect == EffectAllow && (kind == "legacy" || kind == "pattern") {
+		active := false
+		rule.Active = &active
+		rule.NeedsConfirm = true
 	}
 	return rule
 }
@@ -181,8 +187,31 @@ func storedKind(rule *Rule) string {
 	return kind
 }
 
+func allowActive(rule *Rule) bool {
+	if rule == nil || rule.NeedsConfirm {
+		return false
+	}
+	return rule.Active == nil || *rule.Active
+}
+
+// legacySlashMatch is the matcher for a legacy deny or ask. Its star may
+// cross a slash. A legacy allow keeps legacyMatch.
+func legacySlashMatch(pat, raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if pat == "" || raw == "" {
+		return false
+	}
+	pat = strings.ReplaceAll(pat, "/", "\x00")
+	raw = strings.ReplaceAll(raw, "/", "\x00")
+	ok, err := filepath.Match(pat, raw)
+	return err == nil && ok
+}
+
 func ruleHit(rule *Rule, in inspected, forDeny bool) bool {
 	if rule == nil || normTool(rule.Tool) != ToolShell {
+		return false
+	}
+	if rule.Effect == EffectAllow && !allowActive(rule) {
 		return false
 	}
 	switch storedKind(rule) {
@@ -214,11 +243,11 @@ func ruleHit(rule *Rule, in inspected, forDeny bool) bool {
 		if rule.Effect == EffectAllow {
 			return legacyAllowMatch(rule.Pattern, in.Raw)
 		}
-		if legacyMatch(rule.Pattern, in.Raw) {
+		if legacySlashMatch(rule.Pattern, in.Raw) {
 			return true
 		}
 		for _, p := range in.Parts {
-			if legacyMatch(rule.Pattern, p.Raw) {
+			if legacySlashMatch(rule.Pattern, p.Raw) {
 				return true
 			}
 		}

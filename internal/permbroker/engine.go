@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,11 +43,12 @@ const (
 )
 
 var (
-	ErrStale        = errors.New("pending item is cancelled or stale")
-	ErrNotFound     = errors.New("pending item not found")
-	ErrRuleNotFound = errors.New("rule not found")
-	ErrScope        = errors.New("scope is not allowed for this command")
-	ErrBadDecision  = errors.New("decision must be approve or deny")
+	ErrStale          = errors.New("pending item is cancelled or stale")
+	ErrNotFound       = errors.New("pending item not found")
+	ErrRuleNotFound   = errors.New("rule not found")
+	ErrScope          = errors.New("scope is not allowed for this command")
+	ErrBadDecision    = errors.New("decision must be approve or deny")
+	ErrNotConfirmable = errors.New("rule does not need confirm")
 )
 
 // Request is one tool call. The socket fills BotID, SessionID, RunID,
@@ -218,28 +220,30 @@ type Engine struct {
 	hookIDs   []hookID
 	launchPID map[string]int
 
-	snapSet    bool
-	snapWS     string
-	snapGit    []byte
-	snapGitOK  bool
-	snapAttr   []byte
-	snapAttrOK bool
+	// snapBlob is the git baseline used when a call has no per-bot workspace.
+	snapSet  bool
+	snapWS   string
+	snapBlob []byte
+
+	// savedBaseline is the persisted per-bot snapshot, keyed by bot id.
+	// baselineCorrupt means the file could not be read. Git commands ask
+	// until an admin records a baseline for that bot.
+	baselinePath    string
+	savedBaseline   map[string][]byte
+	baselineCorrupt bool
 }
 
 // botCtx is the workspace, homes, and git baseline for one bot.
 // The socket does not receive those on the wire. Another bot's
 // workspace is outside this one.
 type botCtx struct {
-	Workspace  string
-	Repos      []string
-	Home       string
-	UserHome   string
-	Env        []string
-	snapSet    bool
-	snapGit    []byte
-	snapGitOK  bool
-	snapAttr   []byte
-	snapAttrOK bool
+	Workspace string
+	Repos     []string
+	Home      string
+	UserHome  string
+	Env       []string
+	snapSet   bool
+	snapBlob  []byte
 }
 
 type hookID struct {
@@ -267,26 +271,31 @@ func Open(dir string, risks []RiskEntry, auditor Auditor) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
+	baselinePath := filepath.Join(dir, gitBaselineName)
+	saved, corrupt := loadGitBaseline(baselinePath)
 	e := &Engine{
-		dir:        dir,
-		rulesPath:  filepath.Join(dir, "rules.json"),
-		rules:      doc,
-		table:      table{extra: append([]RiskEntry(nil), risks...)},
-		audit:      aud,
-		auditor:    auditor,
-		classifier: NopClassifier{},
-		now:        time.Now,
-		byID:       map[string]*pendingItem{},
-		byKey:      map[string]string{},
-		denied:     map[string]struct{}{},
-		dead:       map[string]struct{}{},
-		active:     map[string]Turn{},
-		resolver:   resolvePinned,
-		bots:       map[string]botCtx{},
-		userTask:   map[string]string{},
-		launchPID:  map[string]int{},
-		stopCh:     make(chan struct{}),
-		flushCh:    make(chan struct{}, 1),
+		dir:             dir,
+		rulesPath:       filepath.Join(dir, "rules.json"),
+		baselinePath:    baselinePath,
+		savedBaseline:   saved,
+		baselineCorrupt: corrupt,
+		rules:           doc,
+		table:           table{extra: append([]RiskEntry(nil), risks...)},
+		audit:           aud,
+		auditor:         auditor,
+		classifier:      NopClassifier{},
+		now:             time.Now,
+		byID:            map[string]*pendingItem{},
+		byKey:           map[string]string{},
+		denied:          map[string]struct{}{},
+		dead:            map[string]struct{}{},
+		active:          map[string]Turn{},
+		resolver:        resolvePinned,
+		bots:            map[string]botCtx{},
+		userTask:        map[string]string{},
+		launchPID:       map[string]int{},
+		stopCh:          make(chan struct{}),
+		flushCh:         make(chan struct{}, 1),
 	}
 	e.flushWG.Add(1)
 	go e.flushLoop()
@@ -472,12 +481,12 @@ func (e *Engine) SetBotContext(bot, workspace string, repos []string) {
 		UserHome:  prev.UserHome,
 		Env:       append([]string(nil), prev.Env...),
 	}
-	if prev.Workspace == workspace {
-		next.snapSet = prev.snapSet
-		next.snapGit = prev.snapGit
-		next.snapGitOK = prev.snapGitOK
-		next.snapAttr = prev.snapAttr
-		next.snapAttrOK = prev.snapAttrOK
+	if prev.Workspace == workspace && prev.snapSet {
+		next.snapSet = true
+		next.snapBlob = append([]byte(nil), prev.snapBlob...)
+	} else if blob, ok := e.savedBaseline[bot]; ok && !e.baselineCorrupt {
+		next.snapSet = true
+		next.snapBlob = append([]byte(nil), blob...)
 	}
 	e.bots[bot] = next
 	e.mu.Unlock()
@@ -544,7 +553,8 @@ func (e *Engine) approvalTTL() time.Duration {
 
 // ClassifierMayAllow reports whether a future classifier may contribute
 // an allow for this bot. It is false until that bot has a workspace and
-// a git baseline. The classifier still cannot allow a call today.
+// a git baseline that still matches, and it is false when the git scan
+// finds a risk. The classifier still cannot allow a call today.
 func (e *Engine) ClassifierMayAllow(bot string) bool {
 	if e == nil {
 		return false
@@ -556,7 +566,16 @@ func (e *Engine) ClassifierMayAllow(bot string) bool {
 
 func (e *Engine) classifierMayAllowLocked(bot string) bool {
 	b, ok := e.bots[bot]
-	return ok && strings.TrimSpace(b.Workspace) != "" && b.snapSet
+	if !ok || strings.TrimSpace(b.Workspace) == "" || !b.snapSet || e.baselineCorrupt {
+		return false
+	}
+	if !bytes.Equal(b.snapBlob, gitBaselineBlob(b.Workspace, homesOf(b))) {
+		return false
+	}
+	if gitConfigRisk(b.Workspace, homesOf(b), b.Env) != "" {
+		return false
+	}
+	return true
 }
 
 // RegisterLaunch records the CLI process started for bot.
@@ -663,54 +682,108 @@ func (e *Engine) NoteUserMessage(bot, task string) {
 	}
 }
 
-// SnapshotGit records .git/config and .gitattributes for the Claude
-// path. A later change makes a Claude git command ask. The daemon
-// calls this once, after the workspace exists. run_shell does not use
-// this snapshot. Risky git config is a separate hard ask for both.
+// SnapshotGit records the git baseline for a call that has no per-bot
+// workspace. A later change makes a git command ask. It does not write
+// the persisted per-bot file.
 func (e *Engine) SnapshotGit(workspace string) {
 	if e == nil || strings.TrimSpace(workspace) == "" {
 		return
 	}
-	gitData, gitOK := readGitBaseline(workspace)
-	attrData, attrOK := readBaselineFile(filepath.Join(workspace, ".gitattributes"))
+	blob := gitBaselineBlob(workspace, nil)
 	e.mu.Lock()
 	e.snapSet = true
 	e.snapWS = workspace
-	e.snapGit = gitData
-	e.snapGitOK = gitOK
-	e.snapAttr = attrData
-	e.snapAttrOK = attrOK
+	e.snapBlob = blob
 	e.mu.Unlock()
 }
 
-// SnapshotBot records .git/config and .gitattributes for one bot's
-// workspace. A later change makes a Claude git command ask. run_shell
-// does not use the snapshot.
+// SnapshotBot records the git baseline for one bot when that bot has
+// none yet. A turn start does not replace a baseline that is already
+// stored. The record is written to the baseline file. An unreadable
+// baseline file is left unchanged so git commands keep asking.
 func (e *Engine) SnapshotBot(bot string) {
 	if e == nil || bot == "" {
 		return
 	}
 	e.mu.Lock()
-	ws := e.bots[bot].Workspace
+	if e.baselineCorrupt || e.bots[bot].snapSet {
+		e.mu.Unlock()
+		return
+	}
+	b := e.bots[bot]
+	ws := b.Workspace
+	homes := homesOf(b)
 	e.mu.Unlock()
 	if strings.TrimSpace(ws) == "" {
 		return
 	}
-	gitData, gitOK := readGitBaseline(ws)
-	attrData, attrOK := readBaselineFile(filepath.Join(ws, ".gitattributes"))
+	blob := gitBaselineBlob(ws, homes)
 	e.mu.Lock()
-	b := e.bots[bot]
-	if b.Workspace != ws {
-		e.mu.Unlock()
+	defer e.mu.Unlock()
+	if e.baselineCorrupt {
+		return
+	}
+	b = e.bots[bot]
+	if b.Workspace != ws || b.snapSet {
+		return
+	}
+	if e.savedBaseline == nil {
+		e.savedBaseline = map[string][]byte{}
+	}
+	e.savedBaseline[bot] = append([]byte(nil), blob...)
+	if err := e.persistBaselinesLocked(); err != nil {
+		delete(e.savedBaseline, bot)
+		log.Printf("permission broker: git baseline file is unreadable: %s", e.baselinePath)
 		return
 	}
 	b.snapSet = true
-	b.snapGit = gitData
-	b.snapGitOK = gitOK
-	b.snapAttr = attrData
-	b.snapAttrOK = attrOK
+	b.snapBlob = append([]byte(nil), blob...)
 	e.bots[bot] = b
+}
+
+// RebaselineBot records the git baseline for one bot again and writes
+// the baseline file. It does not bump the ruleset. The bot needs a
+// workspace. An audit row is written when the file is stored.
+func (e *Engine) RebaselineBot(bot string) error {
+	if e == nil || strings.TrimSpace(bot) == "" {
+		return ErrNotFound
+	}
+	e.mu.Lock()
+	b := e.bots[bot]
+	ws := b.Workspace
+	homes := homesOf(b)
 	e.mu.Unlock()
+	if strings.TrimSpace(ws) == "" {
+		return ErrNotFound
+	}
+	blob := gitBaselineBlob(ws, homes)
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	b = e.bots[bot]
+	if b.Workspace != ws {
+		return ErrNotFound
+	}
+	if e.savedBaseline == nil {
+		e.savedBaseline = map[string][]byte{}
+	}
+	prev, had := e.savedBaseline[bot]
+	e.savedBaseline[bot] = append([]byte(nil), blob...)
+	if err := e.persistBaselinesLocked(); err != nil {
+		if had {
+			e.savedBaseline[bot] = prev
+		} else {
+			delete(e.savedBaseline, bot)
+		}
+		log.Printf("permission broker: git baseline file is unreadable: %s", e.baselinePath)
+		return err
+	}
+	b.snapSet = true
+	b.snapBlob = append([]byte(nil), blob...)
+	e.bots[bot] = b
+	e.auditDecision(Request{BotID: bot}, inspected{
+		ClassNote: "none", Hash: hashRaw("git-baseline", bot),
+	}, "git_rebaseline", "git_rebaseline", "", "human", "", "")
+	return nil
 }
 
 // SaveRule stores an exact argv rule. Critical, compounds, and commands
@@ -775,17 +848,19 @@ func (e *Engine) SaveRule(rule Rule) (Rule, error) {
 // RuleView is one saved rule for an admin list. Argv and pattern text
 // are redacted. Kind is exact when the stored kind is empty.
 type RuleView struct {
-	ID         string    `json:"id"`
-	Effect     string    `json:"effect"`
-	Scope      string    `json:"scope"`
-	BotID      string    `json:"bot_id,omitempty"`
-	Argv       []string  `json:"argv,omitempty"`
-	Pattern    string    `json:"pattern,omitempty"`
-	Kind       string    `json:"kind"`
-	Source     string    `json:"source,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	LastUsedAt time.Time `json:"last_used_at,omitempty"`
-	Uses       int       `json:"uses"`
+	ID           string    `json:"id"`
+	Effect       string    `json:"effect"`
+	Scope        string    `json:"scope"`
+	BotID        string    `json:"bot_id,omitempty"`
+	Argv         []string  `json:"argv,omitempty"`
+	Pattern      string    `json:"pattern,omitempty"`
+	Kind         string    `json:"kind"`
+	Source       string    `json:"source,omitempty"`
+	Active       *bool     `json:"active,omitempty"`
+	NeedsConfirm bool      `json:"needs_confirm,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+	LastUsedAt   time.Time `json:"last_used_at,omitempty"`
+	Uses         int       `json:"uses"`
 }
 
 // ListRules returns bot and global rules. The hook socket does not call this.
@@ -810,12 +885,80 @@ func ruleView(rule Rule) RuleView {
 	view := RuleView{
 		ID: rule.ID, Effect: rule.Effect, Scope: rule.Scope, BotID: rule.BotID,
 		Argv: redactArgv(rule.Argv), Kind: kind, Source: rule.Source,
-		CreatedAt: rule.CreatedAt, LastUsedAt: rule.LastUsedAt, Uses: rule.Uses,
+		NeedsConfirm: rule.NeedsConfirm,
+		CreatedAt:    rule.CreatedAt, LastUsedAt: rule.LastUsedAt, Uses: rule.Uses,
+	}
+	if rule.Active != nil {
+		v := *rule.Active
+		view.Active = &v
 	}
 	if rule.Pattern != "" {
 		view.Pattern = Redact(rule.Pattern)
 	}
 	return view
+}
+
+// ConfirmRule activates one imported allow that is waiting for review.
+// The ruleset bumps. The audit row records the id and a hash. A rule
+// that is already active is refused and the ruleset stays.
+func (e *Engine) ConfirmRule(id string) (string, error) {
+	if e == nil {
+		return "", ErrRuleNotFound
+	}
+	e.writeMu.Lock()
+	defer e.writeMu.Unlock()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	id = strings.TrimSpace(id)
+	idx := -1
+	for i, rule := range e.rules.Rules {
+		if rule.ID == id {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return "", ErrRuleNotFound
+	}
+	rule := e.rules.Rules[idx]
+	if !needsConfirm(rule) {
+		return "", ErrNotConfirmable
+	}
+	rule.NeedsConfirm = false
+	rule.Active = nil
+	next := e.rules
+	next.Version++
+	next.Rules = append([]Rule(nil), e.rules.Rules...)
+	next.Rules[idx] = rule
+	if err := saveRules(e.rulesPath, next); err != nil {
+		return "", err
+	}
+	e.rules = next
+	e.dirty = false
+	e.invalidateLocked()
+	sum := ruleAuditHash(rule)
+	e.auditDecision(Request{BotID: rule.BotID, ToolName: rule.Tool}, inspected{
+		Hash: sum, ClassNote: "none",
+	}, "rule_confirm", "rule_confirm", "", "human", rule.ID, rule.Scope)
+	return sum, nil
+}
+
+func needsConfirm(rule Rule) bool {
+	if rule.Effect != EffectAllow {
+		return false
+	}
+	if rule.NeedsConfirm {
+		return true
+	}
+	return rule.Active != nil && !*rule.Active
+}
+
+func ruleAuditHash(rule Rule) string {
+	argvHash := hashParts(normTool(rule.Tool), rule.Argv)
+	if len(rule.Argv) == 0 && rule.Pattern != "" {
+		argvHash = hashRaw(rule.Kind, rule.Pattern)
+	}
+	return hashRevoke(rule.ID, rule.Effect, argvHash)
 }
 
 // RevokeRule removes one saved rule, including a read-only legacy row.
@@ -1520,13 +1663,6 @@ type inspected struct {
 	GitRisk   string
 }
 
-func baselineDrift(prev []byte, prevOK bool, cur []byte, curOK bool) bool {
-	if prevOK != curOK {
-		return true
-	}
-	return !bytes.Equal(prev, cur)
-}
-
 func commandUsesGit(p Parse) bool {
 	if len(p.Argv) > 0 && baseName(p.Argv[0]) == "git" {
 		return true
@@ -1539,10 +1675,6 @@ func commandUsesGit(p Parse) bool {
 	return false
 }
 
-func claudeBash(name string) bool {
-	return strings.EqualFold(strings.TrimSpace(name), "bash")
-}
-
 // gitRiskTool is a shell tool whose git config is a hard ask.
 // Claude Bash and the daemon run_shell share that scan.
 func gitRiskTool(name string) bool {
@@ -1552,32 +1684,6 @@ func gitRiskTool(name string) bool {
 	default:
 		return false
 	}
-}
-
-func readGitBaseline(ws string) ([]byte, bool) {
-	p := filepath.Join(ws, ".git")
-	st, err := os.Lstat(p)
-	if err != nil {
-		return nil, false
-	}
-	if st.Mode()&os.ModeSymlink != 0 {
-		target, err := os.Readlink(p)
-		if err != nil {
-			return []byte("symlink"), true
-		}
-		return []byte("symlink:" + target), true
-	}
-	if st.Mode().IsRegular() {
-		b, err := os.ReadFile(p)
-		if err != nil {
-			return []byte("unreadable"), true
-		}
-		return b, true
-	}
-	if st.IsDir() {
-		return readBaselineFile(filepath.Join(p, "config"))
-	}
-	return []byte("other"), true
 }
 
 func readBaselineFile(path string) ([]byte, bool) {

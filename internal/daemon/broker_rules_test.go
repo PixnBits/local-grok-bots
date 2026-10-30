@@ -127,6 +127,9 @@ func TestGolden_RulesRevokeImmediateAndAdminOnly(t *testing.T) {
 	if legacyID == "" {
 		t.Fatal("legacy row missing")
 	}
+	if _, err := app.broker.ConfirmRule(legacyID); err != nil {
+		t.Fatal(err)
+	}
 	legacy := app.broker.Evaluate(ctx, shellEval("bot", ws, "git diff"))
 	if legacy.Verdict != permbroker.VerdictAllow {
 		t.Fatalf("legacy before %+v", legacy)

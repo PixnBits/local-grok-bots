@@ -206,16 +206,39 @@ inside the jail has those keys forced off. Claude is not rewritten.
 Inside-workspace checks and the git baseline use that bot's directory
 (`<workspace>/bots/<id>`), not the shared root. The shell jail binds
 that same directory at `/work`. Another bot's tree is outside. The
-daemon records the baseline when the bot context is set; a later change
-makes a Claude git command ask until the daemon restarts. A Claude git
-command and a `run_shell` git command also ask, and cannot be covered
-by a once-token, a task grant, or an allow rule, when that bot's git
-config contains `core.hooksPath`, `core.fsmonitor`, `filter.*`,
-`include` or `includeIf`, `core.sshCommand`, `core.pager`,
-`core.editor`, `diff.external`, or `credential.helper`. The scan covers
-the repo config and include targets that resolve, `.git/info/attributes`,
-`.gitattributes`, the bot home and user home git config, and `GIT_*`
-variables in the environment stored for that bot. The reason is recorded.
+baseline is `DATA_DIR/permbroker/git-baseline.json` (mode `0600`,
+directory mode `0700`). Startup loads it. A bot with no stored baseline
+is recorded once, at boot or on the first turn or shell that has a
+workspace. A later turn does not record it again. Drift from that
+baseline makes a git command ask, for Claude and for `run_shell`, even
+when an allow rule matches. Only
+`POST /api/permbroker/bots/{id}/git-baseline` records a new baseline.
+An unreadable baseline file makes those git commands ask until an admin
+records one for that bot.
+
+A Claude git command and a `run_shell` git command also ask, and cannot
+be covered by a once-token, a task grant, or an allow rule, when the
+scan finds any of the following. Config keys, in any subsection, are
+`core.hooksPath`, `core.fsmonitor`, `core.sshCommand`, `core.pager`,
+`core.editor`, `core.attributesFile`, `core.askPass`, `core.gitProxy`,
+`diff.external`, `diff.<name>.textconv`, `diff.<name>.command`,
+`merge.<name>.driver`, `alias.*`, `credential.helper`, `filter.*`,
+`gpg.program`, `gpg.<format>.program`, `sequence.editor`,
+`uploadpack.packObjectsHook`, `protocol.allow` set to `always`, and
+`protocol.ext.allow` set to anything other than `never`. A
+`url.<base>.insteadOf` or `pushInsteadOf` whose value starts with
+`ext::` asks as well. `include` and `includeIf` still ask. Attribute
+files ask when `diff`, `merge`, or `filter` is set to a driver name. A
+bare `diff`, `-diff`, or `binary` does not. The scan reads the repo
+config and include targets that resolve, `<workspace>/.gitattributes`,
+`<git-dir>/info/attributes`, each home's `.gitconfig`,
+`~/.config/git/config`, and `~/.config/git/attributes`, the file named
+by `core.attributesFile`, and `GIT_*` variables in the environment
+stored for that bot. A hook in `<git-dir>/hooks` asks when it is a
+symlink or an executable file and its name does not end in `.sample`.
+`core.hooksPath` is not followed. The baseline covers the repo config,
+a digest of that hooks directory, the attribute files above, and each
+home's git config and attributes. The reason is recorded.
 
 If the managed isolation environment has no PATH, the daemon fills one
 and logs a single startup warning naming the PATH used to resolve the
@@ -274,9 +297,10 @@ level = "high"
 
 Saved rules are `DATA_DIR/permbroker/rules.json` (mode `0600`, directory
 mode `0700`). A row has an id, effect, scope, bot, argv or pattern,
-kind (`exact`, `pattern`, or `legacy`; empty means exact), source, and
-created, last used, and use count. `GET /api/permbroker/rules` lists
-them. `DELETE /api/permbroker/rules/{id}` revokes one, including a
+kind (`exact`, `pattern`, or `legacy`; empty means exact), source,
+whether an imported allow is still inactive, and created, last used,
+and use count. `GET /api/permbroker/rules` lists them.
+`DELETE /api/permbroker/rules/{id}` revokes one, including a
 migrated legacy row. Revoke writes an audit row of ids and hashes,
 bumps the ruleset, and the next evaluation asks again. The per-bot hook
 socket cannot list or revoke.
@@ -293,18 +317,30 @@ are literal, `*` is not inside a word, and the first token is not a
 wrapper or interpreter. Anything else is a read-only legacy row. The
 legacy allow keeps the original glob and does not grow to a longer
 argv. An allow, whether pattern or legacy, never covers a critical
-command, a compound, or a wrapper. Deny and ask rows still apply. A
-task grant may cover a compound only when every part is granted and
-none of those parts is a hard ask. A saved rule does not. Each new row
-records source `migrated` and the original text, and one audit row is
-written. The ruleset bumps once per batch. The profile source is not
-deleted. A second start does not add duplicates.
+command, a compound, or a wrapper. A legacy or pattern allow copied
+from a profile rule is stored inactive (`active` false,
+`needs_confirm` true) and does not allow. A matching call asks until
+an admin confirms that row with
+`POST /api/permbroker/rules/{id}/confirm`. An exact command copied from
+a profile rule, and an exact rule the broker saved, stays active.
+Confirm writes an audit row with the id and a hash and bumps the
+ruleset. A legacy deny or ask still matches, and its `*` may cross a
+slash. Pattern syntax is unchanged: `*` is one non-flag token and does
+not cross a slash. A task grant may cover a compound only when every
+part is granted and none of those parts is a hard ask. A saved rule
+does not. Each new row records source `migrated` and the original
+text, and one audit row is written. The ruleset bumps once per batch.
+The profile source is not deleted. A second start does not add
+duplicates.
 
 ## Admin API
 
-These routes use the existing admin token, the host allowlist, and the
-same cross-site check as other mutating admin routes (`Sec-Fetch-Site`
-and `Origin`). A live run token is 403 even when the admin token is unset.
+These routes require an admin token. When none is configured the
+response is 403 `{"error":"admin token required"}`. When one is
+configured, a missing credential is 401 and a live run token is 403.
+Other routes stay open when no admin token is configured. The routes
+also use the host allowlist and the same cross-site check as other
+mutating admin routes (`Sec-Fetch-Site` and `Origin`).
 
 - `GET /api/permbroker/pending` lists open items. Command text is redacted.
 - `POST /api/permbroker/pending/{id}` with `{"decision":"approve","scope":"once"}`
@@ -315,6 +351,12 @@ and `Origin`). A live run token is 403 even when the admin token is unset.
 - `POST /api/permbroker/hook/repin` records the current hook file as the
   pin. Policy publish does not do this. The call is audited. A hook that
   is missing or not safe to run is refused and the old pin stays.
+- `POST /api/permbroker/rules/{id}/confirm` activates one imported allow
+  that is waiting for review. The call is audited with the id and a
+  hash, and it bumps the ruleset. A row that is already active is refused.
+- `POST /api/permbroker/bots/{id}/git-baseline` records that bot's git
+  baseline again. It does not bump the ruleset. The call is audited
+  with the bot id.
 
 The socket accepts only `evaluate`. Approve, deny, create-rule, list, and
 revoke on the socket are denies and do not change state.
@@ -358,6 +400,10 @@ curl -sS -H "Authorization: Bearer $LGB_ADMIN_TOKEN" \
   "https://myhost.tailnet-example.ts.net/api/permbroker/rules"
 curl -sS -X DELETE -H "Authorization: Bearer $LGB_ADMIN_TOKEN" \
   "https://myhost.tailnet-example.ts.net/api/permbroker/rules/r_example"
+curl -sS -X POST -H "Authorization: Bearer $LGB_ADMIN_TOKEN" \
+  "https://myhost.tailnet-example.ts.net/api/permbroker/rules/r_example/confirm"
+curl -sS -X POST -H "Authorization: Bearer $LGB_ADMIN_TOKEN" \
+  "https://myhost.tailnet-example.ts.net/api/permbroker/bots/bot-id/git-baseline"
 ```
 
 The broker flag is daemon-wide. `broker_bots` only limits which bots use

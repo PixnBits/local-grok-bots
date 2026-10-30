@@ -157,6 +157,18 @@ func TestGolden_MigrationOnlyNarrows(t *testing.T) {
 	if patternMatch("git diff * --stat", []string{"git", "diff", "-n", "--stat"}) {
 		t.Fatal("flag token matched")
 	}
+	var patternID string
+	for _, rule := range e.ListRules() {
+		if rule.Kind == "pattern" {
+			patternID = rule.ID
+		}
+	}
+	if patternID == "" {
+		t.Fatal("pattern row missing")
+	}
+	if _, err := e.ConfirmRule(patternID); err != nil {
+		t.Fatal(err)
+	}
 	ctx := context.Background()
 	ws := t.TempDir()
 	if d := e.Evaluate(ctx, bashReq("bot", "sess", "task", ws, "git diff HEAD --stat")); d.Verdict != VerdictAllow {

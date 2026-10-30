@@ -291,8 +291,8 @@ func TestGolden_GitBaselineDriftAsks(t *testing.T) {
 	run := shellReq("run_shell", "git status")
 	run.Cwd = ws
 	run.Workspace = ws
-	if d := e.Evaluate(context.Background(), run); d.Verdict != VerdictAllow {
-		t.Fatalf("daemon git %+v", d)
+	if d := e.Evaluate(context.Background(), run); d.Verdict == VerdictAllow {
+		t.Fatalf("daemon git drift %+v", d)
 	}
 }
 

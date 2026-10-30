@@ -1,6 +1,7 @@
 package permbroker
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"strings"
@@ -9,22 +10,20 @@ import (
 // evalSnap is the engine state one evaluate may read without the lock.
 // repos nil is preserved: an empty slice is a different answer.
 type evalSnap struct {
-	table      table
-	resolver   func(string) (string, bool)
-	classifier Classifier
-	ws         string
-	repos      []string
-	snapSet    bool
-	snapWS     string
-	snapGit    []byte
-	snapGitOK  bool
-	snapAttr   []byte
-	snapAttrOK bool
-	critical   []string
-	hook       func(context.Context, Request)
-	perBot     bool
-	homes      []string
-	env        []string
+	table           table
+	resolver        func(string) (string, bool)
+	classifier      Classifier
+	ws              string
+	repos           []string
+	snapSet         bool
+	snapWS          string
+	snapBlob        []byte
+	baselineCorrupt bool
+	critical        []string
+	hook            func(context.Context, Request)
+	perBot          bool
+	homes           []string
+	env             []string
 }
 
 func (e *Engine) capture(req Request) evalSnap {
@@ -36,17 +35,15 @@ func (e *Engine) capture(req Request) evalSnap {
 		extra[i] = row
 	}
 	snap := evalSnap{
-		table:      table{extra: extra},
-		resolver:   e.resolver,
-		classifier: e.classifier,
-		snapSet:    e.snapSet,
-		snapWS:     e.snapWS,
-		snapGit:    append([]byte(nil), e.snapGit...),
-		snapGitOK:  e.snapGitOK,
-		snapAttr:   append([]byte(nil), e.snapAttr...),
-		snapAttrOK: e.snapAttrOK,
-		critical:   append([]string(nil), e.critical...),
-		hook:       e.inspectHook,
+		table:           table{extra: extra},
+		resolver:        e.resolver,
+		classifier:      e.classifier,
+		snapSet:         e.snapSet,
+		snapWS:          e.snapWS,
+		snapBlob:        append([]byte(nil), e.snapBlob...),
+		baselineCorrupt: e.baselineCorrupt,
+		critical:        append([]string(nil), e.critical...),
+		hook:            e.inspectHook,
 	}
 	ws := req.Workspace
 	var repos []string
@@ -57,17 +54,11 @@ func (e *Engine) capture(req Request) evalSnap {
 			if b.snapSet {
 				snap.snapSet = true
 				snap.snapWS = b.Workspace
-				snap.snapGit = append([]byte(nil), b.snapGit...)
-				snap.snapGitOK = b.snapGitOK
-				snap.snapAttr = append([]byte(nil), b.snapAttr...)
-				snap.snapAttrOK = b.snapAttrOK
+				snap.snapBlob = append([]byte(nil), b.snapBlob...)
 			} else {
 				snap.snapSet = false
 				snap.snapWS = ""
-				snap.snapGit = nil
-				snap.snapGitOK = false
-				snap.snapAttr = nil
-				snap.snapAttrOK = false
+				snap.snapBlob = nil
 			}
 		} else if ws == "" {
 			ws = b.Workspace
@@ -186,15 +177,19 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 			in.Eligible = false
 			in.HardAsk = true
 		}
-		if gitDriftSnap(snap, req, ws, parsed) {
-			in.Eligible = false
-			in.HardAsk = true
-		}
+		drifted := gitDriftSnap(snap, req, ws, parsed)
 		if gitRiskTool(req.ToolName) && commandUsesGit(parsed) {
 			if why := gitConfigRisk(ws, snap.homes, snap.env); why != "" {
 				in.GitRisk = why
 				in.Eligible = false
 				in.HardAsk = true
+			}
+		}
+		if drifted {
+			in.Eligible = false
+			in.HardAsk = true
+			if in.GitRisk == "" {
+				in.GitRisk = "baseline"
 			}
 		}
 	} else {
@@ -262,8 +257,13 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 }
 
 func gitDriftSnap(snap evalSnap, req Request, ws string, parsed Parse) bool {
-	if !claudeBash(req.ToolName) || !commandUsesGit(parsed) {
+	if !gitRiskTool(req.ToolName) || !commandUsesGit(parsed) {
 		return false
+	}
+	// An unreadable baseline file asks until an admin records one.
+	// A bot an admin just recorded still compares that record.
+	if snap.baselineCorrupt && !snap.snapSet {
+		return true
 	}
 	if snap.perBot {
 		if !snap.snapSet {
@@ -275,12 +275,7 @@ func gitDriftSnap(snap evalSnap, req Request, ws string, parsed Parse) bool {
 	if ws == "" {
 		return true
 	}
-	gitData, gitOK := readGitBaseline(ws)
-	if baselineDrift(snap.snapGit, snap.snapGitOK, gitData, gitOK) {
-		return true
-	}
-	attr, attrOK := readBaselineFile(filepath.Join(ws, ".gitattributes"))
-	if baselineDrift(snap.snapAttr, snap.snapAttrOK, attr, attrOK) {
+	if !bytes.Equal(snap.snapBlob, gitBaselineBlob(ws, snap.homes)) {
 		return true
 	}
 	return subdirGit(req.Cwd, ws)

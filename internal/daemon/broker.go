@@ -158,7 +158,6 @@ func (a *App) prepareBrokerHook(bot store.Bot, ws, home, runID string) (string, 
 	a.setBrokerOn(bot.ID, true)
 	if a.broker != nil {
 		a.broker.SetBotContext(bot.ID, ws, a.effPol(bot.ID).EffectiveGitHubRepos(bot.GitHubAllow))
-		a.broker.SnapshotBot(bot.ID)
 		a.broker.AddCriticalPaths(a.brokerCriticalPaths(bin, "", "")...)
 		a.broker.AddCriticalPaths(filepath.Dir(copyPath))
 	}
@@ -662,9 +661,10 @@ func (a *App) armBrokerSpec(botID, sessionID, runID string, inputs []store.Messa
 	return nil
 }
 
-// seedBrokerBots records each bot's workspace and git baseline and copies
-// profile rules into the broker file once. The profile rows stay where
-// they are. A second start does not add duplicate broker rules.
+// seedBrokerBots records each bot's workspace and, when that bot has no
+// stored git baseline yet, records one. It copies profile rules into the
+// broker file once. The profile rows stay where they are. A second start
+// does not add duplicate broker rules and does not replace a baseline.
 func (a *App) seedBrokerBots(bots []store.Bot) {
 	if a == nil || a.broker == nil {
 		return
@@ -716,6 +716,7 @@ func (a *App) gateShell(ctx context.Context, bot store.Bot, command string) (boo
 	a.broker.SetBotContext(bot.ID, ws, repos)
 	userHome, _ := os.UserHomeDir()
 	a.broker.EnsureBotHomes(bot.ID, filepath.Join(filepath.Dir(a.ws), "cli", bot.ID, "home"), userHome)
+	a.broker.SnapshotBot(bot.ID)
 	d := a.broker.Evaluate(ctx, permbroker.Request{
 		BotID: bot.ID, SessionID: "shell:" + bot.ID, TaskID: a.broker.UserTask(bot.ID),
 		Cwd: ws, Workspace: ws, Repos: repos,

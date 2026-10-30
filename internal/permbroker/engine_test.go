@@ -172,7 +172,7 @@ func TestGolden_JailSocketCannotApproveOrCreateRules(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	before := e.Ruleset()
-	for _, op := range []string{"approve", "deny", "create-rule", "list", "list-rules", "revoke"} {
+	for _, op := range []string{"approve", "deny", "create-rule", "list", "list-rules", "revoke", "confirm", "git-baseline"} {
 		rep := sockRound(t, sock, map[string]any{"op": op, "id": "p_x"})
 		if rep.Verdict != VerdictDeny {
 			t.Fatalf("op %s %+v", op, rep)

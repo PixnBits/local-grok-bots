@@ -37,21 +37,23 @@ func TestGolden_DenyNeverStopsRun_Ollama(t *testing.T) {
 			t.Cleanup(modelSrv.Close)
 			app := newApp(t, "", model.NewOllama(modelSrv.URL))
 			app.editPol(func(p *policy.Policy) { p.Broker = "hook" })
+			const token = "lgbr_admintesttokenvalue"
+			app.cfg.AuthToken = token
 			srv := serve(t, app)
-			res, b := do(t, "POST", srv.URL+"/api/bots", map[string]string{"name": "IO", "instructions": "shell"}, "")
+			res, b := do(t, "POST", srv.URL+"/api/bots", map[string]string{"name": "IO", "instructions": "shell"}, token)
 			if res.StatusCode != 201 && res.StatusCode != 200 {
 				t.Fatalf("create %d %s", res.StatusCode, b)
 			}
 			var bot store.Bot
 			decodeJSON(t, b, &bot)
-			res, b = do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]string{"content": "go"}, "")
+			res, b = do(t, "POST", srv.URL+"/api/bots/"+bot.ID+"/thread/messages", map[string]string{"content": "go"}, token)
 			if res.StatusCode != 200 {
 				t.Fatalf("post %d %s", res.StatusCode, b)
 			}
 			var id string
 			deadline := time.Now().Add(8 * time.Second)
 			for id == "" && time.Now().Before(deadline) {
-				res, b = do(t, "GET", srv.URL+"/api/permbroker/pending", nil, "")
+				res, b = do(t, "GET", srv.URL+"/api/permbroker/pending", nil, token)
 				if res.StatusCode != 200 {
 					t.Fatalf("pending %d %s", res.StatusCode, b)
 				}
@@ -71,15 +73,15 @@ func TestGolden_DenyNeverStopsRun_Ollama(t *testing.T) {
 				t.Fatal("run did not ask")
 			}
 			if mode == "deny-all" {
-				res, b = do(t, "POST", srv.URL+"/api/permbroker/pending/deny-all", map[string]any{}, "")
+				res, b = do(t, "POST", srv.URL+"/api/permbroker/pending/deny-all", map[string]any{}, token)
 			} else {
-				res, b = do(t, "POST", srv.URL+"/api/permbroker/pending/"+id, map[string]string{"decision": "deny"}, "")
+				res, b = do(t, "POST", srv.URL+"/api/permbroker/pending/"+id, map[string]string{"decision": "deny"}, token)
 			}
 			if res.StatusCode != 200 {
 				t.Fatalf("decide %d %s", res.StatusCode, b)
 			}
 			close(release)
-			waitIdle(t, srv.URL, bot.ID, "")
+			waitIdle(t, srv.URL, bot.ID, token)
 			got, err := app.st.GetBot(bot.ID)
 			if err != nil {
 				t.Fatal(err)
@@ -88,7 +90,11 @@ func TestGolden_DenyNeverStopsRun_Ollama(t *testing.T) {
 				t.Fatalf("run %s %q", got.LastRunStatus, got.LastRunError)
 			}
 			saw := false
-			for _, m := range thread(t, srv.URL, bot.ID) {
+			msgs, err := app.st.ListMessages(bot.ID, "user", "", 20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, m := range msgs {
 				if m.Role == "bot" && strings.Contains(m.Content, "continued after deny") {
 					saw = true
 				}
@@ -139,7 +145,9 @@ func TestGolden_DenyNeverStopsRun_Claude(t *testing.T) {
 		if !strings.Contains(ran.reply, "continued") {
 			t.Fatalf("reply %q", ran.reply)
 		}
-		res, body := do(t, "POST", h.srv.URL+"/api/permbroker/pending/deny-all", map[string]any{}, "")
+		const token = "lgbr_admintesttokenvalue"
+		h.app.cfg.AuthToken = token
+		res, body := do(t, "POST", h.srv.URL+"/api/permbroker/pending/deny-all", map[string]any{}, token)
 		if res.StatusCode != 200 {
 			t.Fatalf("deny-all %d %s", res.StatusCode, body)
 		}

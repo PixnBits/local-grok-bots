@@ -1,6 +1,7 @@
 package permbroker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -395,6 +396,16 @@ func TestGolden_LegacyRuleMigration(t *testing.T) {
 	if !strings.Contains(string(body), `"source": "migrated"`) || !strings.Contains(string(body), `"readonly": true`) {
 		t.Fatalf("record %s", body)
 	}
+	if !strings.Contains(string(body), `"active": false`) || !strings.Contains(string(body), `"needs_confirm": true`) {
+		t.Fatalf("inactive allow not stored\n%s", body)
+	}
+	if err := e.MigrateLegacy(rules); err != nil {
+		t.Fatal(err)
+	}
+	again, err := os.ReadFile(filepath.Join(e.dir, "rules.json"))
+	if err != nil || !bytes.Equal(body, again) {
+		t.Fatal("second migration changed rules.json")
+	}
 	kept, err := os.ReadFile(srcPath)
 	if err != nil || string(kept) != string(original) {
 		t.Fatalf("source changed %q", kept)
@@ -413,8 +424,8 @@ func TestGolden_LegacyRuleMigration(t *testing.T) {
 		t.Fatalf("exact %+v", d)
 	}
 	diff := bashReq("bot", "sess", "task", ws, "git diff")
-	if d := e.Evaluate(ctx, diff); d.Verdict != VerdictAllow {
-		t.Fatalf("pattern %+v", d)
+	if d := e.Evaluate(ctx, diff); d.Verdict == VerdictAllow || d.PendingID == "" {
+		t.Fatalf("legacy allow still active %+v", d)
 	}
 	stat := bashReq("bot", "sess", "task", ws, "git diff --stat")
 	if d := e.Evaluate(ctx, stat); d.Verdict == VerdictAllow {
@@ -425,16 +436,16 @@ func TestGolden_LegacyRuleMigration(t *testing.T) {
 		t.Fatalf("pattern covered compound %+v", d)
 	}
 	legacy := bashReq("bot", "sess", "task", ws, "git diff -- notes.txt")
-	if d := e.Evaluate(ctx, legacy); d.Verdict != VerdictAllow {
-		t.Fatalf("legacy %+v", d)
+	if d := e.Evaluate(ctx, legacy); d.Verdict == VerdictAllow || d.PendingID == "" {
+		t.Fatalf("legacy allow still active %+v", d)
 	}
 	legacyCompound := bashReq("bot", "sess", "task", ws, "git diff -- notes.txt && true")
 	if d := e.Evaluate(ctx, legacyCompound); d.Verdict == VerdictAllow {
 		t.Fatalf("legacy compound %+v", d)
 	}
 	narrow := bashReq("bot", "sess", "task", ws, "git diff HEAD --stat")
-	if d := e.Evaluate(ctx, narrow); d.Verdict != VerdictAllow {
-		t.Fatalf("narrow pattern %+v", d)
+	if d := e.Evaluate(ctx, narrow); d.Verdict == VerdictAllow || d.PendingID == "" {
+		t.Fatalf("pattern allow still active %+v", d)
 	}
 	slash := bashReq("bot", "sess", "task", ws, "git diff a/b --stat")
 	if d := e.Evaluate(ctx, slash); d.Verdict == VerdictAllow {
