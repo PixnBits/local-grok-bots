@@ -193,6 +193,10 @@ type token struct {
 	Hash      string
 	Cwd       string
 	Expires   time.Time
+	// HoldTask keeps a spare once-token from a task, bot, or global
+	// approval until the task id changes. The same task still uses
+	// the grant or the rule, including the non-literal refusal.
+	HoldTask string
 }
 
 type grant struct {
@@ -762,7 +766,7 @@ func (e *Engine) NoteUserText(bot, task, text string) {
 		e.userText = map[string]string{}
 	}
 	if strings.TrimSpace(text) != "" {
-		e.userText[bot] = clipText(Redact(text), 200)
+		e.userText[bot] = clipText(flattenSpace(Redact(text)), 200)
 	}
 	if cur, ok := e.active[bot]; ok && cur.Task != task {
 		cur.Task = task
@@ -1572,10 +1576,7 @@ func (e *Engine) Decide(id, decision, scope string) error {
 		}
 		switch scope {
 		case ScopeOnce:
-			e.tokens = append(e.tokens, token{
-				BotID: item.BotID, SessionID: item.SessionID, Tool: item.Tool,
-				Hash: item.InputHash, Cwd: item.Cwd, Expires: e.now().Add(e.approvalTTL()),
-			})
+			e.keepOnceToken(item, "")
 		case ScopeTask:
 			exp := e.grantExpiry()
 			text := e.userText[item.BotID]
@@ -1603,6 +1604,13 @@ func (e *Engine) Decide(id, decision, scope string) error {
 			}
 		default:
 			return ErrScope
+		}
+		// Hook mode retries the identical command after the next user
+		// message. That message drops a task grant, so task, bot, and
+		// global approvals also keep the same one-time token. It stays
+		// held for this task so the grant or rule still decides here.
+		if scope != ScopeOnce {
+			e.keepOnceToken(item, item.TaskID)
 		}
 		e.bury(item)
 		e.auditHuman(item, "approve", scope)
@@ -1713,6 +1721,17 @@ func (e *Engine) grantExpiry() time.Time {
 	return e.now().Add(d)
 }
 
+func (e *Engine) keepOnceToken(item *pendingItem, holdTask string) {
+	if item == nil {
+		return
+	}
+	e.tokens = append(e.tokens, token{
+		BotID: item.BotID, SessionID: item.SessionID, Tool: item.Tool,
+		Hash: item.InputHash, Cwd: item.Cwd, Expires: e.now().Add(e.approvalTTL()),
+		HoldTask: holdTask,
+	})
+}
+
 func (e *Engine) takeToken(ctx context.Context, req Request, in inspected) (token, bool) {
 	if in.Level == LevelCritical || in.GitRisk != "" {
 		return token{}, false
@@ -1731,6 +1750,9 @@ func (e *Engine) takeToken(ctx context.Context, req Request, in inspected) (toke
 			continue
 		}
 		if !tokenLive(t, now) {
+			continue
+		}
+		if t.HoldTask != "" && t.HoldTask == req.TaskID {
 			continue
 		}
 		if t.Tool == "" || t.Tool != want {

@@ -90,6 +90,7 @@ func (e *Engine) failClosed(req Request) Decision {
 }
 
 func (e *Engine) raiseToCurrent(req Request, in inspected) inspected {
+	before := in.Level
 	if isShellTool(req.ToolName) {
 		if len(in.Argv) > 0 {
 			if lvl := e.table.level(ToolShell, in.Argv); Rank(lvl) > Rank(in.Level) {
@@ -110,6 +111,9 @@ func (e *Engine) raiseToCurrent(req Request, in inspected) inspected {
 	if in.Level == LevelCritical {
 		in.Eligible = false
 		in.HardAsk = true
+	}
+	if in.Level != before {
+		in.AdvisorySource = finalAdvisorySource(in.AdvisorySource, in.Level)
 	}
 	return in
 }
@@ -236,25 +240,36 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 		Tool: req.ToolName, Argv: in.Argv, Raw: in.Raw, Cwd: req.Cwd,
 		Eligible: in.Eligible, Compound: in.Compound, Level: in.Level,
 	}
+	var proposal Level
+	var classWhy string
+	fromModel := false
 	if rep, ok := classifier.(classReporter); ok {
 		report := rep.Classify(ctx, classIn)
 		in.AdvisoryChecked = report.Checked
 		if report.Advisory != "" {
 			in.Advisory = cleanAdvisory(report.Advisory)
 		}
-		if Rank(report.Level) > Rank(in.Level) {
-			in.Level = report.Level
-			in.AdvisorySource = "local model raised this to " + string(report.Level)
-			in.ClassNote = in.AdvisorySource
-		}
+		proposal = report.Level
+		fromModel = true
 	} else {
-		raised, why := classifier.Escalate(ctx, classIn)
-		if Rank(raised) > Rank(in.Level) {
-			in.Level = raised
-			if why == "" {
-				why = "escalated"
+		proposal, classWhy = classifier.Escalate(ctx, classIn)
+	}
+	// Path rules land before the classifier is allowed to change the level.
+	// The source names the final level only when that level is the model's
+	// and it was stricter than the table and the path rules.
+	if hitsCriticalWith(req, in, snap.critical, critEnv{homes: snap.homes, env: snap.env}) {
+		in.Level = LevelCritical
+	}
+	if classifierRaises(in.Level, proposal) {
+		in.Level = proposal
+		if fromModel {
+			in.AdvisorySource = "local model raised this to " + string(proposal)
+			in.ClassNote = in.AdvisorySource
+		} else {
+			if classWhy == "" {
+				classWhy = "escalated"
 			}
-			in.ClassNote = why
+			in.ClassNote = classWhy
 		}
 	}
 	if in.GitRisk != "" {
@@ -269,15 +284,29 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 	}
 	// A classifier cannot allow a call. classifierMayAllowCommandLocked is
 	// the gate any later allow from classifier input has to pass.
-	if hitsCriticalWith(req, in, snap.critical, critEnv{homes: snap.homes, env: snap.env}) {
-		in.Level = LevelCritical
-	}
 	if in.Level == LevelCritical {
 		in.Eligible = false
 		in.HardAsk = true
 	}
 	in.CriticalReason = criticalReason(in.Level, in.Argv, in.Raw)
 	return in
+}
+
+// finalAdvisorySource keeps a model-raise line only when it names the
+// level the card will show. A later path rule that moves the level
+// leaves the source as the table.
+func finalAdvisorySource(source string, level Level) string {
+	raised := "local model raised this to " + string(level)
+	if source == raised {
+		return source
+	}
+	if strings.HasPrefix(source, "local model raised this to ") {
+		return "table"
+	}
+	if source == "" {
+		return "table"
+	}
+	return source
 }
 
 func gitDriftSnap(snap evalSnap, req Request, ws string, parsed Parse) bool {

@@ -46,3 +46,36 @@ func maxLevel(a, b Level) Level {
 	}
 	return a
 }
+
+// classifierRaises reports whether a classifier level is stricter than
+// the table level. Unclassified ranks with medium: low and medium do
+// not replace an unclassified row. Only high or critical does.
+// An empty reply is not a level.
+func classifierRaises(table, got Level) bool {
+	if got == "" {
+		return false
+	}
+	g := frictionRank(got)
+	t := frictionRank(table)
+	if g < 0 || t < 0 {
+		return false
+	}
+	return g > t
+}
+
+// frictionRank is the order a classifier may raise. It is not Rank:
+// unclassified sits with medium, so a "safer" model reply cannot lower it.
+func frictionRank(l Level) int {
+	switch l {
+	case LevelLow:
+		return 1
+	case "", LevelUnclassified, LevelMedium:
+		return 2
+	case LevelHigh:
+		return 3
+	case LevelCritical:
+		return 4
+	default:
+		return -1
+	}
+}

@@ -407,7 +407,7 @@ func TestGolden_PendingCardFields(t *testing.T) {
 			item = p
 		}
 	}
-	if item.BotName != "bot" || !item.Compound || item.TaskText != "pleasestatus" || len(item.Operators) == 0 || item.Operators[0] != "&&" {
+	if item.BotName != "bot" || !item.Compound || item.TaskText != "please status" || len(item.Operators) == 0 || item.Operators[0] != "&&" {
 		t.Fatalf("%+v ops %v", item, item.Operators)
 	}
 	if len(item.Parts) != 2 || len(item.Allowed) == 0 || item.Allowed[0] != ScopeOnce {

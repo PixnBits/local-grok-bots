@@ -102,6 +102,108 @@ func TestApprovalsCopy(t *testing.T) {
 	}
 }
 
+func TestApprovalTitleIgnoresAdvisory(t *testing.T) {
+	src := string(IndexHTML)
+	body := jsFunc(t, src, "function approvalTitle(")
+	if strings.Contains(body, "advisory") {
+		t.Fatalf("title renderer reads advisory: %s", body)
+	}
+	if !strings.Contains(src, "approvalTitle(item)") {
+		t.Fatal("card title does not use approvalTitle")
+	}
+	if strings.Contains(src, "item.advisory && item.advisory.text") {
+		t.Fatal("card title still reads advisory text")
+	}
+}
+
+func TestApprovalsBannerHidesWhenEmpty(t *testing.T) {
+	src := string(IndexHTML)
+	if !strings.Contains(src, "#approvals-banner[hidden] { display: none !important; }") {
+		t.Fatal("empty banner is visible")
+	}
+	if !strings.Contains(src, `if (!String(banner.textContent || "").trim()) banner.hidden = true;`) {
+		t.Fatal("banner stays visible with no text")
+	}
+}
+
+func TestNotifyPrepromptStacks(t *testing.T) {
+	src := string(IndexHTML)
+	if !strings.Contains(src, ".appr-alert { flex-direction: column; align-items: stretch; width: 100%;") {
+		t.Fatal("notification card is still a row")
+	}
+	body := jsFunc(t, src, "function renderAlerts(")
+	if !strings.Contains(body, "appr-alert-h") || !strings.Contains(body, "appr-alert-actions") || !strings.Contains(body, "notifyBell()") {
+		t.Fatal("pre-prompt is not icon, title, body, then buttons")
+	}
+	if !strings.Contains(body, "PREPROMPT_TITLE") || !strings.Contains(body, "Turn on notifications") || !strings.Contains(body, "Not now") {
+		t.Fatal("pre-prompt copy missing")
+	}
+}
+
+func TestRulesTitleIsHeading(t *testing.T) {
+	src := string(IndexHTML)
+	if !strings.Contains(src, `<h2 class="solo-title" id="rules-title" tabindex="-1">Approval rules</h2>`) {
+		t.Fatal("rules title is not a plain heading")
+	}
+	if strings.Contains(src, `<input`) && strings.Contains(src, `id="rules-title"`) {
+		if !strings.Contains(src, `<h2 class="solo-title" id="rules-title"`) {
+			t.Fatal("rules title is an input")
+		}
+	}
+	if strings.Contains(src, `id="rules-title" type=`) || strings.Contains(src, `<input id="rules-title"`) {
+		t.Fatal("rules title is an input")
+	}
+	if !strings.Contains(src, ":focus:not(:focus-visible) { outline-style: none; }") {
+		t.Fatal("programmatic focus draws a box")
+	}
+}
+
+func TestQueueHeaderCountsAndRules(t *testing.T) {
+	src := string(IndexHTML)
+	if !strings.Contains(src, `id="approvals-sub"`) || !strings.Contains(src, `id="approvals-rules"`) || !strings.Contains(src, `href="/rules"`) {
+		t.Fatal("queue header is missing the subtitle or the Rules link")
+	}
+	if !strings.Contains(src, ">Rules<") || !strings.Contains(src, "queueSubtitle(") {
+		t.Fatal("queue header does not render the count or the Rules link")
+	}
+}
+
+func TestRiskRowShowsAllBots(t *testing.T) {
+	src := string(IndexHTML)
+	body := jsFunc(t, src, "function renderRiskRow(")
+	if strings.Contains(body, `row.applies_to || ""`) {
+		t.Fatal("tool kind is still the applies column")
+	}
+	if !strings.Contains(body, "All bots") || !strings.Contains(body, `el("div", "rules-src", row.applies_to)`) {
+		t.Fatal("risk row does not put the tool under the match")
+	}
+}
+
+func TestTaskTextFlattensWhitespace(t *testing.T) {
+	src := string(IndexHTML)
+	if !strings.Contains(src, "flattenTaskText(item.task_text)") {
+		t.Fatal("task text is rendered raw")
+	}
+	body := jsFunc(t, src, "function flattenTaskText(")
+	if !strings.Contains(body, `/\s+/g`) {
+		t.Fatal("task text does not collapse whitespace")
+	}
+}
+
+func jsFunc(t *testing.T, src, start string) string {
+	t.Helper()
+	i := strings.Index(src, start)
+	if i < 0 {
+		t.Fatalf("missing %s", start)
+	}
+	rest := src[i:]
+	j := strings.Index(rest[len(start):], "\nfunction ")
+	if j < 0 {
+		t.Fatalf("no function after %s", start)
+	}
+	return rest[:len(start)+j]
+}
+
 func TestApprovalsNoExternalURLs(t *testing.T) {
 	src := string(IndexHTML)
 	stripped := strings.ReplaceAll(src, "http://www.w3.org/2000/svg", "")
@@ -328,8 +430,20 @@ check("compound", comp.approve === "once" && comp.chevron === false && comp.note
 const unc = approvalActions({level: "unclassified", allowed_scopes: ["once", "bot"]});
 check("unclassified-lock", unc.lockGlobal === true && unc.approve === "split-primary", JSON.stringify(unc));
 check("adv-off", advisorySource({checked: false, source: "table"}) === "Not checked", advisorySource({checked: false, source: "table"}));
-check("adv-table", advisorySource({checked: true, source: "table"}) === "From the risk table", advisorySource({checked: true, source: "table"}));
-check("adv-model", advisorySource({checked: true, source: "local model raised this to high"}) === "Local model raised this to high", advisorySource({checked: true, source: "local model raised this to high"}));
+check("adv-table", advisorySource({checked: true, source: "table"}, "low") === "Low from the built-in table. Local model: no change.", advisorySource({checked: true, source: "table"}, "low"));
+check("adv-crit-table", advisorySource({checked: true, source: "table"}, "critical") === "Critical from the built-in table. Local model: no change.", advisorySource({checked: true, source: "table"}, "critical"));
+check("adv-model", advisorySource({checked: true, source: "local model raised this to high"}, "high") === "Local model raised this to high", advisorySource({checked: true, source: "local model raised this to high"}, "high"));
+const titled = {level: "critical", tool: "shell", critical_reason: "Reads outside the workspace: /", advisory: {text: "Looks routine; safe to allow."}};
+check("title-reason", approvalTitle(titled) === "Reads outside the workspace: /", approvalTitle(titled));
+check("title-shell", approvalTitle({level: "low", tool: "shell", advisory: {text: "Looks routine; safe to allow."}}) === "Run a shell command", approvalTitle({level: "low", tool: "shell", advisory: {text: "Looks routine; safe to allow."}}));
+check("title-parts", approvalTitle({level: "medium", tool: "shell", compound: true}) === "Run a command with several parts", approvalTitle({level: "medium", tool: "shell", compound: true}));
+check("title-edit", approvalTitle({level: "medium", tool: "edit"}) === "Edit a file", approvalTitle({level: "medium", tool: "edit"}));
+check("title-no-advisory", approvalTitle.toString().indexOf("advisory") < 0, approvalTitle.toString());
+check("task-flat", flattenTaskText("a.txt\nMake exactly") === "a.txt Make exactly", flattenTaskText("a.txt\nMake exactly"));
+check("task-spaces", flattenTaskText("  a \n\n b\t") === "a b", flattenTaskText("  a \n\n b\t"));
+check("sub-0", queueSubtitle(0, 0) === "0 requests · 0 bots", queueSubtitle(0, 0));
+check("sub-1", queueSubtitle(1, 1) === "1 request · 1 bot", queueSubtitle(1, 1));
+check("sub-n", queueSubtitle(2, 3) === "2 requests · 3 bots", queueSubtitle(2, 3));
 check("preview", previewSummary({would_allow: 3, would_ask: 1, still_asks_critical: 1}, "Ada") === "3 of Ada's last 50 requests would be allowed · 2 still asks", previewSummary({would_allow: 3, would_ask: 1, still_asks_critical: 1}, "Ada"));
 check("outcome", outcomeLabel("still_asks_compound", "") === "Still asks · several parts", outcomeLabel("still_asks_compound", ""));
 check("no-match", outcomeLabel("no_match", "flag_in_star").indexOf("never matches a flag") >= 0, outcomeLabel("no_match", "flag_in_star"));

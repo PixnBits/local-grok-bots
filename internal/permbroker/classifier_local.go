@@ -100,7 +100,7 @@ func (c *LocalClassifier) Escalate(ctx context.Context, in ClassInput) (Level, s
 		return "", ""
 	}
 	rep := c.Classify(ctx, in)
-	if Rank(rep.Level) > Rank(in.Level) {
+	if classifierRaises(in.Level, rep.Level) {
 		return rep.Level, "local model raised this to " + string(rep.Level)
 	}
 	return "", ""

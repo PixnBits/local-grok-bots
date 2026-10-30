@@ -188,6 +188,7 @@ window.addEventListener("storage", function (ev) {
   }
   * { box-sizing: border-box; }
   :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  :focus:not(:focus-visible) { outline-style: none; }
   html, body { margin: 0; height: 100%; height: 100dvh; overflow: hidden; }
   body {
     font-family: var(--font);
@@ -1187,13 +1188,22 @@ window.addEventListener("storage", function (ev) {
     border-left: 1px solid var(--border);
   }
   .appr-bar, .rules-bar { height: 64px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--surface); }
+  #approvals .appr-bar { height: auto; min-height: 64px; }
+  .appr-head { min-width: 0; flex: 1; display: flex; flex-direction: column; justify-content: center; }
+  .appr-sub { margin: 0; color: var(--muted); font-size: 12px; line-height: 16px; font-weight: 400; }
+  a.appr-rules { color: var(--accent-text); font-size: 13px; font-weight: 600; text-decoration: none; flex: none; }
   .appr-bar h2, #rules-title { margin: 0; font-size: 17px; font-weight: 650; line-height: 24px; }
+  #rules-title { width: auto; border: 0; background: none; box-shadow: none; padding: 0; border-radius: 0; }
   .appr-body, .rules-scroll { flex: 1; min-height: 0; overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 12px; }
   .appr-note, .appr-err, .appr-alert {
     display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; border-radius: 10px;
     background: var(--danger-soft); color: var(--danger-text); font-size: 13px; line-height: 18px;
   }
-  .appr-alert { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+  #approvals-banner[hidden] { display: none !important; }
+  .appr-alert { flex-direction: column; align-items: stretch; width: 100%; background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+  .appr-alert-h { display: flex; align-items: center; gap: 8px; font-weight: 700; }
+  .appr-alert-h svg { flex: none; }
+  .appr-alert-actions { display: flex; flex-wrap: wrap; gap: 8px; }
   .appr-alert p { margin: 0; }
   .appr-empty { display: grid; gap: 8px; justify-items: center; text-align: center; padding: 32px 16px; color: var(--text); }
   .appr-empty p { margin: 0; color: var(--muted); font-size: 13px; line-height: 18px; }
@@ -1781,7 +1791,11 @@ window.addEventListener("storage", function (ev) {
   <div id="approvals-scrim" hidden></div>
   <aside id="approvals" hidden role="dialog" aria-labelledby="approvals-title">
     <header class="appr-bar">
-      <h2 id="approvals-title" tabindex="-1">Approvals</h2>
+      <div class="appr-head">
+        <h2 id="approvals-title" tabindex="-1">Approvals</h2>
+        <p class="appr-sub" id="approvals-sub">0 requests · 0 bots</p>
+      </div>
+      <a class="appr-rules" id="approvals-rules" href="/rules">Rules</a>
       <button type="button" class="ghost icon-btn" id="approvals-close" aria-label="Close"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
     </header>
     <div id="approvals-banner" class="appr-note" hidden></div>
@@ -8474,11 +8488,49 @@ function armReady(ui, now) {
   if (!ui || !ui.armedAt) return false;
   return (now || 0) - ui.armedAt >= APPROVE_ARM_MS;
 }
-function advisorySource(advisory) {
+function levelWord(level) {
+  const l = String(level || "unclassified");
+  return l.charAt(0).toUpperCase() + l.slice(1);
+}
+function approvalTitle(item) {
+  const it = item || {};
+  const reason = String(it.critical_reason || "");
+  if (reason) return reason;
+  if (it.compound) return "Run a command with several parts";
+  const tool = String(it.tool || "").toLowerCase();
+  if (tool === "shell" || tool === "bash") return "Run a shell command";
+  if (tool === "edit" || tool === "write" || tool === "multiedit" || tool === "notebookedit") return "Edit a file";
+  if (tool === "read" || tool === "glob" || tool === "grep") return "Read a file";
+  return "Permission needed";
+}
+function flattenTaskText(text) {
+  return String(text == null ? "" : text).replace(/\s+/g, " ").trim();
+}
+function queueBotCount(items) {
+  const seen = {};
+  let n = 0;
+  (items || []).forEach(function (item) {
+    const id = String((item && item.bot_id) || "");
+    if (!id || seen[id]) return;
+    seen[id] = true;
+    n += 1;
+  });
+  return n;
+}
+function queueSubtitle(requests, bots) {
+  const n = Number(requests) || 0;
+  const m = Number(bots) || 0;
+  const req = n === 1 ? "1 request" : n + " requests";
+  const bot = m === 1 ? "1 bot" : m + " bots";
+  return req + " · " + bot;
+}
+function advisorySource(advisory, level) {
   const a = advisory || {};
   const src = String(a.source || "");
   if (!a.checked && (!src || src === "table")) return "Not checked";
-  if (!src || src === "table") return "From the risk table";
+  const raised = src.match(/^local model raised this to ([a-z]+)$/i);
+  if (raised) return "Local model raised this to " + raised[1].toLowerCase();
+  if (!src || src === "table") return levelWord(level) + " from the built-in table. Local model: no change.";
   return src.charAt(0).toUpperCase() + src.slice(1);
 }
 function eyebrowFor(level) {
@@ -8720,6 +8772,36 @@ function syncBrokerBadges() {
     if (copy && line2) appendPendingBadge(copy, line2, button, bot);
   });
 }
+function notifyBell() {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", "0 0 24 24");
+  svg.setAttribute("width", "18");
+  svg.setAttribute("height", "18");
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  const add = function (d) {
+    const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    p.setAttribute("d", d);
+    p.setAttribute("fill", "none");
+    p.setAttribute("stroke", "currentColor");
+    p.setAttribute("stroke-width", "2");
+    p.setAttribute("stroke-linecap", "round");
+    p.setAttribute("stroke-linejoin", "round");
+    svg.append(p);
+  };
+  add("M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z");
+  add("M10 19a2 2 0 0 0 4 0");
+  return svg;
+}
+function paintQueueHeader() {
+  const sub = $("#approvals-sub");
+  const items = approvalItems || [];
+  if (sub) sub.textContent = queueSubtitle(items.length, queueBotCount(items));
+  const link = $("#approvals-rules");
+  if (link && typeof levelURL === "function" && typeof base === "function") {
+    link.setAttribute("href", levelURL(base(), "rules", null, ""));
+  }
+}
 function paintRulesLinks() {
   const n = (approvalRules || []).length;
   const menu = $("#menu-rules");
@@ -8945,7 +9027,7 @@ function renderApprovalCard(item, mode) {
   }
   const title = el("div", "appr-title");
   const chip = el("span", "appr-chip " + level, level);
-  title.append(chip, document.createTextNode((item.advisory && item.advisory.text) || "Permission needed"));
+  title.append(chip, document.createTextNode(approvalTitle(item)));
   inner.append(title);
   if (item.compound) {
     const note = el("div", "appr-compound");
@@ -8966,13 +9048,13 @@ function renderApprovalCard(item, mode) {
     const adv = el("div", "appr-adv" + (item.advisory.checked ? "" : " is-unchecked"));
     adv.append(el("b", "", "Advisory"));
     if (item.advisory.text) adv.append(el("p", "", item.advisory.text));
-    adv.append(el("p", "appr-src", advisorySource(item.advisory)));
+    adv.append(el("p", "appr-src", advisorySource(item.advisory, item.level)));
     inner.append(adv);
   }
   if (item.critical_reason) inner.append(el("p", "appr-reason", item.critical_reason));
   if (item.task_text) {
     const task = el("div", "appr-task");
-    task.append(el("span", "", "Task: " + item.task_text));
+    task.append(el("span", "", "Task: " + flattenTaskText(item.task_text)));
     inner.append(task);
   }
   card.append(inner);
@@ -9139,7 +9221,7 @@ function renderApprovalCard(item, mode) {
       const label = step.scope === "bot" ? "Always for " + itemBot(item) : step.label;
       const strong = el("strong", "", label);
       let detail = "";
-      if (step.scope === "task") detail = taskStepCopy(itemBot(item), item.task_text || "");
+      if (step.scope === "task") detail = taskStepCopy(itemBot(item), flattenTaskText(item.task_text || ""));
       else if (step.scope === "bot") detail = botStepCopy(itemBot(item));
       else if (step.scope === "global") detail = globalStepCopy();
       stepBtn.append(strong);
@@ -9280,8 +9362,11 @@ function renderAlerts(host) {
     });
     card.append(off);
   } else {
-    card.append(el("p", "", PREPROMPT_TITLE));
+    const head = el("div", "appr-alert-h");
+    head.append(notifyBell(), el("strong", "", PREPROMPT_TITLE));
+    card.append(head);
     card.append(el("p", "", PREPROMPT_BODY));
+    const actions = el("div", "appr-alert-actions");
     const on = btn("primary", "Turn on notifications");
     on.addEventListener("click", function () { turnOnNotifications(); });
     const later = btn("ghost", "Not now");
@@ -9290,7 +9375,8 @@ function renderAlerts(host) {
       approvals.forceAlerts = false;
       renderApprovals();
     });
-    card.append(on, later);
+    actions.append(on, later);
+    card.append(actions);
   }
   host.append(card);
 }
@@ -9407,7 +9493,9 @@ function renderApprovals() {
       banner.removeAttribute("data-mode");
       banner.replaceChildren();
     }
+    if (!String(banner.textContent || "").trim()) banner.hidden = true;
   }
+  paintQueueHeader();
   renderAlerts($("#approvals-alerts"));
   syncNotifications(items);
   paintRulesLinks();
@@ -9880,7 +9968,7 @@ function renderGrantRow(grant) {
   row.append(el("span", "appr-chip allow", "allow"));
   const cmd = el("div", "");
   cmd.append(el("div", "rules-cmd", grant.raw || (grant.argv || []).join(" ")));
-  cmd.append(el("div", "rules-src", "Task grant" + (grant.task_text ? " · " + grant.task_text : "")));
+  cmd.append(el("div", "rules-src", "Task grant" + (grant.task_text ? " · " + flattenTaskText(grant.task_text) : "")));
   row.append(cmd);
   row.append(el("span", "", "This task"));
   row.append(el("span", "", grant.expires ? approvalAge(grant.expires, Date.now(), 0) : ""));
@@ -9907,9 +9995,10 @@ function renderRiskRow(row, stricter) {
   line.append(el("span", "appr-chip " + (row.level || ""), row.level || ""));
   const cmd = el("div", "");
   cmd.append(el("div", "rules-cmd", (row.matches || []).join("\n")));
+  if (row.applies_to) cmd.append(el("div", "rules-src", row.applies_to));
   if (stricter && row.raised_from) cmd.append(el("div", "rules-src", "Raised from " + row.raised_from + " to " + row.level));
   line.append(cmd);
-  line.append(el("span", "", row.applies_to || ""));
+  line.append(el("span", "", "All bots"));
   line.append(el("span", "", "—"));
   const lock = el("span", "appr-lock");
   lock.append(cloneTpl("tpl-lock"));
@@ -10011,6 +10100,12 @@ function startApprovals() {
   if (scrim) scrim.addEventListener("click", closeApprovals);
   const close = $("#approvals-close");
   if (close) close.addEventListener("click", closeApprovals);
+  const rulesLink = $("#approvals-rules");
+  if (rulesLink) rulesLink.addEventListener("click", function (ev) {
+    if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey || ev.button) return;
+    ev.preventDefault();
+    openRules("", true);
+  });
   const panel = $("#approvals");
   if (panel) panel.addEventListener("keydown", function (e) {
     if (e.key !== "Tab" || approvalMode() === "dock") return;

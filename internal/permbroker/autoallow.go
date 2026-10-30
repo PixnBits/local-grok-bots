@@ -197,6 +197,11 @@ func cleanAdvisory(s string) string {
 	return clip(s, 300)
 }
 
+// flattenSpace turns runs of spaces and newlines into one space.
+func flattenSpace(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
 // clipText is cleanAdvisory with a caller-chosen limit.
 func clipText(s string, n int) string {
 	s = strings.Map(func(r rune) rune {

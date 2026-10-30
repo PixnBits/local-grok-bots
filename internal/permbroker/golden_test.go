@@ -182,8 +182,11 @@ func TestGolden_TaskGrantExpires(t *testing.T) {
 	}
 	e.NoteUserMessage("bot", "m2")
 	req.TaskID = "m2"
-	if d := e.Evaluate(ctx, req); d.Verdict == VerdictAllow {
+	if d := e.Evaluate(ctx, req); d.Verdict != VerdictAllow || d.Actor != "human" {
 		t.Fatalf("next message %+v", d)
+	}
+	if d := e.Evaluate(ctx, req); d.Verdict == VerdictAllow {
+		t.Fatalf("token reused %+v", d)
 	}
 	req.TaskID = "m1"
 	if d := e.Evaluate(ctx, req); d.Verdict == VerdictAllow {
