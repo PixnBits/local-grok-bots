@@ -38,13 +38,76 @@ func TestGolden_BrokerSettingsBlockOnFailure(t *testing.T) {
 }
 
 func TestGolden_OldClaudeRefusesBroker(t *testing.T) {
-	t.Setenv("LGB_FAKE_CLAUDE_VERSION", "2.1.294")
+	t.Setenv("LGB_FAKE_CLAUDE_VERSION", "2.1.294 (Claude Code)")
 	hook := writeHookScript(t, "#!/bin/sh\nexit 0\n")
 	ran := runBrokerClaude(t, hook, nil)
 	if ran.status != "error" || !strings.Contains(ran.errText, "2.1.294") || !strings.Contains(ran.errText, "so the turn was refused") {
 		t.Fatalf("run %s %q", ran.status, ran.errText)
 	}
 	if ran.marker || strings.Contains(ran.argv, "--settings") || strings.Contains(ran.argv, "-p") {
+		t.Fatalf("turn started argv %q marker %v", ran.argv, ran.marker)
+	}
+	if !strings.Contains(ran.argv, "--version") {
+		t.Fatalf("version probe missing\n%s", ran.argv)
+	}
+}
+
+func TestGolden_HookUnpinnedAtStartupRefusesTurn(t *testing.T) {
+	hook := writeHookScript(t, "#!/bin/sh\nexit 0\n")
+	if err := os.Chmod(hook, 0o775); err != nil {
+		t.Fatal(err)
+	}
+	h := startBrokerClaude(t, hook, "hook")
+	if err := os.Chmod(hook, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ran := h.post(t)
+	const sentence = "hook was not pinned when the policy loaded"
+	if ran.status != "error" || !strings.Contains(ran.errText, sentence) || !strings.Contains(ran.errText, "so the turn was refused") {
+		t.Fatalf("run %s %q", ran.status, ran.errText)
+	}
+	if strings.Contains(ran.argv, "-p") || strings.Contains(ran.argv, "--version") || ran.marker {
+		t.Fatalf("claude started argv %q marker %v", ran.argv, ran.marker)
+	}
+	if !strings.Contains(ran.logs, sentence) {
+		t.Fatalf("logs %s", ran.logs)
+	}
+	audit, err := os.ReadFile(filepath.Join(h.app.cfg.DataDir, "permbroker", "audit.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(audit), sentence) {
+		t.Fatalf("audit\n%s", audit)
+	}
+}
+
+func TestGolden_LaunchEnvPathChecksThatClaude(t *testing.T) {
+	hook := writeHookScript(t, "#!/bin/sh\nexit 0\n")
+	h := startBrokerClaude(t, hook, "hook")
+	oldDir := filepath.Join(h.app.cfg.DataDir, "oldbin")
+	if err := os.MkdirAll(oldDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" +
+		"if [ -n \"$LGB_ARGV_LOG\" ]; then\n" +
+		"  printf '%s\\n' \"$@\" >> \"$LGB_ARGV_LOG\"\n" +
+		"  printf '%s\\n' '---' >> \"$LGB_ARGV_LOG\"\n" +
+		"fi\n" +
+		"printf '%s\\n' '2.1.294 (Claude Code)'\n"
+	if err := os.WriteFile(filepath.Join(oldDir, "claude"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.app.editPol(func(p *policy.Policy) {
+		if p.CLIEnv == nil {
+			p.CLIEnv = map[string]string{}
+		}
+		p.CLIEnv["PATH"] = oldDir
+	})
+	ran := h.post(t)
+	if ran.status != "error" || !strings.Contains(ran.errText, "2.1.294") || !strings.Contains(ran.errText, "so the turn was refused") {
+		t.Fatalf("run %s %q", ran.status, ran.errText)
+	}
+	if strings.Contains(ran.argv, "-p") || ran.marker {
 		t.Fatalf("turn started argv %q marker %v", ran.argv, ran.marker)
 	}
 	if !strings.Contains(ran.argv, "--version") {

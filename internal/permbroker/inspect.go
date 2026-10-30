@@ -244,15 +244,29 @@ func hitsCritical(req Request, in inspected, crit []string) bool {
 	if len(crit) == 0 {
 		return false
 	}
+	cwd := ""
+	if filepath.IsAbs(req.Cwd) {
+		cwd = filepath.Clean(req.Cwd)
+	}
 	texts := []string{in.Raw, req.Cwd, req.Workspace}
 	texts = append(texts, in.Argv...)
 	texts = append(texts, toolPaths(req.ToolInput)...)
 	for _, text := range texts {
-		if pathTouches(text, crit) {
+		if pathTouches(text, cwd, crit) {
 			return true
 		}
 	}
 	return false
+}
+
+// BrokerCriticalPaths is the set the daemon marks critical: the hook
+// binary, DATA_DIR/permbroker, the settings file, and its directory.
+func BrokerCriticalPaths(dataDir, hook, settings, settingsDir string) []string {
+	dir := ""
+	if strings.TrimSpace(dataDir) != "" {
+		dir = filepath.Join(dataDir, "permbroker")
+	}
+	return mergeCritical(nil, []string{hook, dir, settings, settingsDir})
 }
 
 func normalizeCritical(in []string) []string {
@@ -280,20 +294,28 @@ func mergeCritical(base, add []string) []string {
 	return out
 }
 
-func pathTouches(text string, crit []string) bool {
+// pathTouches reports whether text names a critical path.
+// An absolute path is compared directly. A relative path-like token is
+// joined to cwd when cwd is absolute. A bare word is left relative so it
+// is not treated as a path. Text that contains an absolute critical path,
+// such as a flag value, still matches.
+func pathTouches(text, cwd string, crit []string) bool {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return false
 	}
-	clean := text
-	if filepath.IsAbs(text) {
-		clean = filepath.Clean(text)
+	probe := text
+	switch {
+	case filepath.IsAbs(text):
+		probe = filepath.Clean(text)
+	case looksPath(text) && !strings.ContainsAny(text, " \t\n\r") && filepath.IsAbs(cwd):
+		probe = filepath.Clean(filepath.Join(cwd, text))
 	}
 	for _, c := range crit {
-		if clean == c || underRoot(clean, c) {
-			return true
+		if c == "" || c == "/" || c == "." {
+			continue
 		}
-		if mentionsPath(text, c) {
+		if probe == c || underRoot(probe, c) || mentionsPath(text, c) {
 			return true
 		}
 	}

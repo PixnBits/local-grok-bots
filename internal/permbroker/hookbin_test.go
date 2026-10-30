@@ -82,3 +82,51 @@ func TestCheckHookBinaryParents(t *testing.T) {
 		t.Fatalf("tmp parent %v", err)
 	}
 }
+
+func TestUnderRootRelativeVersusAbsolute(t *testing.T) {
+	root := "/var/lib/permbroker"
+	for _, word := range []string{"touch", "git", "canary_a", "a/b"} {
+		if underRoot(word, root) {
+			t.Fatalf("%s matched %s", word, root)
+		}
+	}
+	if !underRoot("/var/lib/permbroker/state", root) {
+		t.Fatal("child")
+	}
+	if !underRoot(root, root) {
+		t.Fatal("root itself")
+	}
+	if underRoot("/var/lib", root) || underRoot("/var/lib/other", root) {
+		t.Fatal("parent or sibling")
+	}
+	if underRoot("/var/lib/permbroker/state", "relroot") || underRoot("a/b", root) {
+		t.Fatal("mixed relative and absolute")
+	}
+}
+
+func TestCheckHookBinaryRelativeJailRoot(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := os.MkdirTemp(home, ".lgb-hookjail-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "hook")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	parent := filepath.Dir(dir)
+	t.Chdir(parent)
+	if err := CheckHookBinary(path, []string{filepath.Base(dir)}); err == nil || !strings.Contains(err.Error(), "hook path is inside a jail-writable directory") {
+		t.Fatalf("relative jail root %v", err)
+	}
+	if err := CheckHookBinary(path, []string{"not-the-hook-dir"}); err != nil {
+		t.Fatalf("unrelated relative root %v", err)
+	}
+}

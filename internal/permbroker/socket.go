@@ -15,6 +15,7 @@ import (
 
 // evaluateTimeout is how long one socket evaluate may run.
 // The deadline is a deny, including when the engine would have allowed.
+// A late evaluation must not spend a one-time approval or a task grant.
 const evaluateTimeout = 2 * time.Second
 
 // Listener is one bot's evaluate socket. The directory is 0700 and the

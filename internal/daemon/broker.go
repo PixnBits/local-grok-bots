@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -122,13 +121,12 @@ func (a *App) prepareBrokerHook(bot store.Bot, ws, home string) (string, error) 
 		return "", a.refuseBrokerHook(bot.ID, err)
 	}
 	if !a.hookPinned() {
-		return "", a.refuseBrokerHook(bot.ID, fmt.Errorf("hook was not pinned when the policy loaded"))
+		err := fmt.Errorf("hook was not pinned when the policy loaded")
+		a.noteHookChange(bot.ID, err)
+		return "", a.refuseBrokerHook(bot.ID, err)
 	}
 	if _, err := a.brokerSockPath(bot.ID); err != nil {
 		return "", a.refuseBrokerHook(bot.ID, err)
-	}
-	if err := a.checkClaudeBrokerVersion(); err != nil {
-		return "", a.refuseBrokerCLI(bot.ID, err)
 	}
 	sock, err := a.brokerSocket(bot.ID)
 	if err != nil {
@@ -193,12 +191,24 @@ func (a *App) noteHookChange(botID string, err error) {
 	a.broker.Note(botID, "deny", err.Error())
 }
 
-func (a *App) checkClaudeBrokerVersion() error {
-	path, err := exec.LookPath("claude")
-	if err != nil {
-		return fmt.Errorf("version cannot be read")
+// checkClaudeBrokerVersion runs --version on the binary this launch will
+// execute. The launch environment is already final, including its PATH.
+func (a *App) checkClaudeBrokerVersion(botID string, spec clisession.Spec) error {
+	if a == nil || !strings.EqualFold(spec.Backend, "claude") || !a.brokerHooksOn(botID) {
+		return nil
 	}
-	return clisession.CheckClaudeBrokerVersion(context.Background(), path)
+	argv, err := clisession.Args(spec)
+	if err != nil || len(argv) == 0 {
+		return a.refuseBrokerCLI(botID, fmt.Errorf("version cannot be read"))
+	}
+	path, err := clisession.ResolveLaunchPath(argv[0], clisession.LaunchEnv(spec))
+	if err != nil {
+		return a.refuseBrokerCLI(botID, fmt.Errorf("version cannot be read"))
+	}
+	if err := clisession.CheckClaudeBrokerVersion(context.Background(), path); err != nil {
+		return a.refuseBrokerCLI(botID, err)
+	}
+	return nil
 }
 
 func (a *App) refuseBrokerCLI(botID string, err error) error {
@@ -208,32 +218,11 @@ func (a *App) refuseBrokerCLI(botID string, err error) error {
 }
 
 func (a *App) brokerCriticalPaths(bin, settings, settingsDir string) []string {
-	dir := ""
-	if a != nil && a.cfg.DataDir != "" {
-		dir = filepath.Join(a.cfg.DataDir, "permbroker")
+	data := ""
+	if a != nil {
+		data = a.cfg.DataDir
 	}
-	return cleanCriticalPaths(bin, dir, settings, settingsDir)
-}
-
-func cleanCriticalPaths(paths ...string) []string {
-	var out []string
-	seen := map[string]bool{}
-	for _, p := range paths {
-		p = strings.TrimSpace(p)
-		if p == "" {
-			continue
-		}
-		if abs, err := filepath.Abs(p); err == nil {
-			p = abs
-		}
-		p = filepath.Clean(p)
-		if p == "" || p == "." || p == "/" || seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, p)
-	}
-	return out
+	return permbroker.BrokerCriticalPaths(data, bin, settings, settingsDir)
 }
 
 // brokerHookBinary is the configured hook, or lgb-permhook next to this

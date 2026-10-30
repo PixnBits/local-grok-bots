@@ -225,6 +225,13 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		a.failCLI(bot.ID, runID, backend, err)
 		return
 	}
+	if err := a.checkClaudeBrokerVersion(bot.ID, spec); err != nil {
+		if fresh {
+			a.clearBotSession(bot.ID, sessionID)
+		}
+		a.failCLI(bot.ID, runID, backend, err)
+		return
+	}
 	a.warnGrokDarwinNetwork(bot, runID, backend)
 	trace := &cliTrace{a: a, botID: bot.ID, runID: runID}
 	res, err := runner.Run(turnCtx, spec, func(ev clisession.Event) {

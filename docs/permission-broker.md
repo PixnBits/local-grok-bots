@@ -27,7 +27,10 @@ with the other policy warnings.
 While `broker` is `hook`, policy load records the hook binary: a content
 hash, device, inode, owner, mode, size, and mtime. Every armed launch
 compares the file again. A difference refuses the turn and appends an
-audit row. Publishing policy again records the file as it is then. The
+audit row. If the hook was missing or not usable when policy loaded, the
+turn is refused even when the file is usable later. The refusal says the
+hook was not pinned when the policy loaded. Publishing policy again
+records the file as it is then. The
 binary must be owned by the daemon user or root. Each directory from the
 file up to `/` must not be group or world writable, including a sticky
 directory. A symlink component is resolved and those directories are
@@ -57,7 +60,11 @@ lock hooks; that key applies only in managed settings. Installing
 
 The settings deny list also names the hook binary, that settings file and
 its directory, and `DATA_DIR/permbroker`. A tool call that touches one of
-those paths is critical: it always asks, and it is never a rule.
+those paths is critical: it always asks, and it is never a rule. A bare
+command word is not one of those paths. Containment uses an absolute
+path, or a relative path resolved from the request's working directory
+when that directory is absolute. Text that contains an absolute critical
+path, such as a flag value, still counts.
 
 The launch refuses bypass flags, `acceptEdits`, `dontAsk`,
 `bypassPermissions`, `--allowedTools`, `--add-dir`, and `--plugin-dir`.
@@ -66,10 +73,14 @@ An MCP config is refused unless it is the daemon's own file.
 `--disallowedTools` may stay. Headless asks, including stream-json
 control, are denied and do not open a card.
 
-The broker arms only when `claude --version` is at least 2.1.295. The
-result is cached for that binary's path, size, and mtime. An older
-release, or a version that cannot be read, refuses the turn before the
-CLI starts. A hook failure other than a normal allow or an exit-2 deny
+The broker arms only when the Claude binary the launch will run prints at
+least 2.1.295. That binary is resolved the same way the launch resolves
+it, using the launch environment's PATH, and the check runs that file
+with `--version`. The first stdout line must be `N.N.N (Claude Code)`,
+with trailing whitespace allowed. Stderr is ignored. A non-zero exit, any
+other text, or an older release refuses the turn before the CLI starts.
+The result is cached for that binary's path, size, and mtime. A hook
+failure other than a normal allow or an exit-2 deny
 blocks the tool because `onFailure` is `block`. Without that field, a
 Read, Glob, or Grep would run and Bash would follow the locked-down
 permission flow.
@@ -83,7 +94,8 @@ including the trailing NUL). A path that does not fit refuses the turn.
 
 The hook is stdlib only. It waits at most 2.5 seconds, under the 30 second
 settings timeout. The socket evaluate itself stops at 2 seconds and the
-deadline is a deny. Exit 0 with a verdict of exactly `allow` is the only
+deadline is a deny. A deadline deny does not spend a one-time approval or
+a task grant. Exit 0 with a verdict of exactly `allow` is the only
 allow. Every doubt exits 2 and prints a PreToolUse deny. Exit 2 blocks the
 tool even if the JSON says allow. The hook never waits for a person.
 
@@ -200,7 +212,12 @@ go test -v ./web/... | grep -i skip
   `onFailure` `block` denies a Read, and the tool marker is absent)
 - hook over the CLI timeout (same block, without waiting 30 seconds)
 - an older Claude release refuses the turn before the CLI starts
+- the version check uses the Claude binary on the launch PATH
 - a hook binary that changes after startup refuses the turn before the CLI starts
+- a hook that was not pinned when policy loaded refuses the turn
+- with the daemon critical paths set, a benign command can be approved once, granted for the task, or saved as a bot rule
+- a command that touches a critical path stays critical
+- a deadline deny leaves a one-time approval unused
 - garbage, empty, unknown, and oversized verdicts
 - ask, approve, identical retry once
 - second retry, and a different argv, cwd, or session, blocked

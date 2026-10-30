@@ -3,9 +3,11 @@ package clisession
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +26,10 @@ type claudeVerKey struct {
 }
 
 var claudeVersionCache sync.Map
+
+// claudeVersionLine is the first stdout line of `claude --version`.
+// Trailing whitespace is trimmed before the match. Anything else is refused.
+var claudeVersionLine = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+) \(Claude Code\)$`)
 
 // CheckClaudeBrokerVersion runs path --version and refuses a release
 // older than MinClaudeBrokerVersion. The result is cached for one
@@ -70,52 +76,26 @@ func probeClaudeVersion(ctx context.Context, path string) (string, error) {
 	cmd := exec.CommandContext(ctx, path, "--version")
 	// Inherit the environment so a test double can report the version
 	// the test asked for. A clean environment would hide that.
-	out, err := cmd.CombinedOutput()
+	// Stderr is ignored. A non-zero exit is a refusal even when stdout
+	// looks like a version line.
+	cmd.Stderr = io.Discard
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("version cannot be read")
+	}
 	if len(out) > 8192 {
 		out = out[:8192]
 	}
-	tok := claudeVersionToken(string(out))
-	if tok == "" {
-		if err == nil {
-			err = fmt.Errorf("version cannot be read")
-		}
-		return "", err
+	line := string(out)
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
 	}
-	return tok, nil
-}
-
-func claudeVersionToken(s string) string {
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			continue
-		}
-		if i > 0 && versionChar(s[i-1]) {
-			continue
-		}
-		j := i
-		parts := 0
-		for parts < 3 {
-			start := j
-			for j < len(s) && s[j] >= '0' && s[j] <= '9' {
-				j++
-			}
-			if j == start {
-				break
-			}
-			parts++
-			if parts == 3 {
-				if j < len(s) && versionChar(s[j]) {
-					break
-				}
-				return s[i:j]
-			}
-			if j >= len(s) || s[j] != '.' {
-				break
-			}
-			j++
-		}
+	line = strings.TrimRight(line, " \t\r")
+	m := claudeVersionLine.FindStringSubmatch(line)
+	if m == nil {
+		return "", fmt.Errorf("version cannot be read")
 	}
-	return ""
+	return m[1] + "." + m[2] + "." + m[3], nil
 }
 
 func versionLess(a, b string) bool {

@@ -647,38 +647,72 @@ func (e *Engine) Evaluate(ctx context.Context, req Request) Decision {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if ctx.Err() != nil {
-		return e.finish(req, in, VerdictDeny, "denied", "", "fail-closed", "")
+	if d, stop := e.cancelled(ctx, req, in); stop {
+		return d
 	}
 	in = e.raiseToCurrent(req, in)
 	if strings.TrimSpace(req.BotID) == "" || strings.TrimSpace(req.SessionID) == "" {
 		return e.finish(req, in, VerdictDeny, "denied", "", "fail-closed", "")
 	}
 	if rule := e.matchDeny(req.BotID, in); rule != nil {
+		if d, stop := e.cancelled(ctx, req, in); stop {
+			return d
+		}
 		e.touch(rule)
 		return e.finish(req, in, VerdictDeny, "denied by rule "+rule.ID, "", rule.ID, rule.ID)
 	}
-	if e.consumeToken(req, in.Hash, in.Level) {
+	if e.consumeToken(ctx, req, in.Hash, in.Level) {
 		return e.finish(req, in, VerdictAllow, "approved", "", "human", "")
+	}
+	if d, stop := e.cancelled(ctx, req, in); stop {
+		return d
 	}
 	if in.Level == LevelCritical || !in.Eligible {
 		if in.Level != LevelCritical && e.grantCovers(req, in) {
+			if d, stop := e.cancelled(ctx, req, in); stop {
+				return d
+			}
 			return e.finish(req, in, VerdictAllow, "allowed for this task", "", "policy", "")
+		}
+		if d, stop := e.cancelled(ctx, req, in); stop {
+			return d
 		}
 		return e.ask(req, in)
 	}
 	if rule := e.matchScoped(req.BotID, in, ScopeBot); rule != nil {
+		if d, stop := e.cancelled(ctx, req, in); stop {
+			return d
+		}
 		return e.applyRule(req, in, rule)
 	}
 	if in.Level == LevelLow || in.Level == LevelMedium {
 		if rule := e.matchScoped("", in, ScopeGlobal); rule != nil {
+			if d, stop := e.cancelled(ctx, req, in); stop {
+				return d
+			}
 			return e.applyRule(req, in, rule)
 		}
 	}
 	if e.grantCovers(req, in) {
+		if d, stop := e.cancelled(ctx, req, in); stop {
+			return d
+		}
 		return e.finish(req, in, VerdictAllow, "allowed for this task", "", "policy", "")
 	}
+	if d, stop := e.cancelled(ctx, req, in); stop {
+		return d
+	}
 	return e.ask(req, in)
+}
+
+// cancelled is the last check before a one-time approval, a rule use,
+// a task grant, or a new pending item. A deadline that already replied
+// deny must not change that state.
+func (e *Engine) cancelled(ctx context.Context, req Request, in inspected) (Decision, bool) {
+	if ctx.Err() == nil {
+		return Decision{}, false
+	}
+	return e.finish(req, in, VerdictDeny, "denied", "", "fail-closed", ""), true
 }
 
 func (e *Engine) applyRule(req Request, in inspected, rule *Rule) Decision {
@@ -926,7 +960,7 @@ func (e *Engine) invalidateLocked() {
 	e.denied = map[string]struct{}{}
 }
 
-func (e *Engine) consumeToken(req Request, hash string, level Level) bool {
+func (e *Engine) consumeToken(ctx context.Context, req Request, hash string, level Level) bool {
 	if level == LevelCritical {
 		return false
 	}
@@ -939,6 +973,9 @@ func (e *Engine) consumeToken(req Request, hash string, level Level) bool {
 			continue
 		}
 		if t.BotID == req.BotID && t.SessionID == req.SessionID && t.Hash == hash && t.Cwd == req.Cwd {
+			if ctx.Err() != nil {
+				return false
+			}
 			e.tokens = append(e.tokens[:i], e.tokens[i+1:]...)
 			return true
 		}

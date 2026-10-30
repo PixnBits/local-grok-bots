@@ -117,15 +117,42 @@ func CheckHookBinary(path string, jailRoots []string) error {
 }
 
 func jailContains(path string, jailRoots []string) error {
+	absPath, err := absoluteClean(path)
+	if err != nil {
+		return fmt.Errorf("hook path cannot be resolved")
+	}
 	for _, root := range jailRoots {
+		root = strings.TrimSpace(root)
 		if root == "" {
 			continue
 		}
-		if underRoot(path, root) {
+		absRoot, err := absoluteClean(root)
+		if err != nil {
+			return fmt.Errorf("jail root cannot be resolved")
+		}
+		if underRoot(absPath, absRoot) {
 			return fmt.Errorf("hook path is inside a jail-writable directory")
 		}
 	}
 	return nil
+}
+
+// absoluteClean makes a path absolute. A relative jail root is resolved
+// before the containment check. A path that cannot be made absolute is refused.
+func absoluteClean(p string) (string, error) {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return "", fmt.Errorf("empty path")
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	abs = filepath.Clean(abs)
+	if !filepath.IsAbs(abs) {
+		return "", fmt.Errorf("not absolute")
+	}
+	return abs, nil
 }
 
 // checkParentChain walks lexical parents from the file's directory through /.
@@ -168,6 +195,9 @@ func checkOneDir(dir string, jailRoots []string) error {
 	return nil
 }
 
+// underRoot reports whether path is root or a descendant of root.
+// Both arguments should already be absolute. filepath.Rel fails when one
+// is relative and the other is absolute; that is not containment.
 func underRoot(path, root string) bool {
 	root = filepath.Clean(root)
 	if root == "" || root == "/" || root == "." {
@@ -175,7 +205,7 @@ func underRoot(path, root string) bool {
 	}
 	rel, err := filepath.Rel(root, path)
 	if err != nil {
-		return true
+		return false
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
 }

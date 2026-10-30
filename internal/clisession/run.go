@@ -50,13 +50,9 @@ func (e ExecRunner) Run(ctx context.Context, spec Spec, onEvent func(Event)) (Re
 	if err != nil {
 		return Result{}, err
 	}
-	path := argv[0]
-	if !strings.Contains(path, "/") {
-		looked, lookErr := exec.LookPath(path)
-		if lookErr != nil {
-			return Result{}, fmt.Errorf("%s not on PATH", path)
-		}
-		path = looked
+	path, err := ResolveLaunchPath(argv[0], LaunchEnv(spec))
+	if err != nil {
+		return Result{}, err
 	}
 	if strings.EqualFold(spec.Backend, "grok") {
 		pinSHA := ""

@@ -181,6 +181,68 @@ func TestSlowInspectDoesNotBlockOtherBot(t *testing.T) {
 	}
 }
 
+func TestDeadlineDenyKeepsOnceToken(t *testing.T) {
+	e := testEngine(t)
+	ctx := context.Background()
+	req := bashReq("bot", "sess", "task", "/work", "git status")
+	first := e.Evaluate(ctx, req)
+	if first.PendingID == "" {
+		t.Fatalf("%+v", first)
+	}
+	if err := e.Decide(first.PendingID, "approve", ScopeOnce); err != nil {
+		t.Fatal(err)
+	}
+	parent, err := os.MkdirTemp("", "dl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(parent) })
+	ln, err := e.Listen("bot", filepath.Join(parent, "s.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	e.NoteTurn("bot", "sess", "run", "task")
+	hookDone := make(chan struct{})
+	e.SetInspectHook(func(context.Context, Request) {
+		time.Sleep(evaluateTimeout + time.Second)
+		close(hookDone)
+	})
+	start := time.Now()
+	rep, err := sockRoundErr(ln.Path(), hookMsg("git status"))
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Verdict != VerdictDeny || rep.Reason != "denied" || strings.Contains(rep.Reason, "pending") {
+		t.Fatalf("deadline %+v", rep)
+	}
+	if elapsed < time.Second || elapsed > 5*time.Second {
+		t.Fatalf("deadline took %s", elapsed)
+	}
+	select {
+	case <-hookDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("slow inspect did not finish")
+	}
+	time.Sleep(100 * time.Millisecond)
+	e.SetInspectHook(nil)
+	again, err := sockRoundErr(ln.Path(), hookMsg("git status"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Verdict != VerdictAllow {
+		t.Fatalf("token %+v", again)
+	}
+	third, err := sockRoundErr(ln.Path(), hookMsg("git status"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.Verdict == VerdictAllow {
+		t.Fatalf("token reused %+v", third)
+	}
+}
+
 func hookMsg(command string) map[string]any {
 	return map[string]any{
 		"op": "evaluate", "hook_event_name": "PreToolUse",
