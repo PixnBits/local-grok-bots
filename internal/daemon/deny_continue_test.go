@@ -73,7 +73,7 @@ func TestGolden_DenyNeverStopsRun_Ollama(t *testing.T) {
 				t.Fatal("run did not ask")
 			}
 			if mode == "deny-all" {
-				res, b = do(t, "POST", srv.URL+"/api/permbroker/pending/deny-all", map[string]any{}, token)
+				res, b = do(t, "POST", srv.URL+"/api/permbroker/pending/deny-all", map[string]any{"ids": []string{id}}, token)
 			} else {
 				res, b = do(t, "POST", srv.URL+"/api/permbroker/pending/"+id, map[string]string{"decision": "deny"}, token)
 			}
@@ -147,7 +147,7 @@ func TestGolden_DenyNeverStopsRun_Claude(t *testing.T) {
 		}
 		const token = "lgbr_admintesttokenvalue"
 		h.app.cfg.AuthToken = token
-		res, body := do(t, "POST", h.srv.URL+"/api/permbroker/pending/deny-all", map[string]any{}, token)
+		res, body := do(t, "POST", h.srv.URL+"/api/permbroker/pending/deny-all", map[string]any{"ids": []string{"gone"}}, token)
 		if res.StatusCode != 200 {
 			t.Fatalf("deny-all %d %s", res.StatusCode, body)
 		}

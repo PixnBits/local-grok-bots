@@ -9,7 +9,7 @@ import (
 )
 
 func TestApprovalsCopy(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	for _, s := range []string{
 		`const APPROVE_ARM_MS = 1500`,
 		`const APPROVAL_POLL_MS = 2000`,
@@ -103,7 +103,7 @@ func TestApprovalsCopy(t *testing.T) {
 }
 
 func TestApprovalTitleIgnoresAdvisory(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	body := jsFunc(t, src, "function approvalTitle(")
 	if strings.Contains(body, "advisory") {
 		t.Fatalf("title renderer reads advisory: %s", body)
@@ -117,7 +117,7 @@ func TestApprovalTitleIgnoresAdvisory(t *testing.T) {
 }
 
 func TestApprovalsBannerHidesWhenEmpty(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	if !strings.Contains(src, "#approvals-banner[hidden] { display: none !important; }") {
 		t.Fatal("empty banner is visible")
 	}
@@ -127,7 +127,7 @@ func TestApprovalsBannerHidesWhenEmpty(t *testing.T) {
 }
 
 func TestNotifyPrepromptStacks(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	if !strings.Contains(src, ".appr-alert { flex-direction: column; align-items: stretch; width: 100%;") {
 		t.Fatal("notification card is still a row")
 	}
@@ -141,7 +141,7 @@ func TestNotifyPrepromptStacks(t *testing.T) {
 }
 
 func TestRulesTitleIsHeading(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	if !strings.Contains(src, `<h2 class="solo-title" id="rules-title" tabindex="-1">Approval rules</h2>`) {
 		t.Fatal("rules title is not a plain heading")
 	}
@@ -159,7 +159,7 @@ func TestRulesTitleIsHeading(t *testing.T) {
 }
 
 func TestQueueHeaderCountsAndRules(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	if !strings.Contains(src, `id="approvals-sub"`) || !strings.Contains(src, `id="approvals-rules"`) || !strings.Contains(src, `href="/rules"`) {
 		t.Fatal("queue header is missing the subtitle or the Rules link")
 	}
@@ -169,7 +169,7 @@ func TestQueueHeaderCountsAndRules(t *testing.T) {
 }
 
 func TestRiskRowShowsAllBots(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	body := jsFunc(t, src, "function renderRiskRow(")
 	if strings.Contains(body, `row.applies_to || ""`) {
 		t.Fatal("tool kind is still the applies column")
@@ -180,7 +180,7 @@ func TestRiskRowShowsAllBots(t *testing.T) {
 }
 
 func TestTaskTextFlattensWhitespace(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	if !strings.Contains(src, "flattenTaskText(item.task_text)") {
 		t.Fatal("task text is rendered raw")
 	}
@@ -205,7 +205,7 @@ func jsFunc(t *testing.T, src, start string) string {
 }
 
 func TestApprovalsNoExternalURLs(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	stripped := strings.ReplaceAll(src, "http://www.w3.org/2000/svg", "")
 	for _, bad := range []string{"http://", "https://", "//cdn"} {
 		if i := strings.Index(strings.ToLower(stripped), bad); i >= 0 {
@@ -267,11 +267,11 @@ func TestApprovalsPureHelpers(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed")
 	}
-	snippet, err := json.Marshal(between(t, string(IndexHTML), "// approvals-pure:begin", "// approvals-pure:end"))
+	snippet, err := json.Marshal(between(t, ClientSource(), "// approvals-pure:begin", "// approvals-pure:end"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	route, err := json.Marshal(between(t, string(IndexHTML), "// route:begin", "// route:end"))
+	route, err := json.Marshal(between(t, ClientSource(), "// route:begin", "// route:end"))
 	if err != nil {
 		t.Fatal(err)
 	}

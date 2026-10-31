@@ -52,6 +52,9 @@ func gitConfigRisk(ws string, homes, env []string) string {
 		if why := gitHookRisk(ws); why != "" {
 			return why
 		}
+		if why := symlinkAttrRisk(ws); why != "" {
+			return why
+		}
 	}
 	return ""
 }

@@ -11,7 +11,7 @@ import (
 // helpers between the profile-logic markers. Static pins lock the draft copy.
 
 func TestProfileStatic(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	for _, s := range []string{
 		`>Draft</span>`,
 		`Not created yet`,
@@ -59,7 +59,7 @@ func TestProfileLogic(t *testing.T) {
 	if err != nil {
 		t.Fatal("node not installed")
 	}
-	snippet, err := json.Marshal(between(t, string(IndexHTML), "// profile-logic:begin", "// profile-logic:end"))
+	snippet, err := json.Marshal(between(t, ClientSource(), "// profile-logic:begin", "// profile-logic:end"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestProfileOpenAppliesFields(t *testing.T) {
 	if err != nil {
 		t.Fatal("node not installed")
 	}
-	src := string(IndexHTML)
+	src := ClientSource()
 	tools := sliceFrom(t, src, "const SERVER_TOOL_NAMES", "async function duplicateBot")
 	apply := sliceFrom(t, src, "function applyBotFields", "function blankDraftFields")
 	open := sliceFrom(t, src, "async function openProfile", "// scroll:begin")

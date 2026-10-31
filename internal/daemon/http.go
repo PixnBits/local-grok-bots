@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -46,12 +48,14 @@ func (a *App) Handler() http.Handler {
 	a.permRoute("POST /api/bots/{id}/permission-suggestions/{sug_id}/dismiss", a.handleDismissSuggestion)
 	a.adminRoute("GET /api/permbroker/pending", a.handleBrokerPending)
 	a.adminRoute("POST /api/permbroker/pending/deny-all", a.handleBrokerDenyAll)
+	a.adminRoute("POST /api/permbroker/pending/approve-all", a.handleBrokerApproveAll)
 	a.adminRoute("POST /api/permbroker/pending/{id}", a.handleBrokerDecide)
 	a.adminRoute("POST /api/permbroker/hook/repin", a.handleBrokerRepin)
 	a.adminRoute("GET /api/permbroker/rules", a.handleBrokerRules)
 	a.adminRoute("POST /api/permbroker/rules", a.handleBrokerCreateRule)
 	a.adminRoute("DELETE /api/permbroker/rules/{id}", a.handleBrokerRevokeRule)
 	a.adminRoute("POST /api/permbroker/rules/{id}/confirm", a.handleBrokerConfirmRule)
+	a.adminRoute("POST /api/permbroker/rules/{id}/replace", a.handleBrokerReplaceRule)
 	a.adminRoute("POST /api/permbroker/bots/{id}/git-baseline", a.handleBrokerGitBaseline)
 	a.adminRoute("POST /api/permbroker/patterns/validate", a.handleBrokerValidatePattern)
 	a.adminRoute("GET /api/permbroker/patterns/wrappers", a.handleBrokerPatternWrappers)
@@ -72,13 +76,49 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /api/stt/status", a.handleSTTStatus)
 	mux.HandleFunc("POST /api/stt", a.handleSTT)
 	mux.HandleFunc("GET /login", a.handleLogin)
+	mux.HandleFunc("GET /app.js", a.handleAppJS)
+	mux.HandleFunc("GET /app.css", a.handleAppCSS)
+	mux.HandleFunc("GET /theme.js", a.handleThemeJS)
 	mux.HandleFunc("GET /", a.handleIndex)
 	mux.HandleFunc("GET /index.html", a.handleIndex)
 	// Approval rules. The client reads ?bot= from the query.
 	mux.HandleFunc("GET /rules", a.handleIndex)
 	// A bot's page. The client reads the id from the path.
 	mux.HandleFunc("GET /bots/{id}", a.handleIndex)
-	return a.withAuth(mux)
+	return securityHeaders(a.withAuth(mux))
+}
+
+const (
+	headerCSP     = "Content-Security-Policy"
+	headerNoSniff = "X-Content-Type-Options"
+	cspValue      = "default-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+)
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set(headerCSP, cspValue)
+		w.Header().Set(headerNoSniff, "nosniff")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (a *App) handleAppJS(w http.ResponseWriter, r *http.Request) {
+	writeStatic(w, "text/javascript; charset=utf-8", web.AppJS)
+}
+
+func (a *App) handleAppCSS(w http.ResponseWriter, r *http.Request) {
+	writeStatic(w, "text/css; charset=utf-8", web.AppCSS)
+}
+
+func (a *App) handleThemeJS(w http.ResponseWriter, r *http.Request) {
+	writeStatic(w, "text/javascript; charset=utf-8", web.ThemeJS)
+}
+
+func writeStatic(w http.ResponseWriter, contentType string, body []byte) {
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 func (a *App) withAuth(next http.Handler) http.Handler {
@@ -96,7 +136,7 @@ func (a *App) withAuth(next http.Handler) http.Handler {
 				return
 			}
 		}
-		if r.URL.Path == "/api/health" || r.URL.Path == "/login" || mcpPermissionOpen(r.URL.Path) || !a.tokensConfigured() || a.credentialAccepted(r) {
+		if r.URL.Path == "/api/health" || r.URL.Path == "/login" || publicAsset(r.URL.Path) || mcpPermissionOpen(r.URL.Path) || !a.tokensConfigured() || a.credentialAccepted(r) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -137,6 +177,15 @@ func (a *App) remoteHostDenied(r *http.Request) bool {
 
 // mcpPermissionOpen is the permission MCP route. The path token and the
 // Bearer token are checked by the handler, not by the admin-token gate.
+func publicAsset(path string) bool {
+	switch path {
+	case "/app.js", "/app.css", "/theme.js":
+		return true
+	default:
+		return false
+	}
+}
+
 func mcpPermissionOpen(path string) bool {
 	return path == "/api/mcp/permission" || strings.HasPrefix(path, "/api/mcp/permission/")
 }
@@ -147,18 +196,19 @@ const authCookie = "lgb_auth"
 // adminRoute registers a broker route whose auth is the handler itself.
 func (a *App) adminRoute(pattern string, h http.HandlerFunc) {
 	a.adminPatterns = append(a.adminPatterns, pattern)
-	a.gated.HandleFunc(pattern, a.guardPermission(h))
+	a.gated.HandleFunc(pattern, a.guardPermission(h, false))
 }
 
 // permRoute registers a non-broker permission route with the same auth.
 func (a *App) permRoute(pattern string, h http.HandlerFunc) {
 	a.permPatterns = append(a.permPatterns, pattern)
-	a.gated.HandleFunc(pattern, a.guardPermission(h))
+	a.gated.HandleFunc(pattern, a.guardPermission(h, true))
 }
 
 // guardPermission fails closed. No admin token, a live run token, and a
 // missing credential are refused before the route handler runs.
-func (a *App) guardPermission(h http.HandlerFunc) http.HandlerFunc {
+// Non-broker writes also require a same-origin JSON body.
+func (a *App) guardPermission(h http.HandlerFunc, permBody bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !a.tokensConfigured() {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "admin token required"})
@@ -171,6 +221,22 @@ func (a *App) guardPermission(h http.HandlerFunc) http.HandlerFunc {
 		if !a.credentialAccepted(r) {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
 			return
+		}
+		if permBody && r.Method != http.MethodGet && r.Method != http.MethodHead {
+			if !a.brokerPostOK(w, r) {
+				return
+			}
+			media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+			if err != nil || media != "application/json" {
+				writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "content type must be application/json"})
+				return
+			}
+			body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+			if err != nil || len(bytes.TrimSpace(body)) == 0 || !json.Valid(body) {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "json body required"})
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(body))
 		}
 		h(w, r)
 	}

@@ -138,6 +138,8 @@ type pendingItem struct {
 	AdvChecked bool
 	TaskText   string
 	CritReason string
+	GitReason  string
+	Literal    bool
 	CreatedAt  time.Time
 	Ruleset    int
 	Classifier string
@@ -169,6 +171,7 @@ type Pending struct {
 	TaskText   string        `json:"task_text"`
 	Suggest    bool          `json:"suggest_always"`
 	CritReason string        `json:"critical_reason"`
+	GitReason  string        `json:"git_reason,omitempty"`
 }
 
 // PendingPart is one command inside a pending card.
@@ -275,6 +278,10 @@ type Engine struct {
 	baselinePath    string
 	savedBaseline   map[string][]byte
 	baselineCorrupt bool
+
+	// revokeFail is a test hook. When set, RevokeRule returns it and
+	// leaves the rule in place.
+	revokeFail error
 }
 
 // botCtx is the workspace, homes, and git baseline for one bot.
@@ -569,6 +576,7 @@ func (e *Engine) SetBotRuntime(bot, home, userHome string, env []string) {
 	b.UserHome = userHome
 	b.Env = append([]string(nil), env...)
 	e.bots[bot] = b
+	e.maybeUpgradeBaselineLocked(bot)
 	e.mu.Unlock()
 }
 
@@ -629,20 +637,21 @@ func (e *Engine) classifierMayAllowLocked(bot string) bool {
 // classifierMayAllowCommandLocked is the guard for any classifier input
 // that would contribute to an allow. The classifier still cannot allow
 // a call. Each condition is separate so a test can drop one of them.
+// commandMayAllow is the command half of the allow guard. It does not
+// look at the bot baseline. A task grant for a compound does not use it:
+// a compound is not eligible and is still grantable.
+func commandMayAllow(in inspected) bool {
+	if !in.Literal || !in.Eligible || in.Compound {
+		return false
+	}
+	if in.Level == LevelCritical || in.GitRisk != "" {
+		return false
+	}
+	return true
+}
+
 func (e *Engine) classifierMayAllowCommandLocked(bot string, in inspected) bool {
-	if !in.Literal {
-		return false
-	}
-	if !in.Eligible {
-		return false
-	}
-	if in.Compound {
-		return false
-	}
-	if in.Level == LevelCritical {
-		return false
-	}
-	if in.GitRisk != "" {
+	if !commandMayAllow(in) {
 		return false
 	}
 	return e.classifierMayAllowLocked(bot)
@@ -920,7 +929,7 @@ func (e *Engine) SaveRule(rule Rule) (Rule, error) {
 	if cls.Hard || !cls.Eligible || lvl == LevelCritical || cls.Level == LevelCritical {
 		return Rule{}, ErrScope
 	}
-	if !scopeAllowed(lvl, true, false, false, rule.Scope) {
+	if !scopeAllowed(lvl, true, false, false, true, rule.Scope) {
 		return Rule{}, ErrScope
 	}
 	return e.commitRule(rule, lvl)
@@ -957,6 +966,8 @@ type RuleView struct {
 	Source       string    `json:"source,omitempty"`
 	Active       *bool     `json:"active,omitempty"`
 	NeedsConfirm bool      `json:"needs_confirm,omitempty"`
+	Confirmable  bool      `json:"confirmable"`
+	NeverReason  string    `json:"never_reason,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
 	LastUsedAt   time.Time `json:"last_used_at,omitempty"`
 	Uses         int       `json:"uses"`
@@ -972,20 +983,26 @@ func (e *Engine) ListRules() []RuleView {
 	defer e.mu.Unlock()
 	out := make([]RuleView, 0, len(e.rules.Rules))
 	for _, rule := range e.rules.Rules {
-		out = append(out, ruleView(rule))
+		out = append(out, e.ruleView(rule))
 	}
 	return out
 }
 
-func ruleView(rule Rule) RuleView {
+func (e *Engine) ruleView(rule Rule) RuleView {
 	kind := rule.Kind
 	if kind == "" {
 		kind = "exact"
+	}
+	why := ""
+	if rule.Effect == EffectAllow && (storedKind(&rule) == "legacy" || needsConfirm(rule)) {
+		why = e.neverMatchReason(rule)
 	}
 	view := RuleView{
 		ID: rule.ID, Effect: rule.Effect, Scope: rule.Scope, BotID: rule.BotID,
 		Argv: redactArgv(rule.Argv), Kind: kind, Source: rule.Source,
 		NeedsConfirm: rule.NeedsConfirm,
+		Confirmable:  needsConfirm(rule) && why == "",
+		NeverReason:  why,
 		CreatedAt:    rule.CreatedAt, LastUsedAt: rule.LastUsedAt, Uses: rule.Uses,
 	}
 	if rule.Active != nil {
@@ -1029,6 +1046,9 @@ func (e *Engine) ConfirmRule(id string) (string, error) {
 	if !needsConfirm(rule) {
 		return "", ErrNotConfirmable
 	}
+	if why := e.neverMatchReason(rule); why != "" {
+		return "", &InputError{Code: "never_matches", Msg: why}
+	}
 	rule.NeedsConfirm = false
 	rule.Active = nil
 	next := e.rules
@@ -1058,6 +1078,87 @@ func needsConfirm(rule Rule) bool {
 	return rule.Active != nil && !*rule.Active
 }
 
+const (
+	neverCommand = "This command cannot be allowed by a rule"
+	neverStar    = "A * stands for exactly one word and cannot be last."
+)
+
+// neverMatchReason explains an allow that cannot match a shell command.
+// A bad command wins over a pattern that is not expressible. A legacy
+// glob such as "git diff*" still names git diff; the star is not a word.
+func (e *Engine) neverMatchReason(rule Rule) string {
+	if rule.Effect != EffectAllow {
+		return ""
+	}
+	kind := rule.Kind
+	if kind == "" {
+		kind = "exact"
+	}
+	switch kind {
+	case "exact":
+		return e.commandNever(rule.Argv)
+	case "pattern":
+		if ValidatePattern(rule.Pattern) != nil {
+			return e.legacyNever(rule)
+		}
+		return e.commandNever(patternWitnessArgv(rule.Pattern))
+	case "legacy":
+		return e.legacyNever(rule)
+	default:
+		return ""
+	}
+}
+
+// legacyNever is the reason a legacy allow cannot match. The witness is
+// the glob with stars removed, so "git diff*" is the command git diff.
+func (e *Engine) legacyNever(rule Rule) string {
+	if rule.Tool != "" && normTool(rule.Tool) != ToolShell {
+		return neverCommand
+	}
+	if _, err := filepath.Match(rule.Pattern, "x"); err != nil {
+		return neverStar
+	}
+	return e.commandNever(legacyWitnessArgv(rule.Pattern))
+}
+
+func (e *Engine) commandNever(argv []string) string {
+	if len(argv) == 0 {
+		return neverCommand
+	}
+	if hitsCritical(Request{ToolName: ToolShell}, inspected{Argv: argv, Raw: strings.Join(argv, " ")}, e.critical) {
+		return neverCommand
+	}
+	cls := classifyArgv(argv, "", "", nil, e.resolver)
+	lvl := maxLevel(e.table.level(ToolShell, argv), cls.Level)
+	if cls.Hard || !cls.Eligible || lvl == LevelCritical || cls.Level == LevelCritical || lvl == LevelUnclassified || cls.Level == LevelUnclassified {
+		return neverCommand
+	}
+	return ""
+}
+
+func patternWitnessArgv(pattern string) []string {
+	words := strings.Fields(pattern)
+	out := make([]string, 0, len(words))
+	for _, w := range words {
+		if strings.Contains(w, "*") {
+			out = append(out, "x")
+			continue
+		}
+		out = append(out, w)
+	}
+	return out
+}
+
+func legacyWitnessArgv(pattern string) []string {
+	cleaned := strings.Map(func(r rune) rune {
+		if r == '*' || r == '?' {
+			return -1
+		}
+		return r
+	}, pattern)
+	return strings.Fields(cleaned)
+}
+
 func ruleAuditHash(rule Rule) string {
 	argvHash := hashParts(normTool(rule.Tool), rule.Argv)
 	if len(rule.Argv) == 0 && rule.Pattern != "" {
@@ -1077,6 +1178,9 @@ func (e *Engine) RevokeRule(id string) error {
 	defer e.writeMu.Unlock()
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.revokeFail != nil {
+		return e.revokeFail
+	}
 	id = strings.TrimSpace(id)
 	idx := -1
 	for i, rule := range e.rules.Rules {
@@ -1343,7 +1447,7 @@ func (e *Engine) cancelled(ctx context.Context, req Request, in inspected) (Deci
 }
 
 func (e *Engine) applyRule(req Request, in inspected, rule *Rule) Decision {
-	if rule.Effect == EffectAllow && !autoAllowOK(in) {
+	if rule.Effect == EffectAllow && (!autoAllowOK(in) || !commandMayAllow(in) || raisedBlocks(in, rule)) {
 		return e.ask(req, in)
 	}
 	e.touch(rule)
@@ -1386,6 +1490,8 @@ func (e *Engine) ask(req Request, in inspected) Decision {
 		AdvChecked: in.AdvisoryChecked,
 		TaskText:   e.userText[req.BotID],
 		CritReason: in.CriticalReason,
+		GitReason:  in.GitReason,
+		Literal:    in.Literal,
 		CreatedAt:  e.now(),
 		Ruleset:    e.rules.Version,
 		Classifier: in.ClassNote,
@@ -1431,11 +1537,11 @@ func (e *Engine) pendingView(item *pendingItem) Pending {
 		Cwd: item.Cwd, Level: item.Level, InputHash: item.InputHash,
 		CreatedAt: item.CreatedAt, Ruleset: item.Ruleset, Compound: item.Compound,
 		HardAsk: item.HardAsk, Eligible: item.Eligible,
-		Allowed:   allowedScopes(item.Level, item.Eligible, item.Compound, item.HardAsk),
+		Allowed:   allowedScopes(item.Level, item.Eligible, item.Compound, item.HardAsk, item.Literal),
 		Operators: append([]string{}, item.Operators...),
 		Advisory:  Advisory{Text: item.Advisory, Source: source, Checked: item.AdvChecked},
 		TaskText:  item.TaskText, Suggest: e.suggestAlways(item),
-		CritReason: item.CritReason,
+		CritReason: item.CritReason, GitReason: item.GitReason,
 	}
 	if view.Operators == nil {
 		view.Operators = []string{}
@@ -1447,10 +1553,10 @@ func (e *Engine) pendingView(item *pendingItem) Pending {
 	return view
 }
 
-func allowedScopes(level Level, eligible, compound, hard bool) []string {
+func allowedScopes(level Level, eligible, compound, hard, literal bool) []string {
 	var out []string
 	for _, scope := range []string{ScopeOnce, ScopeTask, ScopeBot, ScopeGlobal} {
-		if scopeAllowed(level, eligible, compound, hard, scope) {
+		if scopeAllowed(level, eligible, compound, hard, literal, scope) {
 			out = append(out, scope)
 		}
 	}
@@ -1571,7 +1677,7 @@ func (e *Engine) Decide(id, decision, scope string) error {
 		e.pushOutcome(itemOutcome(item, "denied", "", 0))
 		return nil
 	case "approve":
-		if !scopeAllowed(item.Level, item.Eligible, item.Compound, item.HardAsk, scope) {
+		if !scopeAllowed(item.Level, item.Eligible, item.Compound, item.HardAsk, item.Literal, scope) {
 			return ErrScope
 		}
 		switch scope {
@@ -1622,42 +1728,136 @@ func (e *Engine) Decide(id, decision, scope string) error {
 	}
 }
 
-// DenyAll denies the listed ids. A nil ids slice denies every current
-// item. An id that is not current fails the call and changes nothing.
-// Each denied item is audited.
-func (e *Engine) DenyAll(ids []string) error {
+// BatchItem is one id from a deny-all or approve-all call.
+type BatchItem struct {
+	ID    string `json:"id"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
+}
+
+// BatchReport is the per-item result of a batch decision. A stale or
+// unknown id is skipped. The other ids are still applied.
+type BatchReport struct {
+	Results  []BatchItem `json:"results"`
+	OKCount  int         `json:"ok_count"`
+	Skipped  int         `json:"skipped"`
+	Denied   int         `json:"denied,omitempty"`
+	Approved int         `json:"approved,omitempty"`
+}
+
+// DenyAll denies the listed ids. An empty list is refused and denies
+// nothing. A stale or unknown id is skipped. Each denied item is audited.
+func (e *Engine) DenyAll(ids []string) (BatchReport, error) {
 	if e == nil {
-		return ErrNotFound
+		return BatchReport{}, ErrNotFound
+	}
+	if len(ids) == 0 {
+		return BatchReport{}, &InputError{Code: "ids", Msg: "ids required"}
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	var want []string
-	if ids == nil {
-		for id := range e.byID {
-			want = append(want, id)
-		}
-	} else {
-		for _, id := range ids {
-			if _, dead := e.dead[id]; dead {
-				return ErrStale
-			}
-			if e.byID[id] == nil {
-				return ErrNotFound
-			}
-			want = append(want, id)
-		}
-	}
-	for _, id := range want {
+	return e.denyAllLocked(ids), nil
+}
+
+func (e *Engine) denyAllLocked(ids []string) BatchReport {
+	rep := BatchReport{Results: make([]BatchItem, 0, len(ids))}
+	for _, id := range ids {
 		item := e.byID[id]
 		if item == nil {
+			msg := ErrNotFound.Error()
+			if _, dead := e.dead[id]; dead {
+				msg = ErrStale.Error()
+			}
+			rep.Results = append(rep.Results, BatchItem{ID: id, Error: msg})
+			rep.Skipped++
 			continue
 		}
 		e.denied[collapseKey(item)] = struct{}{}
 		e.bury(item)
 		e.auditHuman(item, "deny", "")
 		e.pushOutcome(itemOutcome(item, "denied", "", 0))
+		rep.Results = append(rep.Results, BatchItem{ID: id, OK: true})
+		rep.OKCount++
+		rep.Denied++
 	}
-	return nil
+	return rep
+}
+
+// ApproveAll approves the listed ids once. An empty list is refused and
+// approves nothing. A stale or unknown id is skipped. Scope is once.
+func (e *Engine) ApproveAll(ids []string) (BatchReport, error) {
+	if e == nil {
+		return BatchReport{}, ErrNotFound
+	}
+	if len(ids) == 0 {
+		return BatchReport{}, &InputError{Code: "ids", Msg: "ids required"}
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	rep := BatchReport{Results: make([]BatchItem, 0, len(ids))}
+	for _, id := range ids {
+		if _, dead := e.dead[id]; dead {
+			rep.Results = append(rep.Results, BatchItem{ID: id, Error: ErrStale.Error()})
+			rep.Skipped++
+			continue
+		}
+		item := e.byID[id]
+		if item == nil {
+			rep.Results = append(rep.Results, BatchItem{ID: id, Error: ErrNotFound.Error()})
+			rep.Skipped++
+			continue
+		}
+		if item.Ruleset != e.rules.Version {
+			e.bury(item)
+			rep.Results = append(rep.Results, BatchItem{ID: id, Error: ErrStale.Error()})
+			rep.Skipped++
+			continue
+		}
+		e.keepOnceToken(item, "")
+		e.bury(item)
+		e.auditHuman(item, "approve", ScopeOnce)
+		e.noteApproval(item)
+		e.pushOutcome(itemOutcome(item, "approved", "", 0))
+		rep.Results = append(rep.Results, BatchItem{ID: id, OK: true})
+		rep.OKCount++
+		rep.Approved++
+	}
+	return rep, nil
+}
+
+// SetRevokeFailure makes the next RevokeRule calls return err and keep
+// the rule. A nil err clears the hook. Tests use this for replace.
+func (e *Engine) SetRevokeFailure(err error) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	e.revokeFail = err
+	e.mu.Unlock()
+}
+
+// ReplaceRule stores the draft, then revokes id. The locks are not held
+// across both calls. When the revoke fails, both rules stay and revoked
+// is false.
+func (e *Engine) ReplaceRule(id string, d RuleDraft) (string, bool, error) {
+	if e == nil {
+		return "", false, ErrRuleNotFound
+	}
+	rule, err := e.CreateRule(d)
+	if err != nil {
+		return "", false, err
+	}
+	if err := e.RevokeRule(id); err != nil {
+		return rule.ID, false, err
+	}
+	return rule.ID, true, nil
+}
+
+func raisedBlocks(in inspected, rule *Rule) bool {
+	if !in.RaisedHigh || rule == nil {
+		return false
+	}
+	return rule.Scope == ScopeBot || rule.Scope == ScopeGlobal
 }
 
 func (e *Engine) bury(item *pendingItem) {
@@ -1780,7 +1980,10 @@ func tokenLive(t token, now time.Time) bool {
 }
 
 func (e *Engine) grantCovers(req Request, in inspected) bool {
-	if in.HardAsk || in.Level == LevelCritical {
+	// Literal stays with autoAllowOK. Rejecting it here would ask before
+	// that choke, and the non-literal grant golden would stay green if
+	// the choke were removed.
+	if in.HardAsk || in.Level == LevelCritical || in.GitRisk != "" {
 		return false
 	}
 	now := e.now()
@@ -1920,6 +2123,8 @@ type inspected struct {
 	Operators       []string
 	ClassNote       string
 	GitRisk         string
+	GitReason       string
+	RaisedHigh      bool
 	Advisory        string
 	AdvisorySource  string
 	AdvisoryChecked bool

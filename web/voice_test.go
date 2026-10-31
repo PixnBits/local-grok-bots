@@ -10,7 +10,7 @@ import (
 // Composer voice: browser recognition stays on-device, and speech uses a local voice.
 
 func TestComposerVoiceOnDevice(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	if strings.Contains(src, "webkitSpeechRecognition") || strings.Contains(strings.ToLower(src), "webkitspeechrecognition") {
 		t.Fatal("index.html names the prefixed speech recognizer")
 	}
@@ -83,11 +83,11 @@ func TestComposerVoiceNode(t *testing.T) {
 	if err != nil {
 		t.Fatal("node is required")
 	}
-	sr, err := json.Marshal(between(t, string(IndexHTML), "// voice-sr:begin", "// voice-sr:end"))
+	sr, err := json.Marshal(between(t, ClientSource(), "// voice-sr:begin", "// voice-sr:end"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	tts, err := json.Marshal(between(t, string(IndexHTML), "// voice-tts:begin", "// voice-tts:end"))
+	tts, err := json.Marshal(between(t, ClientSource(), "// voice-tts:begin", "// voice-tts:end"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +385,7 @@ function runSR(opts) {
 
 // Voice controls keep focus, announce every error, and name the mic problem.
 func TestComposerVoiceFocusAndErrors(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	slot := between(t, src, "function syncVoiceSlot(hasText) {", "function syncSendEmpty()")
 	if !strings.Contains(slot, "had.hidden") || !strings.Contains(slot, `getElementById("send-btn")`) {
 		t.Fatal("hiding the focused mic, voice or settings button must move focus to Send or the field")

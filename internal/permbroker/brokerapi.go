@@ -126,15 +126,28 @@ func (e *Engine) CreateRule(d RuleDraft) (Rule, error) {
 		if exactHasOperator(argv) {
 			return Rule{}, &InputError{Code: "operators", Msg: "exact rule contains an operator"}
 		}
+		if effect == EffectDeny {
+			cls := classifyArgv(argv, "", "", nil, e.resolver)
+			lvl := maxLevel(e.table.level(ToolShell, argv), cls.Level)
+			rule.Kind = "exact"
+			rule.Argv = argv
+			return e.commitRule(rule, lvl)
+		}
 		if hitsCritical(Request{ToolName: ToolShell}, inspected{Argv: argv, Raw: strings.Join(argv, " ")}, e.critical) {
+			if effect == EffectAllow {
+				return Rule{}, &InputError{Code: "never_matches", Msg: neverCommand}
+			}
 			return Rule{}, ErrScope
 		}
 		cls := classifyArgv(argv, "", "", nil, e.resolver)
 		lvl := maxLevel(e.table.level(ToolShell, argv), cls.Level)
 		if cls.Hard || !cls.Eligible || lvl == LevelCritical || cls.Level == LevelCritical {
+			if effect == EffectAllow {
+				return Rule{}, &InputError{Code: "never_matches", Msg: neverCommand}
+			}
 			return Rule{}, ErrScope
 		}
-		if !scopeAllowed(lvl, true, false, false, scope) {
+		if !scopeAllowed(lvl, true, false, false, true, scope) {
 			return Rule{}, ErrScope
 		}
 		rule.Kind = "exact"
@@ -147,6 +160,11 @@ func (e *Engine) CreateRule(d RuleDraft) (Rule, error) {
 		}
 		rule.Kind = "pattern"
 		rule.Pattern = strings.TrimSpace(d.Pattern)
+		if effect == EffectAllow {
+			if why := e.neverMatchReason(rule); why != "" {
+				return Rule{}, &InputError{Code: "never_matches", Msg: why}
+			}
+		}
 		return e.commitRule(rule, LevelUnclassified)
 	default:
 		return Rule{}, ErrScope

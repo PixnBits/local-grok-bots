@@ -231,31 +231,92 @@ func (a *App) handleBrokerDenyAll(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "pending item not found"})
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 8192))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
+	ids, ok := brokerBatchIDs(w, r)
+	if !ok {
 		return
 	}
-	var req struct {
-		IDs *[]string `json:"ids"`
-	}
-	if len(strings.TrimSpace(string(body))) > 0 {
-		if err := json.Unmarshal(body, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
-			return
-		}
-	}
-	var ids []string
-	if req.IDs != nil {
-		ids = *req.IDs
-	} else {
-		ids = nil
-	}
-	if err := a.broker.DenyAll(ids); err != nil {
+	rep, err := a.broker.DenyAll(ids)
+	if err != nil {
 		writeBrokerErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, rep)
+}
+
+func (a *App) handleBrokerApproveAll(w http.ResponseWriter, r *http.Request) {
+	if !a.brokerPostOK(w, r) {
+		return
+	}
+	if a.broker == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "pending item not found"})
+		return
+	}
+	ids, ok := brokerBatchIDs(w, r)
+	if !ok {
+		return
+	}
+	rep, err := a.broker.ApproveAll(ids)
+	if err != nil {
+		writeBrokerErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+func brokerBatchIDs(w http.ResponseWriter, r *http.Request) ([]string, bool) {
+	body, err := io.ReadAll(io.LimitReader(r.Body, 8192))
+	if err != nil || len(strings.TrimSpace(string(body))) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ids required"})
+		return nil, false
+	}
+	var req struct {
+		IDs []string `json:"ids"`
+	}
+	if json.Unmarshal(body, &req) != nil || len(req.IDs) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ids required"})
+		return nil, false
+	}
+	return req.IDs, true
+}
+
+func (a *App) handleBrokerReplaceRule(w http.ResponseWriter, r *http.Request) {
+	if !a.brokerPostOK(w, r) {
+		return
+	}
+	if a.broker == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
+		return
+	}
+	var body struct {
+		Kind    string   `json:"kind"`
+		Argv    []string `json:"argv"`
+		Pattern string   `json:"pattern"`
+		Scope   string   `json:"scope"`
+		BotID   string   `json:"bot_id"`
+		Effect  string   `json:"effect"`
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 8192))
+	if err != nil || json.Unmarshal(raw, &body) != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
+		return
+	}
+	created, revoked, err := a.broker.ReplaceRule(r.PathValue("id"), permbroker.RuleDraft{
+		Kind: body.Kind, Argv: body.Argv, Pattern: body.Pattern,
+		Scope: body.Scope, BotID: body.BotID, Effect: body.Effect,
+	})
+	if created == "" {
+		writeBrokerErr(w, err)
+		return
+	}
+	status := http.StatusOK
+	payload := map[string]any{"created": created, "revoked": revoked}
+	if !revoked {
+		status = http.StatusMultiStatus
+		if err != nil {
+			payload["error"] = err.Error()
+		}
+	}
+	writeJSON(w, status, payload)
 }
 
 func (a *App) handleBrokerDecide(w http.ResponseWriter, r *http.Request) {
@@ -265,6 +326,10 @@ func (a *App) handleBrokerDecide(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "deny-all" {
 		a.handleBrokerDenyAll(w, r)
+		return
+	}
+	if id == "approve-all" {
+		a.handleBrokerApproveAll(w, r)
 		return
 	}
 	if a.broker == nil {

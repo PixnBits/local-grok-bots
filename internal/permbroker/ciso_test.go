@@ -50,9 +50,14 @@ func TestGolden_AutoAllowNeedsLiteral(t *testing.T) {
 	if first.PendingID == "" || first.Verdict == VerdictAllow {
 		t.Fatalf("ask %+v", first)
 	}
-	if err := e.Decide(first.PendingID, "approve", ScopeTask); err != nil {
-		t.Fatal(err)
+	// Task, bot, and global are refused. The grant is planted so the
+	// next evaluation still reaches autoAllowOK.
+	for _, scope := range []string{ScopeTask, ScopeBot, ScopeGlobal} {
+		if err := e.Decide(first.PendingID, "approve", scope); err == nil {
+			t.Fatalf("%s approved a non-literal command", scope)
+		}
 	}
+	plantGrant(t, e, first.PendingID)
 	if d := e.Evaluate(ctx, req); d.Verdict == VerdictAllow {
 		t.Fatalf("task grant auto-allowed a non-literal %+v", d)
 	}
@@ -62,12 +67,44 @@ func TestGolden_AutoAllowNeedsLiteral(t *testing.T) {
 	if opened.Verdict == VerdictAllow || opened.PendingID == "" {
 		t.Fatalf("compound %+v", opened)
 	}
-	if err := e.Decide(opened.PendingID, "approve", ScopeTask); err != nil {
-		t.Fatalf("compound grant: %v", err)
+	for _, scope := range []string{ScopeTask, ScopeBot, ScopeGlobal} {
+		if err := e.Decide(opened.PendingID, "approve", scope); err == nil {
+			t.Fatalf("%s approved a non-literal compound", scope)
+		}
 	}
+	plantGrant(t, e, opened.PendingID)
 	if d := e.Evaluate(ctx, comp); d.Verdict == VerdictAllow {
 		t.Fatalf("task grant auto-allowed a non-literal compound %+v", d)
 	}
+}
+
+// plantGrant stores the grant Decide would have stored for a task
+// approval, then drops the pending item without marking it denied.
+func plantGrant(t *testing.T, e *Engine, id string) {
+	t.Helper()
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	item := e.byID[id]
+	if item == nil {
+		t.Fatal("pending gone")
+	}
+	exp := e.now().Add(e.approvalTTL())
+	if len(item.Parts) > 0 {
+		for _, p := range item.Parts {
+			e.grants = append(e.grants, grant{
+				BotID: item.BotID, SessionID: item.SessionID, TaskID: item.TaskID,
+				Hash: p.Hash, Cwd: item.Cwd, Expires: exp,
+				Argv: append([]string(nil), p.Argv...), Raw: p.Raw,
+			})
+		}
+	} else {
+		e.grants = append(e.grants, grant{
+			BotID: item.BotID, SessionID: item.SessionID, TaskID: item.TaskID,
+			Hash: item.InputHash, Cwd: item.Cwd, Expires: exp,
+			Argv: append([]string(nil), item.Argv...), Raw: item.Raw,
+		})
+	}
+	e.bury(item)
 }
 
 func TestGolden_AutoAllowLinuxOnly(t *testing.T) {
@@ -199,7 +236,7 @@ func (r reportClass) Classify(context.Context, ClassInput) ClassReport {
 
 func TestGolden_PatternAllowSkipsCriticalAndCompound(t *testing.T) {
 	rule := &Rule{Effect: EffectAllow, Kind: "pattern", Pattern: "git diff * --stat", Tool: ToolShell}
-	safe := inspected{Eligible: true, Argv: []string{"git", "diff", "HEAD", "--stat"}, Level: LevelLow}
+	safe := inspected{Literal: true, Eligible: true, Argv: []string{"git", "diff", "HEAD", "--stat"}, Level: LevelLow}
 	if !ruleHit(rule, safe, false) {
 		t.Fatal("pattern did not match the safe command")
 	}
@@ -217,7 +254,7 @@ func TestGolden_PatternAllowSkipsCriticalAndCompound(t *testing.T) {
 
 func TestGolden_LegacyAllowStopsAtGlobWords(t *testing.T) {
 	rule := &Rule{Effect: EffectAllow, Kind: "legacy", Pattern: "git log*", Tool: ToolShell}
-	short := inspected{Eligible: true, Argv: []string{"git", "log"}, Raw: "git log", Level: LevelLow}
+	short := inspected{Literal: true, Eligible: true, Argv: []string{"git", "log"}, Raw: "git log", Level: LevelLow}
 	long := inspected{Eligible: true, Argv: []string{"git", "log", "--oneline"}, Raw: "git log --oneline", Level: LevelLow}
 	if !ruleHit(rule, short, false) {
 		t.Fatal("git log")

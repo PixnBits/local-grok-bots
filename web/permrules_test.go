@@ -16,7 +16,7 @@ func TestPermRulePanel(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed")
 	}
-	src := string(IndexHTML)
+	src := ClientSource()
 	i := strings.Index(src, "// perm-rules:begin")
 	j := strings.Index(src, "// perm-rules:end")
 	if i < 0 || j < i {

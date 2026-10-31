@@ -12,7 +12,7 @@ import (
 // Node runs the routing helpers and the sheet focus trap.
 
 func TestLayoutStatic(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	for _, s := range []string{
 		"height: 100dvh;",
 		"overflow: hidden;",
@@ -114,7 +114,7 @@ func TestLayoutStatic(t *testing.T) {
 }
 
 func TestNoRemoteAssetURLs(t *testing.T) {
-	src := strings.ReplaceAll(string(IndexHTML), "http://www.w3.org/2000/svg", "")
+	src := strings.ReplaceAll(ClientSource(), "http://www.w3.org/2000/svg", "")
 	patterns := []*regexp.Regexp{
 		regexp.MustCompile(`(?i)<script[^>]*\ssrc\s*=\s*["']https?:`),
 		regexp.MustCompile(`(?i)<link[^>]*\shref\s*=\s*["']https?:`),
@@ -135,7 +135,7 @@ func TestDrillDownRouting(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed")
 	}
-	snippet, err := json.Marshal(between(t, string(IndexHTML), "// route:begin", "// route:end"))
+	snippet, err := json.Marshal(between(t, ClientSource(), "// route:begin", "// route:end"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestStateFocusTrap(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed")
 	}
-	snippet, err := json.Marshal(between(t, string(IndexHTML), "// focus:begin", "// focus:end"))
+	snippet, err := json.Marshal(between(t, ClientSource(), "// focus:begin", "// focus:end"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ console.log(JSON.stringify(cases));
 }
 
 func TestProfileMobileJustifyStart(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	blocks := mediaBodies(t, src, `@media (max-width: 979px)`)
 	var mobile string
 	for _, block := range blocks {
@@ -322,7 +322,7 @@ func TestMenuButtonPattern(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed")
 	}
-	src := string(IndexHTML)
+	src := ClientSource()
 	snippet, err := json.Marshal(between(t, src, "// menu:begin", "// menu:end"))
 	if err != nil {
 		t.Fatal(err)
@@ -455,7 +455,7 @@ console.log(JSON.stringify(cases));
 }
 
 func TestProfileSoloHeading(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	start := strings.Index(src, `<section class="view" id="view-profile">`)
 	if start < 0 {
 		t.Fatal("profile view missing")
@@ -498,7 +498,7 @@ func TestProfileScrollAndDrillFocus(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed")
 	}
-	src := string(IndexHTML)
+	src := ClientSource()
 	open := between(t, src, "async function openProfile", "async function loadRoutines")
 	if !strings.Contains(open, `resetScrollTops(document.querySelectorAll(".profile-layout, .profile-col"))`) {
 		t.Fatal("openProfile must reset profile scroll containers")

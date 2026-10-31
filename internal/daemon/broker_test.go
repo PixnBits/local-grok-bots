@@ -355,17 +355,22 @@ func TestGolden_AdminPendingIsAdminOnly(t *testing.T) {
 	keep := askPending(t, app, "echo ok")
 	other := askPending(t, app, "echo no")
 	res, body = do(t, "POST", base+"/api/permbroker/pending/deny-all", map[string]any{"ids": []string{keep, "missing"}}, token)
-	if res.StatusCode != 404 {
+	if res.StatusCode != 200 || !strings.Contains(string(body), `"ok":true`) || !strings.Contains(string(body), "missing") {
 		t.Fatalf("partial deny-all %d %s", res.StatusCode, body)
 	}
-	if len(app.broker.ListPending()) != 2 {
-		t.Fatalf("partial deny changed state %+v", app.broker.ListPending())
+	if len(app.broker.ListPending()) != 1 {
+		t.Fatalf("partial deny %+v", app.broker.ListPending())
 	}
 	res, body = do(t, "POST", base+"/api/permbroker/pending/deny-all", map[string]any{"ids": []string{}}, token)
-	if res.StatusCode != 200 || len(app.broker.ListPending()) != 2 {
+	if res.StatusCode != 400 || len(app.broker.ListPending()) != 1 {
 		t.Fatalf("empty deny-all %d %s pending %d", res.StatusCode, body, len(app.broker.ListPending()))
 	}
 	res, body = do(t, "POST", base+"/api/permbroker/pending/deny-all", map[string]any{}, token)
+	if res.StatusCode != 400 || len(app.broker.ListPending()) != 1 {
+		t.Fatalf("empty body deny-all %d %s pending %+v", res.StatusCode, body, app.broker.ListPending())
+	}
+	left := app.broker.ListPending()
+	res, body = do(t, "POST", base+"/api/permbroker/pending/deny-all", map[string]any{"ids": []string{left[0].ID}}, token)
 	if res.StatusCode != 200 || len(app.broker.ListPending()) != 0 {
 		t.Fatalf("deny-all %d %s pending %+v", res.StatusCode, body, app.broker.ListPending())
 	}

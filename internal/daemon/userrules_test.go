@@ -44,7 +44,7 @@ func TestDurableAllowAutoAllowsReadOnly(t *testing.T) {
 	if len(listed.Suggestions) != 1 || listed.Suggestions[0].Status != "pending" {
 		t.Fatalf("%+v", listed.Suggestions)
 	}
-	res, body = do(t, "POST", base+"/permission-suggestions/"+listed.Suggestions[0].ID+"/accept", nil, tok)
+	res, body = do(t, "POST", base+"/permission-suggestions/"+listed.Suggestions[0].ID+"/accept", map[string]any{}, tok)
 	if res.StatusCode != 201 || !strings.Contains(string(body), "Bash(pwd)") {
 		t.Fatalf("accept suggestion %d %s", res.StatusCode, body)
 	}
@@ -284,7 +284,7 @@ func TestPermRuleApplyRollsBack(t *testing.T) {
 		}
 		return nil
 	}
-	res, body = do(t, "DELETE", base+"/permission-rules/"+rule.ID, nil, tok)
+	res, body = do(t, "DELETE", base+"/permission-rules/"+rule.ID, map[string]any{}, tok)
 	if res.StatusCode != 500 || !strings.Contains(string(body), "injected revoke") {
 		t.Fatalf("revoke %d %s", res.StatusCode, body)
 	}

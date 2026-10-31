@@ -22,6 +22,14 @@ not load-bearing: `echo` is not an allowlisted binary, so the rule never
 matches. A literal compound such as `git log --oneline | head -5` must
 stay allowed on Linux.
 
+`grantCovers` must not reject `!Literal`. That return asks before
+`autoAllowOK`, so deleting the literal check in the choke still asks
+and `TestGolden_AutoAllowNeedsLiteral` stays green. Git risk and
+critical on `grantCovers` are separate: the live goldens call
+`grantCovers` with those fields set. A non-literal pending item can be
+approved only once, so that golden plants the grant Decide used to
+store and then evaluates again.
+
 The classifier allow guard is separate. `ClassifierMayAllow(bot)` stays
 true after a matching snapshot. Command checks live in
 `classifierMayAllowCommandLocked`. Each row of the table test is false

@@ -13,7 +13,7 @@ import (
 // focus, thread column). Node runs the pure helpers between the markers.
 
 func TestRosterStatic(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	for _, s := range []string{
 		`<h1>Bots</h1>`,
 		`.roster-head { height: 64px;`,
@@ -254,7 +254,7 @@ func TestRosterLogic(t *testing.T) {
 	if err != nil {
 		t.Fatal("node not installed")
 	}
-	src := string(IndexHTML)
+	src := ClientSource()
 	var b strings.Builder
 	for _, pair := range [][2]string{
 		{"// health:begin", "// health:end"},

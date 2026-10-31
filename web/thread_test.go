@@ -12,7 +12,7 @@ import (
 // Node runs the pure helpers between the thread-logic markers.
 
 func TestThreadStatic(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	for _, s := range []string{
 		`aria-label="Stop run"`,
 		"Stop · Esc",
@@ -92,7 +92,7 @@ func TestThreadStatic(t *testing.T) {
 
 // Phone header and thread details found in the live check.
 func TestThreadPolish(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	for _, s := range []string{
 		// The chip's segments must not pick up the theme control's .seg box.
 		`.state-chip .chip-seg {`,
@@ -147,7 +147,7 @@ func TestThreadLogic(t *testing.T) {
 	if err != nil {
 		t.Fatal("node not installed")
 	}
-	snippet, err := json.Marshal(between(t, string(IndexHTML), "// thread-logic:begin", "// thread-logic:end"))
+	snippet, err := json.Marshal(between(t, ClientSource(), "// thread-logic:begin", "// thread-logic:end"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -527,7 +527,7 @@ func skipJSString(src string, i int) int {
 }
 
 func TestThreadRecordRender(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	renderFn := extractJSFunction(t, src, "renderRunRecords")
 	pendingFn := extractJSFunction(t, src, "renderPendingRunRecords")
 	messagesFn := extractJSFunction(t, src, "renderMessages")

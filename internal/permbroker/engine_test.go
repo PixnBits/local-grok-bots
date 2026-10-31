@@ -500,17 +500,27 @@ func TestDenyAllAuditsEachItem(t *testing.T) {
 		if one.PendingID == "" || two.PendingID == "" || one.PendingID == two.PendingID {
 			t.Fatalf("%+v %+v", one, two)
 		}
-		if err := e.DenyAll([]string{one.PendingID, "missing"}); err != ErrNotFound {
-			t.Fatalf("partial %v", err)
+		rep, err := e.DenyAll([]string{one.PendingID, "missing"})
+		if err != nil || rep.OKCount != 1 || rep.Skipped != 1 || rep.Denied != 1 {
+			t.Fatalf("partial %v %+v", err, rep)
 		}
-		if len(e.ListPending()) != 2 {
-			t.Fatal("partial deny changed pending")
+		if len(e.ListPending()) != 1 {
+			t.Fatal("known id was not denied")
 		}
 		early := decodeAudit(t, readPermAudit(t, dir))
-		if humanDenyCount(early) != 0 {
-			t.Fatal("partial deny wrote an audit row")
+		if humanDenyCount(early) != 1 {
+			t.Fatal("partial deny skipped the known id")
 		}
-		if err := e.DenyAll(nil); err != nil {
+		if _, err := e.DenyAll(nil); err == nil {
+			t.Fatal("nil ids denied")
+		}
+		if _, err := e.DenyAll([]string{}); err == nil {
+			t.Fatal("empty ids denied")
+		}
+		if len(e.ListPending()) != 1 {
+			t.Fatal("empty deny changed pending")
+		}
+		if _, err := e.DenyAll([]string{two.PendingID}); err != nil {
 			t.Fatal(err)
 		}
 		rows := decodeAudit(t, readPermAudit(t, dir))

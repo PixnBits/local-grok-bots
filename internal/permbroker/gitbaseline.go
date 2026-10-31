@@ -27,6 +27,7 @@ const gitBaselineName = "git-baseline.json"
 
 type gitBaselineDoc struct {
 	Version int              `json:"version"`
+	Format  int              `json:"format,omitempty"`
 	Bots    []gitBaselineBot `json:"bots"`
 }
 
@@ -66,29 +67,7 @@ func gitBaselineBlob(ws string, homes []string) []byte {
 	}
 	sys, sysOK := readBaselineFile(systemGitconfig)
 	writePiece(&b, "system-gitconfig", sys, sysOK)
-	hs := append([]string(nil), homes...)
-	sort.Strings(hs)
-	seen := map[string]bool{}
-	for _, h := range hs {
-		h = strings.TrimSpace(h)
-		if h == "" {
-			continue
-		}
-		h = filepath.Clean(h)
-		if seen[h] {
-			continue
-		}
-		seen[h] = true
-		b.WriteString("home ")
-		b.WriteString(h)
-		b.WriteByte('\n')
-		gc, gcOK := readBaselineFile(filepath.Join(h, ".gitconfig"))
-		writePiece(&b, "gitconfig", gc, gcOK)
-		xc, xcOK := readBaselineFile(filepath.Join(h, ".config", "git", "config"))
-		writePiece(&b, "xdg-config", xc, xcOK)
-		xa, xaOK := readBaselineFile(filepath.Join(h, ".config", "git", "attributes"))
-		writePiece(&b, "xdg-attributes", xa, xaOK)
-	}
+	writeHomes(&b, homes)
 	return []byte(b.String())
 }
 
@@ -302,7 +281,7 @@ func (e *Engine) persistBaselinesLocked() error {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	doc := gitBaselineDoc{Version: 1, Bots: make([]gitBaselineBot, 0, len(ids))}
+	doc := gitBaselineDoc{Version: 1, Format: gitBaselineFormat, Bots: make([]gitBaselineBot, 0, len(ids))}
 	for _, id := range ids {
 		doc.Bots = append(doc.Bots, gitBaselineBot{ID: id, Blob: string(e.savedBaseline[id])})
 	}

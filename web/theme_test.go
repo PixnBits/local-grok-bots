@@ -16,7 +16,7 @@ import (
 // Static checks lock the token set; node runs the head theme script and paintMark.
 
 func TestThemeStatic(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	if !strings.Contains(src, `<meta name="color-scheme" content="light dark">`) {
 		t.Error("missing meta color-scheme")
 	}
@@ -235,7 +235,7 @@ func TestThemeApply(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed")
 	}
-	snippet, err := json.Marshal(between(t, string(IndexHTML), "// theme:begin", "// theme:end"))
+	snippet, err := json.Marshal(between(t, ClientSource(), "// theme:begin", "// theme:end"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +290,7 @@ func TestPaintMarkColor(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed")
 	}
-	snippet, err := json.Marshal(between(t, string(IndexHTML), "// mark:begin", "// mark:end"))
+	snippet, err := json.Marshal(between(t, ClientSource(), "// mark:begin", "// mark:end"))
 	if err != nil {
 		t.Fatal(err)
 	}

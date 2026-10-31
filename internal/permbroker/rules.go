@@ -132,7 +132,10 @@ func bytesTrim(b []byte) []byte {
 // command a task grant must not cover is once only when hard is set,
 // otherwise once or task. High and unclassified stop at the bot.
 // Low and medium may be global. A compound is never a bot or global rule.
-func scopeAllowed(level Level, eligible, compound, hard bool, scope string) bool {
+func scopeAllowed(level Level, eligible, compound, hard, literal bool, scope string) bool {
+	if scope != ScopeOnce && !literal {
+		return false
+	}
 	switch scope {
 	case ScopeOnce:
 		return true

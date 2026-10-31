@@ -13,7 +13,7 @@ import (
 // The profile heading reads the bot name, including while it is typed.
 // At phone width the preset swatches fill a grid and the custom control sits on the next row.
 func TestMarkMarkup(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	for _, s := range []string{
 		"display: inline-block; vertical-align: middle;",
 		"width: 28px; height: 28px; flex: none;",
