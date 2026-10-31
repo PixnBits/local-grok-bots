@@ -579,7 +579,7 @@ it. An empty list means every bot.
 
 HTML responses, including `/`, `/rules`, `/login`, and the signed-out
 page, send `Content-Security-Policy: default-src 'self'; frame-ancestors
-'none'; base-uri 'none'` and `X-Content-Type-Options: nosniff`. Scripts
+'none'; base-uri 'none'; form-action 'self'` and `X-Content-Type-Options: nosniff`. Scripts
 and styles are same-origin files: `/theme.js`, `/app.css`, and
 `/app.js`. The theme script loads from `/theme.js` before the page
 paints. A `*` in a pattern stands for exactly one word and cannot be

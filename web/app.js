@@ -131,7 +131,8 @@ function drillFocusTarget(name, wide) {
 function applyDrillFocus(el, tabindex) {
   if (!el || typeof el.focus !== "function") return false;
   if (tabindex != null) el.tabIndex = tabindex;
-  el.focus({ preventScroll: true });
+  try { el.focus({ preventScroll: true, focusVisible: false }); }
+  catch (e) { el.focus({ preventScroll: true }); }
   return true;
 }
 function focusDrillView(name, wide, query) {
@@ -2992,8 +2993,16 @@ function changedNote(node) {
   if (node.classList.contains("changed")) return node;
   return node.querySelector(":scope > .changed");
 }
+function clearGrantChips() {
+  document.querySelectorAll(".grant .grant-name").forEach(function (wrap) {
+    const name = wrap.querySelector("b");
+    if (name) wrap.replaceWith(name);
+    else wrap.remove();
+  });
+}
 function paintFieldMarks(labels) {
   document.querySelectorAll(".is-dirty").forEach(n => n.classList.remove("is-dirty"));
+  clearGrantChips();
   for (const pair of DIRTY_FIELDS) {
     const ch = changedNote(document.getElementById(pair[1]));
     if (ch) ch.hidden = true;
@@ -3015,7 +3024,17 @@ function paintFieldMarks(labels) {
   for (const g of GRANT_ORDER) {
     if (base.has(g) === cur.has(g)) continue;
     const row = document.getElementById("grant-" + g);
-    if (row) row.classList.add("is-dirty");
+    if (!row) continue;
+    row.classList.add("is-dirty");
+    const name = row.querySelector("b");
+    const chip = el("span", "chip changed-chip", "Changed");
+    chip.setAttribute("aria-label", "Changed since last save");
+    if (name) {
+      const wrap = document.createElement("span");
+      wrap.className = "grant-name";
+      name.replaceWith(wrap);
+      wrap.append(name, chip);
+    } else row.append(chip);
   }
 }
 function paintSaveBar() {
@@ -3389,7 +3408,15 @@ function showStatusToast(message, undo) {
     const undoAt = text.lastIndexOf("Undo");
     kids.push(el("span", "toast-copy", undoAt >= 0 ? text.slice(0, undoAt) : text));
     const undoBtn = btn("ghost", "Undo");
-    undoBtn.addEventListener("click", function () { dismissToast(); undo(); });
+    undoBtn.addEventListener("click", function () {
+      dismissToast();
+      const rulesView = document.getElementById("view-rules");
+      if (rulesView && rulesView.classList.contains("on")) {
+        const bridge = rulesView.querySelector("#rules-list h3[data-rules-focus]") || document.getElementById("rules-title");
+        if (bridge && typeof bridge.focus === "function") bridge.focus({ preventScroll: true });
+      }
+      undo();
+    });
     kids.push(undoBtn);
   } else {
     kids.push(el("span", "toast-copy", text));
@@ -6504,6 +6531,7 @@ function patternErrorCopy(code, cmd, wrappers) {
   if (c === "star_in_word") return "A `*` must be a whole word on its own.";
   if (c === "star_first") return "Start with the command name, for example `gh`.";
   if (c === "operators") return "Patterns can't contain ; && | $( ) or backticks. Commands with several parts always ask.";
+  if (c === "never_matches") return "This command cannot be allowed by a rule.";
   return "";
 }
 function denyToast(bot) { return "Denied. " + (bot || "The bot") + " carries on without it."; }
@@ -6523,7 +6551,8 @@ function compoundIntro(item) {
   const joined = ops.length ? " joined by " + ops.join(" and ") : "";
   const missing = parts.filter(function (p) { return !p.granted_for_task; }).length;
   const here = missing === 1 ? "Here one part isn't granted" : "Here " + missing + " parts aren't granted";
-  return "This command has " + n + " parts" + joined + ". Commands with several parts ask and can't be saved as a rule. The one exception: when every part is already granted for this task, the task grant covers the whole command. Other rules don't count. " + here + ", so it asks:";
+  const noun = n === 1 ? "part" : "parts";
+  return "This command has " + n + " " + noun + joined + ". Commands with several parts ask and can't be saved as a rule. The one exception: when every part is already granted for this task, the task grant covers the whole command. Other rules don't count. " + here + ", so it asks:";
 }
 function recentLabel(kind, bot) {
   if (kind === "expired") return "Expired · " + (bot || "bot") + " stopped";
@@ -6702,7 +6731,7 @@ function nextQueueFocusKey(items, removeIds) {
   (removeIds || []).forEach(function (id) { gone[id] = true; });
   const all = items || [];
   const left = all.filter(function (item) { return item && !gone[item.id]; });
-  if (!left.length) return "approvals-title";
+  if (!left.length) return "approvals-empty";
   const ordered = orderApprovalIds(all, [], "");
   let next = "";
   for (let i = 0; i < ordered.length; i++) {
@@ -6719,6 +6748,16 @@ function nextQueueFocusKey(items, removeIds) {
   let item = null;
   for (let k = 0; k < left.length; k++) if (left[k].id === next) item = left[k];
   return item ? primaryActionKey(item, "queue") : "approvals-title";
+}
+function batchCount(okCount, sent) {
+  if (okCount == null || okCount === "") {
+    const n = Number(sent);
+    return isFinite(n) && n > 0 ? n : 0;
+  }
+  const n = Number(okCount);
+  if (isFinite(n)) return n;
+  const fallback = Number(sent);
+  return isFinite(fallback) ? fallback : 0;
 }
 function batchResultCopy(kind, okCount, skipped, bot) {
   const ok = Number(okCount) || 0;
@@ -6749,6 +6788,10 @@ function riskLabel(row) {
   if (first === "rm") return "Deletes files";
   if (first === "edit" || first === "write" || first === "multiedit" || first === "notebookedit") return "Changes files";
   if (first === "grep" || first === "read" || first === "glob" || first === "cat") return "Reads files";
+  if (first === "cut" || first === "head" || first === "wc") return "Reads text";
+  const two = String(matches[0] || "").trim().split(/\s+/).slice(0, 2).join(" ");
+  if (two === "gh alias") return "Changes GitHub CLI settings";
+  if (two === "git push") return "Publishes code";
   return "Runs a command";
 }
 function ruleDateLabel(value) {
@@ -7103,7 +7146,7 @@ function applyQueueChrome() {
     panel.classList.toggle("is-dock", queueOpen && mode === "dock");
     panel.classList.toggle("is-slide", queueOpen && mode === "slide");
     panel.classList.toggle("is-sheet", queueOpen && mode === "sheet");
-    if (mode === "dock") {
+    if (!queueOpen || mode === "dock") {
       panel.setAttribute("role", "region");
       panel.removeAttribute("aria-modal");
     } else {
@@ -7139,39 +7182,83 @@ function openApprovals(opts) {
 function setIntendedFocus(key) {
   approvals.intendedFocus = key || "";
 }
+function nodeShown(node) {
+  if (!node || !node.isConnected) return false;
+  let el = node;
+  while (el && el.nodeType === 1) {
+    if (el.hidden) return false;
+    if (window.getComputedStyle) {
+      const st = window.getComputedStyle(el);
+      if (st.display === "none" || st.visibility === "hidden") return false;
+    }
+    el = el.parentElement;
+  }
+  return true;
+}
 function approvalOpener() {
   const list = document.querySelectorAll("button.appr-btn");
   for (let i = 0; i < list.length; i++) {
-    const button = list[i];
-    if (!button || button.hidden) continue;
-    if (window.getComputedStyle && window.getComputedStyle(button).display === "none") continue;
-    return button;
+    if (nodeShown(list[i])) return list[i];
   }
-  return list.length ? list[0] : null;
+  return null;
+}
+function focusNode(node) {
+  if (!nodeShown(node) || typeof node.focus !== "function") return false;
+  try { node.focus({ preventScroll: true }); }
+  catch (e) { node.focus(); }
+  const card = node.closest ? node.closest(".appr-card") : null;
+  if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest" });
+  const again = function () {
+    if (!nodeShown(node)) return;
+    const active = document.activeElement;
+    if (active === node) return;
+    if (!active || active === document.body || active === document.documentElement || !active.isConnected || (active.closest && active.closest("[hidden]"))) {
+      try { node.focus({ preventScroll: true }); }
+      catch (e2) { node.focus(); }
+    }
+  };
+  if (typeof requestAnimationFrame === "function") requestAnimationFrame(again);
+  setTimeout(again, 0);
+  setTimeout(again, 50);
+  return document.activeElement !== document.body;
 }
 function applyIntendedFocus(root) {
   const key = approvals.intendedFocus;
   if (!key) return false;
+  const rulesKey = key.indexOf("rules:") === 0;
   let node = null;
-  if (key === "approvals-title") node = document.getElementById("approvals-title");
-  else if (key === "approvals-opener") node = approvalOpener();
-  else if (key.indexOf("rules:") === 0) {
+  if (key === "approvals-empty" || key === "approvals-title") {
+    const panel = document.getElementById("approvals");
+    const open = !!(panel && !panel.hidden && nodeShown(panel));
+    const empty = document.getElementById("approvals-empty-title");
+    if (key === "approvals-empty" && open && nodeShown(empty)) node = empty;
+    else if (key === "approvals-title" && open && nodeShown(document.getElementById("approvals-title"))) node = document.getElementById("approvals-title");
+    else node = approvalOpener();
+  } else if (key === "approvals-opener") {
+    node = approvalOpener();
+  } else if (rulesKey) {
     node = findByAttr(document.getElementById("rules-list") || document, "data-rules-focus", key.slice(6));
-    if (!node) node = document.getElementById("rules-title");
+    if (!nodeShown(node)) return false;
   } else {
     node = findByAttr(root || document, "data-appr-focus", key) || findByAttr(document, "data-appr-focus", key);
   }
-  if (!node || (node.closest && node.closest("[hidden]"))) node = approvalOpener() || document.getElementById("approvals-title");
+  if (!rulesKey && !nodeShown(node)) node = approvalOpener();
+  if (!nodeShown(node)) {
+    if (!rulesKey) approvals.intendedFocus = "";
+    return false;
+  }
   approvals.intendedFocus = "";
-  if (!node || typeof node.focus !== "function") return false;
-  if (node.closest && node.closest("[hidden]")) node = approvalOpener();
-  if (!node || typeof node.focus !== "function") return false;
-  node.focus();
-  const card = node.closest ? node.closest(".appr-card") : null;
-  if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest" });
-  return document.activeElement !== document.body;
+  const landed = focusNode(node);
+  return landed && document.activeElement !== document.body;
 }
 function closeApprovals() {
+  const opener = approvalOpener();
+  const panel = $("#approvals");
+  if (panel) panel.removeAttribute("aria-modal");
+  if (opener) {
+    try { opener.focus({ preventScroll: true }); }
+    catch (e) { opener.focus(); }
+  }
   const waiting = (approvalItems || []).length > 0;
   queueOpen = false;
   queueManual = false;
@@ -7671,6 +7758,7 @@ async function postBatch(kind, ids, sample) {
   const data = res.data || {};
   let ok = data.ok_count;
   let skipped = data.skipped;
+  const sent = (ids || []).length;
   const done = [];
   if (Array.isArray(data.results)) {
     let counted = 0;
@@ -7682,10 +7770,10 @@ async function postBatch(kind, ids, sample) {
     if (ok == null) ok = counted;
     if (skipped == null) skipped = skippedN;
   } else {
-    ok = Number(ok) || 0;
+    ok = batchCount(ok, sent);
     (ids || []).forEach(function (id) { done.push(id); });
   }
-  ok = Number(ok) || 0;
+  ok = batchCount(ok, sent);
   skipped = Number(skipped) || 0;
   const bot = itemBot(sample);
   showStatusToast(batchResultCopy(kind, ok, skipped, bot), null);
@@ -7916,7 +8004,11 @@ function renderApprovals() {
   });
   if (!items.length) {
     const empty = el("div", "appr-empty");
-    empty.append(el("h3", "", EMPTY_QUEUE_TITLE), el("p", "", EMPTY_QUEUE_BODY));
+    const heading = el("h3", "", EMPTY_QUEUE_TITLE);
+    heading.id = "approvals-empty-title";
+    heading.tabIndex = -1;
+    heading.setAttribute("data-appr-focus", "approvals-empty");
+    empty.append(heading, el("p", "", EMPTY_QUEUE_BODY));
     body.append(empty);
   } else {
     let lastRank = -1;
@@ -7935,7 +8027,7 @@ function renderApprovals() {
   if (applyIntendedFocus(panel)) return;
   if (restore && !approvals.focusDeny && !approvals.wantFocus) {
     const back = findByAttr(panel, "data-appr-focus", restore);
-    if (back && !typingFocus()) back.focus();
+    if (back && !typingFocus()) focusNode(back);
   } else applyQueueFocus(panel);
 }
 function renderBrokerThread() {
@@ -8254,12 +8346,11 @@ function paintRules() {
   }
   if (show("risk")) list.append(renderRiskSection());
   if (approvals.intendedFocus && String(approvals.intendedFocus).indexOf("rules:") === 0) {
-    applyIntendedFocus(list);
-    return;
+    if (applyIntendedFocus(list)) return;
   }
   if (focusKey) {
     const again = findByAttr(list, "data-rules-focus", focusKey);
-    if (again && again.focus) again.focus();
+    if (again) focusNode(again);
   }
 }
 function renderRuleSection(title, botId, rules, grants) {
@@ -8477,8 +8568,7 @@ function renderRiskRow(row, stricter) {
   level.append(chip);
   const pattern = document.createElement("td");
   pattern.append(el("div", "rules-cmd", (row.matches || []).join("\n")));
-  pattern.append(el("div", "rules-src", "All bots"));
-  if (row.applies_to) pattern.append(el("div", "rules-src", row.applies_to));
+  if (row.applies_to && row.applies_to !== "All bots") pattern.append(el("div", "rules-src", row.applies_to));
   if (stricter && row.raised_from) pattern.append(el("div", "rules-src", "Raised from " + row.raised_from + " to " + row.level));
   const what = document.createElement("td");
   what.textContent = riskLabel(row);
@@ -8536,7 +8626,13 @@ async function revokeRule(rule, trigger) {
   if (res.status !== 200) { approvals.intendedFocus = ""; return; }
   if (rule.kind === "legacy") showStatusToast("Rule revoked.", null);
   else showStatusToast("Rule revoked · Undo", function () {
-    brokerCall("/api/permbroker/rules", { method: "POST", body: JSON.stringify(payload) }).then(pollSoon);
+    brokerCall("/api/permbroker/rules", { method: "POST", body: JSON.stringify(payload) }).then(function (res) {
+      const created = res && res.data && res.data.rule && res.data.rule.id;
+      const sec = (rule && rule.scope === "global") ? "global" : ((rule && rule.bot_id) || "global");
+      if (res && res.status === 200 && created) setIntendedFocus("rules:rule:" + created + ":menu");
+      else setIntendedFocus("rules:sec:" + sec);
+      pollSoon();
+    });
   });
   pollSoon();
 }

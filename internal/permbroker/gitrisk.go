@@ -59,6 +59,26 @@ func gitConfigRisk(ws string, homes, env []string) string {
 	return ""
 }
 
+// gitRiskReason is the card text for a git-risk hard ask that is not
+// baseline drift. Drift keeps its own sentence.
+func gitRiskReason(why string) string {
+	switch why {
+	case "filter":
+		return "A .gitattributes file sets a filter"
+	case "diff":
+		return "A .gitattributes file sets a diff driver"
+	case "merge":
+		return "A .gitattributes file sets a merge driver"
+	case "cap":
+		return "Too many git attribute files to review"
+	default:
+		if why == "" {
+			return ""
+		}
+		return "Git config sets " + why
+	}
+}
+
 // gitDir is the git directory for ws. A gitdir file is resolved. A
 // symlink or a real directory uses that .git path. core.hooksPath is
 // not consulted.

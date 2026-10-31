@@ -22,6 +22,7 @@ const (
 	gitReasonConfig = "Git config changed since it was last reviewed"
 	gitReasonAttrs  = "A .gitattributes file changed"
 	gitReasonSystem = "System git config changed"
+	gitReasonHook   = "Git hook changed"
 )
 
 // gitBaselineBlobOld is the fcc6144 piece set: repo config, hooks, info
@@ -134,7 +135,27 @@ func driftReason(stored, current []byte) string {
 		(pieceText(stored, "system-gitconfig") != "" || pieceText(current, "system-gitconfig") != "") {
 		return gitReasonSystem
 	}
+	if pieceText(stored, "hooks") != pieceText(current, "hooks") && hooksOnlyDrift(stored, current) {
+		return gitReasonHook
+	}
 	return gitReasonConfig
+}
+
+// hooksOnlyDrift is true when the hooks piece is the only difference.
+func hooksOnlyDrift(stored, current []byte) bool {
+	return stripPiece(stored, "hooks") == stripPiece(current, "hooks")
+}
+
+func stripPiece(blob []byte, name string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(string(blob), "\n") {
+		if line == name || strings.HasPrefix(line, name+" ") {
+			continue
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // maybeUpgradeBaselineLocked rewrites an old baseline when the files it

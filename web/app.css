@@ -162,6 +162,7 @@
   * { box-sizing: border-box; }
   :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
   :focus:not(:focus-visible) { outline-style: none; }
+  .solo-title:focus:not(:focus-visible) { outline-style: none; }
   html, body { margin: 0; height: 100%; height: 100dvh; overflow: hidden; }
   body {
     font-family: var(--font);
@@ -394,14 +395,15 @@
   .fld input:focus, .fld textarea:focus, .fld select:focus, .chips:focus-within {
     border-color: var(--focus); box-shadow: 0 0 0 3px var(--accent-soft);
   }
-  .fld input.is-dirty, .fld textarea.is-dirty, .chips.is-dirty,
-  .mark-block.is-dirty, #server-tools.is-dirty, .grant.is-dirty {
-    box-shadow: inset 3px 0 0 var(--accent);
-  }
-  .mark-block.is-dirty, #server-tools.is-dirty, .grant.is-dirty { padding-left: 8px; }
   .fld input.is-dirty:focus, .fld textarea.is-dirty:focus, .chips.is-dirty:focus-within {
     border-color: var(--focus);
-    box-shadow: inset 3px 0 0 var(--accent), 0 0 0 3px var(--accent-soft);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+  .grant.is-dirty { border: 1px solid var(--accent); border-radius: 10px; }
+  .grant .grant-name { grid-column: 2; grid-row: 1; display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+  .grant .changed-chip {
+    grid-column: auto; width: max-content; height: 22px; padding: 0 8px;
+    font-family: var(--font); color: var(--accent-text); background: var(--accent-soft);
   }
   .fld.is-error input, .fld.is-error textarea, .chips.is-error { border-color: var(--danger); }
   .help { margin: 0; font-size: 12px; line-height: 16px; color: var(--muted); display: flex; gap: 6px; align-items: flex-start; }
@@ -1355,6 +1357,10 @@
     a.appr-rules, #approvals-close, #rule-close {
       min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center;
     }
+    a.appr-open {
+      min-height: 44px; display: inline-flex; align-items: center; width: fit-content; max-width: 100%;
+    }
+    #view-rules button.icon-btn { min-width: 44px; min-height: 44px; }
   }
   @media (min-width: 1180px) {
     body.queue-dock .app { flex-direction: row; }

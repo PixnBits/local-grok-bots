@@ -82,6 +82,12 @@ type App struct {
 	brokerMu      sync.Mutex
 	brokerLn      map[string]*permbroker.Listener
 	brokerOn      map[string]bool
+	// shellCwd is the directory a bot's run_shell session is in.
+	// It stays inside that bot's workspace. shellPlan is the directory
+	// to store after the command that was just allowed actually runs.
+	shellCwdMu sync.Mutex
+	shellCwd   map[string]string
+	shellPlan  map[string]shellCwdPlan
 	// hookPin is the hook binary recorded at the first pin or an admin repin.
 	// hookBin is the path the current armed launch checked.
 	// hookRepinRequired stays set until an admin repin.

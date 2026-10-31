@@ -91,7 +91,7 @@ func (a *App) Handler() http.Handler {
 const (
 	headerCSP     = "Content-Security-Policy"
 	headerNoSniff = "X-Content-Type-Options"
-	cspValue      = "default-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+	cspValue      = "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
 )
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -175,8 +175,6 @@ func (a *App) remoteHostDenied(r *http.Request) bool {
 	return false
 }
 
-// mcpPermissionOpen is the permission MCP route. The path token and the
-// Bearer token are checked by the handler, not by the admin-token gate.
 func publicAsset(path string) bool {
 	switch path {
 	case "/app.js", "/app.css", "/theme.js":
@@ -186,8 +184,17 @@ func publicAsset(path string) bool {
 	}
 }
 
+// mcpPermissionOpen is the permission MCP route. The path token and the
+// Bearer token are checked by the handler, not by the admin-token gate.
 func mcpPermissionOpen(path string) bool {
-	return path == "/api/mcp/permission" || strings.HasPrefix(path, "/api/mcp/permission/")
+	if path == "/api/mcp/permission" {
+		return true
+	}
+	rest, ok := strings.CutPrefix(path, "/api/mcp/permission/")
+	if !ok || rest == "" || strings.Contains(rest, "/") {
+		return false
+	}
+	return permTokenOK(rest)
 }
 
 // protectMutatingAPI applies the Origin / Sec-Fetch-Site check and JSON

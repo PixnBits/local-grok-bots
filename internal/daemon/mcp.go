@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -202,8 +203,19 @@ func (a *App) lookupPerm(token string) (permBind, bool) {
 	}
 	a.permMu.Lock()
 	defer a.permMu.Unlock()
-	b, ok := a.permTokens[token]
-	return b, ok
+	tokenb := []byte(token)
+	var found permBind
+	matched := 0
+	for cand, b := range a.permTokens {
+		if subtle.ConstantTimeCompare([]byte(cand), tokenb) == 1 {
+			found = b
+			matched = 1
+		}
+	}
+	if matched == 1 {
+		return found, true
+	}
+	return permBind{}, false
 }
 
 // mcpPermToken prefers a 64-hex path segment. Otherwise it takes a Bearer

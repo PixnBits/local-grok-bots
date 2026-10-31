@@ -275,6 +275,14 @@ func TestGolden_NestedGitAttributesRisk(t *testing.T) {
 	if d := e.Evaluate(context.Background(), bashReq("bot", "sess", "task", ws, "git status")); d.Verdict == VerdictAllow {
 		t.Fatalf("nested filter %+v", d)
 	}
+	pending := e.ListPending()
+	if len(pending) != 1 || pending[0].GitReason == "" {
+		t.Fatalf("git reason %+v", pending)
+	}
+	reason := strings.ToLower(pending[0].GitReason)
+	if !strings.Contains(reason, "filter") && !strings.Contains(pending[0].GitReason, ".gitattributes") {
+		t.Fatalf("git reason %q", pending[0].GitReason)
+	}
 }
 
 func TestGolden_NestedGitAttributesDrift(t *testing.T) {

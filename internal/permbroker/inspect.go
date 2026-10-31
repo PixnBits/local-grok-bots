@@ -209,6 +209,9 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 				in.GitRisk = "baseline"
 			}
 		}
+		if in.GitReason == "" && in.GitRisk != "" && in.GitRisk != "baseline" {
+			in.GitReason = gitRiskReason(in.GitRisk)
+		}
 	} else {
 		canon, ok := canonicalJSON(req.ToolInput)
 		if !ok {

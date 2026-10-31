@@ -507,11 +507,12 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		}
 		shellWS, werr := a.shellWorkspace(current.ID)
 		if werr != nil {
+			a.clearShellPlan(current.ID)
 			return "", werr
 		}
 		res, err := sandbox.Run(shellCtx, sandbox.Request{
 			Workspace:       shellWS,
-			Command:         command,
+			Command:         a.shellRunCommand(current.ID, shellWS, command),
 			CleanBash:       cleanBash,
 			Grants:          current.Grants,
 			NetAllow:        current.NetAllow,
@@ -537,8 +538,10 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		a.recordSandboxEvents(current.ID, res.Events)
 		summary := formatShell(res.Stdout, res.Stderr)
 		if err != nil {
+			a.clearShellPlan(current.ID)
 			return summary, fmt.Errorf("%s\n%s", err.Error(), summary)
 		}
+		a.commitShellPlan(current.ID, shellWS)
 		return summary, nil
 	default:
 		return "", fmt.Errorf("unknown tool %s", name)
