@@ -407,13 +407,17 @@ a live run token is 403. The same gate covers the non-broker permission
 routes (the decision, the pending lists, and the durable
 permission-rule routes). Auth is the registered route. A path that is
 not one of those routes is not a broker handler. Routes that are not
-permission routes stay open when no admin token is configured. The
-routes also use the host allowlist and the same cross-site check as
-other mutating admin routes (`Sec-Fetch-Site` and `Origin`). A
-non-broker permission route that is not GET uses that check and
-requires `Content-Type: application/json` with a JSON body. An empty
-body or a body that is not JSON is 400. Another content type is 415.
-Broker posts that send no body are unchanged.
+permission routes stay open when no admin token is configured. Every
+state-changing `/api` route (POST, PUT, PATCH, DELETE) uses the host
+allowlist and the same cross-site check (`Sec-Fetch-Site` and
+`Origin`). Those routes require `Content-Type: application/json` (a
+parameter such as `charset` is allowed). Another type, or a missing
+type on a request with a body, is 415. A DELETE with an empty body may
+omit Content-Type. Non-broker permission writes still require a JSON
+body: empty or non-JSON is 400. `POST /api/mcp/permission` and
+`POST /api/mcp/permission/{token}` authenticate by token for the CLI
+MCP client and do not require JSON Content-Type. `POST /api/stt`
+accepts `application/octet-stream` audio and keeps its origin check.
 
 - `GET /api/permbroker/pending` lists open items. Command text is redacted.
   Each item includes `bot_name`, `level`, `hard_ask`, `eligible`,
@@ -561,8 +565,10 @@ curl -sS -H "Authorization: Bearer $LGB_ADMIN_TOKEN" \
 curl -sS -X DELETE -H "Authorization: Bearer $LGB_ADMIN_TOKEN" \
   "https://myhost.tailnet-example.ts.net/api/permbroker/rules/r_example"
 curl -sS -X POST -H "Authorization: Bearer $LGB_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" -d '{}' \
   "https://myhost.tailnet-example.ts.net/api/permbroker/rules/r_example/confirm"
 curl -sS -X POST -H "Authorization: Bearer $LGB_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" -d '{}' \
   "https://myhost.tailnet-example.ts.net/api/permbroker/bots/bot-id/git-baseline"
 ```
 

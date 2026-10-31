@@ -140,8 +140,13 @@ func do(t *testing.T, method, url string, body any, token string) (*http.Respons
 	if err != nil {
 		t.Fatal(err)
 	}
-	if body != nil {
+	switch strings.ToUpper(method) {
+	case http.MethodPost, http.MethodPut, http.MethodPatch:
 		req.Header.Set("Content-Type", "application/json")
+	default:
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
 	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)

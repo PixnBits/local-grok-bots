@@ -85,7 +85,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /rules", a.handleIndex)
 	// A bot's page. The client reads the id from the path.
 	mux.HandleFunc("GET /bots/{id}", a.handleIndex)
-	return securityHeaders(a.withAuth(mux))
+	return securityHeaders(a.withAuth(a.protectMutatingAPI(mux)))
 }
 
 const (
@@ -190,6 +190,89 @@ func mcpPermissionOpen(path string) bool {
 	return path == "/api/mcp/permission" || strings.HasPrefix(path, "/api/mcp/permission/")
 }
 
+// protectMutatingAPI applies the Origin / Sec-Fetch-Site check and JSON
+// Content-Type rule to every state-changing /api route.
+func (a *App) protectMutatingAPI(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !a.mutatingAPIOK(w, r) {
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func mutatingAPIMethod(method string) bool {
+	switch strings.ToUpper(method) {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func skipJSONContentType(path string) bool {
+	if path == "/api/stt" {
+		return true
+	}
+	return mcpPermissionOpen(path)
+}
+
+func (a *App) mutatingAPIOK(w http.ResponseWriter, r *http.Request) bool {
+	if r == nil || r.URL == nil || !strings.HasPrefix(r.URL.Path, "/api/") || !mutatingAPIMethod(r.Method) {
+		return true
+	}
+	if sttCrossSite(r) || !a.originAllowed(r) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return false
+	}
+	if skipJSONContentType(r.URL.Path) {
+		return true
+	}
+	if !jsonContentTypeOK(r) {
+		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "content type must be application/json"})
+		return false
+	}
+	return true
+}
+
+func jsonContentTypeOK(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	ct := strings.TrimSpace(r.Header.Get("Content-Type"))
+	if ct == "" {
+		return r.Method == http.MethodDelete && !requestHasBody(r)
+	}
+	media, _, err := mime.ParseMediaType(ct)
+	return err == nil && strings.EqualFold(media, "application/json")
+}
+
+func requestHasBody(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.ContentLength > 0 {
+		return true
+	}
+	if r.Body == nil || r.Body == http.NoBody {
+		return false
+	}
+	if r.ContentLength == 0 {
+		return false
+	}
+	buf := make([]byte, 1)
+	n, err := r.Body.Read(buf)
+	rest := r.Body
+	if n > 0 {
+		r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(buf[:n]), rest))
+		return true
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		return true
+	}
+	return false
+}
+
 // authCookie carries the admin token for a browser that opened /login.
 const authCookie = "lgb_auth"
 
@@ -220,6 +303,9 @@ func (a *App) guardPermission(h http.HandlerFunc, permBody bool) http.HandlerFun
 		}
 		if !a.credentialAccepted(r) {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+			return
+		}
+		if !a.mutatingAPIOK(w, r) {
 			return
 		}
 		if permBody && r.Method != http.MethodGet && r.Method != http.MethodHead {

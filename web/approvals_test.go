@@ -190,6 +190,27 @@ func TestTaskTextFlattensWhitespace(t *testing.T) {
 	}
 }
 
+func TestCommandFallsBackToCmd(t *testing.T) {
+	src := ClientSource()
+	for _, name := range []string{"function liveToolLine(", "function toolCallLabel("} {
+		body := jsFunc(t, src, name)
+		commandAt := strings.Index(body, "a.command")
+		cmdAt := strings.Index(body, "a.cmd")
+		if commandAt < 0 || cmdAt < 0 {
+			t.Fatalf("%s missing command/cmd fallback", name)
+		}
+		if cmdAt < commandAt {
+			t.Fatalf("%s uses cmd before command", name)
+		}
+		if !strings.Contains(body, "a.command.trim()") {
+			t.Fatalf("%s does not treat a blank command as empty", name)
+		}
+		if !strings.Contains(body, `typeof a.cmd === "string"`) || !strings.Contains(body, "a.cmd.trim()") {
+			t.Fatalf("%s does not fall back to a non-blank cmd", name)
+		}
+	}
+}
+
 func jsFunc(t *testing.T, src, start string) string {
 	t.Helper()
 	i := strings.Index(src, start)

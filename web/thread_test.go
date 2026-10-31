@@ -160,7 +160,7 @@ vm.runInContext(snippet + "\n" + [
   "shouldClearQueued", "queuedClearOnThread", "escStopsRun", "workingIndicatorText",
   "threadSubline", "stateChipName", "composerHint", "composerPlaceholder",
   "cardEyebrow", "cardTitle", "cardRecordText", "recordKind", "countdownAnnounce",
-  "archiveFocusTarget", "themeRadioKey", "retryTrigger", "toolCallLabel",
+  "archiveFocusTarget", "themeRadioKey", "retryTrigger", "toolCallLabel", "liveToolLine",
   "partialsToShow", "mergeRunRecords", "runRecordKey", "stoppedNoticeText",
   "timeoutNoteActions", "streamResetApplies", "timedOutTag", "timeoutRunId", "focusTargetAfterNote", "timeoutAnnouncement",
   "STOP_TIMEOUT_MS", "QUEUED_CAPTION", "STOP_FAILED_NOTE", "HINT_IDLE", "HINT_RUNNING"
@@ -255,6 +255,10 @@ check("hint", ctx.composerHint(false) === ctx.HINT_IDLE && ctx.composerHint(true
 check("ph-wide", ctx.composerPlaceholder("Recipe Helper", false) === "Message Recipe Helper");
 check("ph-narrow", ctx.composerPlaceholder("Garden Notes", true) === "Message Garden Notes");
 check("bash-label", ctx.toolCallLabel("Bash", {command: "git status"}) === "Bash(git status)");
+check("bash-cmd", ctx.toolCallLabel("Bash", {cmd: "ls -l"}) === "Bash(ls -l)");
+check("bash-blank-cmd", ctx.toolCallLabel("Bash", {command: "  ", cmd: "pwd"}) === "Bash(pwd)");
+check("live-cmd", ctx.liveToolLine("Bash", {cmd: "ls"}, true).indexOf("ls") >= 0);
+check("live-blank-cmd", ctx.liveToolLine("Bash", {command: "   ", cmd: "pwd"}, true).indexOf("pwd") >= 0);
 check("eye-q", ctx.cardEyebrow({kind: "question", tool: "AskUserQuestion"}, "Recipe Helper") === "QUESTION FROM Recipe Helper");
 check("eye-push", ctx.cardEyebrow({tool: "git_push"}, "") === "APPROVAL REQUIRED · GIT_PUSH");
 check("eye-pr", ctx.cardEyebrow({tool: "create_pr"}, "") === "APPROVAL REQUIRED · CREATE_PR");

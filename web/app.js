@@ -77,9 +77,15 @@ function base() {
 function showAuth() { $("#auth").classList.add("on"); }
 async function api(path, opts={}) {
   const headers = Object.assign({}, opts.headers || {});
-  if (opts.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+  const method = String(opts.method || "GET").toUpperCase();
+  const mutating = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
+  let body = opts.body;
+  if (mutating) {
+    if (!headers["Content-Type"]) headers["Content-Type"] = "application/json";
+    if (body == null || body === "") body = "{}";
+  }
   if (state.token) headers.Authorization = "Bearer " + state.token;
-  const res = await fetch(base() + path, Object.assign({}, opts, {headers}));
+  const res = await fetch(base() + path, Object.assign({}, opts, {headers, body}));
   if (res.status === 401) { showAuth(); throw new Error("unauthorized"); }
   if (res.status === 204) return null;
   const text = await res.text();
@@ -4839,7 +4845,8 @@ function liveToolLine(name, args, ok) {
   let arg = "";
   const a = args && typeof args === "object" ? args : null;
   if (a) {
-    if (typeof a.command === "string" && a.command) arg = a.command;
+    if (typeof a.command === "string" && a.command.trim()) arg = a.command;
+    else if (typeof a.cmd === "string" && a.cmd.trim()) arg = a.cmd;
     else if (typeof a.file_path === "string" && a.file_path) arg = a.file_path;
     else if (typeof a.path === "string" && a.path) arg = a.path;
     else {
@@ -4868,7 +4875,8 @@ function toolCallLabel(tool, args) {
   const name = tool == null || tool === "" ? "tool" : String(tool);
   const a = args && typeof args === "object" ? args : {};
   let arg = "";
-  if (typeof a.command === "string" && a.command) arg = a.command;
+  if (typeof a.command === "string" && a.command.trim()) arg = a.command;
+  else if (typeof a.cmd === "string" && a.cmd.trim()) arg = a.cmd;
   else if (typeof a.repo === "string" && a.repo) arg = a.repo;
   else if (typeof a.file_path === "string" && a.file_path) arg = a.file_path;
   else if (typeof a.path === "string" && a.path) arg = a.path;
@@ -6923,12 +6931,17 @@ function closeNote(id) {
 }
 async function brokerCall(path, opts) {
   const headers = {};
-  const body = opts && opts.body;
-  if (body) headers["Content-Type"] = "application/json";
+  const method = String((opts && opts.method) || "GET").toUpperCase();
+  const mutating = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
+  let body = opts && opts.body;
+  if (mutating) {
+    headers["Content-Type"] = "application/json";
+    if (body == null || body === "") body = "{}";
+  }
   if (state.token) headers.Authorization = "Bearer " + state.token;
   try {
     const res = await fetch(base() + path, {
-      method: (opts && opts.method) || "GET",
+      method: method,
       headers: headers,
       body: body || undefined,
       cache: "no-store"
