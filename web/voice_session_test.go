@@ -9,7 +9,7 @@ import (
 
 func voicePageSource(t *testing.T) string {
 	t.Helper()
-	src := string(IndexHTML)
+	src := ClientSource()
 	i := strings.Index(src, "// voice-sr:begin")
 	j := strings.LastIndex(src, "state.stop = freshStop()")
 	if i < 0 || j < i {

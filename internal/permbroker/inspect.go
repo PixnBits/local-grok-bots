@@ -47,7 +47,9 @@ func (e *Engine) capture(req Request) evalSnap {
 	}
 	ws := req.Workspace
 	var repos []string
-	if b, ok := e.bots[req.BotID]; ok {
+	if _, ok := e.bots[req.BotID]; ok {
+		e.maybeUpgradeBaselineLocked(req.BotID)
+		b := e.bots[req.BotID]
 		if b.Workspace != "" {
 			ws = b.Workspace
 			snap.perBot = true
@@ -90,6 +92,7 @@ func (e *Engine) failClosed(req Request) Decision {
 }
 
 func (e *Engine) raiseToCurrent(req Request, in inspected) inspected {
+	before := in.Level
 	if isShellTool(req.ToolName) {
 		if len(in.Argv) > 0 {
 			if lvl := e.table.level(ToolShell, in.Argv); Rank(lvl) > Rank(in.Level) {
@@ -111,16 +114,29 @@ func (e *Engine) raiseToCurrent(req Request, in inspected) inspected {
 		in.Eligible = false
 		in.HardAsk = true
 	}
+	if in.Level != before {
+		in.AdvisorySource = finalAdvisorySource(in.AdvisorySource, in.Level)
+	}
 	return in
 }
 
 func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
-	in := inspected{}
+	in := inspected{Literal: true, AdvisorySource: "table"}
 	ws, repos := snap.ws, snap.repos
 	if isShellTool(req.ToolName) {
 		raw, _ := commandOf(req.ToolInput)
 		in.Raw = raw
 		parsed := ParseCommand(raw)
+		if parsed.Reason == "not a literal" {
+			if sp, ops, ok := surfaceParse(raw); ok {
+				parsed = sp
+				in.Operators = ops
+				in.Literal = false
+			}
+		}
+		if in.Operators == nil {
+			in.Operators = commandOperators(raw)
+		}
 		in.Compound = parsed.Compound
 		in.Argv = append([]string(nil), parsed.Argv...)
 		cwd := req.Cwd
@@ -177,7 +193,7 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 			in.Eligible = false
 			in.HardAsk = true
 		}
-		drifted := gitDriftSnap(snap, req, ws, parsed)
+		drifted, driftWhy := gitDriftSnap(snap, req, ws, parsed)
 		if gitRiskTool(req.ToolName) && commandUsesGit(parsed) {
 			if why := gitConfigRisk(ws, snap.homes, snap.env); why != "" {
 				in.GitRisk = why
@@ -186,11 +202,15 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 			}
 		}
 		if drifted {
+			in.GitReason = driftWhy
 			in.Eligible = false
 			in.HardAsk = true
 			if in.GitRisk == "" {
 				in.GitRisk = "baseline"
 			}
+		}
+		if in.GitReason == "" && in.GitRisk != "" && in.GitRisk != "baseline" {
+			in.GitReason = gitRiskReason(in.GitRisk)
 		}
 	} else {
 		canon, ok := canonicalJSON(req.ToolInput)
@@ -222,16 +242,45 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 	if classifier == nil {
 		classifier = NopClassifier{}
 	}
-	raised, why := classifier.Escalate(ctx, ClassInput{
+	classIn := ClassInput{
 		Tool: req.ToolName, Argv: in.Argv, Raw: in.Raw, Cwd: req.Cwd,
 		Eligible: in.Eligible, Compound: in.Compound, Level: in.Level,
-	})
-	if Rank(raised) > Rank(in.Level) {
-		in.Level = raised
-		if why == "" {
-			why = "escalated"
+	}
+	var proposal Level
+	var classWhy string
+	fromModel := false
+	if rep, ok := classifier.(classReporter); ok {
+		report := rep.Classify(ctx, classIn)
+		in.AdvisoryChecked = report.Checked
+		if report.Advisory != "" {
+			in.Advisory = cleanAdvisory(report.Advisory)
 		}
-		in.ClassNote = why
+		proposal = report.Level
+		fromModel = true
+	} else {
+		proposal, classWhy = classifier.Escalate(ctx, classIn)
+	}
+	// Path rules land before the classifier is allowed to change the level.
+	// The source names the final level only when that level is the model's
+	// and it was stricter than the table and the path rules.
+	if hitsCriticalWith(req, in, snap.critical, critEnv{homes: snap.homes, env: snap.env}) {
+		in.Level = LevelCritical
+	}
+	tableLevel := in.Level
+	if classifierRaises(tableLevel, proposal) {
+		if Rank(proposal) >= Rank(LevelHigh) && Rank(proposal) > Rank(tableLevel) {
+			in.RaisedHigh = true
+		}
+		in.Level = proposal
+		if fromModel {
+			in.AdvisorySource = "local model raised this to " + string(proposal)
+			in.ClassNote = in.AdvisorySource
+		} else {
+			if classWhy == "" {
+				classWhy = "escalated"
+			}
+			in.ClassNote = classWhy
+		}
 	}
 	if in.GitRisk != "" {
 		note := "git config " + in.GitRisk
@@ -243,42 +292,70 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 	} else if in.ClassNote == "" {
 		in.ClassNote = "none"
 	}
-	// A classifier cannot allow a call. ClassifierMayAllow is the gate any
-	// future allow has to pass, and it is false without this bot's
-	// workspace and git baseline.
-	if hitsCriticalWith(req, in, snap.critical, critEnv{homes: snap.homes, env: snap.env}) {
-		in.Level = LevelCritical
-	}
+	// A classifier cannot allow a call. classifierMayAllowCommandLocked is
+	// the gate any later allow from classifier input has to pass.
 	if in.Level == LevelCritical {
 		in.Eligible = false
 		in.HardAsk = true
 	}
+	in.CriticalReason = criticalReason(in.Level, in.Argv, in.Raw)
 	return in
 }
 
-func gitDriftSnap(snap evalSnap, req Request, ws string, parsed Parse) bool {
+// finalAdvisorySource keeps a model-raise line only when it names the
+// level the card will show. A later path rule that moves the level
+// leaves the source as the table.
+func finalAdvisorySource(source string, level Level) string {
+	raised := "local model raised this to " + string(level)
+	if source == raised {
+		return source
+	}
+	if strings.HasPrefix(source, "local model raised this to ") {
+		return "table"
+	}
+	if source == "" {
+		return "table"
+	}
+	return source
+}
+
+func gitDriftSnap(snap evalSnap, req Request, ws string, parsed Parse) (bool, string) {
 	if !gitRiskTool(req.ToolName) || !commandUsesGit(parsed) {
-		return false
+		return false, ""
 	}
 	// An unreadable baseline file asks until an admin records one.
 	// A bot an admin just recorded still compares that record.
 	if snap.baselineCorrupt && !snap.snapSet {
-		return true
+		return true, gitReasonConfig
 	}
 	if snap.perBot {
 		if !snap.snapSet {
-			return true
+			return true, gitReasonConfig
 		}
 	} else if !snap.snapSet {
-		return false
+		return false, ""
 	}
 	if ws == "" {
-		return true
+		return true, gitReasonConfig
 	}
-	if !bytes.Equal(snap.snapBlob, gitBaselineBlob(ws, snap.homes)) {
-		return true
+	if subdirGit(req.Cwd, ws) {
+		return true, gitReasonAttrs
 	}
-	return subdirGit(req.Cwd, ws)
+	current := gitBaselineBlob(ws, snap.homes)
+	if bytes.Equal(snap.snapBlob, current) {
+		return false, ""
+	}
+	if blobIsOldFormat(snap.snapBlob) {
+		if sameHomes(blobHomes(snap.snapBlob), snap.homes) {
+			old := gitBaselineBlobOld(ws, snap.homes)
+			if bytes.Equal(snap.snapBlob, old) {
+				return false, ""
+			}
+			return true, driftReason(snap.snapBlob, old)
+		}
+		return true, gitReasonConfig
+	}
+	return true, driftReason(snap.snapBlob, current)
 }
 
 func hitsCritical(req Request, in inspected, crit []string) bool {

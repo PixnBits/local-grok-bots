@@ -88,6 +88,13 @@ func runBwrap(ctx context.Context, p *prepared, bwrap string) (string, string, e
 	})
 }
 
+func shellChdir(p *prepared) string {
+	if p == nil || p.jailDir == "" {
+		return "/work"
+	}
+	return p.jailDir
+}
+
 // bwrapLaunchArgs is the bubblewrap argv for one prepared shell.
 // extra holds the info and block pipe ends when a root jail drops.
 // infoR and blockW stay with the parent for the uid map.
@@ -117,7 +124,7 @@ func bwrapLaunchArgs(p *prepared) (args []string, extra, bindFiles []*os.File, i
 		"--proc", "/proc",
 		"--dev", "/dev",
 		"--bind", p.workspace, "/work",
-		"--chdir", "/work",
+		"--chdir", shellChdir(p),
 	)
 	if st, statErr := os.Stat("/etc/ld.so.cache"); statErr == nil && !st.IsDir() {
 		args = append(args, "--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache")
@@ -336,7 +343,7 @@ func runUnshare(ctx context.Context, p *prepared) (string, string, error) {
 		}
 		mounts = append(mounts, m)
 	}
-	cfg := stage2File{Workspace: p.workspace, Command: p.command, Env: p.env, Mounts: mounts, CleanBash: p.cleanBash}
+	cfg := stage2File{Workspace: p.workspace, Command: p.command, Env: p.env, Mounts: mounts, CleanBash: p.cleanBash, WorkRel: p.workRel}
 	b, err := json.Marshal(cfg)
 	if err != nil {
 		return "", "", err

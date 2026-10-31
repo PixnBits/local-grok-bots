@@ -19,7 +19,7 @@ func TestMarkdownRenderer(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed")
 	}
-	src := string(IndexHTML)
+	src := ClientSource()
 	i := strings.Index(src, "// md:begin")
 	j := strings.Index(src, "// md:end")
 	if i < 0 || j < i {

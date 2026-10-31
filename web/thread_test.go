@@ -12,7 +12,7 @@ import (
 // Node runs the pure helpers between the thread-logic markers.
 
 func TestThreadStatic(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	for _, s := range []string{
 		`aria-label="Stop run"`,
 		"Stop · Esc",
@@ -39,7 +39,6 @@ func TestThreadStatic(t *testing.T) {
 		"Every push asks. Session approval does not apply.",
 		"Every pull request asks. Nothing is sent to GitHub until you allow it.",
 		"Couldn't send your answer. The daemon didn't respond. Try again.",
-		"Stopped after denial.",
 		"Open in Log",
 		"Try again",
 		"Stopped after 8 tool rounds. Continue picks up the same work for 8 more.",
@@ -93,7 +92,7 @@ func TestThreadStatic(t *testing.T) {
 
 // Phone header and thread details found in the live check.
 func TestThreadPolish(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	for _, s := range []string{
 		// The chip's segments must not pick up the theme control's .seg box.
 		`.state-chip .chip-seg {`,
@@ -148,7 +147,7 @@ func TestThreadLogic(t *testing.T) {
 	if err != nil {
 		t.Fatal("node not installed")
 	}
-	snippet, err := json.Marshal(between(t, string(IndexHTML), "// thread-logic:begin", "// thread-logic:end"))
+	snippet, err := json.Marshal(between(t, ClientSource(), "// thread-logic:begin", "// thread-logic:end"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +160,7 @@ vm.runInContext(snippet + "\n" + [
   "shouldClearQueued", "queuedClearOnThread", "escStopsRun", "workingIndicatorText",
   "threadSubline", "stateChipName", "composerHint", "composerPlaceholder",
   "cardEyebrow", "cardTitle", "cardRecordText", "recordKind", "countdownAnnounce",
-  "archiveFocusTarget", "themeRadioKey", "retryTrigger", "toolCallLabel",
+  "archiveFocusTarget", "themeRadioKey", "retryTrigger", "toolCallLabel", "liveToolLine",
   "partialsToShow", "mergeRunRecords", "runRecordKey", "stoppedNoticeText",
   "timeoutNoteActions", "streamResetApplies", "timedOutTag", "timeoutRunId", "focusTargetAfterNote", "timeoutAnnouncement",
   "STOP_TIMEOUT_MS", "QUEUED_CAPTION", "STOP_FAILED_NOTE", "HINT_IDLE", "HINT_RUNNING"
@@ -256,6 +255,10 @@ check("hint", ctx.composerHint(false) === ctx.HINT_IDLE && ctx.composerHint(true
 check("ph-wide", ctx.composerPlaceholder("Recipe Helper", false) === "Message Recipe Helper");
 check("ph-narrow", ctx.composerPlaceholder("Garden Notes", true) === "Message Garden Notes");
 check("bash-label", ctx.toolCallLabel("Bash", {command: "git status"}) === "Bash(git status)");
+check("bash-cmd", ctx.toolCallLabel("Bash", {cmd: "ls -l"}) === "Bash(ls -l)");
+check("bash-blank-cmd", ctx.toolCallLabel("Bash", {command: "  ", cmd: "pwd"}) === "Bash(pwd)");
+check("live-cmd", ctx.liveToolLine("Bash", {cmd: "ls"}, true).indexOf("ls") >= 0);
+check("live-blank-cmd", ctx.liveToolLine("Bash", {command: "   ", cmd: "pwd"}, true).indexOf("pwd") >= 0);
 check("eye-q", ctx.cardEyebrow({kind: "question", tool: "AskUserQuestion"}, "Recipe Helper") === "QUESTION FROM Recipe Helper");
 check("eye-push", ctx.cardEyebrow({tool: "git_push"}, "") === "APPROVAL REQUIRED · GIT_PUSH");
 check("eye-pr", ctx.cardEyebrow({tool: "create_pr"}, "") === "APPROVAL REQUIRED · CREATE_PR");
@@ -528,7 +531,7 @@ func skipJSString(src string, i int) int {
 }
 
 func TestThreadRecordRender(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	renderFn := extractJSFunction(t, src, "renderRunRecords")
 	pendingFn := extractJSFunction(t, src, "renderPendingRunRecords")
 	messagesFn := extractJSFunction(t, src, "renderMessages")

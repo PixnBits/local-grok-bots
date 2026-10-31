@@ -62,13 +62,26 @@ func launch(ctx context.Context, p *prepared) (string, string, error) {
 	if p.cleanBash {
 		argv = []string{sandboxExec, "-p", prof, "/bin/bash", "--norc", "--noprofile", "-c", p.command}
 	}
+	dir := ws
+	if p.workRel != "" {
+		sub := filepath.Join(ws, filepath.FromSlash(p.workRel))
+		real, err := filepath.EvalSymlinks(sub)
+		if err != nil {
+			return "", "", err
+		}
+		real = filepath.Clean(real)
+		if !pathHolds(ws, real) {
+			return "", "", fmt.Errorf("invalid shell directory")
+		}
+		dir = real
+	}
 	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Dir = ws
+	cmd.Dir = dir
 	cmd.Env = []string{
 		"PATH=" + darwinPATH(),
 		"HOME=" + ws,
 		"TMPDIR=" + tmp,
-		"PWD=" + ws,
+		"PWD=" + dir,
 		"LANG=en_US.UTF-8",
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_SYSTEM=/dev/null",

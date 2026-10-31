@@ -12,7 +12,7 @@ import (
 )
 
 func TestPermissionHandlersPresent(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	for _, s := range []string{
 		"permission_request",
 		"permission_decision",
@@ -59,7 +59,7 @@ func TestPermissionCard(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed")
 	}
-	src := string(IndexHTML)
+	src := ClientSource()
 	i := strings.Index(src, "// perm:begin")
 	j := strings.Index(src, "// perm:end")
 	if i < 0 || j < i {

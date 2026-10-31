@@ -341,7 +341,7 @@ func TestRunTokenCannotDecide(t *testing.T) {
 		t.Fatalf("empty admin, live token %d %s", res.StatusCode, b)
 	}
 	res, b = do(t, "POST", openURL, map[string]any{"decision": "deny"}, "")
-	if res.StatusCode != http.StatusNotFound {
+	if res.StatusCode != http.StatusForbidden || !strings.Contains(string(b), "admin token required") {
 		t.Fatalf("empty admin, no token %d %s", res.StatusCode, b)
 	}
 	res, b = do(t, "GET", openSrv.URL+"/api/bots", nil, openRun.token)

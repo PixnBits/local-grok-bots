@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -57,6 +58,10 @@ type Request struct {
 	// BASH_ENV or ENV. The broker sets it only after an allow. Other
 	// shells stay on /bin/sh.
 	CleanBash bool
+	// Chdir is a relative directory inside Workspace. Empty stays at the
+	// workspace root. The Linux jail uses it as bwrap --chdir /work/<rel>
+	// (the unshare fallback chdirs there). It is not a shell cd prefix.
+	Chdir string
 }
 
 // Result is the captured output and the grant events for this command.
@@ -82,15 +87,20 @@ type stage2File struct {
 	Env       []string `json:"env"`
 	Mounts    []mount  `json:"mounts"`
 	CleanBash bool     `json:"clean_bash,omitempty"`
+	// WorkRel is the directory under /work. Empty stays at /work.
+	WorkRel string `json:"work_rel,omitempty"`
 }
 
 type prepared struct {
 	workspace string
 	command   string
-	dir       string
-	env       []string
-	mounts    []mount
-	events    string
+	// jailDir is /work or /work/<rel>. workRel is empty at the root.
+	jailDir string
+	workRel string
+	dir     string
+	env     []string
+	mounts  []mount
+	events  string
 	// eventsDir is the daemon-created prep/rw/events directory, opened
 	// O_PATH|O_DIRECTORY|O_CLOEXEC. It is not passed to child processes.
 	// The jail can replace /lgb/events; this fd still names the original inode.
@@ -187,12 +197,36 @@ func Run(ctx context.Context, req Request) (Result, error) {
 	return Result{Stdout: stdout, Stderr: stderr, Events: events}, runErr
 }
 
+// shellJailDir checks rel and returns the jail directory (/work or
+// /work/<rel>) plus the cleaned relative path. An empty rel is the root.
+func shellJailDir(rel string) (jail, cleanRel string, err error) {
+	rel = strings.TrimSpace(rel)
+	if strings.ContainsRune(rel, 0) || filepath.IsAbs(rel) {
+		return "", "", fmt.Errorf("invalid shell directory")
+	}
+	if rel == "" || rel == "." {
+		return "/work", "", nil
+	}
+	clean := path.Clean(filepath.ToSlash(rel))
+	if clean == "." {
+		return "/work", "", nil
+	}
+	if clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") {
+		return "", "", fmt.Errorf("invalid shell directory")
+	}
+	return "/work/" + clean, clean, nil
+}
+
 func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
+	jailDir, workRel, err := shellJailDir(req.Chdir)
+	if err != nil {
+		return nil, err
+	}
 	dir, err := os.MkdirTemp("", "lgb-prep-")
 	if err != nil {
 		return nil, err
 	}
-	p := &prepared{workspace: ws, command: req.Command, dir: dir, before: takeSnap(ws), cleanBash: req.CleanBash}
+	p := &prepared{workspace: ws, command: req.Command, jailDir: jailDir, workRel: workRel, dir: dir, before: takeSnap(ws), cleanBash: req.CleanBash}
 	ok := false
 	defer func() {
 		if !ok {
@@ -386,7 +420,7 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 		"PATH=" + jailPATH(),
 		"HOME=/work",
 		"TMPDIR=/tmp",
-		"PWD=/work",
+		"PWD=" + jailDir,
 		"LANG=C.UTF-8",
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_SYSTEM=/dev/null",

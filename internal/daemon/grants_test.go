@@ -221,7 +221,7 @@ func TestMetaToolServerTools(t *testing.T) {
 }
 
 func TestDuplicateOmitsGrants(t *testing.T) {
-	src := string(web.IndexHTML)
+	src := web.ClientSource()
 	i := strings.Index(src, "async function duplicateBot")
 	j := strings.Index(src, "function paintMarkPicker")
 	if i < 0 || j < i {
@@ -237,7 +237,7 @@ func TestDuplicateOmitsGrants(t *testing.T) {
 }
 
 func TestProfileSaveKeepsServerTools(t *testing.T) {
-	src := string(web.IndexHTML)
+	src := web.ClientSource()
 	if !strings.Contains(src, "Inherit from policy") || !strings.Contains(src, "Explicit list") || !strings.Contains(src, "allows none") {
 		t.Fatal("profile does not distinguish inherit from an explicit list")
 	}

@@ -62,6 +62,7 @@ type acpFix struct {
 	auditPath string
 	dataDir   string
 	saved     []string
+	token     string
 }
 
 func prepareACP(t *testing.T, mode string, pol policy.Policy) *acpFix {
@@ -75,6 +76,7 @@ func prepareACP(t *testing.T, mode string, pol policy.Policy) *acpFix {
 	}
 	t.Setenv("LGB_ACP_MODE", mode)
 	app := newApp(t, dir, nil)
+	f.token = armAdmin(app)
 	lg, err := audit.Open(f.auditPath)
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +97,7 @@ func prepareACP(t *testing.T, mode string, pol policy.Policy) *acpFix {
 	app.rtMu.Unlock()
 	srv := serve(t, app)
 	app.permBase = srv.URL
-	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Ada", "description": "g"}, "")
+	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{"name": "Ada", "description": "g"}, f.token)
 	if res.StatusCode != 201 && res.StatusCode != 200 {
 		t.Fatalf("create %d %s", res.StatusCode, b)
 	}
@@ -123,7 +125,7 @@ func (f *acpFix) rule(effect, pattern string) {
 	f.t.Helper()
 	res, b := do(f.t, "POST", f.url+"/api/bots/"+f.bot.ID+"/permission-rules", map[string]any{
 		"effect": effect, "pattern": pattern,
-	}, "")
+	}, f.token)
 	if res.StatusCode != 201 {
 		f.t.Fatalf("rule %s %s: %d %s", effect, pattern, res.StatusCode, b)
 	}
@@ -144,7 +146,7 @@ func (f *acpFix) start(prompts bool) {
 
 func (f *acpFix) startContent(content string, prompts bool) {
 	f.t.Helper()
-	res, b := do(f.t, "POST", f.url+"/api/bots/"+f.bot.ID+"/thread/messages", map[string]any{"content": content}, "")
+	res, b := do(f.t, "POST", f.url+"/api/bots/"+f.bot.ID+"/thread/messages", map[string]any{"content": content}, f.token)
 	if res.StatusCode != 200 {
 		f.t.Fatalf("post %d %s", res.StatusCode, b)
 	}
@@ -154,7 +156,7 @@ func (f *acpFix) startContent(content string, prompts bool) {
 	decodeJSON(f.t, b, &posted)
 	f.runID = posted.RunID
 	if prompts {
-		f.events = startSSE(f.t, f.url, f.bot.ID, posted.RunID)
+		f.events = startSSE(f.t, f.url, f.bot.ID, posted.RunID, f.token)
 		waitSubscribed(f.t, f.app, posted.RunID)
 	}
 }
@@ -168,7 +170,7 @@ func (f *acpFix) openGate() {
 
 func (f *acpFix) waitDone() store.Bot {
 	f.t.Helper()
-	waitIdle(f.t, f.url, f.bot.ID, "")
+	waitIdle(f.t, f.url, f.bot.ID, f.token)
 	got, err := f.app.st.GetBot(f.bot.ID)
 	if err != nil {
 		f.t.Fatal(err)
@@ -727,7 +729,7 @@ func (f *acpFix) waitCard() (string, string) {
 			default:
 			}
 		}
-		res, b := do(f.t, "GET", f.url+"/api/bots/"+f.bot.ID+"/permissions", nil, "")
+		res, b := do(f.t, "GET", f.url+"/api/bots/"+f.bot.ID+"/permissions", nil, f.token)
 		if res.StatusCode != 200 {
 			f.t.Fatalf("pending %d %s", res.StatusCode, b)
 		}
@@ -747,7 +749,7 @@ func (f *acpFix) waitCard() (string, string) {
 
 func (f *acpFix) decide(id, decision string) {
 	f.t.Helper()
-	res, b := do(f.t, "POST", f.url+"/api/bots/"+f.bot.ID+"/runs/"+f.runID+"/permissions/"+id, map[string]any{"decision": decision}, "")
+	res, b := do(f.t, "POST", f.url+"/api/bots/"+f.bot.ID+"/runs/"+f.runID+"/permissions/"+id, map[string]any{"decision": decision}, f.token)
 	if res.StatusCode != 200 {
 		f.t.Fatalf("decide %s %d %s", decision, res.StatusCode, b)
 	}
@@ -764,6 +766,7 @@ func (f *acpFix) eventText() string {
 func TestUserRulesDoNotWidenGrokArgv(t *testing.T) {
 	dir := t.TempDir()
 	app := newApp(t, dir, nil)
+	tok := armAdmin(app)
 	cap := &captureRunner{}
 	app.runner = cap
 	app.rtMu.Lock()
@@ -782,21 +785,21 @@ func TestUserRulesDoNotWidenGrokArgv(t *testing.T) {
 	base := srv.URL + "/api/bots/" + bot.ID
 	res, body := do(t, "POST", base+"/permission-rules", map[string]any{
 		"effect": "allow", "pattern": "Bash(cat *)",
-	}, "")
+	}, tok)
 	if res.StatusCode != 201 {
 		t.Fatalf("allow %d %s", res.StatusCode, body)
 	}
 	res, body = do(t, "POST", base+"/permission-rules", map[string]any{
 		"effect": "deny", "pattern": "Bash(*push*)",
-	}, "")
+	}, tok)
 	if res.StatusCode != 201 {
 		t.Fatalf("deny %d %s", res.StatusCode, body)
 	}
-	res, body = do(t, "POST", base+"/thread/messages", map[string]any{"content": "go"}, "")
+	res, body = do(t, "POST", base+"/thread/messages", map[string]any{"content": "go"}, tok)
 	if res.StatusCode != 200 {
 		t.Fatalf("post %d %s", res.StatusCode, body)
 	}
-	waitIdle(t, srv.URL, bot.ID, "")
+	waitIdle(t, srv.URL, bot.ID, tok)
 	got, err := app.st.GetBot(bot.ID)
 	if err != nil {
 		t.Fatal(err)

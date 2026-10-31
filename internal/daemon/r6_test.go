@@ -190,7 +190,7 @@ func TestACPToolAllowlist(t *testing.T) {
 func TestACPNetGrantAddsWebToolsOnly(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	f := prepareACP(t, "ok", policy.Policy{UIPrompts: false})
-	res, b := do(t, "PATCH", f.url+"/api/bots/"+f.bot.ID, map[string]any{"grants": []string{"net"}}, "")
+	res, b := do(t, "PATCH", f.url+"/api/bots/"+f.bot.ID, map[string]any{"grants": []string{"net"}}, f.token)
 	if res.StatusCode != 200 {
 		t.Fatalf("patch %d %s", res.StatusCode, b)
 	}

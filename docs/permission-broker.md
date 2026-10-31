@@ -152,7 +152,10 @@ On an ask, the daemon records a pending item and the hook denies with
 human approves that item, then the same command may be retried once. A
 second retry, a different argv, a different cwd, or a different session
 does not use that approval. The once token is also bound to the tool
-name, and it expires. The default lifetime is 15 minutes.
+name, and it expires. The default lifetime is 15 minutes. A once-token
+kept from a task, bot, or global approval stays held for that task. After
+the task id changes, that token can still allow one call within the same
+lifetime.
 `[cli.permission] approval_ttl` sets it. The accepted range is 1 minute
 to 24 hours inclusive. A value outside that range makes the policy fail
 to load. The failure is fail closed: the jail stays on and CLI backends
@@ -179,6 +182,13 @@ is low or medium, a task grant, then ask. An ask beats an allow at the
 same scope. Empty bot or session is a deny. The whole command is allowed
 or it asks. A prefix is not allowed on its own.
 
+A saved allow, a task grant, and a confirmed legacy allow are used only
+on Linux, and only when the command and every compound part are literal
+words. Anything else asks, including when a saved allow or a task grant
+would otherwise match. A command that is not literal words can be
+approved only once. Task, bot, and global are refused for that item. A
+deny rule still denies. A human one-time approval is a separate path.
+
 An exact argv rule matches one normalized literal simple command. The
 key is the argv vector, shared by Claude Bash and `run_shell`. A
 compound is not a rule. Critical commands cannot be saved as a rule.
@@ -195,7 +205,11 @@ A task grant may cover a compound only when every part is granted and
 each part still passes critical and deny at request time. The grant is
 bound to the bot, the session, and the user-message id. It ends on the
 next user message for that bot, when the session ends, or at the shorter
-of 4 hours and `approval_ttl`. Grant cwd stays the raw string.
+of 4 hours and `approval_ttl`. Grant cwd stays the raw string. A grant
+made in one directory does not cover a subdirectory, the parent, or
+another workspace. A trailing slash and a `.` segment are different
+strings. The same session with a different task id does not use the
+grant.
 
 Daemon-run shells use a pinned PATH of root-owned directories and an
 environment allowlist. A rule names a command only when argv0 resolves
@@ -211,12 +225,19 @@ that same directory at `/work`. Another bot's tree is outside. The
 baseline is `DATA_DIR/permbroker/git-baseline.json` (mode `0600`,
 directory mode `0700`). Startup loads it. A bot with no stored baseline
 is recorded once, at boot or on the first turn or shell that has a
-workspace. A later turn does not record it again. Drift from that
-baseline makes a git command ask, for Claude and for `run_shell`, even
-when an allow rule matches. Only
-`POST /api/permbroker/bots/{id}/git-baseline` records a new baseline.
-An unreadable baseline file makes those git commands ask until an admin
-records one for that bot.
+workspace. A later turn does not record it again. A stored baseline in
+the older piece set (no system git config piece, and one root
+`.gitattributes` piece) is re-recorded in the current format when that
+old digest still matches the current files and the home paths match.
+The write is audited with actor `upgrade`. If a file differs, the old
+record stays and the git command asks. Drift from the baseline makes a
+git command ask, for Claude and for `run_shell`, even when an allow
+rule matches. The pending item includes `git_reason`: `Git config
+changed since it was last reviewed`, `A .gitattributes file changed`,
+or `System git config changed`.
+`POST /api/permbroker/bots/{id}/git-baseline` records a new baseline
+after review. An unreadable baseline file makes those git commands ask
+until an admin records one for that bot.
 
 A Claude git command and a `run_shell` git command also ask, and cannot
 be covered by a once-token, a task grant, or an allow rule, when the
@@ -232,15 +253,26 @@ scan finds any of the following. Config keys, in any subsection, are
 `ext::` asks as well. `include` and `includeIf` still ask. Attribute
 files ask when `diff`, `merge`, or `filter` is set to a driver name. A
 bare `diff`, `-diff`, or `binary` does not. The scan reads the repo
-config and include targets that resolve, `<workspace>/.gitattributes`,
-`<git-dir>/info/attributes`, each home's `.gitconfig`,
+config and include targets that resolve, every `.gitattributes` file in
+the worktree, `<git-dir>/info/attributes`, the system git config, each home's `.gitconfig`,
 `~/.config/git/config`, and `~/.config/git/attributes`, the file named
 by `core.attributesFile`, and `GIT_*` variables in the environment
-stored for that bot. A hook in `<git-dir>/hooks` asks when it is a
-symlink or an executable file and its name does not end in `.sample`.
-`core.hooksPath` is not followed. The baseline covers the repo config,
-a digest of that hooks directory, the attribute files above, and each
-home's git config and attributes. The reason is recorded.
+stored for that bot. A nested `.gitattributes` is read the same way as
+the one at the worktree root. A directory reached by a symlink inside
+the worktree that contains a `.gitattributes` file asks, and that file
+is not added to the baseline. The walk skips the contents of `.git`
+except `info/attributes`, which is read on its own. Too many attribute
+files, or a tree that is too deep to finish, asks. A hook in
+`<git-dir>/hooks` asks when it is a symlink or an executable file and
+its name does not end in `.sample`. `core.hooksPath` is not followed.
+The baseline covers the repo config, a digest of that hooks directory,
+those attribute files, the system git config, and each home's git
+config and attributes. The system git config path is resolved at
+startup: the first file reported by `git config --system --list
+--show-origin` when that file exists, otherwise `<prefix>/etc/gitconfig`
+taken from `git --exec-path` when that file exists, otherwise
+`/etc/gitconfig`. A change in any covered file asks until an admin
+records a new baseline for that bot. The reason is recorded.
 
 If the managed isolation environment has no PATH, the daemon fills one
 and logs a single startup warning naming the PATH used to resolve the
@@ -261,10 +293,40 @@ table version.
 `run_shell` calls the same engine in-process. A deny is the tool error.
 The model can continue. The shell is not started.
 
-The classifier stub can only raise a level. It cannot allow a call, and
-it makes no model request. `ClassifierMayAllow` is false unless that bot
-has a workspace and a git baseline. A later classifier contribution to
-an allow has to pass that guard.
+The optional local classifier is off unless policy turns it on.
+
+```toml
+[cli.permission.classifier]
+enabled = false
+endpoint = "http://127.0.0.1:11434"
+model = "local"
+# timeout = "4s"   # default when enabled and unset
+```
+
+The endpoint, when set, must be loopback `http` or `https`: the host
+`localhost`, or an address that is a loopback IP. A userinfo part is
+refused. A non-loopback URL is a config error even when `enabled` is
+false. An enabled classifier with an empty endpoint is the same error.
+The daemon calls it only when `enabled` is true. The default timeout is
+4 seconds.
+
+The request body is the tool name, the redacted argv, and the model
+name. The environment and file contents are not sent. The reply is one
+JSON object, `{"level":"...","advisory":"..."}`, and nothing after it.
+A timeout, a transport error, an unknown level, or a reply that is not
+that object leaves the table level unchanged and sets the advisory to
+`Not checked`. An empty level does not raise. Advisory text is stored
+on the item with control characters removed and cut at 300 characters.
+The note source is `table`, or `local model raised this to {level}`
+when the rank goes up. The classifier can only raise a level or add
+that note. It cannot lower a level and it cannot allow the call. When
+the model raises a command to high or above relative to the table, an
+existing bot or global allow asks.
+
+A classifier result is eligible to contribute to an allow only for a
+literal, eligible, non-compound command that is not critical and has
+no git risk, on Linux, for a bot whose workspace and git baseline still
+match. That guard does not itself allow the call.
 
 ## Risk levels
 
@@ -318,7 +380,7 @@ token and is not a flag or a path separator, the first and last tokens
 are literal, `*` is not inside a word, and the first token is not a
 wrapper or interpreter. Anything else is a read-only legacy row. The
 legacy allow keeps the original glob and does not grow to a longer
-argv. An allow, whether pattern or legacy, never covers a critical
+argv. Confirmed legacy allows match less than before: a legacy glob such as `git log*` now matches `git log` but not `git log --oneline`; add a pattern rule to cover more. An allow, whether pattern or legacy, never covers a critical
 command, a compound, or a wrapper. A legacy or pattern allow copied
 from a profile rule is stored inactive (`active` false,
 `needs_confirm` true) and does not allow. A matching call asks until
@@ -338,28 +400,108 @@ duplicates.
 ## Admin API
 
 These routes require an admin token. When none is configured the
-response is 403 `{"error":"admin token required"}`. When one is
-configured, a missing credential is 401 and a live run token is 403.
-Other routes stay open when no admin token is configured. The routes
-also use the host allowlist and the same cross-site check as other
-mutating admin routes (`Sec-Fetch-Site` and `Origin`).
+response is 403 `{"error":"admin token required"}`. Live mode with a
+CLI backend and no `AUTH_TOKEN` writes `DATA_DIR/admin-token` and uses
+that token. When a token is configured, a missing credential is 401 and
+a live run token is 403. The same gate covers the non-broker permission
+routes (the decision, the pending lists, and the durable
+permission-rule routes). Auth is the registered route. A path that is
+not one of those routes is not a broker handler. Routes that are not
+permission routes stay open when no admin token is configured. Every
+state-changing `/api` route (POST, PUT, PATCH, DELETE) uses the host
+allowlist and the same cross-site check (`Sec-Fetch-Site` and
+`Origin`). Those routes require `Content-Type: application/json` (a
+parameter such as `charset` is allowed). Another type, or a missing
+type on a request with a body, is 415. A DELETE with an empty body may
+omit Content-Type. Non-broker permission writes still require a JSON
+body: empty or non-JSON is 400. `POST /api/mcp/permission` and
+`POST /api/mcp/permission/{token}` authenticate by token for the CLI
+MCP client and do not require JSON Content-Type. `POST /api/stt`
+accepts `application/octet-stream` audio and keeps its origin check.
 
 - `GET /api/permbroker/pending` lists open items. Command text is redacted.
+  Each item includes `bot_name`, `level`, `hard_ask`, `eligible`,
+  `compound`, `allowed_scopes`, `parts`, `operators`, `advisory`,
+  `task_text`, `suggest_always`, `critical_reason`, and `git_reason`.
+  `allowed_scopes` is the subset of `once`, `task`, `bot`, and `global`
+  that this item can take. Critical is `once`. A hard compound is
+  `once`. A command that is not literal words is `once` only. High and
+  unclassified omit `global`. `git_reason` is set when a git baseline
+  changed. `parts` lists each
+  command with `argv`, `raw`, `granted_for_task`, and `has_bot_rule`.
+  `advisory` is `{text, source, checked}`. `task_text` is the user
+  message that started the task, redacted and cut at 200 characters.
+  `suggest_always` is true on a low or medium, non-compound command
+  after two earlier human approvals of that same command within 24
+  hours. Those approvals are `once`, `task`, `bot`, or `global`. The
+  open item is not counted. The count is kept in memory.
+  `critical_reason` is card copy when a path made the level critical,
+  for example `Reads outside the workspace: /` or `Touches your home
+  directory`. The level stays critical. `created_at` is the age.
 - `POST /api/permbroker/pending/{id}` with `{"decision":"approve","scope":"once"}`
   or `"decision":"deny"`. `scope` is `once`, `task`, `bot`, or `global`.
-- `POST /api/permbroker/pending/deny-all` denies every current item.
-  `{"ids":["..."]}` denies that set, or nothing if any id is missing.
-  `{"ids":[]}` denies none.
+  A deny does not end the run.
+- `POST /api/permbroker/pending/deny-all` with `{"ids":["..."]}` denies
+  those items. An empty body or `{"ids":[]}` is 400 and denies nothing.
+  A stale or unknown id is skipped. The response is 200 with `results`
+  (`id`, `ok`, `error`), `ok_count`, `skipped`, and `denied`. One stale
+  id does not refuse the rest.
+- `POST /api/permbroker/pending/approve-all` uses the same body and the
+  same per-item result, with `approved` instead of `denied`. Each
+  accepted id is approved once.
 - `POST /api/permbroker/hook/repin` records the current hook file as the
   pin. Policy publish does not do this. The call is audited. A hook that
   is missing or not safe to run is refused and the old pin stays.
 - `POST /api/permbroker/rules/{id}/confirm` activates one imported allow
   that is waiting for review. The call is audited with the id and a
   hash, and it bumps the ruleset. A row that is already active is refused.
+  A legacy allow that can never match returns 400
+  `{"error":"...","code":"never_matches"}`. The rules list includes
+  `confirmable`, and `never_reason` when the row cannot match.
 - `POST /api/permbroker/bots/{id}/git-baseline` records that bot's git
   baseline again. It does not bump the ruleset. The call is audited
   with the bot id.
-- `GET /api/permbroker/rules` lists saved rules.
+- `GET /api/permbroker/rules` lists saved rules and current task grants.
+  A rule includes `kind` (`exact`, `pattern`, or `legacy`), `effect`,
+  `scope`, `bot_id`, `source_line`, `last_used_at`, `confirmable`, and
+  `never_reason` when set. `task_grants`
+  lists each live grant with `argv`, `raw`, `task_text`, and `expires`.
+- `POST /api/permbroker/rules` creates a rule.
+  `{"kind":"exact"|"pattern","argv":[...],"pattern":"...","scope":"bot"|"global","bot_id":"...","effect":"allow"|"ask"|"deny"}`.
+  An exact rule that contains a shell operator is 400
+  `{"error":"...","code":"operators"}`. A pattern uses the same checks
+  as validate and returns 400 with `code` one of `trailing_wildcard`,
+  `wrapper`, `flag_star`, `star_in_word`, `star_first`, or `operators`.
+  An allow pattern does not cover a critical command or a compound when
+  it matches. An exact or pattern allow whose command cannot be allowed
+  by a rule returns 400 with `code` `never_matches`. A deny of a
+  critical command is stored. The call uses the same origin check as
+  the other broker posts.
+- `POST /api/permbroker/rules/{id}/replace` stores the new rule, then
+  revokes the old one. The body is the same shape as create. When both
+  succeed the response is 200 with `created` and `revoked` true. When
+  the new rule is stored and the revoke fails, both rules stay and the
+  response is 207 with `created`, `revoked` false, and `error`.
+- `POST /api/permbroker/patterns/validate` with `{"pattern":"..."}`
+  returns `{"ok":true|false,"code":"...","message":"..."}`. A pattern
+  that fails is still HTTP 200.
+- `GET /api/permbroker/patterns/wrappers` returns the wrapper and
+  interpreter names the validator uses.
+- `POST /api/permbroker/patterns/preview` scores the last 50 evaluated
+  requests in that scope against a draft. The body is the same shape as
+  create. A bot scope uses that bot's ring. A global scope merges the
+  rings and keeps the newest 50. Each row has redacted `argv`, `level`,
+  `compound`, `time`, and `outcome`: `would_allow`, `would_ask`,
+  `would_deny`, `still_asks_compound`, `still_asks_critical`, or
+  `no_match`. A miss may set `reason` to `flag_in_star`, `extra_word`,
+  or `missing_word`. `summary` counts every outcome, including zeros.
+- `GET /api/permbroker/risk-tables` returns `{version, builtin, stricter}`.
+  Each builtin row is `{level, matches, applies_to}`. A stricter row
+  also has `raised_from`. The call does not write.
+- `GET /api/permbroker/recent` returns the last 50 finished outcomes,
+  newest first, redacted. `kind` is `allowed_by_rule` (with the rule
+  id), `allowed_by_task_grant` (with a parts count), `denied_by_rule`,
+  `approved`, `denied`, or `expired`. An open ask is not in this list.
 - `DELETE /api/permbroker/rules/{id}` revokes one saved rule, including a
   read-only legacy row. The call is audited with the action and the id.
 
@@ -383,6 +525,23 @@ redacted. One item looks like:
       "command": "git status",
       "cwd": "/work",
       "level": "low",
+      "hard_ask": false,
+      "eligible": true,
+      "allowed_scopes": ["once", "task", "bot", "global"],
+      "parts": [
+        {
+          "argv": ["git", "status"],
+          "raw": "git status",
+          "granted_for_task": false,
+          "has_bot_rule": false
+        }
+      ],
+      "operators": [],
+      "advisory": {"text": "", "source": "table", "checked": false},
+      "task_text": "",
+      "suggest_always": false,
+      "critical_reason": "",
+      "bot_name": "Ada",
       "input_hash": "0123456789abcdef",
       "created_at": "2026-10-30T00:00:00Z",
       "ruleset": 1
@@ -406,13 +565,28 @@ curl -sS -H "Authorization: Bearer $LGB_ADMIN_TOKEN" \
 curl -sS -X DELETE -H "Authorization: Bearer $LGB_ADMIN_TOKEN" \
   "https://myhost.tailnet-example.ts.net/api/permbroker/rules/r_example"
 curl -sS -X POST -H "Authorization: Bearer $LGB_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" -d '{}' \
   "https://myhost.tailnet-example.ts.net/api/permbroker/rules/r_example/confirm"
 curl -sS -X POST -H "Authorization: Bearer $LGB_ADMIN_TOKEN" \
+  -H "Content-Type: application/json" -d '{}' \
   "https://myhost.tailnet-example.ts.net/api/permbroker/bots/bot-id/git-baseline"
 ```
 
 The broker flag is daemon-wide. `broker_bots` only limits which bots use
 it. An empty list means every bot.
+
+## Pages
+
+HTML responses, including `/`, `/rules`, `/login`, and the signed-out
+page, send `Content-Security-Policy: default-src 'self'; frame-ancestors
+'none'; base-uri 'none'; form-action 'self'` and `X-Content-Type-Options: nosniff`. Scripts
+and styles are same-origin files: `/theme.js`, `/app.css`, and
+`/app.js`. The theme script loads from `/theme.js` before the page
+paints. A `*` in a pattern stands for exactly one word and cannot be
+last.
+
+Browser notifications are sent only for a critical pending item, and
+only when the tab is hidden and notification permission is on.
 
 ## Audit
 
@@ -477,6 +651,20 @@ go test -v ./web/... | grep -i skip
 - risky git config is a hard ask for Claude git
 - writes under `.git/info/`, `.gitmodules`, and `~/.config/git/` ask
 - a classifier allow does not allow, and the guard is false without per-bot context
+- a non-literal command still asks when a bot allow or a task grant matches
+- a non-literal command can be approved only once
+- an old git baseline whose files still match is re-recorded and audited as upgrade; a real change asks with git_reason
+- a task grant matches the raw cwd and the same task id
+- deny-all and approve-all take an ids list, skip a stale id, and return per-item results
+- confirming a legacy allow that cannot match returns never_matches; an ineligible allow is refused the same way; a deny of a critical command is stored
+- a model raise to high makes an existing bot or global allow ask
+- a symlinked directory that contains .gitattributes asks
+- pages send the content security policy and nosniff headers
+- replacing a rule keeps both when the revoke fails
+- auto-allow asks when the OS is not Linux; a deny still denies
+- a classifier reply cannot lower a level, and it cannot allow a compound, critical, git-risk, non-literal, or ineligible command
+- a nested `.gitattributes` or the system git config asks the same way as the root attributes file
+- broker routes and the other permission routes require an admin token, including when none is configured
 - resolved critical-path forms, including a relative `cd`, a symlink, and a glob
 - once-tokens and task grants expire at `approval_ttl`; pending items do not
 - a same-uid process that is not the hook under the launched CLI is denied

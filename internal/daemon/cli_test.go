@@ -77,7 +77,7 @@ func TestCLIResumeAndScheduledPrompt(t *testing.T) {
 	if !strings.Contains(argv, "--resume") || !strings.Contains(argv, got.SessionID) || strings.Contains(argv, "--session-id") {
 		t.Fatalf("second turn did not resume %s:\n%s", got.SessionID, argv)
 	}
-	msgs := thread(t, srv.URL, bot.ID)
+	msgs := thread(t, srv.URL, bot.ID, "")
 	var replies int
 	for _, m := range msgs {
 		if m.Role == "bot" && m.Content == "hello" {
@@ -653,9 +653,9 @@ func readArgv(t *testing.T, path string) string {
 	return string(b)
 }
 
-func thread(t *testing.T, base, id string) []store.Message {
+func thread(t *testing.T, base, id, token string) []store.Message {
 	t.Helper()
-	res, b := do(t, "GET", base+"/api/bots/"+id+"/thread", nil, "")
+	res, b := do(t, "GET", base+"/api/bots/"+id+"/thread", nil, token)
 	if res.StatusCode != 200 {
 		t.Fatalf("thread %d %s", res.StatusCode, b)
 	}

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	iofs "io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -11,10 +12,22 @@ import (
 	"strings"
 )
 
+// systemGitconfig is read when a git command is classified and when a
+// baseline is recorded. It is never written. Tests point it at a temp file.
+var systemGitconfig = "/etc/gitconfig"
+
+// gitAttrMaxFiles and gitAttrMaxDepth bound the worktree attribute walk.
+// Hitting either cap is treated as a git risk.
+var (
+	gitAttrMaxFiles = 64
+	gitAttrMaxDepth = 16
+)
+
 const gitBaselineName = "git-baseline.json"
 
 type gitBaselineDoc struct {
 	Version int              `json:"version"`
+	Format  int              `json:"format,omitempty"`
 	Bots    []gitBaselineBot `json:"bots"`
 }
 
@@ -43,32 +56,77 @@ func gitBaselineBlob(ws string, homes []string) []byte {
 		infoData, infoOK = readBaselineFile(filepath.Join(dir, "info", "attributes"))
 	}
 	writePiece(&b, "info-attributes", infoData, infoOK)
-	attr, attrOK := readBaselineFile(filepath.Join(ws, ".gitattributes"))
-	writePiece(&b, "gitattributes", attr, attrOK)
-	hs := append([]string(nil), homes...)
-	sort.Strings(hs)
-	seen := map[string]bool{}
-	for _, h := range hs {
-		h = strings.TrimSpace(h)
-		if h == "" {
-			continue
+	rels, capped := listGitAttributes(ws)
+	if capped {
+		writePiece(&b, "gitattributes", []byte("capped"), true)
+	} else {
+		for _, rel := range rels {
+			data, ok := readBaselineFile(filepath.Join(ws, rel))
+			writePiece(&b, "gitattributes "+rel, data, ok)
 		}
-		h = filepath.Clean(h)
-		if seen[h] {
-			continue
-		}
-		seen[h] = true
-		b.WriteString("home ")
-		b.WriteString(h)
-		b.WriteByte('\n')
-		gc, gcOK := readBaselineFile(filepath.Join(h, ".gitconfig"))
-		writePiece(&b, "gitconfig", gc, gcOK)
-		xc, xcOK := readBaselineFile(filepath.Join(h, ".config", "git", "config"))
-		writePiece(&b, "xdg-config", xc, xcOK)
-		xa, xaOK := readBaselineFile(filepath.Join(h, ".config", "git", "attributes"))
-		writePiece(&b, "xdg-attributes", xa, xaOK)
 	}
+	sys, sysOK := readBaselineFile(systemGitconfig)
+	writePiece(&b, "system-gitconfig", sys, sysOK)
+	writeHomes(&b, homes)
 	return []byte(b.String())
+}
+
+// listGitAttributes walks the worktree for .gitattributes. It does not
+// enter a .git directory. .git/info/attributes is recorded separately.
+// A walk that hits the file or depth cap returns capped so the caller asks.
+func listGitAttributes(ws string) (rels []string, capped bool) {
+	ws = strings.TrimSpace(ws)
+	if ws == "" {
+		return nil, false
+	}
+	ws = filepath.Clean(ws)
+	st, statErr := os.Stat(ws)
+	if statErr != nil || !st.IsDir() {
+		return nil, false
+	}
+	err := filepath.WalkDir(ws, func(path string, d iofs.DirEntry, err error) error {
+		if err != nil {
+			capped = true
+			return iofs.SkipDir
+		}
+		rel, relErr := filepath.Rel(ws, path)
+		if relErr != nil {
+			capped = true
+			return iofs.SkipAll
+		}
+		depth := 0
+		if rel != "." {
+			depth = strings.Count(rel, string(os.PathSeparator))
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return iofs.SkipDir
+			}
+			if depth > gitAttrMaxDepth {
+				capped = true
+				return iofs.SkipDir
+			}
+			return nil
+		}
+		if d.Name() != ".gitattributes" {
+			return nil
+		}
+		if depth > gitAttrMaxDepth {
+			capped = true
+			return nil
+		}
+		if len(rels) >= gitAttrMaxFiles {
+			capped = true
+			return iofs.SkipAll
+		}
+		rels = append(rels, rel)
+		return nil
+	})
+	if err != nil {
+		capped = true
+	}
+	sort.Strings(rels)
+	return rels, capped
 }
 
 func writePiece(b *strings.Builder, name string, data []byte, ok bool) {
@@ -223,7 +281,7 @@ func (e *Engine) persistBaselinesLocked() error {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	doc := gitBaselineDoc{Version: 1, Bots: make([]gitBaselineBot, 0, len(ids))}
+	doc := gitBaselineDoc{Version: 1, Format: gitBaselineFormat, Bots: make([]gitBaselineBot, 0, len(ids))}
 	for _, id := range ids {
 		doc.Bots = append(doc.Bots, gitBaselineBot{ID: id, Blob: string(e.savedBaseline[id])})
 	}

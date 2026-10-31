@@ -609,11 +609,11 @@ func (a *App) clearBotSession(botID, sessionID string) {
 	}
 }
 
-func (a *App) noteUserMessage(botID, msgID string) {
+func (a *App) noteUserMessage(botID, msgID, text string) {
 	if a == nil || a.broker == nil || msgID == "" || !a.effPol(botID).BrokerHook(botID) {
 		return
 	}
-	a.broker.NoteUserMessage(botID, msgID)
+	a.broker.NoteUserText(botID, msgID, text)
 }
 
 func lastUserTask(inputs []store.Message) string {
@@ -720,16 +720,22 @@ func (a *App) gateShell(ctx context.Context, bot store.Bot, command string) (boo
 	userHome, _ := os.UserHomeDir()
 	a.broker.EnsureBotHomes(bot.ID, filepath.Join(filepath.Dir(a.ws), "cli", bot.ID, "home"), userHome)
 	a.broker.SnapshotBot(bot.ID)
+	cwd, plan, cerr := a.prepareShellCwd(bot.ID, ws, command)
+	if cerr != nil {
+		return false, cerr
+	}
 	d := a.broker.Evaluate(ctx, permbroker.Request{
 		BotID: bot.ID, SessionID: "shell:" + bot.ID, TaskID: a.broker.UserTask(bot.ID),
-		Cwd: ws, Workspace: ws, Repos: repos,
+		Cwd: cwd, Workspace: ws, Repos: repos,
 		ToolName: "run_shell", ToolInput: raw,
 	})
 	if d.Verdict != permbroker.VerdictAllow {
+		a.clearShellPlan(bot.ID)
 		if d.Reason == "" {
 			return false, errors.New("denied")
 		}
 		return false, errors.New(d.Reason)
 	}
+	a.noteShellPlan(bot.ID, plan)
 	return true, nil
 }

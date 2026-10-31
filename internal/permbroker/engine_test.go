@@ -135,6 +135,93 @@ func TestGolden_CriticalAndCompoundCannotBeRules(t *testing.T) {
 	}
 }
 
+func TestGolden_ClassifierDoesNotLowerUnclassified(t *testing.T) {
+	ctx := context.Background()
+	for _, level := range []Level{LevelLow, LevelMedium} {
+		t.Run(string(level), func(t *testing.T) {
+			e := testEngine(t)
+			e.SetClassifier(reportClass{level: level, advisory: "Looks routine; safe to allow.", checked: true})
+			d := e.Evaluate(ctx, bashReq("bot", "sess", "task", "/work", "cat a.txt"))
+			if d.Level != LevelUnclassified || d.Verdict == VerdictAllow || d.PendingID == "" {
+				t.Fatalf("%+v", d)
+			}
+			card := pendingCard(t, e, d.PendingID)
+			if card.Advisory.Source != "table" || len(card.Allowed) != 1 || card.Allowed[0] != ScopeOnce {
+				t.Fatalf("source %q scopes %v", card.Advisory.Source, card.Allowed)
+			}
+		})
+	}
+	e := testEngine(t)
+	e.SetClassifier(reportClass{level: LevelHigh, advisory: "raise", checked: true})
+	d := e.Evaluate(ctx, bashReq("bot", "sess", "task", "/work", "cat a.txt"))
+	if d.Level != LevelHigh || d.Verdict == VerdictAllow {
+		t.Fatalf("%+v", d)
+	}
+	card := pendingCard(t, e, d.PendingID)
+	if card.Advisory.Source != "local model raised this to high" {
+		t.Fatalf("source %q", card.Advisory.Source)
+	}
+}
+
+func TestGolden_PathRuleSourceIsTable(t *testing.T) {
+	ctx := context.Background()
+	for _, level := range []Level{LevelLow, LevelHigh} {
+		t.Run(string(level), func(t *testing.T) {
+			e := testEngine(t)
+			secret := t.TempDir()
+			e.SetCriticalPaths([]string{secret})
+			e.SetClassifier(reportClass{level: level, advisory: "Looks routine; safe to allow.", checked: true})
+			d := e.Evaluate(ctx, bashReq("bot", "sess", "task", "/work", "ls /"))
+			if d.Level != LevelCritical || d.Verdict == VerdictAllow || d.PendingID == "" {
+				t.Fatalf("%+v", d)
+			}
+			card := pendingCard(t, e, d.PendingID)
+			if card.Advisory.Source != "table" {
+				t.Fatalf("source %q level %s", card.Advisory.Source, card.Level)
+			}
+		})
+	}
+}
+
+func TestGolden_TaskApprovalSurvivesNextMessage(t *testing.T) {
+	ctx := context.Background()
+	for _, scope := range []string{ScopeTask, ScopeOnce} {
+		t.Run(scope, func(t *testing.T) {
+			e := testEngine(t)
+			e.NoteUserMessage("bot", "task-1")
+			req := bashReq("bot", "sess", "task-1", "/work", "git status")
+			first := e.Evaluate(ctx, req)
+			if first.PendingID == "" || first.Verdict == VerdictAllow {
+				t.Fatalf("%+v", first)
+			}
+			if err := e.Decide(first.PendingID, "approve", scope); err != nil {
+				t.Fatal(err)
+			}
+			e.NoteUserMessage("bot", "task-2")
+			req.TaskID = "task-2"
+			allowed := e.Evaluate(ctx, req)
+			if allowed.Verdict != VerdictAllow || allowed.Actor != "human" {
+				t.Fatalf("retry %+v", allowed)
+			}
+			second := e.Evaluate(ctx, req)
+			if second.Verdict == VerdictAllow || second.PendingID == "" {
+				t.Fatalf("second %+v", second)
+			}
+		})
+	}
+}
+
+func pendingCard(t *testing.T, e *Engine, id string) Pending {
+	t.Helper()
+	for _, item := range e.ListPending() {
+		if item.ID == id {
+			return item
+		}
+	}
+	t.Fatalf("missing card %s", id)
+	return Pending{}
+}
+
 func TestGolden_ClassifierOnlyEscalates(t *testing.T) {
 	e := testEngine(t)
 	ctx := context.Background()
@@ -413,17 +500,27 @@ func TestDenyAllAuditsEachItem(t *testing.T) {
 		if one.PendingID == "" || two.PendingID == "" || one.PendingID == two.PendingID {
 			t.Fatalf("%+v %+v", one, two)
 		}
-		if err := e.DenyAll([]string{one.PendingID, "missing"}); err != ErrNotFound {
-			t.Fatalf("partial %v", err)
+		rep, err := e.DenyAll([]string{one.PendingID, "missing"})
+		if err != nil || rep.OKCount != 1 || rep.Skipped != 1 || rep.Denied != 1 {
+			t.Fatalf("partial %v %+v", err, rep)
 		}
-		if len(e.ListPending()) != 2 {
-			t.Fatal("partial deny changed pending")
+		if len(e.ListPending()) != 1 {
+			t.Fatal("known id was not denied")
 		}
 		early := decodeAudit(t, readPermAudit(t, dir))
-		if humanDenyCount(early) != 0 {
-			t.Fatal("partial deny wrote an audit row")
+		if humanDenyCount(early) != 1 {
+			t.Fatal("partial deny skipped the known id")
 		}
-		if err := e.DenyAll(nil); err != nil {
+		if _, err := e.DenyAll(nil); err == nil {
+			t.Fatal("nil ids denied")
+		}
+		if _, err := e.DenyAll([]string{}); err == nil {
+			t.Fatal("empty ids denied")
+		}
+		if len(e.ListPending()) != 1 {
+			t.Fatal("empty deny changed pending")
+		}
+		if _, err := e.DenyAll([]string{two.PendingID}); err != nil {
 			t.Fatal(err)
 		}
 		rows := decodeAudit(t, readPermAudit(t, dir))

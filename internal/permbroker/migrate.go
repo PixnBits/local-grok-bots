@@ -267,7 +267,7 @@ func legacyAllowMatch(pat, raw string) bool {
 }
 
 func allowFlex(in inspected) bool {
-	if !in.Eligible || in.Compound || in.Level == LevelCritical || in.GitRisk != "" {
+	if !commandMayAllow(in) {
 		return false
 	}
 	return !wrapperArgv(in.Argv)

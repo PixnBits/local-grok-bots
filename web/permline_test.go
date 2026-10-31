@@ -16,7 +16,7 @@ func TestPermissionLine(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed")
 	}
-	src := string(IndexHTML)
+	src := ClientSource()
 	i := strings.Index(src, "// permline:begin")
 	j := strings.Index(src, "// permline:end")
 	if i < 0 || j < i {

@@ -11,7 +11,7 @@ import (
 // helpers between the profile-logic markers. Static pins lock the draft copy.
 
 func TestProfileStatic(t *testing.T) {
-	src := string(IndexHTML)
+	src := ClientSource()
 	for _, s := range []string{
 		`>Draft</span>`,
 		`Not created yet`,
@@ -24,7 +24,9 @@ func TestProfileStatic(t *testing.T) {
 		`placeholder="Daemon default"`,
 		`Leave blank to use the daemon default.`,
 		`Ask and deny rules only narrow what a managed allow would permit.`,
-		`box-shadow: inset 3px 0 0 var(--accent), 0 0 0 3px var(--accent-soft)`,
+		`box-shadow: 0 0 0 3px var(--accent-soft)`,
+		`"chip changed-chip"`,
+		`Changed since last save`,
 		`aria-label="Log"`,
 		`function bindProfileSpy`,
 		`An empty GitHub list allows no repositories. It does not inherit the policy list. It can only narrow the policy ceiling.`,
@@ -47,11 +49,130 @@ func TestProfileStatic(t *testing.T) {
 	for _, s := range []string{
 		`last = last.replace(/ MST$/, "");`,
 		`.fld.is-dirty, .sec.is-dirty`,
+		`box-shadow: inset 3px 0 0 var(--accent)`,
+		`padding-left: 8px`,
 	} {
 		if strings.Contains(src, s) {
 			t.Errorf("index.html still has %q", s)
 		}
 	}
+	page := string(IndexHTML)
+	for _, id := range []string{
+		"fld-mark", "fld-name", "fld-label", "fld-description", "fld-model",
+		"fld-grants", "fld-net", "fld-ssh", "fld-github", "fld-tools",
+	} {
+		if !fieldHasChangedNote(page, id) {
+			t.Errorf("missing Changed note for %s", id)
+		}
+	}
+	assertNoStripe(t, string(AppCSS))
+	assertNoStripe(t, page)
+}
+
+func fieldHasChangedNote(page, id string) bool {
+	key := `id="` + id + `"`
+	i := strings.Index(page, key)
+	if i < 0 {
+		return false
+	}
+	rest := page[i+len(key):]
+	next := len(rest)
+	for _, marker := range []string{`id="fld-`, `id="sec-`} {
+		if j := strings.Index(rest, marker); j >= 0 && j < next {
+			next = j
+		}
+	}
+	start := i
+	if start > 60 {
+		start = i - 60
+	}
+	block := page[start : i+len(key)+next]
+	if strings.Contains(block, `<p class="help changed" hidden>Changed</p>`) {
+		return true
+	}
+	return strings.Contains(block, `<p class="help changed" id="`+id+`" hidden>Changed</p>`)
+}
+
+func assertNoStripe(t *testing.T, src string) {
+	t.Helper()
+	for _, part := range strings.Split(src, "}") {
+		lower := strings.ToLower(part)
+		if n := leftBorderWidth(lower); n > 1 {
+			t.Errorf("border-left wider than 1px (%d) in %q", n, trimRule(part))
+		}
+		if n, color := insetLeftStripe(lower); n > 1 && stateColor(color) {
+			t.Errorf("inset stripe %dpx %s in %q", n, color, trimRule(part))
+		}
+	}
+}
+
+func leftBorderWidth(rule string) int {
+	const key = "border-left:"
+	i := strings.Index(rule, key)
+	if i < 0 {
+		return 0
+	}
+	rest := strings.TrimSpace(rule[i+len(key):])
+	n := 0
+	seen := false
+	for _, c := range rest {
+		if c < '0' || c > '9' {
+			break
+		}
+		seen = true
+		n = n*10 + int(c-'0')
+	}
+	if !seen {
+		return 0
+	}
+	return n
+}
+
+func insetLeftStripe(rule string) (int, string) {
+	const key = "box-shadow:"
+	i := strings.Index(rule, key)
+	if i < 0 {
+		return 0, ""
+	}
+	rest := rule[i+len(key):]
+	j := strings.Index(rest, "inset")
+	if j < 0 {
+		return 0, ""
+	}
+	rest = strings.TrimSpace(rest[j+len("inset"):])
+	n := 0
+	seen := false
+	k := 0
+	for k < len(rest) && rest[k] >= '0' && rest[k] <= '9' {
+		seen = true
+		n = n*10 + int(rest[k]-'0')
+		k++
+	}
+	if !seen || !strings.HasPrefix(rest[k:], "px") {
+		return 0, ""
+	}
+	after := strings.TrimSpace(rest[k+2:])
+	if !strings.HasPrefix(after, "0") {
+		return 0, ""
+	}
+	return n, rest
+}
+
+func stateColor(fragment string) bool {
+	for _, name := range []string{"--accent", "--danger", "--warning", "--success", "--attention"} {
+		if strings.Contains(fragment, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func trimRule(part string) string {
+	part = strings.TrimSpace(part)
+	if len(part) > 180 {
+		return part[:180]
+	}
+	return part
 }
 
 func TestProfileLogic(t *testing.T) {
@@ -59,7 +180,7 @@ func TestProfileLogic(t *testing.T) {
 	if err != nil {
 		t.Fatal("node not installed")
 	}
-	snippet, err := json.Marshal(between(t, string(IndexHTML), "// profile-logic:begin", "// profile-logic:end"))
+	snippet, err := json.Marshal(between(t, ClientSource(), "// profile-logic:begin", "// profile-logic:end"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +314,7 @@ func TestProfileOpenAppliesFields(t *testing.T) {
 	if err != nil {
 		t.Fatal("node not installed")
 	}
-	src := string(IndexHTML)
+	src := ClientSource()
 	tools := sliceFrom(t, src, "const SERVER_TOOL_NAMES", "async function duplicateBot")
 	apply := sliceFrom(t, src, "function applyBotFields", "function blankDraftFields")
 	open := sliceFrom(t, src, "async function openProfile", "// scroll:begin")
