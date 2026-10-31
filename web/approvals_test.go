@@ -34,7 +34,7 @@ func TestApprovalsCopy(t *testing.T) {
 		"Approve once?",
 		"This can't be undone from here and can't become a rule.",
 		"How a request is decided",
-		"Can't be converted. Add a pattern rule to replace it, then revoke this.",
+		"Imported from an older version. Revoke it, or add an exact or pattern rule that covers what you need.",
 		"Built-in",
 		"Ships with the daemon. Updated with it.",
 		"Your stricter entries",
@@ -383,7 +383,48 @@ check("deny-rule", recentLabel("denied_by_rule", "A") === "Denied by rule", rece
 check("by-grant", recentLabel("allowed_by_task_grant", "A") === "Allowed by task grant", recentLabel("allowed_by_task_grant", "A"));
 check("title0", criticalTitle("Local Grok Bots", 0) === "Local Grok Bots", criticalTitle("Local Grok Bots", 0));
 check("title2", criticalTitle("Ada — Local Grok Bots", 2) === "(2) Critical approval · Ada — Local Grok Bots", criticalTitle("Ada — Local Grok Bots", 2));
-check("notify-body", notifyBody("Ada", "rm -rf /tmp") === "Ada wants to rm -rf /tmp. Open Local Grok Bots to decide.", notifyBody("Ada", "rm -rf /tmp"));
+check("notify-body", notifyBody(["/usr/bin/rm", "-rf", "/tmp"]) === "rm needs your approval.", notifyBody(["/usr/bin/rm", "-rf", "/tmp"]));
+check("notify-title", notifyTitle("Ada") === "Critical request · Ada", notifyTitle("Ada"));
+check("notify-args", notifyBody(["rm", "-rf", "secret"]).indexOf("secret") < 0 && notifyBody(["rm", "-rf", "secret"]).indexOf("-rf") < 0, notifyBody(["rm", "-rf", "secret"]));
+check("high-cap", (function () {
+  const capped = ladderSteps({level: "high", allowed_scopes: ["once", "task", "bot", "global"]});
+  return capped.lockGlobal === true && capped.steps.map(function (s) { return s.scope; }).join(",") === "once,task,bot";
+})(), "high global");
+check("unc-cap", (function () {
+  const capped = ladderSteps({level: "unclassified", allowed_scopes: ["once", "bot", "global"]});
+  return capped.lockGlobal === true && capped.steps.map(function (s) { return s.scope; }).indexOf("global") < 0;
+})(), "unc global");
+check("once-only", (function () {
+  const act = approvalActions({level: "low", allowed_scopes: ["once"]});
+  return act.approve === "once" && act.chevron === false && act.batch === false;
+})(), "once");
+check("batch-ok", batchResultCopy("approve", 3, 0, "Ada") === "Approved 3 requests.", batchResultCopy("approve", 3, 0, "Ada"));
+check("batch-deny", batchResultCopy("deny", 3, 0, "Ada") === "Denied 3 requests. Ada carries on without them.", batchResultCopy("deny", 3, 0, "Ada"));
+check("batch-stale", batchResultCopy("approve", 2, 1, "Ada") === "2 done, 1 already answered.", batchResultCopy("approve", 2, 1, "Ada"));
+check("cwd", shortCwd("/home/pixnbits/lgbe2e-data/workspace/notes") === "~/lgbe2e-data/workspace/notes", shortCwd("/home/pixnbits/lgbe2e-data/workspace/notes"));
+check("risk-rm", riskLabel({matches: ["rm"]}) === "Deletes files", riskLabel({matches: ["rm"]}));
+check("risk-edit", riskLabel({matches: ["edit"]}) === "Changes files", riskLabel({matches: ["edit"]}));
+check("risk-grep", riskLabel({matches: ["grep"]}) === "Reads files", riskLabel({matches: ["grep"]}));
+check("risk-fall", riskLabel({matches: ["git status"]}) === "Runs a command", riskLabel({matches: ["git status"]}));
+check("risk-api", riskLabel({label: "Custom", matches: ["rm"]}) === "Custom", riskLabel({label: "Custom", matches: ["rm"]}));
+const stamp = new Date(2026, 9, 30, 12, 0, 0).toISOString();
+const provApi = provenanceLine({source: "api", created_at: stamp});
+const provPrompt = provenanceLine({source: "prompt", created_at: stamp});
+check("prov-api", provApi.indexOf("Added by you · ") === 0 && provApi.indexOf("api") < 0, provApi);
+check("prov-prompt", provPrompt.indexOf("Saved from a prompt · ") === 0, provPrompt);
+check("prov-legacy", provenanceLine({kind: "legacy", source: "api"}) === "Imported from an older version. Revoke it, or add an exact or pattern rule that covers what you need.", provenanceLine({kind: "legacy"}));
+check("menu-down", ruleMenuKey("ArrowDown", 3, 0).move === 1, "down");
+check("menu-up", ruleMenuKey("ArrowUp", 3, 1).move === 0, "up");
+check("menu-home", ruleMenuKey("Home", 3, 2).move === 0, "home");
+check("menu-end", ruleMenuKey("End", 3, 0).move === 2, "end");
+check("menu-esc", ruleMenuKey("Escape", 3, 1).close === true, "esc");
+const queue = [{id: "a", level: "critical"}, {id: "b", level: "high"}, {id: "c", level: "low"}];
+check("next-deny", nextQueueFocusKey(queue, ["a"]) === "q:deny:b", nextQueueFocusKey(queue, ["a"]));
+check("next-approve", nextQueueFocusKey(queue, ["b"]) === "q:approve:c", nextQueueFocusKey(queue, ["b"]));
+check("next-empty", nextQueueFocusKey(queue, ["a", "b", "c"]) === "approvals-title", nextQueueFocusKey(queue, ["a", "b", "c"]));
+check("primary-high", primaryActionKey({id: "b", level: "high"}, "queue") === "q:deny:b", primaryActionKey({id: "b", level: "high"}, "queue"));
+check("preview-the", previewSummary({would_allow: 0}, "") === "0 of the last 50 requests would be allowed · 0 still asks", previewSummary({would_allow: 0}, ""));
+check("group-n", groupCountLabel(0, 1) === "Critical · 1", groupCountLabel(0, 1));
 check("notify-http", notifyStateLabel(false, "granted", false) === "Not available", notifyStateLabel(false, "granted", false));
 check("notify-blocked", notifyStateLabel(true, "denied", false) === "Blocked", notifyStateLabel(true, "denied", false));
 check("notify-on", notifyStateLabel(true, "granted", false) === "On", notifyStateLabel(true, "granted", false));
@@ -470,3 +511,139 @@ check("stamp-hash", stamp && stamp.view === "chat" && stamp.bot === "abc", JSON.
 check("profile-stays", levelURL("", "profile", "abc", "").indexOf("/profile") < 0 && levelURL("", "profile", "abc", "") === "/bots/abc#profile", levelURL("", "profile", "abc", ""));
 return out;
 `
+
+func TestRound2Markup(t *testing.T) {
+	src := ClientSource()
+	page := string(IndexHTML)
+	for _, s := range []string{
+		"Model note · untrusted",
+		"A model's guess, not a check. Judge by the command above.",
+		"Model note hidden for high-risk requests.",
+		"Critical request · ",
+		"needs your approval.",
+		"appr-git",
+		"item.git_reason",
+		"Save as new rule",
+		"Saves a new rule and removes the old one.",
+		"Saved the new rule, but couldn't remove the old one. Both are listed.",
+		"/api/permbroker/rules/",
+		"/replace",
+		"revoked === false",
+		"Not yet",
+		"Show task",
+		"Open thread",
+		"Working directory",
+		"appr-cwd-full",
+		"shortCwd(",
+		"rule.confirmable",
+		"rule.never_reason",
+		"A * stands for exactly one word and can't be the last word.",
+		`setAttribute("role", "region")`,
+		`setAttribute("aria-modal", "true")`,
+		"removeAttribute(\"aria-modal\")",
+		"function applyIntendedFocus(",
+		"function setIntendedFocus(",
+		"function ruleMenuKey(",
+		"ArrowDown",
+		"ArrowUp",
+		"Home",
+		"End",
+		`createElement("table")`,
+		`createElement("caption")`,
+		`createElement("thead")`,
+		`setAttribute("scope", "col")`,
+		"approve-all",
+		"deny-all",
+		"batchFlight",
+		"aria-disabled",
+		"firstIdenticalId(",
+		"groupCountLabel(",
+		"#view-bots > .roster-head .appr-btn { display: none; }",
+		"min-width: 44px; min-height: 44px;",
+		"accent-soft",
+		":focus:not(:focus-visible)",
+		`name ? name + "'s" : "the"`,
+		"scope: \"bot\"",
+		"#rule-bot-field",
+	} {
+		if !strings.Contains(src, s) {
+			t.Errorf("client source missing %q", s)
+		}
+	}
+	card := jsFunc(t, src, "function renderApprovalCard(")
+	if strings.Contains(card, "appr-reason") {
+		t.Error("card still renders appr-reason")
+	}
+	if !strings.Contains(card, "MODEL_NOTE_HIDDEN") || !strings.Contains(card, "item.git_reason") {
+		t.Error("card is missing the hidden model note or git_reason")
+	}
+	decide := jsFunc(t, src, "async function postDecision(")
+	if !strings.Contains(decide, "setIntendedFocus(nextQueueFocusKey(") {
+		t.Error("postDecision does not set the next-card focus key")
+	}
+	if !strings.Contains(card, `postDecision(item, "approve", "once")`) || !strings.Contains(card, `postDecision(item, "deny"`) || !strings.Contains(card, `postDecision(item, "approve", picked)`) {
+		t.Error("approve once, deny, or ladder commit does not go through postDecision")
+	}
+	if !strings.Contains(card, `setIntendedFocus(opening ? prefix + "ladder:"`) || !strings.Contains(card, `prefix + "chevron:"`) {
+		t.Error("chevron open and close do not set an intended focus key")
+	}
+	batch := jsFunc(t, src, "async function postBatch(")
+	if !strings.Contains(batch, "setIntendedFocus(nextQueueFocusKey(") || !strings.Contains(batch, "approve-all") || !strings.Contains(batch, "deny-all") {
+		t.Error("batch approve and deny do not set focus or call the batch routes")
+	}
+	if !strings.Contains(card, `postBatch("approve"`) || !strings.Contains(card, `postBatch("deny"`) {
+		t.Error("Approve all and Deny all do not call postBatch")
+	}
+	revoke := jsFunc(t, src, "async function revokeRule(")
+	if !strings.Contains(revoke, "setIntendedFocus(\"rules:\"") {
+		t.Error("revoke does not set the next-row focus key")
+	}
+	close := jsFunc(t, src, "function closeApprovals(")
+	if !strings.Contains(close, `setIntendedFocus("approvals-opener")`) || !strings.Contains(close, "applyIntendedFocus(") {
+		t.Error("Escape close does not return focus through the helper")
+	}
+	render := jsFunc(t, src, "function renderApprovals(")
+	if !strings.Contains(render, "applyIntendedFocus(") {
+		t.Error("renderApprovals does not apply the intended focus key")
+	}
+	rules := jsFunc(t, src, "function paintRules(")
+	if !strings.Contains(rules, "applyIntendedFocus(") {
+		t.Error("paintRules does not apply the intended focus key")
+	}
+	thread := jsFunc(t, src, "function renderBrokerThread(")
+	if !strings.Contains(thread, "applyIntendedFocus(") {
+		t.Error("thread render does not apply the intended focus key")
+	}
+	focus := jsFunc(t, src, "function applyIntendedFocus(")
+	if !strings.Contains(focus, "document.activeElement !== document.body") || !strings.Contains(focus, "approvalOpener()") {
+		t.Error("focus helper can leave focus on document.body")
+	}
+	menu := jsFunc(t, src, "function bindRuleMenu(")
+	for _, key := range []string{"ArrowDown", "ArrowUp", "Home", "End", "Escape", "ruleMenuKey(", "more.focus()"} {
+		if !strings.Contains(menu, key) {
+			t.Errorf("rule menu missing %q", key)
+		}
+	}
+	if strings.Contains(src, "use one * for each word") || strings.Contains(src, "use one `*` for each word") {
+		t.Error("pattern help still says to use one star for each word")
+	}
+	cons := jsFunc(t, src, "function paintConsequence(")
+	if strings.Contains(cons, "Nothing else: a * is one word") {
+		t.Error("exact consequence still explains star semantics")
+	}
+	if !strings.Contains(cons, "draft.kind === \"pattern\"") || !strings.Contains(cons, "STAR_WORD") {
+		t.Error("pattern mode does not keep the star sentence")
+	}
+	for _, bad := range []string{"<script>", "<style", " style=", " onclick=", " onkeydown=", " onchange="} {
+		if strings.Contains(page, bad) {
+			t.Errorf("index.html has inline markup %q", bad)
+		}
+	}
+	handler := regexp.MustCompile(`(?i)\son[a-z]+\s*=`)
+	if handler.MatchString(page) {
+		t.Error("index.html has an inline event handler")
+	}
+	if strings.Contains(page, "http://") || strings.Contains(page, "https://") || strings.Contains(page, "//cdn") {
+		t.Error("index.html has an external URL")
+	}
+}

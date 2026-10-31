@@ -448,9 +448,10 @@
           <button type="button" role="radio" data-scope="bot" aria-checked="true">One bot</button>
           <button type="button" role="radio" data-scope="global" aria-checked="false">All bots</button>
         </div>
-        <label>Bot
+        <div id="rule-bot-field">
+          <label for="rule-bot">Bot</label>
           <select id="rule-bot"></select>
-        </label>
+        </div>
       </div>
       <div class="rule-field">
         <div class="lbl" id="rule-effect-label">Effect</div>
@@ -467,6 +468,7 @@
         <ul id="rule-hits"></ul>
       </div>
     </div>
+    <p class="rule-replace-note" id="rule-replace-note" hidden>Saves a new rule and removes the old one.</p>
     <div class="rule-actions">
       <button type="button" class="primary" id="rule-save" aria-disabled="true">Save</button>
       <button type="button" class="ghost" id="rule-cancel">Cancel</button>

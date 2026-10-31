@@ -6336,13 +6336,19 @@ const CRITICAL_BAND = "⚠ CRITICAL · WE RECOMMEND DENYING";
 const CRITICAL_EYEBROW = "CRITICAL RISK · PERMISSION NEEDED";
 const SEND_FAILED_COPY = "Couldn't send your answer. The daemon didn't respond. Try again.";
 const NOTIFY_TITLE = "Critical approval waiting";
+const MODEL_NOTE_TITLE = "Model note · untrusted";
+const MODEL_NOTE_SUB = "A model's guess, not a check. Judge by the command above.";
+const MODEL_NOTE_HIDDEN = "Model note hidden for high-risk requests.";
+const REPLACE_NOTE = "Saves a new rule and removes the old one.";
+const REPLACE_BOTH = "Saved the new rule, but couldn't remove the old one. Both are listed.";
+const STAR_WORD = "A * stands for exactly one word and can't be the last word.";
 const NOTIFY_UNAVAILABLE = "Browsers don't allow notifications on plain http. Critical approvals still show here and in the tab title.";
 const NOTIFY_BLOCKED = "Notifications are blocked. Allow notifications for this page in your browser's site settings. Critical approvals still show here and in the tab title.";
 const PREPROMPT_TITLE = "Get a notification for critical approvals?";
 const PREPROMPT_BODY = "When a bot asks for a critical approval and this tab is in the background, your browser can show a notification. It comes from this page only, with no outside service. You still decide here.";
 const EXACT_HELP = "Matches this exact command only. To cover more than one command, add a pattern rule. Commands with ; && | $( ) can't be saved.";
-const PATTERN_HELP = "Patterns match the command word for word. `*` stands for exactly one word and never matches a flag (a word starting with `-`). Write flags out in full. Case-sensitive.";
-const LEGACY_NOTE = "Can't be converted. Add a pattern rule to replace it, then revoke this.";
+const PATTERN_HELP = "Patterns match the command word for word. " + STAR_WORD + " It never matches a flag (a word starting with `-`). Write flags out in full. Case-sensitive.";
+const LEGACY_NOTE = "Imported from an older version. Revoke it, or add an exact or pattern rule that covers what you need.";
 const BUILTIN_RISK = "Built-in";
 const BUILTIN_RISK_NOTE = "Ships with the daemon. Updated with it.";
 const STRICTER_RISK = "Your stricter entries";
@@ -6425,28 +6431,35 @@ function approvalFriction(item) {
   if (l === "critical" || l === "high" || l === "low" || l === "medium") return l;
   return "unclassified";
 }
+function onceOnlyScopes(item) {
+  const allowed = item && item.allowed_scopes;
+  if (!allowed || !allowed.length) return false;
+  for (let i = 0; i < allowed.length; i++) if (allowed[i] !== "once") return false;
+  return true;
+}
 function approvalActions(item) {
   const friction = approvalFriction(item);
-  const allowed = (item && item.allowed_scopes) || [];
-  const lockGlobal = allowed.indexOf("global") < 0 && (item && (item.level === "high" || item.level === "unclassified"));
+  const level = item && item.level;
+  const lockGlobal = level === "high" || level === "unclassified";
   if (friction === "compound") return { approve: "once", chevron: false, deny: "outline", batch: false, note: CANT_BE_A_RULE, lockGlobal: false };
   if (friction === "critical") return { approve: "confirm", chevron: false, deny: "fill", batch: false, note: CANT_BE_A_RULE, lockGlobal: false };
-  if (friction === "high") return { approve: "split-secondary", chevron: true, deny: "outline", batch: false, lockGlobal: !!lockGlobal };
+  if (onceOnlyScopes(item)) return { approve: "once", chevron: false, deny: "outline", batch: false, note: "", lockGlobal: false };
+  if (friction === "high") return { approve: "split-secondary", chevron: true, deny: "outline", batch: false, lockGlobal: true };
   if (friction === "low") return { approve: "split-primary", chevron: true, deny: "outline", batch: true, lockGlobal: false };
-  if (friction === "unclassified") return { approve: "split-primary", chevron: true, deny: "outline", batch: false, lockGlobal: !!lockGlobal };
-  return { approve: "split-primary", chevron: true, deny: "outline", batch: false, lockGlobal: false };
+  if (friction === "unclassified") return { approve: "split-primary", chevron: true, deny: "outline", batch: false, lockGlobal: true };
+  return { approve: "split-primary", chevron: true, deny: "outline", batch: false, lockGlobal: !!lockGlobal };
 }
 function ladderSteps(item) {
   const allowed = (item && item.allowed_scopes) || [];
   const has = function (s) { return allowed.indexOf(s) >= 0; };
+  const level = String((item && item.level) || "");
+  const capGlobal = level === "high" || level === "unclassified";
   const steps = [];
   if (has("once")) steps.push({ scope: "once", label: "Just this once" });
   if (has("task")) steps.push({ scope: "task", label: "This task" });
   if (has("bot")) steps.push({ scope: "bot", label: "Always for {bot}" });
-  if (has("global")) steps.push({ scope: "global", label: "All bots" });
-  const level = String((item && item.level) || "");
-  const lockGlobal = !has("global") && (level === "high" || level === "unclassified");
-  return { steps: steps, lockGlobal: lockGlobal };
+  if (has("global") && !capGlobal) steps.push({ scope: "global", label: "All bots" });
+  return { steps: steps, lockGlobal: capGlobal };
 }
 function taskStepCopy(bot, task) {
   return "Until " + (bot || "the bot") + " finishes your message \"" + (task || "") + "\". Your next message asks again.";
@@ -6524,8 +6537,20 @@ function criticalTitle(base, n) {
   if (count <= 0) return title;
   return "(" + count + ") Critical approval · " + title;
 }
-function notifyBody(bot, action) {
-  return (bot || "A bot") + " wants to " + (action || "run a command") + ". Open Local Grok Bots to decide.";
+function commandBasename(argv) {
+  let name = "";
+  if (Array.isArray(argv)) name = argv.length ? String(argv[0] || "") : "";
+  else name = String(argv || "").trim().split(/\s+/)[0] || "";
+  name = name.replace(/\\/g, "/");
+  const cut = name.lastIndexOf("/");
+  if (cut >= 0) name = name.slice(cut + 1);
+  return name || "A command";
+}
+function notifyTitle(bot) {
+  return "Critical request · " + (bot || "A bot");
+}
+function notifyBody(argv) {
+  return commandBasename(argv) + " needs your approval.";
 }
 function notifyStateLabel(secure, permission, locallyOff) {
   if (secure === false) return "Not available";
@@ -6584,7 +6609,7 @@ function previewSummary(summary, name) {
   const s = summary || {};
   const allow = s.would_allow || 0;
   const ask = (s.would_ask || 0) + (s.still_asks_compound || 0) + (s.still_asks_critical || 0);
-  const who = name ? name + "'s" : "recent";
+  const who = name ? name + "'s" : "the";
   return allow + " of " + who + " last 50 requests would be allowed · " + ask + " still asks";
 }
 function outcomeLabel(outcome, reason) {
@@ -6652,6 +6677,101 @@ function eyebrowFor(level) {
   if (String(level || "").toLowerCase() === "critical") return CRITICAL_EYEBROW;
   return String(level || "unclassified").toUpperCase() + " RISK · PERMISSION NEEDED";
 }
+function shortCwd(cwd) {
+  const s = String(cwd || "");
+  const home = s.match(/^\/(?:home|Users)\/[^/]+(\/.*)?$/);
+  if (!home) return s;
+  return "~" + (home[1] || "");
+}
+function primaryActionKey(item, mode) {
+  const prefix = mode === "thread" ? "t:" : "q:";
+  const level = String((item && item.level) || "");
+  if (level === "high" || level === "critical") return prefix + "deny:" + item.id;
+  return prefix + "approve:" + item.id;
+}
+function nextQueueFocusKey(items, removeIds) {
+  const gone = {};
+  (removeIds || []).forEach(function (id) { gone[id] = true; });
+  const all = items || [];
+  const left = all.filter(function (item) { return item && !gone[item.id]; });
+  if (!left.length) return "approvals-title";
+  const ordered = orderApprovalIds(all, [], "");
+  let next = "";
+  for (let i = 0; i < ordered.length; i++) {
+    if (!gone[ordered[i]]) continue;
+    for (let j = i + 1; j < ordered.length; j++) {
+      if (!gone[ordered[j]]) { next = ordered[j]; break; }
+    }
+    if (next) break;
+  }
+  if (!next) {
+    const remain = orderApprovalIds(left, [], "");
+    next = remain.length ? remain[remain.length - 1] : "";
+  }
+  let item = null;
+  for (let k = 0; k < left.length; k++) if (left[k].id === next) item = left[k];
+  return item ? primaryActionKey(item, "queue") : "approvals-title";
+}
+function batchResultCopy(kind, okCount, skipped, bot) {
+  const ok = Number(okCount) || 0;
+  const skip = Number(skipped) || 0;
+  if (skip > 0) return ok + " done, " + skip + " already answered.";
+  if (kind === "approve") return "Approved " + ok + " requests.";
+  return denyAllToast(ok, bot);
+}
+function ruleMenuKey(key, count, index) {
+  const n = Number(count) || 0;
+  if (key === "Escape") return { close: true, move: -1 };
+  if (key === "Home" && n) return { close: false, move: 0 };
+  if (key === "End" && n) return { close: false, move: n - 1 };
+  if (key === "ArrowDown" && n) {
+    const i = index < 0 ? 0 : Math.min(n - 1, index + 1);
+    return { close: false, move: i };
+  }
+  if (key === "ArrowUp" && n) {
+    const i = index <= 0 ? 0 : index - 1;
+    return { close: false, move: i };
+  }
+  return { close: false, move: -1 };
+}
+function riskLabel(row) {
+  if (row && row.label) return String(row.label);
+  const matches = (row && row.matches) || [];
+  const first = String(matches[0] || "").trim().split(/\s+/)[0];
+  if (first === "rm") return "Deletes files";
+  if (first === "edit" || first === "write" || first === "multiedit" || first === "notebookedit") return "Changes files";
+  if (first === "grep" || first === "read" || first === "glob" || first === "cat") return "Reads files";
+  return "Runs a command";
+}
+function ruleDateLabel(value) {
+  const d = value instanceof Date ? value : new Date(value);
+  if (!isFinite(d.getTime()) || d.getFullYear() < 2000) return "";
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return months[d.getMonth()] + " " + d.getDate();
+}
+function provenanceLine(rule) {
+  const r = rule || {};
+  if (r.kind === "legacy" || r.source === "legacy") return LEGACY_NOTE;
+  const date = ruleDateLabel(r.created_at);
+  const tail = date ? " · " + date : "";
+  if (r.source === "prompt") return "Saved from a prompt" + tail;
+  return "Added by you" + tail;
+}
+function groupCountLabel(rank, count) {
+  return groupTitle(rank) + " · " + (Number(count) || 0);
+}
+function firstIdenticalId(items, item) {
+  const key = identicalKey(item);
+  if (!key) return "";
+  const ordered = orderApprovalIds(items || [], [], "");
+  const byId = {};
+  (items || []).forEach(function (other) { if (other) byId[other.id] = other; });
+  for (let i = 0; i < ordered.length; i++) {
+    const other = byId[ordered[i]];
+    if (other && identicalKey(other) === key) return other.id;
+  }
+  return item && item.id;
+}
 // approvals-pure:end
 // approvals-dom:begin
 let approvalItems = null;
@@ -6692,8 +6812,10 @@ const approvals = {
   wantFocus: false,
   polling: false,
   started: false,
-  editingId: ""
+  editingId: "",
+  intendedFocus: ""
 };
+let batchFlight = null;
 
 function approvalsCriticalCount() {
   let n = 0;
@@ -6968,8 +7090,13 @@ function applyQueueChrome() {
     panel.classList.toggle("is-dock", queueOpen && mode === "dock");
     panel.classList.toggle("is-slide", queueOpen && mode === "slide");
     panel.classList.toggle("is-sheet", queueOpen && mode === "sheet");
-    if (mode === "dock") panel.removeAttribute("aria-modal");
-    else panel.setAttribute("aria-modal", "true");
+    if (mode === "dock") {
+      panel.setAttribute("role", "region");
+      panel.removeAttribute("aria-modal");
+    } else {
+      panel.setAttribute("role", "dialog");
+      panel.setAttribute("aria-modal", "true");
+    }
   }
   if (scrim) scrim.hidden = !(queueOpen && mode !== "dock");
   setApprovalsHash(queueOpen);
@@ -6996,18 +7123,49 @@ function openApprovals(opts) {
   approvals.force = true;
   renderApprovals();
 }
+function setIntendedFocus(key) {
+  approvals.intendedFocus = key || "";
+}
+function approvalOpener() {
+  const list = document.querySelectorAll("button.appr-btn");
+  for (let i = 0; i < list.length; i++) {
+    const button = list[i];
+    if (!button || button.hidden) continue;
+    if (window.getComputedStyle && window.getComputedStyle(button).display === "none") continue;
+    return button;
+  }
+  return list.length ? list[0] : null;
+}
+function applyIntendedFocus(root) {
+  const key = approvals.intendedFocus;
+  if (!key) return false;
+  let node = null;
+  if (key === "approvals-title") node = document.getElementById("approvals-title");
+  else if (key === "approvals-opener") node = approvalOpener();
+  else if (key.indexOf("rules:") === 0) {
+    node = findByAttr(document.getElementById("rules-list") || document, "data-rules-focus", key.slice(6));
+    if (!node) node = document.getElementById("rules-title");
+  } else {
+    node = findByAttr(root || document, "data-appr-focus", key) || findByAttr(document, "data-appr-focus", key);
+  }
+  if (!node || (node.closest && node.closest("[hidden]"))) node = approvalOpener() || document.getElementById("approvals-title");
+  approvals.intendedFocus = "";
+  if (!node || typeof node.focus !== "function") return false;
+  if (node.closest && node.closest("[hidden]")) node = approvalOpener();
+  if (!node || typeof node.focus !== "function") return false;
+  node.focus();
+  const card = node.closest ? node.closest(".appr-card") : null;
+  if (card && card.scrollIntoView) card.scrollIntoView({ block: "nearest" });
+  return document.activeElement !== document.body;
+}
 function closeApprovals() {
-  const panel = $("#approvals");
-  const inside = panel && panel.contains(document.activeElement);
   const waiting = (approvalItems || []).length > 0;
   queueOpen = false;
   queueManual = false;
   if (waiting) queueDismissed = true;
   applyQueueChrome();
-  if (inside) {
-    const back = document.querySelector("button.appr-btn");
-    if (back) back.focus();
-  }
+  setIntendedFocus("approvals-opener");
+  applyIntendedFocus(document);
 }
 function closeApprovalLayer() {
   const sheet = $("#rule-sheet");
@@ -7127,9 +7285,23 @@ function renderApprovalCard(item, mode) {
   const pre = el("pre", "appr-pre");
   appendCommand(pre, item);
   argv.append(pre);
-  const meta = [item.cwd, item.tool].filter(Boolean).join(" · ");
-  if (meta) argv.append(el("div", "appr-meta", meta));
+  const cwd = String(item.cwd || "");
+  const tool = String(item.tool || "");
+  if (cwd || tool) {
+    const meta = el("div", "appr-meta", [cwd ? shortCwd(cwd) : "", tool].filter(Boolean).join(" · "));
+    if (cwd) meta.title = cwd;
+    argv.append(meta);
+  }
+  if (cwd) {
+    const details = document.createElement("details");
+    details.className = "appr-details";
+    const summary = document.createElement("summary");
+    summary.textContent = "Working directory";
+    details.append(summary, el("p", "appr-cwd-full", cwd));
+    argv.append(details);
+  }
   inner.append(argv);
+  if (item.git_reason) inner.append(el("p", "appr-git", item.git_reason));
   if (mode === "queue") {
     const top = el("div", "appr-top");
     top.append(el("b", "", itemBot(item)));
@@ -7141,7 +7313,9 @@ function renderApprovalCard(item, mode) {
     inner.append(el("div", "appr-eyebrow", eyebrowFor(level)));
   }
   const title = el("div", "appr-title");
-  const chip = el("span", "appr-chip " + level, level);
+  const chip = el("span", "appr-chip " + level);
+  if (level === "critical") chip.append(cloneTpl("tpl-alert"));
+  chip.append(document.createTextNode(level));
   title.append(chip, document.createTextNode(approvalTitle(item)));
   inner.append(title);
   if (item.compound) {
@@ -7159,18 +7333,43 @@ function renderApprovalCard(item, mode) {
     note.append(ol);
     inner.append(note);
   }
-  if (item.advisory) {
-    const adv = el("div", "appr-adv" + (item.advisory.checked ? "" : " is-unchecked"));
-    adv.append(el("b", "", "Advisory"));
-    if (item.advisory.text) adv.append(el("p", "", item.advisory.text));
+  if (level === "high" || level === "critical") {
+    inner.append(el("p", "appr-note-hidden", MODEL_NOTE_HIDDEN));
+  } else if (item.advisory) {
+    const adv = el("div", "appr-adv");
+    adv.append(el("b", "", MODEL_NOTE_TITLE));
+    adv.append(el("p", "appr-note-sub", MODEL_NOTE_SUB));
+    const noteText = item.advisory ? String(item.advisory.text || "") : "";
+    if (noteText) adv.append(el("p", "", noteText));
     adv.append(el("p", "appr-src", advisorySource(item.advisory, item.level)));
     inner.append(adv);
   }
-  if (item.critical_reason) inner.append(el("p", "appr-reason", item.critical_reason));
+  const prefix = mode === "thread" ? "t:" : "q:";
   if (item.task_text) {
-    const task = el("div", "appr-task");
-    task.append(el("span", "", "Task: " + flattenTaskText(item.task_text)));
+    const task = el("div", "appr-task" + (ui.taskOpen ? " is-open" : ""));
+    task.append(el("span", "appr-task-clamp", "Task: " + flattenTaskText(item.task_text)));
+    const toggle = btn("ghost small", ui.taskOpen ? "Hide task" : "Show task");
+    toggle.setAttribute("data-appr-focus", prefix + "task:" + item.id);
+    toggle.addEventListener("click", function () {
+      ui.taskOpen = !ui.taskOpen;
+      uiRev += 1;
+      setIntendedFocus(prefix + "task:" + item.id);
+      renderApprovals();
+    });
+    task.append(toggle);
     inner.append(task);
+  }
+  if (mode === "queue" && item.bot_id) {
+    const open = document.createElement("a");
+    open.className = "appr-open";
+    open.textContent = "Open thread";
+    open.href = (typeof levelURL === "function" && typeof base === "function") ? levelURL(base(), "chat", item.bot_id, "") : "/";
+    open.addEventListener("click", function (ev) {
+      if (ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey || ev.button) return;
+      ev.preventDefault();
+      if (typeof openBot === "function") openBot(item.bot_id, true);
+    });
+    inner.append(open);
   }
   card.append(inner);
   if (ui.sendError) {
@@ -7180,7 +7379,7 @@ function renderApprovalCard(item, mode) {
     retry.addEventListener("click", function (ev) {
       if (guardAnswer(ev)) return;
       const last = ui.lastTry || { decision: "deny" };
-      if (last.batch) postDenyAll(last.ids, item);
+      if (last.batch) postBatch(last.kind || "deny", last.ids, item);
       else postDecision(item, last.decision, last.scope);
     });
     err.append(retry);
@@ -7188,7 +7387,6 @@ function renderApprovalCard(item, mode) {
   }
   const bar = el("div", "appr-actions");
   const down = approvalsUnreachable();
-  const prefix = mode === "thread" ? "t:" : "q:";
   const steps = ladderSteps(item);
   const showChevron = actions.chevron && (steps.steps.length > 1 || steps.lockGlobal);
   function wireAnswer(node, fn) {
@@ -7228,11 +7426,14 @@ function renderApprovalCard(item, mode) {
       chev.setAttribute("aria-expanded", ui.ladder ? "true" : "false");
       chev.append(cloneTpl("tpl-chev"));
       setAriaDisabled(chev, down);
+      chev.setAttribute("data-appr-focus", prefix + "chevron:" + item.id);
       chev.addEventListener("click", function (ev) {
         if (guardAnswer(ev)) return;
-        ui.ladder = !ui.ladder;
+        const opening = !ui.ladder;
+        ui.ladder = opening;
         if (!ui.scope) ui.scope = "once";
         uiRev += 1;
+        setIntendedFocus(opening ? prefix + "ladder:" + item.id : prefix + "chevron:" + item.id);
         renderApprovals();
       });
       split.append(chev);
@@ -7242,14 +7443,28 @@ function renderApprovalCard(item, mode) {
   if (actions.batch) {
     const key = identicalKey(item);
     const group = key ? (approvalItems || []).filter(function (other) { return identicalKey(other) === key; }) : [];
-    if (group.length > 1) {
+    if (group.length > 1 && firstIdenticalId(approvalItems, item) === item.id) {
+      const ids = group.map(function (g) { return g.id; });
+      const busy = !!(batchFlight && ids.some(function (id) { return batchFlight.ids[id]; }));
       const all = btn("secondary", "Approve all " + group.length);
-      wireAnswer(all, function () { postApproveAll(group); });
+      all.setAttribute("data-appr-focus", prefix + "approve-all:" + item.id);
+      setAriaDisabled(all, down || busy);
+      all.addEventListener("click", function (ev) {
+        if (all.getAttribute("aria-disabled") === "true" || batchFlight) { ev.preventDefault(); return; }
+        if (guardAnswer(ev)) return;
+        postBatch("approve", ids, item);
+      });
       const denyAll = btn("appr-deny-line", "Deny all " + group.length);
+      denyAll.setAttribute("data-appr-focus", prefix + "deny-all:" + item.id);
       const desc = el("p", "appr-src", denyAllDesc(group.length, itemBot(item)));
       desc.id = "deny-all-desc-" + mode + "-" + item.id;
       denyAll.setAttribute("aria-describedby", desc.id);
-      wireAnswer(denyAll, function () { postDenyAll(group.map(function (g) { return g.id; }), item); });
+      setAriaDisabled(denyAll, down || busy);
+      denyAll.addEventListener("click", function (ev) {
+        if (denyAll.getAttribute("aria-disabled") === "true" || batchFlight) { ev.preventDefault(); return; }
+        if (guardAnswer(ev)) return;
+        postBatch("deny", ids, item);
+      });
       bar.append(all, denyAll, desc);
     }
   }
@@ -7330,9 +7545,10 @@ function renderApprovalCard(item, mode) {
     h.textContent = LADDER_HEADING;
     ladder.append(h, el("p", "appr-src", LADDER_NOTE));
     const picked = ui.scope || "once";
-    steps.steps.forEach(function (step) {
+    steps.steps.forEach(function (step, stepIndex) {
       const stepBtn = btn("appr-step" + (picked === step.scope ? " is-on" : ""), "");
       stepBtn.setAttribute("aria-pressed", picked === step.scope ? "true" : "false");
+      if (stepIndex === 0) stepBtn.setAttribute("data-appr-focus", prefix + "ladder:" + item.id);
       const label = step.scope === "bot" ? "Always for " + itemBot(item) : step.label;
       const strong = el("strong", "", label);
       let detail = "";
@@ -7370,6 +7586,7 @@ async function postDecision(item, decision, scope) {
   }
   if (res.status === 409 || res.status === 404) {
     localRecords.unshift({ text: "Approved on another device" });
+    setIntendedFocus(nextQueueFocusKey(approvalItems, [item.id]));
     dropItem(item.id);
     return;
   }
@@ -7379,6 +7596,7 @@ async function postDecision(item, decision, scope) {
     renderApprovals();
     return;
   }
+  setIntendedFocus(nextQueueFocusKey(approvalItems, [item.id]));
   if (decision === "deny") {
     rememberOwn(item, "deny");
     localRecords.unshift({ text: denyRecord(itemBot(item), itemArgv(item)) });
@@ -7400,47 +7618,78 @@ async function undoScopeRule(item, scope) {
   if (match && match.id) await brokerCall("/api/permbroker/rules/" + encodeURIComponent(match.id), { method: "DELETE" });
   pollSoon();
 }
-async function postApproveAll(group) {
-  for (let i = 0; i < group.length; i++) {
-    const item = group[i];
-    const res = await brokerCall("/api/permbroker/pending/" + encodeURIComponent(item.id), {
-      method: "POST",
-      body: JSON.stringify({ decision: "approve", scope: "once" })
-    });
-    if (res.network || (res.status !== 200 && res.status !== 409 && res.status !== 404)) {
-      const ui = ensureUI(item.id);
-      ui.sendError = true;
-      ui.lastTry = { decision: "approve", scope: "once" };
-      uiRev += 1;
-      renderApprovals();
-      return;
-    }
-    if (res.status === 200) rememberOwn(item, "approve");
-  }
-  showStatusToast("Approved once.", null);
-  pollSoon();
+function batchFocusKey(sample, kind) {
+  const id = sample && sample.id;
+  if (!id) return "approvals-title";
+  const active = document.activeElement;
+  const current = active && active.getAttribute ? (active.getAttribute("data-appr-focus") || "") : "";
+  if (current && current.indexOf(id) >= 0) return current;
+  return "q:" + (kind === "deny" ? "deny-all:" : "approve-all:") + id;
 }
-async function postDenyAll(ids, sample) {
-  const ui = sample ? ensureUI(sample.id) : {};
-  ui.lastTry = { batch: true, ids: ids };
-  const res = await brokerCall("/api/permbroker/pending/deny-all", {
-    method: "POST",
-    body: JSON.stringify({ ids: ids })
+async function postBatch(kind, ids, sample) {
+  if (batchFlight) return;
+  const waiting = {};
+  (ids || []).forEach(function (id) { waiting[id] = true; });
+  batchFlight = { ids: waiting, kind: kind };
+  (ids || []).forEach(function (id) {
+    const ui = ensureUI(id);
+    ui.batchBusy = true;
+    ui.lastTry = { batch: true, ids: ids, kind: kind };
+    ui.sendError = false;
   });
-  if (res.network || res.status !== 200) {
+  setIntendedFocus(batchFocusKey(sample, kind));
+  uiRev += 1;
+  renderApprovals();
+  const path = kind === "approve" ? "/api/permbroker/pending/approve-all" : "/api/permbroker/pending/deny-all";
+  const res = await brokerCall(path, { method: "POST", body: JSON.stringify({ ids: ids || [] }) });
+  batchFlight = null;
+  (ids || []).forEach(function (id) { if (cardUI[id]) cardUI[id].batchBusy = false; });
+  if (res.network || (res.status !== 200 && res.status !== 207)) {
     if (sample) {
+      const ui = ensureUI(sample.id);
       ui.sendError = true;
+      ui.lastTry = { batch: true, ids: ids, kind: kind };
       uiRev += 1;
+      setIntendedFocus(batchFocusKey(sample, kind));
       renderApprovals();
     }
     return;
   }
-  const n = ids.length;
+  const data = res.data || {};
+  let ok = data.ok_count;
+  let skipped = data.skipped;
+  const done = [];
+  if (Array.isArray(data.results)) {
+    let counted = 0;
+    let skippedN = 0;
+    data.results.forEach(function (row) {
+      if (row && row.ok) { counted += 1; done.push(row.id); }
+      else skippedN += 1;
+    });
+    if (ok == null) ok = counted;
+    if (skipped == null) skipped = skippedN;
+  } else {
+    ok = Number(ok) || 0;
+    (ids || []).forEach(function (id) { done.push(id); });
+  }
+  ok = Number(ok) || 0;
+  skipped = Number(skipped) || 0;
   const bot = itemBot(sample);
-  const argv = itemArgv(sample);
-  localRecords.unshift({ text: denyAllRecord(n, bot, argv) });
-  showStatusToast(denyAllToast(n, bot), null);
-  ids.forEach(function (id) { rememberOwn({ bot_id: sample && sample.bot_id, command: argv, id: id }, "deny"); });
+  showStatusToast(batchResultCopy(kind, ok, skipped, bot), null);
+  if (kind === "deny" && ok) localRecords.unshift({ text: denyAllRecord(ok, bot, itemArgv(sample)) });
+  if (kind === "approve") {
+    (approvalItems || []).forEach(function (item) {
+      if (done.indexOf(item.id) >= 0) rememberOwn(item, "approve");
+    });
+  }
+  if (done.length) setIntendedFocus(nextQueueFocusKey(approvalItems, done));
+  else setIntendedFocus(batchFocusKey(sample, kind));
+  if (done.length) {
+    approvalItems = (approvalItems || []).filter(function (item) { return done.indexOf(item.id) < 0; });
+    done.forEach(function (id) { delete cardUI[id]; closeNote(id); });
+  }
+  uiRev += 1;
+  renderApprovals();
   pollSoon();
 }
 function dropItem(id) {
@@ -7512,13 +7761,15 @@ function syncNotifications(items) {
     if (approvals.notes[id] || approvals.notified[id]) return;
     const item = live[id];
     try {
-      const n = new Notification(NOTIFY_TITLE, {
-        body: notifyBody(item.bot_name || botLabel(item.bot_id), itemArgv(item)),
+      const n = new Notification(notifyTitle(item.bot_name || botLabel(item.bot_id, "A bot")), {
+        body: notifyBody(item.argv && item.argv.length ? item.argv : itemArgv(item)),
         tag: id
       });
       n.onclick = function () {
         window.focus();
+        ensureUI(id).taskOpen = true;
         approvals.focusDeny = id;
+        setIntendedFocus("q:deny:" + id);
         openApprovals({ manual: true, focus: true });
       };
       approvals.notes[id] = n;
@@ -7630,7 +7881,7 @@ function renderApprovals() {
   ].join("#");
   if (sig === queueSig && !approvals.force) {
     patchAges(panel);
-    applyQueueFocus(panel);
+    if (!applyIntendedFocus(panel)) applyQueueFocus(panel);
     return;
   }
   approvals.force = false;
@@ -7643,6 +7894,13 @@ function renderApprovals() {
   const byId = {};
   items.forEach(function (item) { byId[item.id] = item; });
   body.replaceChildren();
+  const rankCount = {};
+  ids.forEach(function (id) {
+    const item = byId[id];
+    if (!item) return;
+    const rank = approvalRank(item.level);
+    rankCount[rank] = (rankCount[rank] || 0) + 1;
+  });
   if (!items.length) {
     const empty = el("div", "appr-empty");
     empty.append(el("h3", "", EMPTY_QUEUE_TITLE), el("p", "", EMPTY_QUEUE_BODY));
@@ -7654,13 +7912,14 @@ function renderApprovals() {
       if (!item) return;
       const rank = approvalRank(item.level);
       if (rank !== lastRank) {
-        body.append(el("h3", "appr-group", groupTitle(rank)));
+        body.append(el("h3", "appr-group", groupCountLabel(rank, rankCount[rank])));
         lastRank = rank;
       }
       body.append(renderApprovalCard(item, "queue"));
     });
   }
   renderRecords(body);
+  if (applyIntendedFocus(panel)) return;
   if (restore && !approvals.focusDeny && !approvals.wantFocus) {
     const back = findByAttr(panel, "data-appr-focus", restore);
     if (back && !typingFocus()) back.focus();
@@ -7677,7 +7936,8 @@ function renderBrokerThread() {
   threadSig = sig;
   host.replaceChildren();
   mine.forEach(function (item) { host.append(renderApprovalCard(item, "thread")); });
-  if (restore && !typingFocus()) {
+  if (approvals.intendedFocus && String(approvals.intendedFocus).indexOf("t:") === 0) applyIntendedFocus(host);
+  else if (restore && !typingFocus()) {
     const back = findByAttr(host, "data-appr-focus", restore);
     if (back) back.focus();
   }
@@ -7702,6 +7962,7 @@ function fillBotPicker(select, selected) {
     select.append(new Option(b.name || b.id, b.id));
   });
   if (cur && Array.from(select.options).some(function (o) { return o.value === cur; })) select.value = cur;
+  else if (select.options.length) select.value = select.options[0].value;
 }
 function setSeg(root, attr, value) {
   if (!root) return;
@@ -7756,9 +8017,14 @@ function syncRuleForm() {
   const bot = $("#rule-bot");
   if (label) label.textContent = pattern ? "Pattern" : "Exact command";
   if (help) help.textContent = pattern ? PATTERN_HELP : EXACT_HELP;
-  if (bot) bot.hidden = draft.scope !== "bot";
+  const botField = $("#rule-bot-field");
+  if (botField) botField.hidden = draft.scope !== "bot";
+  else if (bot) bot.hidden = draft.scope !== "bot";
+  const replacing = !!(ruleDraft && ruleDraft.replaceId);
+  const note = $("#rule-replace-note");
+  if (note) note.hidden = !replacing;
   const save = $("#rule-save");
-  if (save) save.textContent = pattern ? "Save pattern rule" : "Save exact rule";
+  if (save) save.textContent = replacing ? "Save as new rule" : (pattern ? "Save pattern rule" : "Save exact rule");
   let invalid = false;
   let message = "";
   if (!pattern) {
@@ -7792,7 +8058,10 @@ function paintConsequence(draft) {
   let line = "";
   if (draft.effect === "deny") line = name + " will deny " + what + ".";
   else if (draft.effect === "ask") line = name + " will ask before running " + what + ".";
-  else line = name + " will run " + what + " without asking. Nothing else: a * is one word and never a flag. Commands with several parts and critical items still ask.";
+  else {
+    line = name + " will run " + what + " without asking. Commands with several parts and critical items still ask.";
+    if (draft.kind === "pattern") line += " " + STAR_WORD;
+  }
   node.classList.toggle("is-high", !!(draft._high && draft._high.length && draft.effect === "allow"));
   node.replaceChildren();
   if (draft._high && draft._high.length && draft.effect === "allow") node.append(cloneTpl("tpl-alert"));
@@ -7889,8 +8158,12 @@ async function saveRuleFromForm() {
   }
   const draft = readRuleForm();
   const payload = rulePayload(draft);
-  const res = await brokerCall("/api/permbroker/rules", { method: "POST", body: JSON.stringify(payload) });
-  if (res.network || res.status !== 200) {
+  const replaceId = ruleDraft && ruleDraft.replaceId;
+  const previous = ruleDraft && ruleDraft.previous;
+  const res = await brokerCall(replaceId ? "/api/permbroker/rules/" + encodeURIComponent(replaceId) + "/replace" : "/api/permbroker/rules", { method: "POST", body: JSON.stringify(payload) });
+  const replaced = !!replaceId;
+  const failed = res.network || (replaced ? (res.status !== 200 && res.status !== 207) : res.status !== 200);
+  if (failed) {
     const err = $("#rule-error");
     if (err) {
       err.hidden = false;
@@ -7898,16 +8171,19 @@ async function saveRuleFromForm() {
     }
     return;
   }
-  const created = res.data && res.data.rule;
-  const newId = created && created.id;
-  const replaceId = ruleDraft && ruleDraft.replaceId;
-  if (replaceId && replaceId !== newId) {
-    await brokerCall("/api/permbroker/rules/" + encodeURIComponent(replaceId), { method: "DELETE" });
+  if (replaced && res.data && res.data.revoked === false) {
+    closeRuleSheet();
+    showStatusToast(REPLACE_BOTH, null);
+    rulesForce = true;
+    pollSoon();
+    return;
   }
+  const created = res.data && (replaced ? res.data.created : (res.data.rule && res.data.rule.id));
+  const newId = created || "";
   closeRuleSheet();
   showStatusToast("Rule saved · Undo", function () {
     if (newId) brokerCall("/api/permbroker/rules/" + encodeURIComponent(newId), { method: "DELETE" }).then(function () {
-      if (replaceId) brokerCall("/api/permbroker/rules", { method: "POST", body: JSON.stringify(ruleDraft.previous || payload) });
+      if (replaceId) brokerCall("/api/permbroker/rules", { method: "POST", body: JSON.stringify(previous || payload) });
       pollSoon();
     });
   });
@@ -7964,6 +8240,10 @@ function paintRules() {
     });
   }
   if (show("risk")) list.append(renderRiskSection());
+  if (approvals.intendedFocus && String(approvals.intendedFocus).indexOf("rules:") === 0) {
+    applyIntendedFocus(list);
+    return;
+  }
   if (focusKey) {
     const again = findByAttr(list, "data-rules-focus", focusKey);
     if (again && again.focus) again.focus();
@@ -7973,6 +8253,8 @@ function renderRuleSection(title, botId, rules, grants) {
   const sec = el("section", "rules-sec");
   const head = el("div", "rules-sec-h");
   const h = document.createElement("h3");
+  h.tabIndex = -1;
+  h.setAttribute("data-rules-focus", "sec:" + (botId || "global"));
   h.append(document.createTextNode(title));
   if (botId) {
     const sub = el("span", "rules-sub");
@@ -8010,9 +8292,9 @@ function renderRuleRow(rule) {
   } else {
     cmd.append(el("div", "rules-cmd", (rule.argv || []).join(" ") || rule.pattern || ""));
   }
-  if (rule.source_line || rule.source) cmd.append(el("div", "rules-src", rule.source_line || rule.source));
-  if (rule.kind === "legacy") cmd.append(el("div", "rules-src", LEGACY_NOTE));
-  if (rule.needs_confirm) {
+  cmd.append(el("div", "rules-src", provenanceLine(rule)));
+  if (!rule.confirmable && rule.never_reason) cmd.append(el("div", "rules-src", rule.never_reason));
+  if (rule.confirmable) {
     const confirm = btn("secondary small", "Confirm");
     confirm.setAttribute("data-rules-focus", "rule:" + (rule.id || "") + ":confirm");
     confirm.addEventListener("click", function () {
@@ -8022,8 +8304,9 @@ function renderRuleRow(rule) {
   }
   row.append(cmd);
   row.append(el("span", "", rule.scope === "global" ? "All bots" : botLabel(rule.bot_id, "One bot")));
-  const used = rule.last_used_at ? approvalAge(rule.last_used_at, Date.now(), 0) : "Never";
-  row.append(el("span", "", !rule.last_used_at || String(rule.last_used_at).indexOf("0001") === 0 ? "Never" : used));
+  const usedRaw = rule.last_used_at ? String(rule.last_used_at) : "";
+  const used = !usedRaw || usedRaw.indexOf("0001") === 0 ? "Not yet" : (approvalAge(rule.last_used_at, Date.now(), 0) || "Not yet");
+  row.append(el("span", "", used));
   const menu = el("div", "rules-menu");
   const more = btn("icon-btn", "⋯");
   more.setAttribute("aria-label", "Rule actions");
@@ -8065,18 +8348,59 @@ function renderRuleRow(rule) {
   }
   const revoke = btn("", "Revoke");
   revoke.setAttribute("role", "menuitem");
-  revoke.addEventListener("click", function () { pop.hidden = true; revokeRule(rule); });
-  pop.append(revoke);
-  more.addEventListener("click", function (ev) {
+  revoke.addEventListener("click", function (ev) {
     ev.stopPropagation();
-    const open = pop.hidden;
-    document.querySelectorAll("#view-rules .rules-pop").forEach(function (other) { other.hidden = true; });
-    pop.hidden = !open;
-    more.setAttribute("aria-expanded", pop.hidden ? "false" : "true");
+    pop.hidden = true;
+    more.setAttribute("aria-expanded", "false");
+    revokeRule(rule, more);
   });
+  pop.append(revoke);
+  bindRuleMenu(more, pop);
   menu.append(more, pop);
   row.append(menu);
   return row;
+}
+function bindRuleMenu(more, pop) {
+  function items() { return Array.prototype.slice.call(pop.querySelectorAll("[role='menuitem']")); }
+  function openMenu(index) {
+    document.querySelectorAll("#view-rules .rules-pop").forEach(function (other) {
+      other.hidden = true;
+      const trigger = other.parentNode && other.parentNode.querySelector("[aria-label='Rule actions']");
+      if (trigger && trigger !== more) trigger.setAttribute("aria-expanded", "false");
+    });
+    pop.hidden = false;
+    more.setAttribute("aria-expanded", "true");
+    const list = items();
+    const at = index < 0 ? 0 : Math.min(index, list.length - 1);
+    if (list[at]) list[at].focus();
+  }
+  function closeMenu() {
+    pop.hidden = true;
+    more.setAttribute("aria-expanded", "false");
+    more.focus();
+  }
+  more.addEventListener("click", function (ev) {
+    ev.stopPropagation();
+    if (pop.hidden) openMenu(0);
+    else closeMenu();
+  });
+  more.addEventListener("keydown", function (ev) {
+    if (ev.key !== "ArrowDown" && ev.key !== "ArrowUp" && ev.key !== "Home" && ev.key !== "End") return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const act = ruleMenuKey(ev.key, items().length, -1);
+    openMenu(act.move);
+  });
+  pop.addEventListener("keydown", function (ev) {
+    if (ev.key !== "Escape" && ev.key !== "ArrowDown" && ev.key !== "ArrowUp" && ev.key !== "Home" && ev.key !== "End") return;
+    const list = items();
+    const act = ruleMenuKey(ev.key, list.length, list.indexOf(document.activeElement));
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (act.close) { closeMenu(); return; }
+    if (act.move >= 0 && list[act.move]) list[act.move].focus();
+  });
+  pop.addEventListener("click", function (ev) { ev.stopPropagation(); });
 }
 function renderGrantRow(grant) {
   const row = el("div", "rules-row");
@@ -8098,28 +8422,57 @@ function renderRiskSection() {
   head.append(h);
   sec.append(head);
   const risk = approvalRisk || { builtin: [], stricter: [] };
-  sec.append(el("div", "rules-subhead", BUILTIN_RISK + " · " + BUILTIN_RISK_NOTE));
-  (risk.builtin || []).forEach(function (row) { sec.append(renderRiskRow(row, false)); });
-  sec.append(el("div", "rules-subhead", STRICTER_RISK + " · " + STRICTER_RISK_NOTE));
-  if (!(risk.stricter || []).length) sec.append(el("p", "rules-src", "None yet."));
-  (risk.stricter || []).forEach(function (row) { sec.append(renderRiskRow(row, true)); });
+  sec.append(renderRiskTable(BUILTIN_RISK, BUILTIN_RISK_NOTE, risk.builtin || [], false));
+  sec.append(renderRiskTable(STRICTER_RISK, STRICTER_RISK_NOTE, risk.stricter || [], true));
   return sec;
 }
+function renderRiskTable(caption, note, rows, stricter) {
+  const table = document.createElement("table");
+  table.className = "rules-table";
+  const cap = document.createElement("caption");
+  cap.textContent = caption + " · " + note;
+  table.append(cap);
+  const thead = document.createElement("thead");
+  const hr = document.createElement("tr");
+  ["Level", "Pattern", "What it does", "Applies to"].forEach(function (name) {
+    const th = document.createElement("th");
+    th.setAttribute("scope", "col");
+    th.textContent = name;
+    hr.append(th);
+  });
+  thead.append(hr);
+  table.append(thead);
+  const body = document.createElement("tbody");
+  if (!rows.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 4;
+    td.textContent = "None yet.";
+    tr.append(td);
+    body.append(tr);
+  }
+  rows.forEach(function (row) { body.append(renderRiskRow(row, stricter)); });
+  table.append(body);
+  return table;
+}
 function renderRiskRow(row, stricter) {
-  const line = el("div", "rules-row");
-  line.append(el("span", "appr-chip " + (row.level || ""), row.level || ""));
-  const cmd = el("div", "");
-  cmd.append(el("div", "rules-cmd", (row.matches || []).join("\n")));
-  if (row.applies_to) cmd.append(el("div", "rules-src", row.applies_to));
-  if (stricter && row.raised_from) cmd.append(el("div", "rules-src", "Raised from " + row.raised_from + " to " + row.level));
-  line.append(cmd);
-  line.append(el("span", "", "All bots"));
-  line.append(el("span", "", "—"));
-  const lock = el("span", "appr-lock");
-  lock.append(cloneTpl("tpl-lock"));
-  lock.setAttribute("aria-label", "Read only");
-  line.append(lock);
-  return line;
+  const tr = document.createElement("tr");
+  const level = document.createElement("td");
+  const chip = el("span", "appr-chip " + (row.level || ""));
+  if (String(row.level || "") === "critical") chip.append(cloneTpl("tpl-alert"));
+  chip.append(document.createTextNode(row.level || ""));
+  level.append(chip);
+  const pattern = document.createElement("td");
+  pattern.append(el("div", "rules-cmd", (row.matches || []).join("\n")));
+  pattern.append(el("div", "rules-src", "All bots"));
+  if (row.applies_to) pattern.append(el("div", "rules-src", row.applies_to));
+  if (stricter && row.raised_from) pattern.append(el("div", "rules-src", "Raised from " + row.raised_from + " to " + row.level));
+  const what = document.createElement("td");
+  what.textContent = riskLabel(row);
+  const applies = document.createElement("td");
+  applies.textContent = row.applies_to || "All bots";
+  tr.append(level, pattern, what, applies);
+  return tr;
 }
 async function changeRuleEffect(rule, effect) {
   const payload = {
@@ -8130,17 +8483,34 @@ async function changeRuleEffect(rule, effect) {
     bot_id: rule.bot_id || "",
     effect: effect
   };
-  const res = await brokerCall("/api/permbroker/rules", { method: "POST", body: JSON.stringify(payload) });
-  if (res.status !== 200) return;
-  await brokerCall("/api/permbroker/rules/" + encodeURIComponent(rule.id), { method: "DELETE" });
-  const created = res.data && res.data.rule;
+  const res = await brokerCall("/api/permbroker/rules/" + encodeURIComponent(rule.id) + "/replace", { method: "POST", body: JSON.stringify(payload) });
+  if (res.network || (res.status !== 200 && res.status !== 207)) return;
+  if (res.data && res.data.revoked === false) {
+    showStatusToast(REPLACE_BOTH, null);
+    rulesForce = true;
+    pollSoon();
+    return;
+  }
+  const created = res.data && res.data.created;
   showStatusToast("Rule saved · Undo", function () {
-    if (created && created.id) brokerCall("/api/permbroker/rules/" + encodeURIComponent(created.id), { method: "DELETE" });
+    if (created) brokerCall("/api/permbroker/rules/" + encodeURIComponent(created), { method: "DELETE" });
     brokerCall("/api/permbroker/rules", { method: "POST", body: JSON.stringify(Object.assign({}, payload, { effect: rule.effect })) }).then(pollSoon);
   });
   pollSoon();
 }
-async function revokeRule(rule) {
+async function revokeRule(rule, trigger) {
+  const list = document.getElementById("rules-list");
+  let nextKey = "sec:" + ((rule && rule.bot_id) || (rule && rule.scope) || "global");
+  if (trigger && trigger.closest && list) {
+    const row = trigger.closest(".rules-row");
+    let sib = row ? row.nextElementSibling : null;
+    while (sib) {
+      const menu = sib.querySelector ? sib.querySelector("[data-rules-focus$=':menu']") : null;
+      if (menu) { nextKey = menu.getAttribute("data-rules-focus"); break; }
+      sib = sib.nextElementSibling;
+    }
+  }
+  setIntendedFocus("rules:" + nextKey);
   const payload = {
     kind: rule.kind === "legacy" ? "exact" : (rule.kind === "pattern" ? "pattern" : "exact"),
     argv: rule.argv || [],
@@ -8150,7 +8520,7 @@ async function revokeRule(rule) {
     effect: rule.effect
   };
   const res = await brokerCall("/api/permbroker/rules/" + encodeURIComponent(rule.id), { method: "DELETE" });
-  if (res.status !== 200) return;
+  if (res.status !== 200) { approvals.intendedFocus = ""; return; }
   if (rule.kind === "legacy") showStatusToast("Rule revoked.", null);
   else showStatusToast("Rule revoked · Undo", function () {
     brokerCall("/api/permbroker/rules", { method: "POST", body: JSON.stringify(payload) }).then(pollSoon);
@@ -8246,7 +8616,7 @@ function startApprovals() {
   if (back) back.addEventListener("click", function () { if (typeof navBack === "function") navBack(); });
   const add = $("#rules-new");
   if (add) add.addEventListener("click", function () {
-    openRuleSheet({ scope: state.rulesBot ? "bot" : "global", bot_id: state.rulesBot || state.botId || "" });
+    openRuleSheet({ scope: "bot", bot_id: state.rulesBot || state.botId || "" });
   });
   document.querySelectorAll("#view-rules .rules-filters [role='radio']").forEach(function (button) {
     button.addEventListener("click", function () {
