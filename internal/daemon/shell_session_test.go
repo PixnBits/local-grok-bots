@@ -103,6 +103,128 @@ func TestRunShellSessionCwdBatches(t *testing.T) {
 	}
 }
 
+func TestRunShellSessionCwdSymlinkSwap(t *testing.T) {
+	app := newApp(t, "", nil)
+	app.editPol(func(p *policy.Policy) { p.Broker = "hook" })
+	bot, err := app.st.CreateBot("Ada", "help", nil, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := app.botWorkspace(bot.ID)
+	s1 := filepath.Join(ws, "s1")
+	if err := os.MkdirAll(s1, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		if _, err2 := exec.LookPath("unshare"); err2 != nil {
+			t.Skip("shell sandbox unavailable: bwrap and unshare are missing")
+		}
+	}
+	ctx := context.Background()
+	ask(t, app, bot, "cd s1")
+	approvePending(t, app, "cd", "s1")
+	out, err := app.execTool(ctx, bot, "run_shell", map[string]any{"command": "cd s1"})
+	if err != nil {
+		t.Fatalf("cd s1 %v %s", err, out)
+	}
+	if got := app.shellSessionDir(bot.ID, ws); got != s1 {
+		t.Fatalf("session cwd %s", got)
+	}
+	outside := t.TempDir()
+	if err := os.RemoveAll(s1); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, s1); err != nil {
+		t.Fatal(err)
+	}
+	out, err = app.execTool(ctx, bot, "run_shell", map[string]any{"command": "echo hi"})
+	if err == nil || !strings.Contains(err.Error(), "working directory is no longer inside the workspace; reset to the workspace root") {
+		t.Fatalf("swapped cwd err %v %s", err, out)
+	}
+	if got := app.shellSessionDir(bot.ID, ws); got != ws {
+		t.Fatalf("cwd after reset %s", got)
+	}
+	ask(t, app, bot, "pwd")
+	approvePending(t, app, "pwd")
+	out, err = app.execTool(ctx, bot, "run_shell", map[string]any{"command": "pwd"})
+	if err != nil {
+		t.Fatalf("pwd %v %s", err, out)
+	}
+	if strings.Contains(out, "/work/s1") || !strings.Contains(out, "stdout:\n/work\n") {
+		t.Fatalf("pwd did not run at the workspace root:\n%s", out)
+	}
+}
+
+func TestShellExecRecheckResetsSwappedCwd(t *testing.T) {
+	app := newApp(t, "", nil)
+	bot, err := app.st.CreateBot("Ada", "help", nil, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := app.botWorkspace(bot.ID)
+	s1 := filepath.Join(ws, "s1")
+	if err := os.MkdirAll(s1, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	app.shellCwdMu.Lock()
+	app.shellCwd = map[string]string{bot.ID: s1}
+	app.shellCwdMu.Unlock()
+	outside := t.TempDir()
+	if err := os.RemoveAll(s1); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, s1); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	out, err := app.execTool(ctx, bot, "run_shell", map[string]any{"command": "pwd"})
+	if err == nil || !strings.Contains(err.Error(), "working directory is no longer inside the workspace; reset to the workspace root") {
+		t.Fatalf("exec recheck err %v %s", err, out)
+	}
+	if got := app.shellSessionDir(bot.ID, ws); got != ws {
+		t.Fatalf("cwd after reset %s", got)
+	}
+	if _, err := exec.LookPath("bwrap"); err != nil {
+		if _, err2 := exec.LookPath("unshare"); err2 != nil {
+			t.Skip("shell sandbox unavailable: bwrap and unshare are missing")
+		}
+	}
+	out, err = app.execTool(ctx, bot, "run_shell", map[string]any{"command": "pwd"})
+	if err != nil {
+		t.Fatalf("pwd %v %s", err, out)
+	}
+	if strings.Contains(out, "/work/s1") || !strings.Contains(out, "stdout:\n/work\n") {
+		t.Fatalf("pwd did not run at the workspace root:\n%s", out)
+	}
+}
+
+func TestShellCwdOutsideSeedResets(t *testing.T) {
+	app := newApp(t, "", nil)
+	bot, err := app.st.CreateBot("Ada", "help", nil, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws := app.botWorkspace(bot.ID)
+	outside := t.TempDir()
+	app.shellCwdMu.Lock()
+	app.shellCwd = map[string]string{bot.ID: outside}
+	app.shellCwdMu.Unlock()
+	if got := app.shellSessionDir(bot.ID, ws); got != ws {
+		t.Fatalf("shellSessionDir kept %s", got)
+	}
+	app.shellCwdMu.Lock()
+	app.shellCwd[bot.ID] = ws
+	app.shellPlan = map[string]shellCwdPlan{bot.ID: {next: filepath.Join(outside, "leaf"), update: true}}
+	app.shellCwdMu.Unlock()
+	app.commitShellPlan(bot.ID, ws)
+	app.shellCwdMu.Lock()
+	got := app.shellCwd[bot.ID]
+	app.shellCwdMu.Unlock()
+	if got != ws {
+		t.Fatalf("commitShellPlan stored %s", got)
+	}
+}
+
 func ask(t *testing.T, app *App, bot store.Bot, command string) {
 	t.Helper()
 	out, err := app.execTool(context.Background(), bot, "run_shell", map[string]any{"command": command})

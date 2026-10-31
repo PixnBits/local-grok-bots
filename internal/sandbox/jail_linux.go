@@ -64,6 +64,17 @@ func enterJail(jail string, cfg stage2File) error {
 	if err := unix.Chdir("/work"); err != nil {
 		return err
 	}
+	if cfg.WorkRel != "" {
+		dir, _, err := shellJailDir(cfg.WorkRel)
+		if err != nil {
+			return err
+		}
+		if dir != "/work" {
+			if err := unix.Chdir(dir); err != nil {
+				return err
+			}
+		}
+	}
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return fmt.Errorf("no_new_privs: %w", err)
 	}

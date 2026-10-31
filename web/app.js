@@ -6811,6 +6811,17 @@ function provenanceLine(rule) {
 function groupCountLabel(rank, count) {
   return groupTitle(rank) + " · " + (Number(count) || 0);
 }
+function ruleSheetSaveError(res) {
+  if (!res || res.network) return { message: SEND_FAILED_COPY, invalid: false };
+  const status = Number(res.status) || 0;
+  const code = res.data && res.data.code;
+  if (status >= 400 && status < 500 && code === "never_matches") {
+    return { message: patternErrorCopy("never_matches"), invalid: true };
+  }
+  const data = res.data || {};
+  const message = String(data.error || data.message || "Couldn't save this rule.");
+  return { message: message, invalid: false };
+}
 function firstIdenticalId(items, item) {
   const key = identicalKey(item);
   if (!key) return "";
@@ -8269,10 +8280,19 @@ async function saveRuleFromForm() {
   const replaced = !!replaceId;
   const failed = res.network || (replaced ? (res.status !== 200 && res.status !== 207) : res.status !== 200);
   if (failed) {
+    const failure = ruleSheetSaveError(res);
+    const input = $("#rule-pattern");
+    if (input) input.setAttribute("aria-invalid", failure.invalid ? "true" : "false");
     const err = $("#rule-error");
     if (err) {
       err.hidden = false;
-      err.textContent = SEND_FAILED_COPY;
+      if (failure.invalid) {
+        err.replaceChildren();
+        err.append(cloneTpl("tpl-alert"));
+        err.append(el("span", "", failure.message));
+      } else {
+        err.textContent = failure.message;
+      }
     }
     return;
   }

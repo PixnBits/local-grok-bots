@@ -510,9 +510,17 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			a.clearShellPlan(current.ID)
 			return "", werr
 		}
+		// Re-resolve immediately before exec. The broker already saw one
+		// resolution; a symlink swapped in since then must not run.
+		rel, rerr := a.shellExecRel(current.ID, shellWS)
+		if rerr != nil {
+			a.clearShellPlan(current.ID)
+			return "", rerr
+		}
 		res, err := sandbox.Run(shellCtx, sandbox.Request{
 			Workspace:       shellWS,
-			Command:         a.shellRunCommand(current.ID, shellWS, command),
+			Command:         command,
+			Chdir:           rel,
 			CleanBash:       cleanBash,
 			Grants:          current.Grants,
 			NetAllow:        current.NetAllow,

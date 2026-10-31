@@ -518,6 +518,14 @@ check("outcome", outcomeLabel("still_asks_compound", "") === "Still asks · seve
 check("no-match", outcomeLabel("no_match", "flag_in_star").indexOf("never matches a flag") >= 0, outcomeLabel("no_match", "flag_in_star"));
 check("has-op", exactHasOp("ls && rm") === true && exactHasOp("echo $(id)") === true && exactHasOp("ls -la") === false, "ops");
 check("group", groupTitle(0) === "Critical" && groupTitle(1) === "High" && groupTitle(2) === "Medium & Unclassified" && groupTitle(3) === "Low", "groups");
+const never = ruleSheetSaveError({network: false, status: 400, data: {code: "never_matches", error: "no"}});
+check("never-matches", never.invalid === true && never.message === "This command cannot be allowed by a rule.", never.message);
+const neverReplace = ruleSheetSaveError({network: false, status: 400, data: {code: "never_matches"}});
+check("never-replace", neverReplace.invalid === true && neverReplace.message === "This command cannot be allowed by a rule.", neverReplace.message);
+const netFail = ruleSheetSaveError({network: true, status: 0, data: null});
+check("save-network", netFail.invalid === false && netFail.message === SEND_FAILED_COPY, netFail.message);
+const other4 = ruleSheetSaveError({network: false, status: 400, data: {code: "operators", error: "exact rule contains an operator"}});
+check("save-other", other4.invalid === false && other4.message.indexOf("didn't respond") < 0 && other4.message.indexOf("operator") >= 0, other4.message);
 return out;
 `
 
@@ -673,5 +681,90 @@ func TestRound2Markup(t *testing.T) {
 	}
 	if strings.Contains(page, "http://") || strings.Contains(page, "https://") || strings.Contains(page, "//cdn") {
 		t.Error("index.html has an external URL")
+	}
+}
+
+func TestRuleSheetNeverMatches(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	src := ClientSource()
+	body := jsFunc(t, src, "async function saveRuleFromForm()")
+	if strings.Contains(body, "SEND_FAILED_COPY") {
+		t.Fatal("saveRuleFromForm must not use the network copy itself")
+	}
+	if !strings.Contains(body, "ruleSheetSaveError") || !strings.Contains(body, `setAttribute("aria-invalid"`) {
+		t.Fatal("saveRuleFromForm does not map the save error onto the pattern field")
+	}
+	pure, err := json.Marshal(between(t, src, "// approvals-pure:begin", "// approvals-pure:end"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fn, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `const vm = require("vm");
+const pure = ` + string(pure) + `;
+const fn = ` + string(fn) + `;
+const ctx = {
+  console: console,
+  process: process,
+  calls: [],
+  nodes: {
+    "#rule-save": { getAttribute() { return "false"; } },
+    "#rule-pattern": { attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } },
+    "#rule-error": {
+      hidden: true,
+      _text: "",
+      kids: [],
+      set textContent(v) { this._text = v == null ? "" : String(v); this.kids = []; },
+      get textContent() { return this._text; },
+      replaceChildren() { this.kids = []; this._text = ""; },
+      append(...k) { this.kids.push(...k); }
+    }
+  }
+};
+vm.createContext(ctx);
+vm.runInContext(pure + "\n" + fn + "\n" + ` + "`" + `
+function readRuleForm() { return { kind: "exact", scope: "bot", effect: "allow", text: "gh pr view * --repo example-org/notes-site", bot_id: "b" }; }
+function rulePayload() { return { kind: "exact", argv: ["gh", "pr", "view"], scope: "bot", bot_id: "b", effect: "allow" }; }
+async function brokerCall() { return calls.shift(); }
+function $(sel) { return nodes[sel]; }
+function cloneTpl() { return { text: "" }; }
+function el(tag, cls, text) { return { tag: tag, text: text || "" }; }
+let ruleDraft = {};
+function textOf(err) { return (err.kids || []).map(function (k) { return k.text || ""; }).join(" "); }
+calls.push({ network: false, status: 400, data: { code: "never_matches", error: "no" } });
+saveRuleFromForm().then(function () {
+  const err = nodes["#rule-error"];
+  const input = nodes["#rule-pattern"];
+  if (input.attrs["aria-invalid"] !== "true") throw new Error("aria " + input.attrs["aria-invalid"]);
+  if (textOf(err).indexOf("This command cannot be allowed by a rule.") < 0) throw new Error("copy " + textOf(err));
+  if ((err.textContent || "").indexOf("didn't respond") >= 0) throw new Error("network copy on create");
+  ruleDraft = { replaceId: "rule-1" };
+  calls.push({ network: false, status: 400, data: { code: "never_matches" } });
+  return saveRuleFromForm();
+}).then(function () {
+  const err = nodes["#rule-error"];
+  if (textOf(err).indexOf("This command cannot be allowed by a rule.") < 0) throw new Error("replace " + textOf(err));
+  ruleDraft = {};
+  nodes["#rule-pattern"].attrs["aria-invalid"] = "true";
+  calls.push({ network: true, status: 0, data: null });
+  return saveRuleFromForm();
+}).then(function () {
+  const err = nodes["#rule-error"];
+  const input = nodes["#rule-pattern"];
+  if (err.textContent !== SEND_FAILED_COPY) throw new Error("net " + err.textContent);
+  if (input.attrs["aria-invalid"] !== "false") throw new Error("aria stuck " + input.attrs["aria-invalid"]);
+  if (textOf(err).indexOf("cannot be allowed") >= 0) throw new Error("network kept the rule copy");
+  console.log("ok");
+}).catch(function (e) { console.error(e); process.exit(1); });
+` + "`" + `, ctx);
+`
+	out := runNode(t, node, script)
+	if out != "ok" {
+		t.Fatalf("rule sheet %s", out)
 	}
 }

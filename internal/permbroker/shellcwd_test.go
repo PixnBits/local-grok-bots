@@ -69,6 +69,27 @@ func TestShellCwdAfterStaysInside(t *testing.T) {
 	}
 }
 
+func TestResolveDirRejectsMissingLeafUnderEscapingParent(t *testing.T) {
+	ws := t.TempDir()
+	outside := t.TempDir()
+	parent := filepath.Join(ws, "sub")
+	if err := os.Mkdir(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(parent, "out")); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(parent, "out", "missing")
+	real, exists, inside := resolveDir(ws, dest)
+	if inside || exists {
+		t.Fatalf("resolveDir real %s exists %v inside %v", real, exists, inside)
+	}
+	_, reject, update := ShellCwdAfter(ws, ws, "cd sub/out/missing")
+	if !reject || update {
+		t.Fatalf("missing leaf under escaping parent reject %v update %v", reject, update)
+	}
+}
+
 func TestDriftReasonHookOnly(t *testing.T) {
 	stored := []byte("v1\nhooks abc\nrepo-config x\n")
 	hook := []byte("v1\nhooks def\nrepo-config x\n")
