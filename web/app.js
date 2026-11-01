@@ -568,6 +568,11 @@ async function loadBots() {
     // ended; pick it up so its reply streams in.
     if (b.active_run_id && b.active_run_id !== state.streaming) follow(b.active_run_id);
     else if (b.pending_permissions > 0 && state.streaming) loadPendingPermissions(state.streaming).catch(() => {});
+    if (b.last_run_status === "waiting") {
+      state.approvalWait = true;
+      if (b.waiting_tool) state.liveTool = b.waiting_tool;
+      setWorking(true);
+    }
   }
 }
 function setMenuText(id, text) {
@@ -951,6 +956,13 @@ async function refreshBot() {
   else state.bots.push(b);
   paintHeader(b);
   renderBots();
+  if (b.last_run_status === "waiting") {
+    state.approvalWait = true;
+    if (b.waiting_tool) state.liveTool = b.waiting_tool;
+    setWorking(true);
+  } else if (!pendingApproval()) {
+    state.approvalWait = false;
+  }
   return b;
 }
 function whoText(m) {
@@ -960,6 +972,7 @@ function whoText(m) {
     return b ? b.name : "Bot";
   }
   if ((m.content || "").startsWith("Message from ") || (m.content || "").startsWith("Notice: ")) return "";
+  if ((m.content || "").startsWith("Your request ")) return "";
   return "Scheduled";
 }
 // md:begin
@@ -1553,7 +1566,7 @@ function pendingApproval() {
 }
 function workPhase() {
   if (state.stop && state.stop.phase === "stopping") return "stopping";
-  if (pendingApproval()) return "waiting";
+  if (pendingApproval() || state.approvalWait) return "waiting";
   return "working";
 }
 function setWorking(on, text) {
@@ -2335,8 +2348,14 @@ async function follow(runId) {
         try { payload = JSON.parse(data); } catch { continue; }
         if (event === "status") {
           if (noteRunStarted(state.bots, state.botId)) renderBots();
-          const tool = payload.text || payload.state || "";
-          if (tool && tool !== "working" && tool !== "running" && tool !== "retrying") state.liveTool = tool;
+          if (payload.state === "waiting") {
+            state.approvalWait = true;
+            if (payload.text) state.liveTool = payload.text;
+          } else {
+            state.approvalWait = false;
+            const tool = payload.text || payload.state || "";
+            if (tool && tool !== "working" && tool !== "running" && tool !== "retrying") state.liveTool = tool;
+          }
           if (!state.stop || state.stop.phase !== "stopping") setWorking(true);
           paintSubline(currentBot());
         } else if (event === "stream_reset") {
@@ -2391,6 +2410,7 @@ async function follow(runId) {
           const status = event === "error" ? "error" : (event === "timeout" ? "timeout" : (payload.status || ""));
           if (event === "timeout" && payload.run_id) state.timeoutRunId = String(payload.run_id);
           if (event === "timeout") announce(timeoutAnnouncement(payload.error));
+          state.approvalWait = false;
           const prevPhase = state.stop ? state.stop.phase : "";
           applyStop(reduceStop(state.stop || freshStop(), { type: "stream-done", status: status }));
           if (prevPhase === "stopping" && state.stop.phase === "stopped") {
@@ -6392,6 +6412,7 @@ const LADDER_HEADING = "HOW LONG SHOULD THIS LAST?";
 const LADDER_NOTE = "Rules match the exact command above, character for character.";
 const LOCK_GLOBAL = "All bots isn't offered";
 const CANT_BE_A_RULE = "Can't be a rule";
+const HOOK_CRITICAL_ONCE = "Deny this. A critical command from the CLI can't be approved once, because that approval can't be tied to one run.";
 
 function hashIsApprovals(hash) {
   return String(hash || "").replace(/^#/, "") === "approvals";
@@ -6477,6 +6498,7 @@ function approvalActions(item) {
   const level = item && item.level;
   const lockGlobal = level === "high" || level === "unclassified";
   if (friction === "compound") return { approve: "once", chevron: false, deny: "outline", batch: false, note: CANT_BE_A_RULE, lockGlobal: false };
+  if (friction === "critical" && item && item.origin === "hook") return { approve: "none", chevron: false, deny: "fill", batch: false, note: HOOK_CRITICAL_ONCE, lockGlobal: false };
   if (friction === "critical") return { approve: "confirm", chevron: false, deny: "fill", batch: false, note: CANT_BE_A_RULE, lockGlobal: false };
   if (onceOnlyScopes(item)) return { approve: "once", chevron: false, deny: "outline", batch: false, note: "", lockGlobal: false };
   if (friction === "high") return { approve: "split-secondary", chevron: true, deny: "outline", batch: false, lockGlobal: true };
@@ -7524,7 +7546,7 @@ function renderApprovalCard(item, mode) {
     approve.setAttribute("data-appr-focus", prefix + "approve:" + item.id);
     wireAnswer(approve, function () { postDecision(item, "approve", "once"); });
     bar.append(approve);
-  } else {
+  } else if (actions.approve !== "none") {
     const split = el("span", "appr-split");
     const primary = actions.approve === "split-primary";
     const approve = btn(primary ? "primary" : "secondary", "Approve once");

@@ -705,6 +705,7 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleDeleteBot(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	a.goneBots.Store(id, struct{}{})
+	a.cancelBotApprovals(id, "delete")
 	a.cancelBot(id)
 	a.closeBrokerBot(id)
 	a.credMu.Lock()
@@ -847,7 +848,10 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if run.Status != "running" {
+	if run.Status == "waiting" {
+		tool := a.waitingTool(botID)
+		a.writeSSE(w, flusher, "status", map[string]any{"state": "waiting", "text": tool})
+	} else if run.Status != "running" {
 		// Finished before any subscriber; synthesize the terminal event.
 		switch run.Status {
 		case "done", "cancelled":
@@ -905,6 +909,13 @@ func (a *App) handleCancel(w http.ResponseWriter, r *http.Request) {
 	run, err := a.st.GetRun(runID)
 	if err != nil || run.BotID != botID {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
+		return
+	}
+	if run.Status == "waiting" {
+		a.cancelRunApproval(botID, runID, "stop")
+		_ = a.st.SetStatus(botID, "idle")
+		a.bus.Publish(runID, "done", map[string]any{"run_id": runID, "status": "cancelled"})
+		writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 		return
 	}
 	if run.Status != "running" {

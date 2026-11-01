@@ -148,13 +148,43 @@ allow. Every doubt exits 2 and prints a PreToolUse deny. Exit 2 blocks the
 tool even if the JSON says allow. The hook never waits for a person.
 
 On an ask, the daemon records a pending item and the hook denies with
-`pending approval <id>; retry the identical command after approval`. A
-human approves that item, then the same command may be retried once. A
-second retry, a different argv, a different cwd, or a different session
-does not use that approval. The once token is also bound to the tool
-name, and it expires. The default lifetime is 15 minutes. A once-token
-kept from a task, bot, or global approval stays held for that task. After
-the task id changes, that token can still allow one call within the same
+`pending approval <id>; retry the identical command after approval`. The
+hook still cannot wait. A native `run_shell` ask does not give that
+sentence to the model. The daemon writes a checkpoint at
+`DATA/permbroker/checkpoints/<pending-id>.json` (mode 0600, temp file
+then rename) and leaves the same run `waiting`. The file is HMAC-SHA256
+over the pending id, a NUL, and the raw payload bytes, using the 32-byte
+key at `DATA/permbroker/checkpoint.key` (mode 0600). The payload holds
+the bot, run, task, session, tool name, arguments, call id, resolved
+cwd, and the message history through the assistant message that contains
+the call. The checkpoint is not permission to run.
+
+Approve and approve-all re-check the cwd with `confirmShellCwd`, then
+`ResumeEval`. A deny rule or a ruleset change refuses. `shellExecRel`
+runs again immediately before the jail. The saved call is marked
+consumed before it runs, so a second decision or a crash after exec does
+not run it again. The tool result is appended and the same run id
+continues with a fresh 8-round budget. Deny and deny-all append exactly
+`denied by user` and continue. A new user message, stop, bot deletion,
+or task end marks the checkpoint `cancelled`; the decision is stored and
+the call does not run. Startup loads open checkpoints and restores their
+pending items. A bad MAC, a missing item, a policy denial, or a failed
+cwd re-check audits `resume_refused` and does not run. Suspend, resume,
+cancel, and the CLI note are audited.
+
+A critical native approval is one execution bound to that pending id. It
+is not a once-token, and `takeToken` still refuses critical commands. A
+hook-originated critical card offers Deny and an explanation, not
+Approve once. For any other hook item, a decision posts one system note
+and starts or queues a run, only while that item's task is still the
+bot's current task: `Your request <id> was approved; run exactly: <cmd>`
+or `Your request <id> was denied.` The note is sent at most once. The
+retried hook command still depends on the once-token.
+
+That once-token is bound to the bot, session, tool, input hash, and cwd,
+and it expires. The default lifetime is 15 minutes. A once-token kept
+from a task, bot, or global approval stays held for that task. After the
+task id changes, that token can still allow one call within the same
 lifetime.
 `[cli.permission] approval_ttl` sets it. The accepted range is 1 minute
 to 24 hours inclusive. A value outside that range makes the policy fail

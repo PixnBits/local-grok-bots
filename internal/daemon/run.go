@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,6 +39,7 @@ func (a *App) execute(botID, runID string) {
 	} else {
 		ctx, cancel = context.WithTimeout(a.ctx, turnPol.EffectiveOllamaRunTimeout())
 	}
+	ctx = withRunID(ctx, runID)
 	a.rtMu.Lock()
 	if st := a.loops[botID]; st != nil {
 		st.cancel = cancel
@@ -257,7 +259,7 @@ func (a *App) execute(botID, runID string) {
 				Kind: "text", OK: true, Result: clip(resp.Content, maxReplyBytes),
 			})
 		}
-		for _, tc := range resp.ToolCalls {
+		for i, tc := range resp.ToolCalls {
 			if a.finishOllamaCtx(bot, runID, ctx, msgs, "", retried, lastFirst) {
 				return
 			}
@@ -267,6 +269,15 @@ func (a *App) execute(botID, runID string) {
 				"name": tc.Name, "arguments": redacted,
 			})
 			result, terr := a.execTool(ctx, bot, tc.Name, tc.Arguments)
+			var wait *approvalWaitError
+			if errors.As(terr, &wait) {
+				// Suspend instead of handing the retry sentence back to the model.
+				if err := a.suspendForApproval(bot, runID, msgs, tc.Name, tc.Arguments, strconv.Itoa(i), wait); err != nil {
+					_, _ = a.finishRun(runID, "error", err.Error())
+					a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+				}
+				return
+			}
 			payload := map[string]any{"name": tc.Name, "ok": terr == nil}
 			body := result
 			if terr != nil {
@@ -627,6 +638,10 @@ func mapHist(m store.Message, names map[string]string) model.Message {
 		return model.Message{Role: "assistant", Content: m.Content}
 	case "system":
 		if strings.HasPrefix(m.Content, "Message from ") || strings.HasPrefix(m.Content, "Notice: ") {
+			return model.Message{Role: "user", Content: m.Content}
+		}
+		// A hook decision note is the instruction itself, not a schedule.
+		if strings.HasPrefix(m.Content, "Your request ") {
 			return model.Message{Role: "user", Content: m.Content}
 		}
 		return model.Message{Role: "user", Content: "[scheduled] " + m.Content}

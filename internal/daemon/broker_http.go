@@ -235,11 +235,13 @@ func (a *App) handleBrokerDenyAll(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	snaps := a.snapshotPending(ids)
 	rep, err := a.broker.DenyAll(ids)
 	if err != nil {
 		writeBrokerErr(w, err)
 		return
 	}
+	a.settleBatch(rep, "deny", snaps)
 	writeJSON(w, http.StatusOK, rep)
 }
 
@@ -255,11 +257,13 @@ func (a *App) handleBrokerApproveAll(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	snaps := a.snapshotPending(ids)
 	rep, err := a.broker.ApproveAll(ids)
 	if err != nil {
 		writeBrokerErr(w, err)
 		return
 	}
+	a.settleBatch(rep, "approve", snaps)
 	writeJSON(w, http.StatusOK, rep)
 }
 
@@ -345,11 +349,45 @@ func (a *App) handleBrokerDecide(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request"})
 		return
 	}
-	if err := a.broker.Decide(id, strings.TrimSpace(req.Decision), strings.TrimSpace(req.Scope)); err != nil {
+	decision := strings.TrimSpace(req.Decision)
+	snap, _ := a.broker.SnapshotPending(id)
+	if err := a.broker.Decide(id, decision, strings.TrimSpace(req.Scope)); err != nil {
+		if errors.Is(err, permbroker.ErrStale) {
+			a.refuseOpen(id, snap, "policy")
+		} else if errors.Is(err, permbroker.ErrNotFound) {
+			a.refuseOpen(id, snap, "missing")
+		}
 		writeBrokerErr(w, err)
 		return
 	}
+	a.afterBrokerDecision(id, decision, snap)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (a *App) snapshotPending(ids []string) map[string]permbroker.PendingSnapshot {
+	out := map[string]permbroker.PendingSnapshot{}
+	if a == nil || a.broker == nil {
+		return out
+	}
+	for _, id := range ids {
+		if snap, ok := a.broker.SnapshotPending(id); ok {
+			out[id] = snap
+		}
+	}
+	return out
+}
+
+func (a *App) settleBatch(rep permbroker.BatchReport, decision string, snaps map[string]permbroker.PendingSnapshot) {
+	for _, item := range rep.Results {
+		snap := snaps[item.ID]
+		if item.OK {
+			a.afterBrokerDecision(item.ID, decision, snap)
+			continue
+		}
+		if item.Error == permbroker.ErrStale.Error() {
+			a.refuseOpen(item.ID, snap, "policy")
+		}
+	}
 }
 
 func writeBrokerErr(w http.ResponseWriter, err error) {

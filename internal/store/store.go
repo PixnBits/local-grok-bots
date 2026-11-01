@@ -270,6 +270,8 @@ type Bot struct {
 	LastRunError  string  `json:"last_run_error,omitempty"`
 	// ContinueRunID is not a column. The daemon fills it from the in-memory offer.
 	ContinueRunID string `json:"continue_run_id,omitempty"`
+	// WaitingTool is not a column. The daemon fills it from an open checkpoint.
+	WaitingTool string `json:"waiting_tool,omitempty"`
 	// PendingPermissions is not a column: open permission or question
 	// requests for this bot, from the daemon's broker.
 	PendingPermissions int `json:"pending_permissions,omitempty"`
@@ -1643,6 +1645,88 @@ func (s *Store) FinishRun(id, status, errText string) (bool, error) {
 		e = errText
 	}
 	if _, err := s.db.Exec(`UPDATE runs SET status=?, finished_at=?, error=? WHERE id=? AND status='running'`, status, now, e, id); err != nil {
+		return false, err
+	}
+	detail := map[string]any{"run_id": id, "status": status}
+	if errText != "" {
+		detail["error"] = errText
+	}
+	if err := s.logUnlocked(botID, "run_finished", detail); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// SuspendRun moves a running run to waiting. It does not set finished_at
+// and it does not write a failure notice. False means it was not running.
+func (s *Store) SuspendRun(id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var botID string
+	err := s.db.QueryRow(`SELECT bot_id FROM runs WHERE id=? AND status='running'`, id).Scan(&botID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if _, err := s.db.Exec(`UPDATE runs SET status='waiting', finished_at=NULL, error=NULL WHERE id=? AND status='running'`, id); err != nil {
+		return false, err
+	}
+	if err := s.logUnlocked(botID, "run_waiting", map[string]any{"run_id": id, "status": "waiting"}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ResumeRun moves a waiting run back to running so the same id can continue.
+func (s *Store) ResumeRun(id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var botID string
+	err := s.db.QueryRow(`SELECT bot_id FROM runs WHERE id=? AND status='waiting'`, id).Scan(&botID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if _, err := s.db.Exec(`UPDATE runs SET status='running', finished_at=NULL, error=NULL WHERE id=? AND status='waiting'`, id); err != nil {
+		return false, err
+	}
+	if err := s.logUnlocked(botID, "run_resumed", map[string]any{"run_id": id, "status": "running"}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// CancelWaiting marks a waiting run cancelled. A running run is left alone.
+func (s *Store) CancelWaiting(id string) (bool, error) {
+	return s.finishWaiting(id, "cancelled", "")
+}
+
+// FailWaiting marks a waiting run as error. It does not run the saved call.
+func (s *Store) FailWaiting(id, errText string) (bool, error) {
+	return s.finishWaiting(id, "error", errText)
+}
+
+func (s *Store) finishWaiting(id, status, errText string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var botID string
+	err := s.db.QueryRow(`SELECT bot_id FROM runs WHERE id=? AND status='waiting'`, id).Scan(&botID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	now := FormatTime(Now())
+	var e any
+	if errText != "" {
+		e = errText
+	}
+	if _, err := s.db.Exec(`UPDATE runs SET status=?, finished_at=?, error=? WHERE id=? AND status='waiting'`, status, now, e, id); err != nil {
 		return false, err
 	}
 	detail := map[string]any{"run_id": id, "status": status}

@@ -40,8 +40,12 @@ type loopState struct {
 	cancel   context.CancelFunc
 	cliPID   int
 	idleKill bool
-	// released is closed when running is cleared. Stored status goes idle
-	// before that, so a waiter on status can still observe the loop running.
+	// gen distinguishes the loop that is exiting from a resume that
+	// already started the next one. endLoop ignores a stale gen.
+	gen uint64
+	// released is closed when this generation leaves running. Stored
+	// status goes idle before that, so a waiter on status can still
+	// observe the loop running.
 	released chan struct{}
 }
 
@@ -88,6 +92,11 @@ type App struct {
 	shellCwdMu sync.Mutex
 	shellCwd   map[string]string
 	shellPlan  map[string]shellCwdPlan
+	// shellOnce is one resumed command that gateShell may run without
+	// asking again. shellExecRel still runs. ckMu guards checkpoints.
+	shellOnce map[string]shellOnceSlot
+	ckMu      sync.Mutex
+	waitTool  map[string]string
 	// hookPin is the hook binary recorded at the first pin or an admin repin.
 	// hookBin is the path the current armed launch checked.
 	// hookRepinRequired stays set until an admin repin.
@@ -398,6 +407,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		return nil, err
 	}
 	a.seedBrokerBots(bots)
+	a.loadApprovalCheckpoints()
 	for _, b := range bots {
 		if b.Status != "paused" {
 			a.kick(b.ID)
@@ -675,6 +685,11 @@ func (a *App) kickLocked(botID string) string {
 		st.again = true
 		return st.runID
 	}
+	// A suspended run stays the latest run until a person decides or
+	// the checkpoint is cancelled. Do not start a second one on top.
+	if run, lerr := a.st.LatestRun(botID); lerr == nil && run.Status == "waiting" {
+		return ""
+	}
 	need, err := a.st.NeedsRun(botID)
 	if err != nil || !need {
 		return ""
@@ -862,6 +877,9 @@ func (a *App) decorateBot(b store.Bot) store.Bot {
 		b.ContinueRunID = h.runID
 	}
 	b.Warnings = descriptionWarnings(b.Description)
+	if b.LastRunStatus == "waiting" {
+		b.WaitingTool = a.waitingTool(b.ID)
+	}
 	return b
 }
 
@@ -874,11 +892,26 @@ func (a *App) decorateBots(bots []store.Bot) []store.Bot {
 		if h, ok := a.resume[bots[i].ID]; ok {
 			bots[i].ContinueRunID = h.runID
 		}
+		if bots[i].LastRunStatus == "waiting" {
+			bots[i].WaitingTool = a.waitingTool(bots[i].ID)
+		}
 	}
 	return bots
 }
 
 func (a *App) loop(botID, runID string) {
+	a.rtMu.Lock()
+	st := a.loops[botID]
+	gen := uint64(1)
+	var released chan struct{}
+	if st != nil {
+		if st.gen == 0 {
+			st.gen = 1
+		}
+		gen = st.gen
+		released = st.released
+	}
+	a.rtMu.Unlock()
 	current := runID
 	for {
 		a.execute(botID, current)
@@ -911,7 +944,34 @@ func (a *App) loop(botID, runID string) {
 		a.rtMu.Unlock()
 		current = run.ID
 	}
-	a.endLoop(botID)
+	a.endLoop(botID, gen, released)
+}
+
+// startLoopLocked runs the same run id again. The caller holds a.rtMu.
+// The previous generation's endLoop does not clear this one.
+func (a *App) startLoopLocked(botID, runID string) {
+	if a.closing {
+		return
+	}
+	st := a.loops[botID]
+	if st == nil {
+		st = &loopState{}
+		a.loops[botID] = st
+	}
+	st.gen++
+	if st.gen == 0 {
+		st.gen = 1
+	}
+	st.running = true
+	st.runID = runID
+	st.again = false
+	st.cancel = nil
+	st.released = make(chan struct{})
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		a.loop(botID, runID)
+	}()
 }
 
 func (a *App) consumeAgain(botID string) bool {
@@ -926,23 +986,33 @@ func (a *App) consumeAgain(botID string) bool {
 	return v
 }
 
-func (a *App) endLoop(botID string) {
-	if b, err := a.st.GetBot(botID); err == nil && b.Status == "running" {
-		_ = a.st.SetStatus(botID, "idle")
-	}
+func (a *App) endLoop(botID string, gen uint64, released chan struct{}) {
 	a.rtMu.Lock()
 	st := a.loops[botID]
-	again := false
-	if st != nil {
-		again = st.again
-		st.running = false
-		st.again = false
-		st.runID = ""
-		st.cancel = nil
-		if st.released != nil {
-			close(st.released)
-			st.released = nil
+	if st == nil || st.gen != gen {
+		a.rtMu.Unlock()
+		if released != nil {
+			close(released)
 		}
+		return
+	}
+	waiting := false
+	if run, err := a.st.LatestRun(botID); err == nil && run.Status == "waiting" {
+		waiting = true
+	}
+	if !waiting {
+		if b, err := a.st.GetBot(botID); err == nil && b.Status == "running" {
+			_ = a.st.SetStatus(botID, "idle")
+		}
+	}
+	again := st.again
+	st.running = false
+	st.again = false
+	st.runID = ""
+	st.cancel = nil
+	if st.released == released && st.released != nil {
+		close(st.released)
+		st.released = nil
 	}
 	a.rtMu.Unlock()
 	if again && a.ctx.Err() == nil {
