@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/permbroker"
 	"github.com/PixnBits/local-grok-bots/internal/store"
@@ -570,7 +571,7 @@ func (a *App) refuseSnap(snap permbroker.PendingSnapshot, id, scope string) {
 	a.broker.DropFreshApproval(snap.BotID, snap.SessionID, snap.InputHash, snap.Cwd, id)
 	a.auditResumeRefused(snap.BotID, snap.SessionID, snap.RunID, snap.TaskID, snap.Cwd, snap.Tool, id, scope)
 	if snap.RunID != "" {
-		if ok, _ := a.st.FailWaiting(snap.RunID, "approval refused"); ok {
+		if ok, _ := a.st.FailWaiting(snap.RunID, audit.RedactText("approval refused")); ok {
 			a.persistRunNotice(snap.BotID, snap.RunID, "error", "approval refused")
 		}
 		_ = a.st.SetStatus(snap.BotID, "idle")
@@ -608,6 +609,7 @@ func (a *App) failApproval(ck checkpoint, msg string) {
 	if a == nil || a.st == nil || ck.RunID == "" {
 		return
 	}
+	msg = audit.RedactText(msg)
 	if ok, _ := a.st.FailWaiting(ck.RunID, msg); ok {
 		a.persistRunNotice(ck.BotID, ck.RunID, "error", msg)
 	} else if run, err := a.st.GetRun(ck.RunID); err == nil && run.Status == "running" {
@@ -1587,7 +1589,7 @@ func (a *App) failUncoveredWaiting(botID, scope string) {
 		if covered[run.ID] {
 			continue
 		}
-		if ok, _ := a.st.FailWaiting(run.ID, "approval refused"); ok {
+		if ok, _ := a.st.FailWaiting(run.ID, audit.RedactText("approval refused")); ok {
 			a.persistRunNotice(run.BotID, run.ID, "error", "approval refused")
 		}
 		_ = a.st.SetStatus(run.BotID, "idle")

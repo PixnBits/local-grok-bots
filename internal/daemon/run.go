@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
@@ -53,7 +54,7 @@ func (a *App) execute(botID, runID string) {
 		a.takePending(runID)
 		a.dropResume(botID)
 		_, _ = a.finishRun(runID, "error", err.Error())
-		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": audit.RedactText(err.Error())})
 		return
 	}
 	modelName := a.cfg.Model
@@ -76,7 +77,7 @@ func (a *App) execute(botID, runID string) {
 		a.takePending(runID)
 		a.dropResume(bot.ID)
 		_, _ = a.finishRun(runID, "error", err.Error())
-		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": audit.RedactText(err.Error())})
 		return
 	}
 	// A continuation already holds the transcript, including tool results.
@@ -84,7 +85,7 @@ func (a *App) execute(botID, runID string) {
 	run, err := a.st.GetRun(runID)
 	if err != nil {
 		_, _ = a.finishRun(runID, "error", err.Error())
-		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": audit.RedactText(err.Error())})
 		return
 	}
 	// seen holds turn input already in the transcript, so a message that
@@ -100,7 +101,7 @@ func (a *App) execute(botID, runID string) {
 		msgs, hist, err = a.buildMessagesHist(bot, tools)
 		if err != nil {
 			_, _ = a.finishRun(runID, "error", err.Error())
-			a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+			a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": audit.RedactText(err.Error())})
 			return
 		}
 		for _, m := range hist {
@@ -222,7 +223,7 @@ func (a *App) execute(botID, runID string) {
 					a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "retrying"})
 					msgs = append(msgs, model.Message{
 						Role:    "user",
-						Content: "The tool call could not be parsed: " + clip(parseErr.Detail, 500) + ". Call the tool again with valid arguments, or reply in text.",
+						Content: "The tool call could not be parsed: " + clip(audit.RedactText(parseErr.Detail), 500) + ". Call the tool again with valid arguments, or reply in text.",
 					})
 					parseContinue = true
 					break
@@ -232,7 +233,7 @@ func (a *App) execute(botID, runID string) {
 					a.persistBotText(bot.ID, runID, t, false)
 				}
 				_, _ = a.finishRun(runID, "error", err.Error())
-				a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+				a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": audit.RedactText(err.Error())})
 				return
 			}
 			a.logOllamaCall(bot.ID, modelName, true, attempt, false, first, nil, resp.PromptTokens+resp.OutputTokens, "", "", tools)
@@ -244,7 +245,7 @@ func (a *App) execute(botID, runID string) {
 		if len(resp.ToolCalls) == 0 {
 			// One automatic retry when the reply denies an attached tool
 			// and this execute has not called a tool yet.
-			if a.shouldSchemaRetry(round, schemaRetried, sawToolCall, resp.Content, tools) {
+			if a.shouldSchemaRetry(runID, round, schemaRetried, sawToolCall, resp.Content, tools) {
 				schemaRetried = true
 				joined, n := attachedToolLog(tools)
 				a.log(bot.ID, "tool_schema_retry", map[string]any{"tools": joined, "tool_count": n})
@@ -286,7 +287,7 @@ func (a *App) execute(botID, runID string) {
 				// Suspend instead of handing the retry sentence back to the model.
 				if err := a.suspendForApproval(bot, runID, msgs, tc.Name, tc.Arguments, strconv.Itoa(i), wait); err != nil {
 					_, _ = a.finishRun(runID, "error", err.Error())
-					a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+					a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": audit.RedactText(err.Error())})
 				}
 				return
 			}
@@ -324,7 +325,7 @@ func (a *App) finishInterrupted(botID, runID string, ctx context.Context) {
 		a.bus.Publish(runID, "done", map[string]any{"run_id": runID, "status": "cancelled"})
 		return
 	}
-	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": errText})
+	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": audit.RedactText(errText)})
 }
 
 // finishRun stores a run's end state. A run that did not finish "done"
@@ -333,6 +334,8 @@ func (a *App) finishInterrupted(botID, runID string, ctx context.Context) {
 // message of the run) after a failure, the same as after a reply. Notices are
 // not turn input, so they do not start another run.
 func (a *App) finishRun(runID, status, errText string) (bool, error) {
+	// Redact before the notice and the row. quoteRunError truncates later.
+	errText = audit.RedactText(errText)
 	if status != "done" {
 		if run, err := a.st.GetRun(runID); err == nil && run.Status == "running" {
 			a.persistRunNotice(run.BotID, runID, status, errText)
@@ -395,11 +398,31 @@ func timeoutLimitCode(errText string) string {
 }
 
 // shouldSchemaRetry is the only gate for the attached-tool claim retry.
-func (a *App) shouldSchemaRetry(round int, schemaRetried, sawToolCall bool, content string, tools []model.Tool) bool {
-	if a == nil || schemaRetried || sawToolCall || round+1 >= maxToolRounds {
+// sawToolCall covers this execute. runHasToolCall covers a call already
+// stored on the run, including one resumed after approval.
+func (a *App) shouldSchemaRetry(runID string, round int, schemaRetried, sawToolCall bool, content string, tools []model.Tool) bool {
+	if a == nil || schemaRetried || sawToolCall || round+1 >= maxToolRounds || a.runHasToolCall(runID) {
 		return false
 	}
 	return claimsAttachedToolUnavailable(content, tools)
+}
+
+// runHasToolCall reports a persisted kind=call row for this run.
+// Ok, error, and denied calls all count. Text and permission rows do not.
+func (a *App) runHasToolCall(runID string) bool {
+	if a == nil || a.st == nil || runID == "" {
+		return false
+	}
+	recs, err := a.st.RunTools([]string{runID})
+	if err != nil {
+		return false
+	}
+	for _, rec := range recs[runID] {
+		if rec.Kind == "call" {
+			return true
+		}
+	}
+	return false
 }
 
 // toolDeniedError is a broker, policy, or hook refusal of one tool call.
@@ -436,7 +459,7 @@ func (a *App) persistRunNotice(botID, runID, status, errText string) {
 }
 
 func (a *App) persistBotText(botID, runID, content string, timedOut bool) {
-	content = clip(content, maxReplyBytes)
+	content = clip(stripToolTrailers(content), maxReplyBytes)
 	m, err := a.st.AddMessage(store.Message{
 		BotID: botID, Thread: "user", Role: "bot", Content: content, RunID: &runID, TimedOut: timedOut,
 	})
@@ -478,7 +501,7 @@ func (a *App) finishOllamaTimeout(bot store.Bot, runID string, msgs []model.Mess
 	dur := a.limitDuration(bot.ID, limit)
 	kept := ""
 	if t := strings.TrimSpace(partial); t != "" {
-		kept = clip(t, maxReplyBytes)
+		kept = clip(stripToolTrailers(t), maxReplyBytes)
 		a.persistBotText(bot.ID, runID, kept, true)
 		resume := append([]model.Message{}, msgs...)
 		resume = append(resume, model.Message{Role: "assistant", Content: kept})
@@ -487,7 +510,7 @@ func (a *App) finishOllamaTimeout(bot store.Bot, runID string, msgs []model.Mess
 	}
 	body := timeoutBody(limit, dur, retried, kept)
 	_, _ = a.finishRun(runID, "timeout", body)
-	a.bus.Publish(runID, "timeout", map[string]any{"run_id": runID, "error": body, "limit": limit})
+	a.bus.Publish(runID, "timeout", map[string]any{"run_id": runID, "error": audit.RedactText(body), "limit": limit})
 	a.log(bot.ID, "run_timed_out", map[string]any{
 		"run_id":          runID,
 		"limit":           limit,
@@ -697,6 +720,9 @@ func (a *App) buildMessagesHist(bot store.Bot, tools []model.Tool) ([]model.Mess
 	}
 	out := []model.Message{{Role: "system", Content: b.String()}}
 	for _, m := range hist {
+		if m.Role == "bot" {
+			m.Content = stripToolTrailers(m.Content)
+		}
 		msg := mapHist(m, names)
 		if m.Role == "bot" {
 			msg.Content = appendToolUseSummary(msg.Content, toolUseSummary(toolRecsFor(byRun, m)))
@@ -704,7 +730,7 @@ func (a *App) buildMessagesHist(bot store.Bot, tools []model.Tool) ([]model.Mess
 		out = append(out, msg)
 		if m.Kind == store.KindRunFailed {
 			if text := quoteRunError(a.runErrorFor(m)); text != "" {
-				out = append(out, model.Message{Role: "user", Content: text})
+				out = append(out, model.Message{Role: "assistant", Content: text})
 			}
 		}
 	}

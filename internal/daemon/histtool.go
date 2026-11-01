@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
@@ -24,7 +25,7 @@ const (
 	// maxLoggedToolNames and maxLoggedToolChars cap the tools field on a log row.
 	maxLoggedToolNames = 32
 	maxLoggedToolChars = 600
-	// maxRunErrorRunes caps the run error copied into a replayed user message.
+	// maxRunErrorRunes caps the run error copied into a replayed assistant message.
 	maxRunErrorRunes = 300
 
 	// toolSummaryPrefix frames the trailer as a record of what ran.
@@ -146,6 +147,23 @@ func appendToolUseSummary(content, summary string) string {
 	return content + "\n" + summary
 }
 
+// stripToolTrailers drops lines a model copied from a replayed trailer.
+// The real trailer is appended later from run_tools. An empty result stays empty.
+func stripToolTrailers(content string) string {
+	if content == "" {
+		return ""
+	}
+	lines := strings.Split(content, "\n")
+	kept := lines[:0]
+	for _, line := range lines {
+		if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "[tools used") {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.Join(kept, "\n")
+}
+
 // toolRecordsForHist loads every replayed bot turn's run_tools in one query.
 func (a *App) toolRecordsForHist(hist []store.Message) (map[string][]store.ToolRecord, error) {
 	seen := make(map[string]struct{}, len(hist))
@@ -225,9 +243,10 @@ func attachedToolLog(tools []model.Tool) (string, int) {
 	return capToolJoin(names, ",", maxLoggedToolNames, maxLoggedToolChars), len(names)
 }
 
-// quoteRunError is a single-line, quoted, truncated copy of a run error.
-// Empty input returns empty. The result is data for a user message.
+// quoteRunError redacts, then truncates, then quotes a run error.
+// Empty input returns empty. The result is an assistant message.
 func quoteRunError(errText string) string {
+	errText = audit.RedactText(errText)
 	errText = strings.TrimSpace(errText)
 	if errText == "" {
 		return ""
@@ -260,6 +279,7 @@ func (a *App) recordDeniedTool(runID, botID, name string) {
 // The denial phrase has to sit against that tool's name. A mention in
 // another sentence does not count, and a name that is not attached does not count.
 func claimsAttachedToolUnavailable(content string, tools []model.Tool) bool {
+	content = normalizeClaimText(content)
 	if strings.TrimSpace(content) == "" {
 		return false
 	}
@@ -301,7 +321,8 @@ func denialPatterns(tools []model.Tool) []*regexp.Regexp {
 		left := `(?:^|[^A-Za-z0-9_.-])`
 		right := `(?:[^A-Za-z0-9_.-]|$)`
 		raw := []string{
-			left + q + `\s+(?:is|isn't|is\s+not)\s+(?:available|unavailable)\b`,
+			left + q + `\s+(?:isn't\s+available|is\s+not\s+available|is\s+unavailable)\b`,
+			left + q + `(?:\s*-\s*|\s+)not\s+available\b`,
 			left + q + `\s+has\s+no\s+(?:callable\s+)?schema\b`,
 			left + q + `\s+(?:tool\s+)?(?:is\s+)?(?:not|isn't)\s+(?:callable|available)\b`,
 			`\bno\s+(?:callable\s+)?` + q + `\s+schema\b`,
@@ -317,6 +338,21 @@ func denialPatterns(tools []model.Tool) []*regexp.Regexp {
 
 func claimSentenceBreak(r rune) bool {
 	return r == '.' || r == '!' || r == '?' || r == '\n' || r == '\r'
+}
+
+// normalizeClaimText folds punctuation that would hide a denial phrase.
+// Curly apostrophes become '. Dashes and non-breaking spaces become spaces.
+// Backticks are removed so a code span still matches the tool name.
+func normalizeClaimText(s string) string {
+	return strings.NewReplacer(
+		"\u2018", "'",
+		"\u2019", "'",
+		"\u2013", " ",
+		"\u2014", " ",
+		"\u00a0", " ",
+		"\u202f", " ",
+		"`", "",
+	).Replace(s)
 }
 
 func toolSchemaReminder(tools []model.Tool) string {

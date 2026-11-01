@@ -714,7 +714,7 @@ func (a *App) kickLocked(botID string) string {
 		return ""
 	}
 	if err := a.st.SetStatus(botID, "running"); err != nil {
-		_, _ = a.st.FinishRun(run.ID, "error", err.Error())
+		_, _ = a.st.FinishRun(run.ID, "error", audit.RedactText(err.Error()))
 		return ""
 	}
 	st.running = true
@@ -761,7 +761,7 @@ func (a *App) continueRun(botID, fromRun string) (string, int, error) {
 		return "", http.StatusInternalServerError, err
 	}
 	if err := a.st.SetStatus(botID, "running"); err != nil {
-		_, _ = a.st.FinishRun(run.ID, "error", err.Error())
+		_, _ = a.st.FinishRun(run.ID, "error", audit.RedactText(err.Error()))
 		a.resume[botID] = offer
 		return "", http.StatusInternalServerError, err
 	}
@@ -826,14 +826,14 @@ func (a *App) retryRun(botID, fromRun string) (string, int, error) {
 		return "", http.StatusInternalServerError, err
 	}
 	if err := a.st.SetStatus(botID, "running"); err != nil {
-		_, _ = a.st.FinishRun(newRun.ID, "error", err.Error())
+		_, _ = a.st.FinishRun(newRun.ID, "error", audit.RedactText(err.Error()))
 		if hadOffer {
 			a.resume[botID] = offer
 		}
 		return "", http.StatusInternalServerError, err
 	}
 	if err := a.st.DeleteRunOutput(botID, fromRun); err != nil {
-		_, _ = a.st.FinishRun(newRun.ID, "error", err.Error())
+		_, _ = a.st.FinishRun(newRun.ID, "error", audit.RedactText(err.Error()))
 		_ = a.st.SetStatus(botID, "idle")
 		if hadOffer {
 			a.resume[botID] = offer
