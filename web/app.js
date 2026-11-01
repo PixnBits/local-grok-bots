@@ -971,8 +971,9 @@ function whoText(m) {
     const b = currentBot();
     return b ? b.name : "Bot";
   }
-  if ((m.content || "").startsWith("Message from ") || (m.content || "").startsWith("Notice: ")) return "";
-  if ((m.content || "").startsWith("Your request ")) return "";
+  const note = hookNoteBody(m.content);
+  const body = note || (m.content || "");
+  if (body.startsWith("Message from ") || body.startsWith("Notice: ")) return "";
   return "Scheduled";
 }
 // md:begin
@@ -1444,7 +1445,7 @@ function renderMessages(mode = "bottom") {
     } else {
       const bubble = el("div", "bubble system");
       if (whoText(m)) bubble.append(el("span", "who", whoText(m)));
-      bubble.append(document.createTextNode(m.content || ""));
+      bubble.append(document.createTextNode(hookNoteBody(m.content) || (m.content || "")));
       box.append(bubble);
       if (m.run_id && !shownTools.has(m.run_id) && hasToolRecords(state.tools[m.run_id])) {
         shownTools.add(m.run_id);
@@ -2131,12 +2132,12 @@ function paintSubline(b) {
     return;
   }
   const phase = state.stop && state.stop.phase;
-  const live = phase !== "stopped" && !!(state.streaming || b.status === "running" || phase === "running" || phase === "stopping");
-  const word = b.archived ? "paused" : live ? "running" : (b.status === "paused" ? "paused" : "idle");
+  const word = headerPhaseWord(b, !!state.streaming, phase || "", !!state.approvalWait);
   if (label) label.textContent = threadSubline(word, word === "running" ? state.liveTool : "", b.label || "");
   if (dot) {
     dot.hidden = false;
-    dot.className = "dot " + (word === "running" ? "running" : word === "paused" ? "paused" : "idle");
+    const dotWord = word === "running" || word === "paused" || word === "waiting" ? word : "idle";
+    dot.className = "dot " + dotWord;
   }
 }
 function syncStopButton() {
@@ -5192,6 +5193,26 @@ function focusTargetAfterNote(activeTag, composerUsable) {
   if (tag && tag !== "BODY" && tag !== "BUTTON") return "";
   if (composerUsable) return "composer-input";
   return "thread-name";
+}
+
+// Header word while a run is waiting on approval. Stopping stays "running".
+function headerPhaseWord(bot, streaming, stopPhase, approvalWait) {
+  if (bot && bot.archived) return "paused";
+  const phase = stopPhase || "";
+  if (phase !== "stopping" && phase !== "stopped" && (approvalWait || (bot && bot.last_run_status === "waiting"))) return "waiting";
+  const live = phase !== "stopped" && (streaming || (bot && bot.status === "running") || phase === "running" || phase === "stopping");
+  if (live) return "running";
+  if (bot && bot.status === "paused") return "paused";
+  return "idle";
+}
+
+// Body of a daemon hook note. Empty means this text is not that note.
+// The marker is the check. A person can type the same sentence.
+function hookNoteBody(content) {
+  const s = content == null ? "" : String(content);
+  const marker = "\u2063lgb-hook-note\u2063";
+  if (s.startsWith(marker)) return s.slice(marker.length);
+  return "";
 }
 // thread-logic:end
 // roster-keys:begin

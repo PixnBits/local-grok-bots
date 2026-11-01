@@ -93,10 +93,20 @@ type App struct {
 	shellCwd   map[string]string
 	shellPlan  map[string]shellCwdPlan
 	// shellOnce is one resumed command that gateShell may run without
-	// asking again. shellExecRel still runs. ckMu guards checkpoints.
+	// asking again. shellExecRel still runs. The slot is keyed by the
+	// pending id carried in ctx. ckMu guards checkpoints, the decision
+	// claim, and the tombstone ledger.
 	shellOnce map[string]shellOnceSlot
 	ckMu      sync.Mutex
 	waitTool  map[string]string
+	// deciding is the pending id whose decision is in progress.
+	// The first claim wins. A loser returns 409 and does not touch the file.
+	deciding map[string]struct{}
+	// deadAt is the tombstone ledger (pending id → time). deadCorrupt
+	// means that file could not be read, so no open checkpoint is restored.
+	deadAt      map[string]time.Time
+	deadCorrupt bool
+	lastSweep   time.Time
 	// hookPin is the hook binary recorded at the first pin or an admin repin.
 	// hookBin is the path the current armed launch checked.
 	// hookRepinRequired stays set until an admin repin.
@@ -548,6 +558,7 @@ func (a *App) timerLoop() {
 		case <-t.C:
 			a.fireDue()
 			a.killIdle()
+			a.maybeSweepApprovals(time.Now())
 		}
 	}
 }

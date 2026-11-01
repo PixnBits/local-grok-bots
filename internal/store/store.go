@@ -1761,6 +1761,36 @@ func (s *Store) GetRun(id string) (Run, error) {
 	return r, nil
 }
 
+// ListWaiting returns every run still waiting on an approval.
+func (s *Store) ListWaiting() ([]Run, error) {
+	if s == nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT id, bot_id, status, started_at, finished_at, error FROM runs WHERE status='waiting' ORDER BY started_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Run
+	for rows.Next() {
+		var r Run
+		var fin, errText sql.NullString
+		if err := rows.Scan(&r.ID, &r.BotID, &r.Status, &r.StartedAt, &fin, &errText); err != nil {
+			return nil, err
+		}
+		if fin.Valid {
+			r.FinishedAt = &fin.String
+		}
+		if errText.Valid {
+			r.Error = &errText.String
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // LatestRun is the bot's newest run. started_at is strictly increasing;
 // id breaks a tie.
 func (s *Store) LatestRun(botID string) (Run, error) {

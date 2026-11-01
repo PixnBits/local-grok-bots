@@ -26,6 +26,16 @@ const (
 	ckRefused   = "refused"
 
 	deniedByUser = "denied by user"
+
+	// hookNoteMarker is written only by notifyHook. mapHist keeps that
+	// message as a system line. The visible sentence is not the check.
+	hookNoteMarker = "\u2063lgb-hook-note\u2063"
+	hookNoteRunes  = 300
+
+	// approvalRetention is how long a terminal checkpoint or a hook-sent
+	// marker stays on disk. Tombstones stay; each is an id and a time.
+	approvalRetention  = 7 * 24 * time.Hour
+	approvalSweepEvery = time.Hour
 )
 
 // approvalWaitError is the ask the run loop turns into a checkpoint.
@@ -95,9 +105,27 @@ type ckEnvelope struct {
 }
 
 type shellOnceSlot struct {
-	command string
-	cwd     string
-	until   time.Time
+	command   string
+	cwd       string
+	pendingID string
+	until     time.Time
+}
+
+type shellOnceIDKey struct{}
+
+func withShellOnceID(ctx context.Context, id string) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, shellOnceIDKey{}, id)
+}
+
+func shellOnceIDFrom(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	s, _ := ctx.Value(shellOnceIDKey{}).(string)
+	return s
 }
 
 func (a *App) checkpointDir() string {
@@ -419,14 +447,18 @@ func (a *App) suspendForApproval(bot store.Bot, runID string, msgs []model.Messa
 }
 
 // loadApprovalCheckpoints restores open native asks after a restart and
-// continues a call that already ran. A bad file is not restored.
+// continues a call that already ran. A bad file is not restored. A waiting
+// run whose checkpoint cannot be loaded is failed, and the bot goes idle.
 func (a *App) loadApprovalCheckpoints() {
 	if a == nil || a.broker == nil {
 		return
 	}
+	a.loadDeadLedger()
+	a.sweepApprovalFiles(time.Now())
 	dir := a.checkpointDir()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
+		a.failUncoveredWaiting("", "missing")
 		return
 	}
 	for _, ent := range entries {
@@ -445,8 +477,16 @@ func (a *App) loadApprovalCheckpoints() {
 		}
 		switch ck.State {
 		case ckOpen:
+			if a.deadCorrupt || a.tombstoned(id) || !a.runWaiting(ck.RunID) {
+				scope := "replay"
+				if !a.tombstoned(id) && !a.deadCorrupt {
+					scope = "stale"
+				}
+				a.dropOpenCheckpoint(ck, scope)
+				continue
+			}
 			if err := a.broker.RestorePending(ck.Pending); err != nil {
-				a.broker.AuditCheckpoint(ck.BotID, ck.SessionID, ck.RunID, ck.TaskID, ck.Cwd, ck.ToolName, ck.PendingID, "resume_refused", "missing")
+				a.dropOpenCheckpoint(ck, "missing")
 				continue
 			}
 			a.setWaitTool(ck.BotID, ck.ToolName)
@@ -461,6 +501,7 @@ func (a *App) loadApprovalCheckpoints() {
 			a.failApproval(ck, "approval interrupted")
 		}
 	}
+	a.failUncoveredWaiting("", "missing")
 }
 
 func (a *App) afterBrokerDecision(id, decision string, snap permbroker.PendingSnapshot) {
@@ -470,6 +511,14 @@ func (a *App) afterBrokerDecision(id, decision string, snap permbroker.PendingSn
 	ck, kind := a.readCheckpoint(id)
 	if kind == "tamper" {
 		a.refuseSnap(snap, id, "tamper")
+		return
+	}
+	if kind == "" && ck.State == ckOpen && (a.tombstoned(id) || !a.runWaiting(ck.RunID)) {
+		scope := "replay"
+		if !a.tombstoned(id) {
+			scope = "stale"
+		}
+		a.dropOpenCheckpoint(ck, scope)
 		return
 	}
 	if kind == "missing" {
@@ -527,6 +576,7 @@ func (a *App) refuseSnap(snap permbroker.PendingSnapshot, id, scope string) {
 func (a *App) refuseCheckpoint(ck checkpoint, scope string) {
 	a.dropFresh(ck)
 	a.ckMu.Lock()
+	_ = a.rememberDeadUnlocked(ck.PendingID)
 	cur, kind := a.readCheckpointUnlocked(ck.PendingID)
 	if kind == "" && cur.State == ckOpen {
 		cur.State = ckRefused
@@ -599,7 +649,7 @@ func (a *App) resumeApproved(ck checkpoint) {
 		a.broker.DropFreshApproval(ck.BotID, ck.SessionID, ck.Pending.InputHash, ck.Cwd, ck.PendingID)
 		return
 	}
-	a.armShellOnce(ck.BotID, cmd, resolved)
+	a.armShellOnce(ck.BotID, ck.PendingID, cmd, resolved)
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
@@ -623,12 +673,13 @@ func (a *App) prepareResumeCwd(ck *checkpoint) (string, error) {
 }
 
 func (a *App) execSavedCall(ck checkpoint) {
+	defer a.clearShellOnce(ck.BotID, ck.PendingID)
 	bot, err := a.st.GetBot(ck.BotID)
 	if err != nil {
 		a.failApproval(ck, "approval refused")
 		return
 	}
-	result, terr := a.execTool(a.ctx, bot, ck.ToolName, ck.ToolArgs)
+	result, terr := a.execTool(withShellOnceID(a.ctx, ck.PendingID), bot, ck.ToolName, ck.ToolArgs)
 	var wait *approvalWaitError
 	if errors.As(terr, &wait) {
 		a.failApproval(ck, "approval refused")
@@ -688,6 +739,9 @@ func (a *App) markConsumed(id string) bool {
 	if kind != "" || ck.State != ckOpen {
 		return false
 	}
+	if err := a.rememberDeadUnlocked(id); err != nil {
+		return false
+	}
 	ck.State = ckConsumed
 	ck.HasResult = false
 	ck.Result = ""
@@ -709,7 +763,7 @@ func (a *App) saveResult(id, body string) {
 	_ = a.writeCheckpointUnlocked(ck)
 }
 
-func (a *App) armShellOnce(botID, command, cwd string) {
+func (a *App) armShellOnce(botID, pendingID, command, cwd string) {
 	if a == nil || botID == "" || command == "" {
 		return
 	}
@@ -718,10 +772,29 @@ func (a *App) armShellOnce(botID, command, cwd string) {
 	if a.shellOnce == nil {
 		a.shellOnce = map[string]shellOnceSlot{}
 	}
-	a.shellOnce[botID] = shellOnceSlot{command: command, cwd: cwd, until: time.Now().Add(2 * time.Minute)}
+	a.shellOnce[botID] = shellOnceSlot{
+		command: command, cwd: cwd, pendingID: pendingID,
+		until: time.Now().Add(2 * time.Minute),
+	}
 }
 
-func (a *App) takeShellOnce(botID, command, cwd string) bool {
+func (a *App) clearShellOnce(botID, pendingID string) {
+	if a == nil || botID == "" {
+		return
+	}
+	a.shellCwdMu.Lock()
+	defer a.shellCwdMu.Unlock()
+	slot, ok := a.shellOnce[botID]
+	if !ok {
+		return
+	}
+	if pendingID != "" && slot.pendingID != pendingID {
+		return
+	}
+	delete(a.shellOnce, botID)
+}
+
+func (a *App) takeShellOnce(ctx context.Context, botID, command, cwd string) bool {
 	if a == nil {
 		return false
 	}
@@ -729,6 +802,9 @@ func (a *App) takeShellOnce(botID, command, cwd string) bool {
 	defer a.shellCwdMu.Unlock()
 	slot, ok := a.shellOnce[botID]
 	if !ok {
+		return false
+	}
+	if slot.pendingID != "" && shellOnceIDFrom(ctx) != slot.pendingID {
 		return false
 	}
 	if time.Now().After(slot.until) || slot.command != command || filepath.Clean(slot.cwd) != filepath.Clean(cwd) {
@@ -810,11 +886,16 @@ func (a *App) cancelCheckpoint(ck checkpoint, reason string) {
 		return
 	}
 	cur.State = ckCancelled
+	if err := a.rememberDeadUnlocked(ck.PendingID); err != nil {
+		a.ckMu.Unlock()
+		return
+	}
 	if err := a.writeCheckpointUnlocked(cur); err != nil {
 		a.ckMu.Unlock()
 		return
 	}
 	a.ckMu.Unlock()
+	a.clearShellOnce(ck.BotID, ck.PendingID)
 	if a.broker != nil {
 		a.broker.AuditCheckpoint(ck.BotID, ck.SessionID, ck.RunID, ck.TaskID, ck.Cwd, ck.ToolName, ck.PendingID, "cancel", reason)
 		a.broker.DropFreshApproval(ck.BotID, ck.SessionID, ck.Pending.InputHash, ck.Cwd, ck.PendingID)
@@ -845,12 +926,13 @@ func (a *App) notifyHook(snap permbroker.PendingSnapshot, decision string) {
 		if cmd == "" {
 			cmd = strings.Join(snap.Argv, " ")
 		}
-		text = "Your request " + snap.ID + " was approved; run exactly: " + cmd
+		text = "Notice: request " + snap.ID + " was approved; the command shown below as data: " + hookCommandData(cmd)
 	case "deny":
-		text = "Your request " + snap.ID + " was denied."
+		text = "Notice: request " + snap.ID + " was denied."
 	default:
 		return
 	}
+	text = hookNoteMarker + text
 	if !a.claimHookSent(snap.ID) {
 		return
 	}
@@ -896,4 +978,397 @@ func (a *App) claimHookSent(id string) bool {
 		return false
 	}
 	return true
+}
+
+// hookCommandData is one JSON string, at most hookNoteRunes, with an
+// ellipsis when the command was cut. Newlines and control characters
+// stay inside the quotes.
+func hookCommandData(cmd string) string {
+	rs := []rune(cmd)
+	if len(rs) > hookNoteRunes {
+		cmd = string(rs[:hookNoteRunes-1]) + "…"
+	}
+	b, err := json.Marshal(cmd)
+	if err != nil {
+		return `""`
+	}
+	return string(b)
+}
+
+// claimDecision marks id as being decided. The caller must releaseDecision.
+// False means another decision owns it, or the checkpoint is already terminal.
+func (a *App) claimDecision(id string) bool {
+	if a == nil || !safePendingID(id) {
+		return false
+	}
+	a.ckMu.Lock()
+	defer a.ckMu.Unlock()
+	if a.deciding == nil {
+		a.deciding = map[string]struct{}{}
+	}
+	if _, ok := a.deciding[id]; ok {
+		return false
+	}
+	ck, kind := a.readCheckpointUnlocked(id)
+	if kind == "" && ck.State != ckOpen {
+		return false
+	}
+	a.deciding[id] = struct{}{}
+	return true
+}
+
+func (a *App) releaseDecision(id string) {
+	if a == nil || id == "" {
+		return
+	}
+	a.ckMu.Lock()
+	defer a.ckMu.Unlock()
+	delete(a.deciding, id)
+}
+
+func (a *App) runWaiting(id string) bool {
+	if a == nil || a.st == nil || id == "" {
+		return false
+	}
+	run, err := a.st.GetRun(id)
+	return err == nil && run.Status == "waiting"
+}
+
+// dropOpenCheckpoint refuses an open file that must not be restored:
+// a tombstoned id, a run that is not waiting, or a pending item that
+// cannot be put back. It does not execute the saved call.
+func (a *App) dropOpenCheckpoint(ck checkpoint, scope string) {
+	a.refuseCheckpoint(ck, scope)
+}
+
+func (a *App) tombstonePath() string {
+	if a == nil || a.cfg.DataDir == "" {
+		return ""
+	}
+	return filepath.Join(a.cfg.DataDir, "permbroker", "tombstones.json")
+}
+
+func (a *App) tombstoned(id string) bool {
+	if a == nil {
+		return false
+	}
+	a.ckMu.Lock()
+	defer a.ckMu.Unlock()
+	return a.tombstonedUnlocked(id)
+}
+
+func (a *App) tombstonedUnlocked(id string) bool {
+	if a.deadCorrupt {
+		return true
+	}
+	if a.deadAt == nil {
+		return false
+	}
+	_, ok := a.deadAt[id]
+	return ok
+}
+
+func (a *App) loadDeadLedger() {
+	if a == nil {
+		return
+	}
+	a.ckMu.Lock()
+	defer a.ckMu.Unlock()
+	a.deadAt = map[string]time.Time{}
+	a.deadCorrupt = false
+	path := a.tombstonePath()
+	if path == "" {
+		return
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			a.deadCorrupt = true
+		}
+		return
+	}
+	fi, sterr := os.Stat(path)
+	if sterr != nil || fi.Mode().Perm()&0o077 != 0 {
+		a.deadCorrupt = true
+		return
+	}
+	dec := json.NewDecoder(strings.NewReader(string(b)))
+	dec.DisallowUnknownFields()
+	var doc struct {
+		V   int               `json:"v"`
+		IDs map[string]string `json:"ids"`
+	}
+	if err := dec.Decode(&doc); err != nil || doc.V != 1 {
+		a.deadCorrupt = true
+		return
+	}
+	var extra any
+	if err := dec.Decode(&extra); err != io.EOF {
+		a.deadCorrupt = true
+		return
+	}
+	for id, ts := range doc.IDs {
+		if !safePendingID(id) {
+			a.deadCorrupt = true
+			a.deadAt = map[string]time.Time{}
+			return
+		}
+		t, err := time.Parse(time.RFC3339, ts)
+		if err != nil {
+			a.deadCorrupt = true
+			a.deadAt = map[string]time.Time{}
+			return
+		}
+		a.deadAt[id] = t
+	}
+}
+
+// rememberDeadUnlocked records id in the tombstone ledger. The caller holds ckMu.
+func (a *App) rememberDeadUnlocked(id string) error {
+	if a == nil || !safePendingID(id) {
+		return errors.New("pending id")
+	}
+	if a.deadAt == nil {
+		a.deadAt = map[string]time.Time{}
+	}
+	if _, ok := a.deadAt[id]; !ok {
+		a.deadAt[id] = time.Now().UTC().Truncate(time.Second)
+	}
+	return a.writeDeadUnlocked()
+}
+
+func (a *App) writeDeadUnlocked() error {
+	ids := map[string]string{}
+	for id, t := range a.deadAt {
+		ids[id] = t.UTC().Format(time.RFC3339)
+	}
+	raw, err := json.Marshal(struct {
+		V   int               `json:"v"`
+		IDs map[string]string `json:"ids"`
+	}{V: 1, IDs: ids})
+	if err != nil {
+		return err
+	}
+	return writeAtomic600(a.tombstonePath(), raw)
+}
+
+func writeAtomic600(path string, body []byte) error {
+	if path == "" {
+		return errors.New("path")
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, ".tomb-")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if _, err := tmp.Write(body); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}
+
+// maybeSweepApprovals removes old terminal checkpoints about once an hour.
+func (a *App) maybeSweepApprovals(now time.Time) {
+	if a == nil {
+		return
+	}
+	a.ckMu.Lock()
+	due := a.lastSweep.IsZero() || now.Sub(a.lastSweep) >= approvalSweepEvery
+	a.ckMu.Unlock()
+	if !due {
+		return
+	}
+	a.sweepApprovalFiles(now)
+}
+
+// sweepApprovalFiles deletes terminal checkpoints and hook-sent markers
+// older than approvalRetention. Open checkpoints and tombstones stay.
+// The caller does not hold ckMu.
+func (a *App) sweepApprovalFiles(now time.Time) {
+	if a == nil {
+		return
+	}
+	a.ckMu.Lock()
+	a.lastSweep = now
+	a.ckMu.Unlock()
+	a.sweepCheckpointDir(now)
+	a.sweepHookSent(now)
+}
+
+func (a *App) sweepCheckpointDir(now time.Time) {
+	dir := a.checkpointDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cut := now.Add(-approvalRetention)
+	for _, ent := range entries {
+		name := ent.Name()
+		if ent.IsDir() || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		id := strings.TrimSuffix(name, ".json")
+		info, err := ent.Info()
+		if err != nil || info.ModTime().After(cut) {
+			continue
+		}
+		ck, kind := a.readCheckpoint(id)
+		if kind != "" {
+			continue
+		}
+		switch ck.State {
+		case ckConsumed, ckCancelled, ckRefused:
+		default:
+			continue
+		}
+		path, err := a.checkpointPath(id)
+		if err != nil {
+			continue
+		}
+		_ = os.Remove(path)
+	}
+}
+
+func (a *App) sweepHookSent(now time.Time) {
+	if a == nil || a.cfg.DataDir == "" {
+		return
+	}
+	dir := filepath.Join(a.cfg.DataDir, "permbroker", "hook-sent")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cut := now.Add(-approvalRetention)
+	for _, ent := range entries {
+		if ent.IsDir() {
+			continue
+		}
+		info, err := ent.Info()
+		if err != nil || info.ModTime().After(cut) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, ent.Name()))
+	}
+}
+
+// failUncoveredWaiting fails waiting runs that no open checkpoint covers.
+// scope is the audit reason, usually "missing". The bot is set idle.
+func (a *App) failUncoveredWaiting(botID, scope string) {
+	if a == nil || a.st == nil {
+		return
+	}
+	if scope == "" {
+		scope = "missing"
+	}
+	a.auditUnreadableCheckpoints()
+	runs, err := a.st.ListWaiting()
+	if err != nil {
+		return
+	}
+	covered := a.openRunIDs()
+	for _, run := range runs {
+		if botID != "" && run.BotID != botID {
+			continue
+		}
+		if covered[run.ID] {
+			continue
+		}
+		if ok, _ := a.st.FailWaiting(run.ID, "approval refused"); ok {
+			a.persistRunNotice(run.BotID, run.ID, "error", "approval refused")
+		}
+		_ = a.st.SetStatus(run.BotID, "idle")
+		a.clearWait(run.BotID)
+		if a.broker != nil {
+			a.broker.AuditCheckpoint(run.BotID, "", run.ID, "", "", "", "", "resume_refused", scope)
+		}
+	}
+}
+
+func (a *App) openRunIDs() map[string]bool {
+	out := map[string]bool{}
+	if a == nil {
+		return out
+	}
+	dir := a.checkpointDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return out
+	}
+	for _, ent := range entries {
+		name := ent.Name()
+		if ent.IsDir() || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		id := strings.TrimSuffix(name, ".json")
+		ck, kind := a.readCheckpoint(id)
+		if kind != "" || ck.State != ckOpen {
+			continue
+		}
+		if a.tombstoned(id) {
+			continue
+		}
+		out[ck.RunID] = true
+	}
+	return out
+}
+
+func (a *App) auditUnreadableCheckpoints() {
+	if a == nil || a.broker == nil {
+		return
+	}
+	dir := a.checkpointDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, ent := range entries {
+		name := ent.Name()
+		if ent.IsDir() || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		id := strings.TrimSuffix(name, ".json")
+		if _, kind := a.readCheckpoint(id); kind == "tamper" {
+			a.broker.AuditCheckpoint("", "", "", "", "", "", id, "resume_refused", "tamper")
+		}
+	}
+}
+
+// auditMiss records a decision whose pending item is already gone.
+// It does not write the checkpoint and does not call refuseOpen.
+func (a *App) auditMiss(id string, snap permbroker.PendingSnapshot) {
+	if a == nil || a.broker == nil || id == "" {
+		return
+	}
+	_, kind := a.readCheckpoint(id)
+	if kind != "" && snap.ID == "" {
+		return
+	}
+	a.broker.AuditCheckpoint(snap.BotID, snap.SessionID, snap.RunID, snap.TaskID, snap.Cwd, snap.Tool, id, "resume_refused", "missing")
 }

@@ -701,7 +701,7 @@ func TestGolden_HookDecisionPostsNoteOnce(t *testing.T) {
 		}
 		var out []string
 		for _, m := range msgs {
-			if strings.HasPrefix(m.Content, "Your request ") {
+			if strings.HasPrefix(m.Content, hookNoteMarker) {
 				out = append(out, m.Content)
 			}
 		}
@@ -725,13 +725,16 @@ func TestGolden_HookDecisionPostsNoteOnce(t *testing.T) {
 	if res.StatusCode != 200 {
 		t.Fatalf("approve %d %s", res.StatusCode, b)
 	}
-	want := "Your request " + okSnap.ID + " was approved; run exactly: echo HOOK_OK"
+	want := hookNoteMarker + "Notice: request " + okSnap.ID + " was approved; the command shown below as data: " + hookCommandData("echo HOOK_OK")
 	gotNotes := notes()
 	if len(gotNotes) != 1 || gotNotes[0] != want {
 		t.Fatalf("note %q", gotNotes)
 	}
-	mapped := mapHist(store.Message{Role: "system", Content: want}, nil)
-	if mapped.Role != "user" || mapped.Content != want || strings.Contains(mapped.Content, "[scheduled]") {
+	mapped := mapHist(store.Message{Role: "system", Content: gotNotes[0]}, nil)
+	if mapped.Role != "system" || strings.Contains(mapped.Content, hookNoteMarker) || strings.Contains(mapped.Content, "\n") {
+		t.Fatalf("mapHist %+v", mapped)
+	}
+	if !strings.Contains(mapped.Content, "shown below as data:") || !strings.Contains(mapped.Content, hookCommandData("echo HOOK_OK")) {
 		t.Fatalf("mapHist %+v", mapped)
 	}
 	app.notifyHook(okSnap, "approve")
@@ -747,7 +750,7 @@ func TestGolden_HookDecisionPostsNoteOnce(t *testing.T) {
 	if res.StatusCode != 200 {
 		t.Fatalf("deny %d %s", res.StatusCode, b)
 	}
-	denyWant := "Your request " + denySnap.ID + " was denied."
+	denyWant := hookNoteMarker + "Notice: request " + denySnap.ID + " was denied."
 	gotNotes = notes()
 	if len(gotNotes) != 2 || gotNotes[0] != want || gotNotes[1] != denyWant {
 		t.Fatalf("notes %q", gotNotes)
@@ -767,7 +770,7 @@ func TestGolden_HookDecisionPostsNoteOnce(t *testing.T) {
 		t.Fatalf("critical approve %d %s", res.StatusCode, b)
 	}
 	for _, n := range notes() {
-		if strings.Contains(n, "run exactly") && strings.Contains(n, crit.ID) {
+		if strings.Contains(n, "shown below as data") && strings.Contains(n, crit.ID) {
 			t.Fatalf("critical hook note %q", n)
 		}
 		if strings.Contains(n, "CRIT_HOOK") {

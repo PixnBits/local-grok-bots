@@ -1493,7 +1493,7 @@ func (e *Engine) ask(req Request, in inspected) Decision {
 		return e.finish(req, in, VerdictDeny, "denied", "", "human", "")
 	}
 	if id, ok := e.byKey[key]; ok {
-		return e.finish(req, in, VerdictDeny, pendingReason(id), id, "policy", "")
+		return e.finishAsk(req, in, id)
 	}
 	item := &pendingItem{
 		ID:         newID("p_"),
@@ -1535,7 +1535,21 @@ func (e *Engine) ask(req Request, in inspected) Decision {
 		}
 		e.staged[item.ID] = struct{}{}
 	}
-	return e.finish(req, in, VerdictDeny, pendingReason(item.ID), item.ID, "policy", "")
+	return e.finishAsk(req, in, item.ID)
+}
+
+// finishAsk records an ask. The hook still receives a deny, because it
+// cannot wait. The audit row is "ask", not "deny": nothing was refused.
+func (e *Engine) finishAsk(req Request, in inspected, pendingID string) Decision {
+	reason := pendingReason(pendingID)
+	e.noteRequest(req, in)
+	e.noteOutcome(req, in, VerdictDeny, reason, pendingID, "")
+	e.auditDecision(req, in, "ask", reason, pendingID, "policy", "", "")
+	return Decision{
+		Verdict: VerdictDeny, Reason: reason, PendingID: pendingID,
+		Level: in.Level, Actor: "policy", RuleID: "", InputHash: in.Hash,
+		Eligible: in.Eligible, Compound: in.Compound,
+	}
 }
 
 func pendingReason(id string) string {

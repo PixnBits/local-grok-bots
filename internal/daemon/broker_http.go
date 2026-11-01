@@ -235,14 +235,7 @@ func (a *App) handleBrokerDenyAll(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	snaps := a.snapshotPending(ids)
-	rep, err := a.broker.DenyAll(ids)
-	if err != nil {
-		writeBrokerErr(w, err)
-		return
-	}
-	a.settleBatch(rep, "deny", snaps)
-	writeJSON(w, http.StatusOK, rep)
+	a.finishBatch(w, ids, "deny", a.broker.DenyAll)
 }
 
 func (a *App) handleBrokerApproveAll(w http.ResponseWriter, r *http.Request) {
@@ -257,14 +250,7 @@ func (a *App) handleBrokerApproveAll(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	snaps := a.snapshotPending(ids)
-	rep, err := a.broker.ApproveAll(ids)
-	if err != nil {
-		writeBrokerErr(w, err)
-		return
-	}
-	a.settleBatch(rep, "approve", snaps)
-	writeJSON(w, http.StatusOK, rep)
+	a.finishBatch(w, ids, "approve", a.broker.ApproveAll)
 }
 
 func brokerBatchIDs(w http.ResponseWriter, r *http.Request) ([]string, bool) {
@@ -350,18 +336,68 @@ func (a *App) handleBrokerDecide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	decision := strings.TrimSpace(req.Decision)
+	// Claim before Decide. The loser is 409 and does not touch the checkpoint.
+	if !a.claimDecision(id) {
+		writeBrokerErr(w, permbroker.ErrStale)
+		return
+	}
+	defer a.releaseDecision(id)
 	snap, _ := a.broker.SnapshotPending(id)
 	if err := a.broker.Decide(id, decision, strings.TrimSpace(req.Scope)); err != nil {
 		if errors.Is(err, permbroker.ErrStale) {
+			// The winner's ruleset changed under the claim. The item is dead.
 			a.refuseOpen(id, snap, "policy")
 		} else if errors.Is(err, permbroker.ErrNotFound) {
-			a.refuseOpen(id, snap, "missing")
+			a.auditMiss(id, snap)
 		}
 		writeBrokerErr(w, err)
 		return
 	}
 	a.afterBrokerDecision(id, decision, snap)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// finishBatch claims every id before ApproveAll or DenyAll. An id that
+// loses the claim is reported stale and is not refused. ErrNotFound only
+// audits. An empty owned list is 409 and does not call the engine.
+func (a *App) finishBatch(w http.ResponseWriter, ids []string, decision string, apply func([]string) (permbroker.BatchReport, error)) {
+	owned, blocked := a.claimBatch(ids)
+	defer a.releaseBatch(owned)
+	if len(owned) == 0 {
+		writeBrokerErr(w, permbroker.ErrStale)
+		return
+	}
+	snaps := a.snapshotPending(owned)
+	rep, err := apply(owned)
+	if err != nil {
+		writeBrokerErr(w, err)
+		return
+	}
+	a.settleBatch(rep, decision, snaps)
+	for _, id := range blocked {
+		rep.Results = append(rep.Results, permbroker.BatchItem{ID: id, Error: permbroker.ErrStale.Error()})
+		rep.Skipped++
+	}
+	writeJSON(w, http.StatusOK, rep)
+}
+
+func (a *App) claimBatch(ids []string) (owned, blocked []string) {
+	seen := map[string]struct{}{}
+	for _, id := range ids {
+		if _, dup := seen[id]; dup || !a.claimDecision(id) {
+			blocked = append(blocked, id)
+			continue
+		}
+		seen[id] = struct{}{}
+		owned = append(owned, id)
+	}
+	return owned, blocked
+}
+
+func (a *App) releaseBatch(ids []string) {
+	for _, id := range ids {
+		a.releaseDecision(id)
+	}
 }
 
 func (a *App) snapshotPending(ids []string) map[string]permbroker.PendingSnapshot {
@@ -386,6 +422,10 @@ func (a *App) settleBatch(rep permbroker.BatchReport, decision string, snaps map
 		}
 		if item.Error == permbroker.ErrStale.Error() {
 			a.refuseOpen(item.ID, snap, "policy")
+			continue
+		}
+		if item.Error == permbroker.ErrNotFound.Error() {
+			a.auditMiss(item.ID, snap)
 		}
 	}
 }

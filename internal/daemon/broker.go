@@ -617,7 +617,10 @@ func (a *App) noteUserMessage(botID, msgID, text string) {
 		a.broker.NoteUserText(botID, msgID, text)
 	}
 	// A new user message ends the previous task. Its checkpoint must not run.
+	// An unreadable checkpoint cannot be cancelled by that walk, so a
+	// waiting run it no longer covers is failed here and the bot goes idle.
 	a.cancelApprovalsExceptTask(botID, msgID, "message")
+	a.failUncoveredWaiting(botID, "missing")
 }
 
 func lastUserTask(inputs []store.Message) string {
@@ -730,7 +733,7 @@ func (a *App) gateShell(ctx context.Context, bot store.Bot, command string) (boo
 	}
 	// A resumed native call was already re-evaluated. The slot is one
 	// command, and shellExecRel still runs before the jail.
-	if a.takeShellOnce(bot.ID, command, cwd) {
+	if a.takeShellOnce(ctx, bot.ID, command, cwd) {
 		a.noteShellPlan(bot.ID, plan)
 		return true, nil
 	}

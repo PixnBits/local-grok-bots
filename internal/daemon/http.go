@@ -913,7 +913,16 @@ func (a *App) handleCancel(w http.ResponseWriter, r *http.Request) {
 	}
 	if run.Status == "waiting" {
 		a.cancelRunApproval(botID, runID, "stop")
+		// CancelWaiting clears the row even when the checkpoint cannot be
+		// read. cancelRunApproval already did this when the file was open.
+		if ok, _ := a.st.CancelWaiting(runID); ok {
+			if a.broker != nil {
+				a.broker.AuditCheckpoint(botID, "", runID, "", "", "", "", "cancel", "stop")
+			}
+			a.persistRunNotice(botID, runID, "cancelled", "")
+		}
 		_ = a.st.SetStatus(botID, "idle")
+		a.clearWait(botID)
 		a.bus.Publish(runID, "done", map[string]any{"run_id": runID, "status": "cancelled"})
 		writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
 		return

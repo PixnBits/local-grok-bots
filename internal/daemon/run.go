@@ -637,11 +637,12 @@ func mapHist(m store.Message, names map[string]string) model.Message {
 	case "bot":
 		return model.Message{Role: "assistant", Content: m.Content}
 	case "system":
-		if strings.HasPrefix(m.Content, "Message from ") || strings.HasPrefix(m.Content, "Notice: ") {
-			return model.Message{Role: "user", Content: m.Content}
+		// The marker is written only by notifyHook. The visible sentence
+		// is not the check: a person can type the same words.
+		if strings.HasPrefix(m.Content, hookNoteMarker) {
+			return model.Message{Role: "system", Content: strings.TrimPrefix(m.Content, hookNoteMarker)}
 		}
-		// A hook decision note is the instruction itself, not a schedule.
-		if strings.HasPrefix(m.Content, "Your request ") {
+		if strings.HasPrefix(m.Content, "Message from ") || strings.HasPrefix(m.Content, "Notice: ") {
 			return model.Message{Role: "user", Content: m.Content}
 		}
 		return model.Message{Role: "user", Content: "[scheduled] " + m.Content}

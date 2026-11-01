@@ -5,7 +5,10 @@ security boundary. The broker is the ask path. It fails closed: a down,
 late, or ambiguous answer is a deny. A non-admin path cannot approve a
 call or create a rule.
 
-The flag is off unless policy sets it.
+The flag is off unless policy sets it. An ask exists only when `broker`
+is `hook`. With the broker off there is no permission policy: the daemon
+does not classify the command, does not open a card, and does not suspend
+the run.
 
 ```toml
 [cli.permission]
@@ -149,15 +152,25 @@ tool even if the JSON says allow. The hook never waits for a person.
 
 On an ask, the daemon records a pending item and the hook denies with
 `pending approval <id>; retry the identical command after approval`. The
-hook still cannot wait. A native `run_shell` ask does not give that
-sentence to the model. The daemon writes a checkpoint at
+hook still cannot wait. That denial is the hook's reply. The audit row
+for the ask is decision `ask`, actor `policy`. It is not a deny. A real
+refusal (a deny rule, a human deny, or a resume that has no bind) stays
+decision `deny`.
+
+A native `run_shell` ask does not give that sentence to the model. The
+daemon writes a checkpoint at
 `DATA/permbroker/checkpoints/<pending-id>.json` (mode 0600, temp file
 then rename) and leaves the same run `waiting`. The file is HMAC-SHA256
-over the pending id, a NUL, and the raw payload bytes, using the 32-byte
-key at `DATA/permbroker/checkpoint.key` (mode 0600). The payload holds
-the bot, run, task, session, tool name, arguments, call id, resolved
-cwd, and the message history through the assistant message that contains
-the call. The checkpoint is not permission to run.
+over the pending id, a NUL, and the raw payload bytes. The key is 32
+bytes from `crypto/rand`, stored at `DATA/permbroker/checkpoint.key`
+(directory mode 0700, file mode 0600, temp file then rename). The key is
+not derived from a secret outside `DATA`, and it is not mounted into the
+jail. A process running as the same user, outside the jail, can read it,
+the same as the other secrets under `DATA`. A different user cannot. A
+file whose MAC does not match, or whose mode is not 0600, is not loaded.
+The payload holds the bot, run, task, session, tool name, arguments,
+call id, resolved cwd, and the message history through the assistant
+message that contains the call. The checkpoint is not permission to run.
 
 Approve and approve-all re-check the cwd with `confirmShellCwd`, then
 `ResumeEval`. A deny rule or a ruleset change refuses. `shellExecRel`
@@ -167,9 +180,21 @@ not run it again. The tool result is appended and the same run id
 continues with a fresh 8-round budget. Deny and deny-all append exactly
 `denied by user` and continue. A new user message, stop, bot deletion,
 or task end marks the checkpoint `cancelled`; the decision is stored and
-the call does not run. Startup loads open checkpoints and restores their
-pending items. A bad MAC, a missing item, a policy denial, or a failed
-cwd re-check audits `resume_refused` and does not run. Suspend, resume,
+the call does not run. Startup loads an open checkpoint only when its
+pending id is not in the tombstone ledger and its run is still `waiting`,
+then restores that pending item. A restored open copy of a tombstoned id,
+or an open file whose run is not `waiting`, is refused and audited
+(`resume_refused`, scope `replay` or `stale`), including after a restart.
+The ledger is `DATA/permbroker/tombstones.json` (directory 0700, file
+0600, temp file then rename). Each entry is only the pending id and the
+time. A bad ledger is fail closed: open checkpoints are not restored.
+A checkpoint that cannot be read (tampered, truncated, mode other than
+0600, or deleted) fails the waiting run, audits it, and sets the bot
+idle. Stop cancels that run even when the file cannot be read. Terminal
+checkpoints (`consumed`, `cancelled`, `refused`) and hook-sent markers
+older than 7 days are removed at startup and about hourly. Tombstones
+are kept. A bad MAC, a missing item, a policy denial, or a failed cwd
+re-check audits `resume_refused` and does not run. Suspend, resume,
 cancel, and the CLI note are audited.
 
 A critical native approval is one execution bound to that pending id. It
@@ -177,9 +202,14 @@ is not a once-token, and `takeToken` still refuses critical commands. A
 hook-originated critical card offers Deny and an explanation, not
 Approve once. For any other hook item, a decision posts one system note
 and starts or queues a run, only while that item's task is still the
-bot's current task: `Your request <id> was approved; run exactly: <cmd>`
-or `Your request <id> was denied.` The note is sent at most once. The
-retried hook command still depends on the once-token.
+bot's current task. The note is recognised by a daemon-only marker, not
+by its words. The command is one JSON string, truncated to 300 runes
+with an ellipsis when it was cut, inside `Notice: request <id> was
+approved; the command shown below as data: <quoted>`. A denial is
+`Notice: request <id> was denied.` The model sees that line as
+`role=system`. A person can type the same words; that message is not
+the note. The note is sent at most once. The retried hook command still
+depends on the once-token.
 
 That once-token is bound to the bot, session, tool, input hash, and cwd,
 and it expires. The default lifetime is 15 minutes. A once-token kept

@@ -455,13 +455,19 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		defer shellCancel()
 		var timerMu sync.Mutex
 		var shellTimer *time.Timer
+		var timerFired bool
 		armShell := func(d time.Duration) {
 			timerMu.Lock()
 			defer timerMu.Unlock()
 			if shellTimer != nil {
 				shellTimer.Stop()
 			}
-			shellTimer = time.AfterFunc(d, shellCancel)
+			shellTimer = time.AfterFunc(d, func() {
+				timerMu.Lock()
+				timerFired = true
+				timerMu.Unlock()
+				shellCancel()
+			})
 		}
 		armShell(30 * time.Second)
 		defer func() {
@@ -545,6 +551,10 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		})
 		a.recordSandboxEvents(current.ID, res.Events)
 		summary := formatShell(res.Stdout, res.Stderr)
+		timerMu.Lock()
+		fired := timerFired
+		timerMu.Unlock()
+		err = adjustShellStop(ctx, fired, err)
 		if err != nil {
 			a.clearShellPlan(current.ID)
 			return summary, fmt.Errorf("%s\n%s", err.Error(), summary)
@@ -746,6 +756,28 @@ func (a *App) recordSandboxNotice(botID string, ev sandbox.Event, postNotice boo
 	if postNotice && ev.Notice != "" {
 		a.postSystemNotice(botID, "Notice: "+ev.Notice)
 	}
+}
+
+// adjustShellStop keeps a real shell deadline as "shell timed out".
+// Parent cancel (shutdown or stop) is "shell interrupted", even when the
+// sandbox or the shell timer also fired. The model must not be told the
+// command timed out because the daemon was killed.
+func adjustShellStop(parent context.Context, timerFired bool, err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	stopped := strings.Contains(msg, "shell timed out") || strings.Contains(msg, "shell interrupted")
+	if !stopped {
+		return err
+	}
+	if parent != nil && parent.Err() != nil {
+		return errors.New("shell interrupted")
+	}
+	if timerFired && strings.Contains(msg, "shell interrupted") {
+		return errors.New("shell timed out")
+	}
+	return err
 }
 
 func formatShell(stdout, stderr string) string {
