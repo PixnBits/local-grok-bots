@@ -571,9 +571,13 @@ async function loadBots() {
     if (b.active_run_id && b.active_run_id !== state.streaming) follow(b.active_run_id);
     else if (b.pending_permissions > 0 && state.streaming) loadPendingPermissions(state.streaming).catch(() => {});
     if (b.last_run_status === "waiting") {
+      state.workingHold = "";
       state.approvalWait = true;
       if (b.waiting_tool) state.liveTool = b.waiting_tool;
-      setWorking(true);
+      setWorking(true, "", "waiting");
+    } else if (!state.streaming && b.status !== "running" && (!state.stop || state.stop.phase !== "stopping")) {
+      state.workingHold = "closed";
+      setWorking(false);
     }
   }
 }
@@ -957,6 +961,7 @@ async function refreshBot() {
   if (i >= 0) state.bots[i] = b;
   else state.bots.push(b);
   if (b.last_run_status === "waiting") {
+    state.workingHold = "";
     state.approvalWait = true;
     if (b.waiting_tool) state.liveTool = b.waiting_tool;
   } else if (!pendingApproval()) {
@@ -964,7 +969,11 @@ async function refreshBot() {
   }
   paintHeader(b);
   renderBots();
-  if (b.last_run_status === "waiting") setWorking(true);
+  if (b.last_run_status === "waiting") setWorking(true, "", "waiting");
+  else if (!state.streaming && b.status !== "running" && (!state.stop || state.stop.phase !== "stopping")) {
+    state.workingHold = "closed";
+    setWorking(false);
+  }
   return b;
 }
 function whoText(m) {
@@ -1573,12 +1582,15 @@ function workPhase() {
   if (typeof hookRunWaiting === "function" && hookRunWaiting(state.botId, typeof approvalItems === "undefined" ? null : approvalItems)) return "waiting";
   return "working";
 }
-function setWorking(on, text) {
+function setWorking(on, text, phaseOverride) {
   const w = $("#working");
   if (!w) return;
+  // A finished run latches the banner off. Polls must not bring the
+  // waiting sentence back until the next run or a new waiting status.
+  if (on && state && state.workingHold === "closed" && phaseOverride !== "waiting") return;
   const box = $("#msgs");
   if (text && text !== "working" && text !== "Working") state.liveTool = text;
-  const phase = workPhase();
+  const phase = phaseOverride || workPhase();
   const keep = phase === "stopping";
   w.hidden = !on && !keep;
   const label = workingIndicatorText(phase, phase === "stopping" ? "" : (state.liveTool || ""));
@@ -2297,6 +2309,7 @@ async function follow(runId) {
   state.stop = reduceStop(state.stop || freshStop(), { type: "run", runId: runId });
   syncComposer();
   state.liveTool = "";
+  state.workingHold = "";
   syncStopButton();
   if (noteRunStarted(state.bots, state.botId)) renderBots();
   setWorking(true);
@@ -2364,7 +2377,13 @@ async function follow(runId) {
             const tool = payload.text || payload.state || "";
             if (tool && tool !== "working" && tool !== "running" && tool !== "retrying") state.liveTool = tool;
           }
-          if (!state.stop || state.stop.phase !== "stopping") setWorking(true);
+          if (applied.workingBanner === "off") {
+            state.workingHold = "closed";
+            setWorking(false);
+          } else if (!state.stop || state.stop.phase !== "stopping") {
+            if (applied.workingBanner === "waiting") state.workingHold = "";
+            setWorking(true, "", applied.workingBanner === "waiting" ? "waiting" : "working");
+          }
           paintSubline(currentBot());
         } else if (event === "stream_reset") {
           if (typeof streamResetApplies !== "function" || streamResetApplies(payload.run_id, runId)) {
@@ -2420,6 +2439,7 @@ async function follow(runId) {
           if (event === "timeout") announce(timeoutAnnouncement(payload.error));
           const applied = applyStreamStatus(currentBot(), state.approvalWait, event, payload);
           state.approvalWait = applied.approvalWait;
+          if (applied.workingBanner === "off") state.workingHold = "closed";
           if (applied.bot && applied.bot.id) {
             const bi = state.bots.findIndex(x => x.id === applied.bot.id);
             if (bi >= 0) state.bots[bi] = applied.bot;
@@ -5221,26 +5241,32 @@ function headerPhaseWord(bot, streaming, stopPhase, approvalWait) {
 
 // Header word after a stream event. A finished or non-waiting status
 // clears a cached "waiting" run so the pill updates before the next reload.
+// workingBanner is "waiting", "working", or "off". The same events that
+// clear the pill clear the waiting banner: a finished run is "off".
 function applyStreamStatus(bot, approvalWait, event, payload) {
   const b = bot ? Object.assign({}, bot) : null;
   let wait = !!approvalWait;
+  let workingBanner = "working";
   const ev = String(event || "");
   const p = payload || {};
   if (ev === "status") {
     if (p.state === "waiting") {
       wait = true;
+      workingBanner = "waiting";
       if (b) b.last_run_status = "waiting";
     } else {
       wait = false;
+      workingBanner = "working";
       if (b && b.last_run_status === "waiting") b.last_run_status = p.state || "working";
     }
   } else if (ev === "done" || ev === "error" || ev === "timeout") {
     wait = false;
+    workingBanner = "off";
     let status = ev === "error" ? "error" : (ev === "timeout" ? "timeout" : (p.status || "done"));
     if (!status) status = "done";
     if (b) b.last_run_status = status;
   }
-  return { bot: b, approvalWait: wait };
+  return { bot: b, approvalWait: wait, workingBanner: workingBanner };
 }
 
 // True when this bot has a hook approval card. Native cards use the

@@ -188,6 +188,30 @@ func TestHeaderPhaseWordWired(t *testing.T) {
 	}
 }
 
+// TestWorkingBannerClearsWithPill fails if the #working waiting banner
+// stays up after the stream event that clears the header pill.
+func TestWorkingBannerClearsWithPill(t *testing.T) {
+	src := ClientSource()
+	status := extractJSFunction(t, src, "applyStreamStatus")
+	if !strings.Contains(status, "workingBanner") || !strings.Contains(status, `"off"`) {
+		t.Fatal("applyStreamStatus does not clear the working banner when the run finishes")
+	}
+	follow := extractJSFunction(t, src, "follow")
+	if strings.Count(follow, "workingBanner") < 2 || !strings.Contains(follow, `workingHold = "closed"`) {
+		t.Fatal("follow does not clear the working banner on the status and done paths")
+	}
+	set := extractJSFunction(t, src, "setWorking")
+	if !strings.Contains(set, "workingHold") {
+		t.Fatal("setWorking lets a finished run show the waiting banner again")
+	}
+	for _, name := range []string{"refreshBot", "loadBots"} {
+		fn := extractJSFunction(t, src, name)
+		if !strings.Contains(fn, `workingHold = "closed"`) || !strings.Contains(fn, "setWorking(false)") {
+			t.Fatalf("%s leaves the working banner up after the run is idle", name)
+		}
+	}
+}
+
 func TestThreadLogic(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -512,6 +536,20 @@ check("pill-done", (function () {
 check("pill-working", (function () {
   const applied = ctx.applyStreamStatus({id:"b", status:"running", last_run_status:"waiting"}, true, "status", {state:"working"});
   return applied.approvalWait === false && applied.bot.last_run_status !== "waiting" && ctx.headerPhaseWord(applied.bot, true, "", applied.approvalWait) !== "waiting";
+})());
+check("banner-done", (function () {
+  const applied = ctx.applyStreamStatus({id:"b", status:"running", last_run_status:"waiting"}, true, "done", {status:"done"});
+  return applied.workingBanner === "off" && applied.approvalWait === false && ctx.headerPhaseWord(applied.bot, false, "", applied.approvalWait) !== "waiting";
+})());
+check("banner-error", ctx.applyStreamStatus({id:"b", last_run_status:"waiting"}, true, "error", {}).workingBanner === "off");
+check("banner-timeout", ctx.applyStreamStatus({id:"b", last_run_status:"waiting"}, true, "timeout", {}).workingBanner === "off");
+check("banner-status-working", (function () {
+  const applied = ctx.applyStreamStatus({id:"b", status:"running", last_run_status:"waiting"}, true, "status", {state:"working", text:"working"});
+  return applied.workingBanner === "working" && applied.approvalWait === false && ctx.workingIndicatorText(applied.workingBanner, "run_shell") !== "Waiting for your approval · run_shell";
+})());
+check("banner-status-wait", (function () {
+  const applied = ctx.applyStreamStatus({id:"b", status:"running", last_run_status:"done"}, false, "status", {state:"waiting", text:"run_shell"});
+  return applied.workingBanner === "waiting" && applied.approvalWait === true && ctx.workingIndicatorText(applied.workingBanner, "run_shell") === "Waiting for your approval · run_shell";
 })());
 check("hook-wait", ctx.hookRunWaiting("b", [{bot_id:"b", origin:"hook"}]) === true);
 check("hook-other", ctx.hookRunWaiting("b", [{bot_id:"a", origin:"hook"}]) === false && ctx.hookRunWaiting("b", [{bot_id:"b", origin:"native"}]) === false);
