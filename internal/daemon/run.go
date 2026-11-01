@@ -111,6 +111,7 @@ func (a *App) execute(botID, runID string) {
 	through := run.StartedAt
 
 	parseRetried := false
+	schemaRetried := false
 	retriesLeft := turnPol.EffectiveOllamaStallRetries()
 	retried := 0
 	var lastFirst time.Duration
@@ -190,13 +191,13 @@ func (a *App) execute(botID, runID string) {
 				if errLogged == nil {
 					errLogged = ctx.Err()
 				}
-				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, errLogged, 0, limit, limitValue)
+				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, errLogged, 0, limit, limitValue, tools)
 				a.finishOllamaCtx(bot, runID, ctx, msgs, shown, retried, first)
 				return
 			}
 			if te != nil && (te.Limit == "first_output_timeout" || te.Limit == "stall_timeout") {
 				willRetry := retriesLeft > 0
-				a.logOllamaCall(bot.ID, modelName, false, attempt, willRetry, first, te, 0, te.Limit, compactDuration(a.limitDuration(bot.ID, te.Limit)))
+				a.logOllamaCall(bot.ID, modelName, false, attempt, willRetry, first, te, 0, te.Limit, compactDuration(a.limitDuration(bot.ID, te.Limit)), tools)
 				if willRetry {
 					retriesLeft--
 					retried++
@@ -208,7 +209,7 @@ func (a *App) execute(botID, runID string) {
 				return
 			}
 			if te != nil && te.Limit == "model_timeout" {
-				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, te, 0, "model_timeout", compactDuration(turnPol.EffectiveOllamaModelTimeout()))
+				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, te, 0, "model_timeout", compactDuration(turnPol.EffectiveOllamaModelTimeout()), tools)
 				a.finishOllamaTimeout(bot, runID, msgs, "model_timeout", bestPartial, retried, first)
 				return
 			}
@@ -217,7 +218,7 @@ func (a *App) execute(botID, runID string) {
 				// One more call, and only when a round remains. The failed call still counts toward the cap.
 				if errors.As(err, &parseErr) && !parseRetried && round+1 < maxToolRounds {
 					parseRetried = true
-					a.logOllamaCall(bot.ID, modelName, false, attempt, true, first, err, 0, "", "")
+					a.logOllamaCall(bot.ID, modelName, false, attempt, true, first, err, 0, "", "", tools)
 					a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "retrying"})
 					msgs = append(msgs, model.Message{
 						Role:    "user",
@@ -226,7 +227,7 @@ func (a *App) execute(botID, runID string) {
 					parseContinue = true
 					break
 				}
-				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, err, 0, "", "")
+				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, err, 0, "", "", tools)
 				if t := strings.TrimSpace(partial); t != "" {
 					a.persistBotText(bot.ID, runID, t, false)
 				}
@@ -234,13 +235,24 @@ func (a *App) execute(botID, runID string) {
 				a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
 				return
 			}
-			a.logOllamaCall(bot.ID, modelName, true, attempt, false, first, nil, resp.PromptTokens+resp.OutputTokens, "", "")
+			a.logOllamaCall(bot.ID, modelName, true, attempt, false, first, nil, resp.PromptTokens+resp.OutputTokens, "", "", tools)
 			break
 		}
 		if parseContinue {
 			continue
 		}
 		if len(resp.ToolCalls) == 0 {
+			// One automatic retry when the reply denies an attached tool.
+			// The round cap stops a removed flag from looping; the flag
+			// stops a second retry in the same turn.
+			if !schemaRetried && round+1 < maxToolRounds && claimsAttachedToolUnavailable(resp.Content, tools) {
+				schemaRetried = true
+				joined, n := attachedToolLog(tools)
+				a.log(bot.ID, "tool_schema_retry", map[string]any{"tools": joined, "tool_count": n})
+				a.bus.Publish(runID, "stream_reset", map[string]any{"run_id": runID, "reason": "tool_schema"})
+				msgs = append(msgs, model.Message{Role: "system", Content: toolSchemaReminder(tools)})
+				continue
+			}
 			if strings.TrimSpace(resp.Content) != "" {
 				a.persistBotText(bot.ID, runID, resp.Content, false)
 			}
@@ -353,8 +365,8 @@ func runNoticeText(status, errText string) string {
 }
 
 func (a *App) persistRunNotice(botID, runID, status, errText string) {
-	m, err := a.st.AddMessage(store.Message{
-		BotID: botID, Thread: "user", Role: "system", Content: runNoticeText(status, errText), RunID: &runID,
+	m, err := a.st.AddRunNotice(store.Message{
+		BotID: botID, Content: runNoticeText(status, errText), RunID: &runID,
 	})
 	if err != nil {
 		return
@@ -460,13 +472,16 @@ func (a *App) limitDuration(botID, limit string) time.Duration {
 	}
 }
 
-func (a *App) logOllamaCall(botID, modelName string, ok bool, attempt int, retry bool, first time.Duration, err error, tokens int, limit, limitValue string) {
+func (a *App) logOllamaCall(botID, modelName string, ok bool, attempt int, retry bool, first time.Duration, err error, tokens int, limit, limitValue string, tools []model.Tool) {
+	joined, n := attachedToolLog(tools)
 	detail := map[string]any{
 		"model":           modelName,
 		"ok":              ok,
 		"attempt":         attempt,
 		"retry":           retry,
 		"first_output_ms": first.Milliseconds(),
+		"tools":           joined,
+		"tool_count":      n,
 	}
 	if err != nil {
 		detail["error"] = err.Error()
@@ -614,9 +629,17 @@ func (a *App) buildMessagesHist(bot store.Bot, tools []model.Tool) ([]model.Mess
 		b.WriteString("\n")
 	}
 	b.WriteString("\n" + attachedToolsLine(tools) + "\n" + toolAuthority + "\n\nYou can call tools. create_bot creates a bot: pass name and description. description is the standing prompt the new bot is given. instructions is an old name for that same field and still works. Do not use the shell to create a bot. update_bot changes a bot. list_bots and read_bot inspect bots. send_dm sends a direct message. write_memory and delete_memory keep notes. set_timer schedules a prompt back to you: pass prompt plus one of in (one-shot duration such as \"5m\"), at (one-shot RFC 3339 time), or every (repeating interval); list_timers and clear_timer manage them. Each tool's arguments are described in its schema; use those names. read_file, write_file, edit_file, and delete_file stay inside the workspace; paths outside it are rejected and symlinks are refused. run_shell stays inside the workspace. go, gofmt, and other tools installed under /usr are on PATH. Tests stay offline unless net is granted. The build grant does not add a network exception. GitHub remotes are HTTPS to allowlisted repositories. git push waits for an approval card and the daemon sends it; the jail does not send the push. create_pr waits for an approval card. pr_status reads one allowlisted pull request. SSH stays off unless the user turned it on in the profile. After tools, send a short reply to the user. Direct messages from other bots appear as user messages prefixed with [DM from Name]. Scheduled prompts are prefixed with [scheduled]. If you need a tool, call it in this response. Do not reply with only an announcement such as \"Let me check.\"\n")
+	byRun, err := a.toolRecordsForHist(hist)
+	if err != nil {
+		return nil, nil, err
+	}
 	out := []model.Message{{Role: "system", Content: b.String()}}
 	for _, m := range hist {
-		out = append(out, mapHist(m, names))
+		msg := mapHist(m, names)
+		if m.Role == "bot" {
+			msg.Content = appendToolUseSummary(msg.Content, toolUseSummary(toolRecsFor(byRun, m)))
+		}
+		out = append(out, msg)
 	}
 	return out, hist, nil
 }
@@ -639,7 +662,11 @@ func mapHist(m store.Message, names map[string]string) model.Message {
 	case "system":
 		// Kind is the check. The visible sentence is not: a person can
 		// type the same words, and a stored prefix is not a role.
-		if m.Kind == store.KindHookNote {
+		// A run-failure notice stays role=system: the daemon recorded
+		// that the run failed, and the model should not hear that as the
+		// user. Omitting it would hide the failure. An empty kind keeps
+		// the mapping below, including a "Notice: " row stored earlier.
+		if m.Kind == store.KindHookNote || m.Kind == store.KindRunFailed {
 			return model.Message{Role: "system", Content: m.Content}
 		}
 		if strings.HasPrefix(m.Content, "Message from ") || strings.HasPrefix(m.Content, "Notice: ") {
