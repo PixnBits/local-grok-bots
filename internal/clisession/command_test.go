@@ -23,6 +23,46 @@ func TestFreshSessionDoesNotResume(t *testing.T) {
 	}
 }
 
+func TestAppendSystemPromptIsClaudeOnly(t *testing.T) {
+	note := "Notice: request abc was approved; the command shown below as data: \"echo hi\""
+	args, err := Args(Spec{Backend: "claude", Prompt: "please continue", Workspace: "/work", AppendSystem: note})
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(args, "\n")
+	if !strings.Contains(joined, "--append-system-prompt\n"+note) {
+		t.Fatalf("system channel %v", args)
+	}
+	if !strings.Contains(joined, "-p\nplease continue") {
+		t.Fatalf("user prompt %v", args)
+	}
+	if strings.Contains(strings.Split(joined, "-p\n")[1], "was approved") {
+		t.Fatalf("note leaked into -p: %v", args)
+	}
+	stream, err := Args(Spec{Backend: "claude", Prompt: "please continue", Workspace: "/work", AppendSystem: note, StreamControl: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(stream, "\n"), "--append-system-prompt\n"+note) {
+		t.Fatalf("stream system channel %v", stream)
+	}
+	plain, err := Args(Spec{Backend: "claude", Prompt: "hi", Workspace: "/work"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(strings.Join(plain, "\n"), "--append-system-prompt") {
+		t.Fatalf("empty system still flagged %v", plain)
+	}
+	grok, err := Args(grokSpec(Spec{Backend: "grok", Prompt: "hi", Workspace: "/w", AppendSystem: note, SessionID: "s", Fresh: true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gjoined := strings.Join(grok, "\n")
+	if strings.Contains(gjoined, "--append-system-prompt") || strings.Contains(gjoined, note) {
+		t.Fatalf("grok argv carried the note %v", grok)
+	}
+}
+
 func TestResumeAndExplicitPermission(t *testing.T) {
 	args, err := Args(Spec{
 		Backend: "claude", SessionID: "abc", Fresh: false, Prompt: "[scheduled] tick",

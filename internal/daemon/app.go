@@ -102,11 +102,15 @@ type App struct {
 	// deciding is the pending id whose decision is in progress.
 	// The first claim wins. A loser returns 409 and does not touch the file.
 	deciding map[string]struct{}
-	// deadAt is the tombstone ledger (pending id → time). deadCorrupt
-	// means that file could not be read, so no open checkpoint is restored.
-	deadAt      map[string]time.Time
-	deadCorrupt bool
-	lastSweep   time.Time
+	// deadAt is the tombstone ledger (pending id → time).
+	// corruptIDs are ledger lines that named an id and failed the MAC
+	// or the timestamp. Those ids stay closed unless the run is waiting
+	// on that exact checkpoint. ledgerSuspicious means this load was
+	// missing or invalid; a sweep does not rewrite an empty bad file.
+	deadAt           map[string]time.Time
+	corruptIDs       map[string]struct{}
+	ledgerSuspicious bool
+	lastSweep        time.Time
 	// hookPin is the hook binary recorded at the first pin or an admin repin.
 	// hookBin is the path the current armed launch checked.
 	// hookRepinRequired stays set until an admin repin.

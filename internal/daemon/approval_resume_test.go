@@ -701,7 +701,7 @@ func TestGolden_HookDecisionPostsNoteOnce(t *testing.T) {
 		}
 		var out []string
 		for _, m := range msgs {
-			if strings.HasPrefix(m.Content, hookNoteMarker) {
+			if m.Kind == store.KindHookNote {
 				out = append(out, m.Content)
 			}
 		}
@@ -725,13 +725,13 @@ func TestGolden_HookDecisionPostsNoteOnce(t *testing.T) {
 	if res.StatusCode != 200 {
 		t.Fatalf("approve %d %s", res.StatusCode, b)
 	}
-	want := hookNoteMarker + "Notice: request " + okSnap.ID + " was approved; the command shown below as data: " + hookCommandData("echo HOOK_OK")
+	want := "Notice: request " + okSnap.ID + " was approved; the command shown below as data: " + hookCommandData("echo HOOK_OK")
 	gotNotes := notes()
 	if len(gotNotes) != 1 || gotNotes[0] != want {
 		t.Fatalf("note %q", gotNotes)
 	}
-	mapped := mapHist(store.Message{Role: "system", Content: gotNotes[0]}, nil)
-	if mapped.Role != "system" || strings.Contains(mapped.Content, hookNoteMarker) || strings.Contains(mapped.Content, "\n") {
+	mapped := mapHist(store.Message{Role: "system", Kind: store.KindHookNote, Content: gotNotes[0]}, nil)
+	if mapped.Role != "system" || strings.Contains(mapped.Content, "\u2063") || strings.Contains(mapped.Content, "lgb-hook-note") || strings.Contains(mapped.Content, "\n") {
 		t.Fatalf("mapHist %+v", mapped)
 	}
 	if !strings.Contains(mapped.Content, "shown below as data:") || !strings.Contains(mapped.Content, hookCommandData("echo HOOK_OK")) {
@@ -750,7 +750,7 @@ func TestGolden_HookDecisionPostsNoteOnce(t *testing.T) {
 	if res.StatusCode != 200 {
 		t.Fatalf("deny %d %s", res.StatusCode, b)
 	}
-	denyWant := hookNoteMarker + "Notice: request " + denySnap.ID + " was denied."
+	denyWant := "Notice: request " + denySnap.ID + " was denied."
 	gotNotes = notes()
 	if len(gotNotes) != 2 || gotNotes[0] != want || gotNotes[1] != denyWant {
 		t.Fatalf("notes %q", gotNotes)

@@ -359,12 +359,18 @@ func (a *App) handleBrokerDecide(w http.ResponseWriter, r *http.Request) {
 
 // finishBatch claims every id before ApproveAll or DenyAll. An id that
 // loses the claim is reported stale and is not refused. ErrNotFound only
-// audits. An empty owned list is 409 and does not call the engine.
+// audits. When every id loses the claim, the response is still per id
+// and does not call the engine.
 func (a *App) finishBatch(w http.ResponseWriter, ids []string, decision string, apply func([]string) (permbroker.BatchReport, error)) {
 	owned, blocked := a.claimBatch(ids)
 	defer a.releaseBatch(owned)
 	if len(owned) == 0 {
-		writeBrokerErr(w, permbroker.ErrStale)
+		rep := permbroker.BatchReport{Results: make([]permbroker.BatchItem, 0, len(blocked))}
+		for _, id := range blocked {
+			rep.Results = append(rep.Results, permbroker.BatchItem{ID: id, Error: permbroker.ErrStale.Error()})
+			rep.Skipped++
+		}
+		writeJSON(w, http.StatusOK, rep)
 		return
 	}
 	snaps := a.snapshotPending(owned)

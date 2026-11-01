@@ -563,6 +563,8 @@ async function loadBots() {
   renderBots();
   const b = currentBot();
   if (b) {
+    if (b.last_run_status === "waiting") state.approvalWait = true;
+    else if (typeof pendingApproval !== "function" || !pendingApproval()) state.approvalWait = false;
     paintHeader(b);
     // A message sent mid-run can start a follow-up run after the stream
     // ended; pick it up so its reply streams in.
@@ -954,15 +956,15 @@ async function refreshBot() {
   const i = state.bots.findIndex(x => x.id === b.id);
   if (i >= 0) state.bots[i] = b;
   else state.bots.push(b);
-  paintHeader(b);
-  renderBots();
   if (b.last_run_status === "waiting") {
     state.approvalWait = true;
     if (b.waiting_tool) state.liveTool = b.waiting_tool;
-    setWorking(true);
   } else if (!pendingApproval()) {
     state.approvalWait = false;
   }
+  paintHeader(b);
+  renderBots();
+  if (b.last_run_status === "waiting") setWorking(true);
   return b;
 }
 function whoText(m) {
@@ -971,7 +973,7 @@ function whoText(m) {
     const b = currentBot();
     return b ? b.name : "Bot";
   }
-  const note = hookNoteBody(m.content);
+  const note = hookNoteBody(m.content, m.kind);
   const body = note || (m.content || "");
   if (body.startsWith("Message from ") || body.startsWith("Notice: ")) return "";
   return "Scheduled";
@@ -1445,7 +1447,7 @@ function renderMessages(mode = "bottom") {
     } else {
       const bubble = el("div", "bubble system");
       if (whoText(m)) bubble.append(el("span", "who", whoText(m)));
-      bubble.append(document.createTextNode(hookNoteBody(m.content) || (m.content || "")));
+      bubble.append(document.createTextNode(hookNoteBody(m.content, m.kind) || (m.content || "")));
       box.append(bubble);
       if (m.run_id && !shownTools.has(m.run_id) && hasToolRecords(state.tools[m.run_id])) {
         shownTools.add(m.run_id);
@@ -1568,6 +1570,7 @@ function pendingApproval() {
 function workPhase() {
   if (state.stop && state.stop.phase === "stopping") return "stopping";
   if (pendingApproval() || state.approvalWait) return "waiting";
+  if (typeof hookRunWaiting === "function" && hookRunWaiting(state.botId, typeof approvalItems === "undefined" ? null : approvalItems)) return "waiting";
   return "working";
 }
 function setWorking(on, text) {
@@ -2349,11 +2352,15 @@ async function follow(runId) {
         try { payload = JSON.parse(data); } catch { continue; }
         if (event === "status") {
           if (noteRunStarted(state.bots, state.botId)) renderBots();
+          const applied = applyStreamStatus(currentBot(), state.approvalWait, "status", payload);
+          state.approvalWait = applied.approvalWait;
+          if (applied.bot && applied.bot.id) {
+            const bi = state.bots.findIndex(x => x.id === applied.bot.id);
+            if (bi >= 0) state.bots[bi] = applied.bot;
+          }
           if (payload.state === "waiting") {
-            state.approvalWait = true;
             if (payload.text) state.liveTool = payload.text;
           } else {
-            state.approvalWait = false;
             const tool = payload.text || payload.state || "";
             if (tool && tool !== "working" && tool !== "running" && tool !== "retrying") state.liveTool = tool;
           }
@@ -2411,7 +2418,13 @@ async function follow(runId) {
           const status = event === "error" ? "error" : (event === "timeout" ? "timeout" : (payload.status || ""));
           if (event === "timeout" && payload.run_id) state.timeoutRunId = String(payload.run_id);
           if (event === "timeout") announce(timeoutAnnouncement(payload.error));
-          state.approvalWait = false;
+          const applied = applyStreamStatus(currentBot(), state.approvalWait, event, payload);
+          state.approvalWait = applied.approvalWait;
+          if (applied.bot && applied.bot.id) {
+            const bi = state.bots.findIndex(x => x.id === applied.bot.id);
+            if (bi >= 0) state.bots[bi] = applied.bot;
+          }
+          paintSubline(currentBot());
           const prevPhase = state.stop ? state.stop.phase : "";
           applyStop(reduceStop(state.stop || freshStop(), { type: "stream-done", status: status }));
           if (prevPhase === "stopping" && state.stop.phase === "stopped") {
@@ -5206,13 +5219,52 @@ function headerPhaseWord(bot, streaming, stopPhase, approvalWait) {
   return "idle";
 }
 
-// Body of a daemon hook note. Empty means this text is not that note.
-// The marker is the check. A person can type the same sentence.
-function hookNoteBody(content) {
-  const s = content == null ? "" : String(content);
-  const marker = "\u2063lgb-hook-note\u2063";
-  if (s.startsWith(marker)) return s.slice(marker.length);
+// Header word after a stream event. A finished or non-waiting status
+// clears a cached "waiting" run so the pill updates before the next reload.
+function applyStreamStatus(bot, approvalWait, event, payload) {
+  const b = bot ? Object.assign({}, bot) : null;
+  let wait = !!approvalWait;
+  const ev = String(event || "");
+  const p = payload || {};
+  if (ev === "status") {
+    if (p.state === "waiting") {
+      wait = true;
+      if (b) b.last_run_status = "waiting";
+    } else {
+      wait = false;
+      if (b && b.last_run_status === "waiting") b.last_run_status = p.state || "working";
+    }
+  } else if (ev === "done" || ev === "error" || ev === "timeout") {
+    wait = false;
+    let status = ev === "error" ? "error" : (ev === "timeout" ? "timeout" : (p.status || "done"));
+    if (!status) status = "done";
+    if (b) b.last_run_status = status;
+  }
+  return { bot: b, approvalWait: wait };
+}
+
+// True when this bot has a hook approval card. Native cards use the
+// in-thread permission wait. The origin is the check.
+function hookRunWaiting(botId, items) {
+  if (!botId || !items || !items.length) return false;
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    if (it && it.bot_id === botId && it.origin === "hook") return true;
+  }
+  return false;
+}
+
+// Copy for a decision the server already settled. 409 is the conflict.
+function decidedConflictCopy(status) {
+  if (status === 409) return "Already decided";
   return "";
+}
+
+// Body of a daemon hook note. Empty means this text is not that note.
+// kind is the check. A prefix in the text is not.
+function hookNoteBody(content, kind) {
+  if (kind !== "hook_note") return "";
+  return content == null ? "" : String(content);
 }
 // thread-logic:end
 // roster-keys:begin
@@ -7738,7 +7790,15 @@ async function postDecision(item, decision, scope) {
     renderApprovals();
     return;
   }
-  if (res.status === 409 || res.status === 404) {
+  if (res.status === 409) {
+    const msg = decidedConflictCopy(res.status);
+    localRecords.unshift({ text: msg });
+    showStatusToast(msg, null);
+    setIntendedFocus(nextQueueFocusKey(approvalItems, [item.id]));
+    dropItem(item.id);
+    return;
+  }
+  if (res.status === 404) {
     localRecords.unshift({ text: "Approved on another device" });
     setIntendedFocus(nextQueueFocusKey(approvalItems, [item.id]));
     dropItem(item.id);
@@ -8699,6 +8759,13 @@ async function revokeRule(rule, trigger) {
   });
   pollSoon();
 }
+function syncHookWait() {
+  if (typeof hookRunWaiting !== "function" || typeof state === "undefined" || !state) return;
+  const b = typeof currentBot === "function" ? currentBot() : null;
+  const live = !!(state.streaming || state.approvalWait || (b && (b.status === "running" || b.active_run_id)));
+  if (!live) return;
+  setWorking(true);
+}
 async function pollApprovals() {
   if (approvals.polling) { pollAgain = true; return; }
   approvals.polling = true;
@@ -8733,6 +8800,7 @@ async function pollApprovals() {
     Object.keys(cardUI).forEach(function (id) { if (!live[id]) delete cardUI[id]; });
     renderApprovals();
     if (typeof renderBots === "function") renderBots();
+    syncHookWait();
   } finally {
     approvals.polling = false;
     if (pollAgain) { pollAgain = false; pollApprovals(); return; }

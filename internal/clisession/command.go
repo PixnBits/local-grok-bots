@@ -49,6 +49,10 @@ type Spec struct {
 	// Marker is the run id written to LGB_SESSION_MARKER on the child.
 	// Boot will not signal a Linux process that lacks this value.
 	Marker string
+	// AppendSystem is extra system text for this Claude turn.
+	// It is passed with --append-system-prompt and is not part of -p.
+	// Grok has no system flag, so Args leaves this off grok's argv.
+	AppendSystem string
 }
 
 // Event is one parsed stream record.
@@ -184,6 +188,7 @@ func claudeFlags(spec Spec) []string {
 		args = append(args, "--model", spec.Model)
 	}
 	args = append(args, sessionFlags(spec)...)
+	args = append(args, appendSystemFlags(spec)...)
 	args = append(args,
 		"-p", spec.Prompt,
 		"--output-format", "stream-json",
@@ -225,6 +230,7 @@ func claudeStreamFlags(spec Spec) []string {
 		args = append(args, "--model", spec.Model)
 	}
 	args = append(args, sessionFlags(spec)...)
+	args = append(args, appendSystemFlags(spec)...)
 	args = append(args,
 		"--input-format", "stream-json",
 		"--output-format", "stream-json",
@@ -256,6 +262,14 @@ func isolationFlags(spec Spec) []string {
 		args = append(args, "--settings", spec.Isolate.SettingsPath)
 	}
 	return args
+}
+
+func appendSystemFlags(spec Spec) []string {
+	text := strings.TrimSpace(spec.AppendSystem)
+	if text == "" {
+		return nil
+	}
+	return []string{"--append-system-prompt", text}
 }
 
 func sessionFlags(spec Spec) []string {

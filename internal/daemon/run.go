@@ -637,10 +637,10 @@ func mapHist(m store.Message, names map[string]string) model.Message {
 	case "bot":
 		return model.Message{Role: "assistant", Content: m.Content}
 	case "system":
-		// The marker is written only by notifyHook. The visible sentence
-		// is not the check: a person can type the same words.
-		if strings.HasPrefix(m.Content, hookNoteMarker) {
-			return model.Message{Role: "system", Content: strings.TrimPrefix(m.Content, hookNoteMarker)}
+		// Kind is the check. The visible sentence is not: a person can
+		// type the same words, and a stored prefix is not a role.
+		if m.Kind == store.KindHookNote {
+			return model.Message{Role: "system", Content: m.Content}
 		}
 		if strings.HasPrefix(m.Content, "Message from ") || strings.HasPrefix(m.Content, "Notice: ") {
 			return model.Message{Role: "user", Content: m.Content}

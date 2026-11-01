@@ -870,6 +870,10 @@ func (a *App) setTimer(bot store.Bot, args map[string]any) (string, error) {
 	if prompt == "" {
 		return "", badArgs("prompt is required")
 	}
+	prompt = strings.TrimSpace(store.SanitizeSystemText(prompt))
+	if prompt == "" {
+		return "", badArgs("prompt is required")
+	}
 	in := strings.TrimSpace(strArg(args, "in"))
 	at := strings.TrimSpace(strArg(args, "at"))
 	every := strings.TrimSpace(strArg(args, "every"))

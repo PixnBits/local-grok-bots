@@ -165,7 +165,9 @@ Paused calls are saved under `DATA/permbroker/checkpoints/`. They are
 signed with a key at `DATA/permbroker/checkpoint.key` (mode 0600 in a
 0700 directory). The key is kept with the daemon's other data and is not
 mounted into the sandbox. Finished checkpoints and related markers are
-removed after 7 days.
+removed after 7 days. Consumed decision records live beside those
+checkpoints, signed with that key. A record is removed after 7 days
+once its checkpoint file is gone.
 
 A hook once-token is bound to the bot, session, tool, input hash, and cwd,
 and it expires. The default lifetime is 15 minutes. A once-token kept

@@ -55,24 +55,31 @@ func TestConcurrentDecideOnePending(t *testing.T) {
 			}()
 			close(start)
 			wg.Wait()
-			n200, n409 := 0, 0
+			if out[0].err != nil || out[1].err != nil {
+				t.Fatalf("post %v %v", out[0].err, out[1].err)
+			}
+			won, lost := 0, 0
 			var loser []byte
-			for _, res := range out {
-				if res.err != nil {
-					t.Fatal(res.err)
+			classify := func(res result, batch bool) {
+				if batch && res.code == http.StatusOK && batchItemStale(res.body) {
+					lost++
+					loser = res.body
+					return
 				}
 				switch res.code {
 				case http.StatusOK:
-					n200++
+					won++
 				case http.StatusConflict:
-					n409++
+					lost++
 					loser = res.body
 				default:
 					t.Fatalf("status %d %s", res.code, res.body)
 				}
 			}
-			if n200 != 1 || n409 != 1 {
-				t.Fatalf("statuses %d %d bodies %s | %s", out[0].code, out[1].code, out[0].body, out[1].body)
+			classify(out[0], false)
+			classify(out[1], second == "all")
+			if won != 1 || lost != 1 {
+				t.Fatalf("won %d lost %d bodies %s | %s", won, lost, out[0].body, out[1].body)
 			}
 			if !strings.Contains(string(loser), permbroker.ErrStale.Error()) {
 				t.Fatalf("loser %s", loser)
@@ -133,7 +140,7 @@ func TestClaimedDecideDoesNotTouchCheckpoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code != http.StatusConflict || !strings.Contains(string(body), permbroker.ErrStale.Error()) {
+	if code != http.StatusOK || !batchItemStale(body) || !strings.Contains(string(body), permbroker.ErrStale.Error()) {
 		t.Fatalf("approve-all loser %d %s", code, body)
 	}
 	ck, kind := r.app.readCheckpoint(card.ID)
@@ -211,10 +218,10 @@ func TestHookNoteIsDataNotUserRole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := hookNoteMarker + "Notice: request " + d.PendingID + " was approved; the command shown below as data: " + hookCommandData(cmd)
+	want := "Notice: request " + d.PendingID + " was approved; the command shown below as data: " + hookCommandData(cmd)
 	var notes []store.Message
 	for _, m := range msgs {
-		if strings.HasPrefix(m.Content, hookNoteMarker) {
+		if m.Kind == store.KindHookNote {
 			notes = append(notes, m)
 		}
 	}
@@ -331,6 +338,19 @@ func breakCheckpoint(t *testing.T, path, how string) {
 	default:
 		t.Fatalf("how %s", how)
 	}
+}
+
+func batchItemStale(body []byte) bool {
+	var rep permbroker.BatchReport
+	if json.Unmarshal(body, &rep) != nil || len(rep.Results) == 0 {
+		return false
+	}
+	for _, item := range rep.Results {
+		if item.OK || item.Error != permbroker.ErrStale.Error() {
+			return false
+		}
+	}
+	return true
 }
 
 func auditHasRun(rows []permbroker.AuditRow, runID, decision, scope string) bool {
