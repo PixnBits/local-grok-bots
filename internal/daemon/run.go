@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
@@ -112,6 +111,7 @@ func (a *App) execute(botID, runID string) {
 
 	parseRetried := false
 	schemaRetried := false
+	sawToolCall := false
 	retriesLeft := turnPol.EffectiveOllamaStallRetries()
 	retried := 0
 	var lastFirst time.Duration
@@ -242,10 +242,9 @@ func (a *App) execute(botID, runID string) {
 			continue
 		}
 		if len(resp.ToolCalls) == 0 {
-			// One automatic retry when the reply denies an attached tool.
-			// The round cap stops a removed flag from looping; the flag
-			// stops a second retry in the same turn.
-			if !schemaRetried && round+1 < maxToolRounds && claimsAttachedToolUnavailable(resp.Content, tools) {
+			// One automatic retry when the reply denies an attached tool
+			// and this execute has not called a tool yet.
+			if a.shouldSchemaRetry(round, schemaRetried, sawToolCall, resp.Content, tools) {
 				schemaRetried = true
 				joined, n := attachedToolLog(tools)
 				a.log(bot.ID, "tool_schema_retry", map[string]any{"tools": joined, "tool_count": n})
@@ -260,6 +259,7 @@ func (a *App) execute(botID, runID string) {
 			a.bus.Publish(runID, "done", map[string]any{"run_id": runID})
 			return
 		}
+		sawToolCall = true
 		// This text is on the live stream and in this run's transcript.
 		// It is not a thread message: stored announcements teach the next
 		// turn to stop after "Let me check" without calling a tool.
@@ -300,9 +300,7 @@ func (a *App) execute(botID, runID string) {
 			msgs = append(msgs, model.Message{Role: "tool", ToolName: tc.Name, Content: body})
 			a.bus.Publish(runID, "tool_result", payload)
 			argJSON, _ := json.Marshal(redacted)
-			_ = a.st.AddRunTool(runID, bot.ID, store.ToolRecord{
-				Name: tc.Name, Arguments: argJSON, OK: terr == nil, Result: clip(body, 4000),
-			})
+			_ = a.st.AddRunTool(runID, bot.ID, callRecord(tc.Name, argJSON, body, terr))
 		}
 	}
 	msg := "tool round limit"
@@ -343,25 +341,88 @@ func (a *App) finishRun(runID, status, errText string) (bool, error) {
 	return a.st.FinishRun(runID, status, errText)
 }
 
+// runNoticeText is the thread line for a run that did not finish done.
+// The sentence is chosen from status and a known code. errText is never copied.
 func runNoticeText(status, errText string) string {
-	errText = strings.TrimSpace(audit.RedactText(errText))
-	switch {
-	case status == "cancelled":
-		return "Notice: Run cancelled."
-	case status == "timeout":
-		if errText == "" {
-			return "Notice: Run timed out."
+	return "Notice: " + runNoticeSentence(status, strings.TrimSpace(errText))
+}
+
+func runNoticeSentence(status, errText string) string {
+	switch status {
+	case "cancelled":
+		return "Run cancelled."
+	case "stopped":
+		return "Run stopped."
+	case "timeout":
+		if code := timeoutLimitCode(errText); code != "" {
+			return "Run timed out (" + code + ")."
 		}
-		return "Notice: " + errText
-	case errText == "interrupted":
-		return "Notice: Run interrupted before it finished."
-	case errText == "turn_timeout" || errText == "timed out":
-		return "Notice: Run timed out (" + errText + "). Partial output and tool results are kept above."
-	case errText == "":
-		return "Notice: Run failed."
-	default:
-		return "Notice: Run failed: " + clip(errText, 2000)
+		return "Run timed out."
 	}
+	switch errText {
+	case "":
+		return "Run failed."
+	case "interrupted":
+		return "Run interrupted before it finished."
+	case "turn_timeout":
+		return "Run timed out (turn_timeout)."
+	case "timed out":
+		return "Run timed out."
+	case "shutdown":
+		return "Run stopped."
+	case "tool round limit":
+		return "Run failed (tool round limit)."
+	case "approval refused":
+		return "Run failed (approval refused)."
+	case "approval interrupted":
+		return "Run failed (approval interrupted)."
+	case "stall_timeout", "first_output_timeout", "model_timeout", "run_timeout":
+		return "Run timed out (" + errText + ")."
+	default:
+		return "Run failed (model error)."
+	}
+}
+
+// timeoutLimitCode reads a limit token that timeoutBody writes in parentheses.
+// The returned code is one of the fixed list, never a slice of errText.
+func timeoutLimitCode(errText string) string {
+	for _, code := range []string{"first_output_timeout", "stall_timeout", "model_timeout", "run_timeout", "turn_timeout"} {
+		if strings.Contains(errText, "("+code+")") {
+			return code
+		}
+	}
+	return ""
+}
+
+// shouldSchemaRetry is the only gate for the attached-tool claim retry.
+func (a *App) shouldSchemaRetry(round int, schemaRetried, sawToolCall bool, content string, tools []model.Tool) bool {
+	if a == nil || schemaRetried || sawToolCall || round+1 >= maxToolRounds {
+		return false
+	}
+	return claimsAttachedToolUnavailable(content, tools)
+}
+
+// toolDeniedError is a broker, policy, or hook refusal of one tool call.
+// Error() may carry the broker's reason for the live tool message.
+// The stored run_tools row uses toolDeniedMarker instead.
+type toolDeniedError struct{ detail string }
+
+func (e *toolDeniedError) Error() string {
+	if e == nil || strings.TrimSpace(e.detail) == "" {
+		return toolDeniedMarker
+	}
+	return e.detail
+}
+
+func callRecord(name string, args json.RawMessage, body string, terr error) store.ToolRecord {
+	rec := store.ToolRecord{Kind: "call", Name: name, Arguments: args, OK: terr == nil, Result: clip(body, 4000)}
+	var denied *toolDeniedError
+	if errors.As(terr, &denied) {
+		rec.OK = false
+		rec.Result = toolDeniedMarker
+		rec.Arguments = json.RawMessage(`{}`)
+	}
+	return rec
 }
 
 func (a *App) persistRunNotice(botID, runID, status, errText string) {
@@ -496,7 +557,8 @@ func (a *App) logOllamaCall(botID, modelName string, ok bool, attempt int, retry
 	a.log(botID, "model_call", detail)
 }
 
-// timeoutBody is the run error text. The thread notice prefixes "Notice: ".
+// timeoutBody is the run error text stored on the run. The thread notice is a
+// fixed sentence from runNoticeText, not a copy of this body.
 func timeoutBody(limit string, d time.Duration, retried int, partial string) string {
 	shown := compactDuration(d)
 	var b strings.Builder
@@ -640,8 +702,25 @@ func (a *App) buildMessagesHist(bot store.Bot, tools []model.Tool) ([]model.Mess
 			msg.Content = appendToolUseSummary(msg.Content, toolUseSummary(toolRecsFor(byRun, m)))
 		}
 		out = append(out, msg)
+		if m.Kind == store.KindRunFailed {
+			if text := quoteRunError(a.runErrorFor(m)); text != "" {
+				out = append(out, model.Message{Role: "user", Content: text})
+			}
+		}
 	}
 	return out, hist, nil
+}
+
+// runErrorFor is the run's stored error, replayed as data. It is not the notice text.
+func (a *App) runErrorFor(m store.Message) string {
+	if a == nil || a.st == nil || m.RunID == nil || *m.RunID == "" {
+		return ""
+	}
+	run, err := a.st.GetRun(*m.RunID)
+	if err != nil || run.Error == nil {
+		return ""
+	}
+	return *run.Error
 }
 
 func mapHist(m store.Message, names map[string]string) model.Message {
@@ -699,12 +778,8 @@ func botTools(bot store.Bot) []model.Tool {
 	return toolDefs()
 }
 
-// attachedToolsLine names every tool in tools, the slice sent with the
-// model request.
+// attachedToolsLine names the tools sent with the model request.
+// Names are sanitized, empty names are skipped, and the list is capped.
 func attachedToolsLine(tools []model.Tool) string {
-	names := make([]string, len(tools))
-	for i, t := range tools {
-		names[i] = t.Name
-	}
-	return "Attached tools: " + strings.Join(names, ", ")
+	return "Attached tools: " + promptToolList(tools)
 }

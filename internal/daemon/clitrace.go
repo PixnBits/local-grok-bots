@@ -52,6 +52,34 @@ func (t *cliTrace) tool(name string, redacted any) {
 	t.pending = append(t.pending, pendingCall{name: name, args: raw})
 }
 
+// toolEvent stores one CLI tool result and returns the body and ok for the
+// live stream. A refused call is stored by deny, not as an ordinary result.
+func (t *cliTrace) toolEvent(name, body string, failed, denied bool) (string, bool) {
+	if denied {
+		if strings.TrimSpace(body) == "" {
+			body = toolDeniedMarker
+		}
+		t.deny(name)
+		return body, false
+	}
+	ok := !failed
+	t.result(name, body, ok)
+	return body, ok
+}
+
+// deny stores one refused call as the fixed marker and empty arguments.
+// The live event text stays on the bus; it is not the stored result.
+func (t *cliTrace) deny(name string) {
+	callName := name
+	if len(t.pending) > 0 {
+		if t.pending[0].name != "" {
+			callName = t.pending[0].name
+		}
+		t.pending = t.pending[1:]
+	}
+	t.add(deniedToolRecord(callName))
+}
+
 // result pairs with the oldest open call. Claude names a result by its
 // tool_use_id, not the tool, so order is what pairs them.
 func (t *cliTrace) result(name, body string, ok bool) {

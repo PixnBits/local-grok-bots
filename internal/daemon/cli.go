@@ -305,12 +305,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 			if name == "" {
 				name = "tool"
 			}
-			ok := !ev.Denied && !ev.Failed
-			body := ev.Text
-			if ev.Denied && strings.TrimSpace(body) == "" {
-				body = "denied"
-			}
-			trace.result(name, body, ok)
+			body, ok := trace.toolEvent(name, ev.Text, ev.Failed, ev.Denied)
 			shown := clip(audit.RedactText(body), 4000)
 			payload := map[string]any{"name": name, "ok": ok, "result_or_error": shown}
 			if ev.Denied {

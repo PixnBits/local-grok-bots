@@ -621,6 +621,7 @@ func (a *App) resumeDenied(ck checkpoint) {
 	if !a.markConsumed(ck.PendingID) {
 		return
 	}
+	a.recordDeniedTool(ck.RunID, ck.BotID, ck.ToolName)
 	a.saveResult(ck.PendingID, deniedByUser)
 	a.continueApproval(ck, deniedByUser, "deny")
 }
@@ -651,6 +652,7 @@ func (a *App) resumeApproved(ck checkpoint) {
 		ToolName: ck.ToolName, ToolInput: raw, Origin: permbroker.OriginNative,
 	}, ck.PendingID)
 	if d.Verdict != permbroker.VerdictAllow {
+		a.recordDeniedTool(ck.RunID, ck.BotID, ck.ToolName)
 		a.broker.DropFreshApproval(ck.BotID, ck.SessionID, ck.Pending.InputHash, ck.Cwd, ck.PendingID)
 		a.refuseCheckpoint(ck, "policy")
 		return
@@ -701,9 +703,7 @@ func (a *App) execSavedCall(ck checkpoint) {
 	}
 	a.saveResult(ck.PendingID, body)
 	argJSON, _ := json.Marshal(redactValue(ck.ToolArgs))
-	_ = a.st.AddRunTool(ck.RunID, ck.BotID, store.ToolRecord{
-		Name: ck.ToolName, Arguments: argJSON, OK: terr == nil, Result: clip(body, 4000),
-	})
+	_ = a.st.AddRunTool(ck.RunID, ck.BotID, callRecord(ck.ToolName, argJSON, body, terr))
 	a.continueApproval(ck, body, "approve")
 }
 

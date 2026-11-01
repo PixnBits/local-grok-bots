@@ -719,7 +719,7 @@ func (a *App) gateShell(ctx context.Context, bot store.Bot, command string) (boo
 	}
 	raw, err := json.Marshal(map[string]string{"command": command})
 	if err != nil {
-		return false, errors.New("denied")
+		return false, &toolDeniedError{detail: toolDeniedMarker}
 	}
 	ws := a.botWorkspace(bot.ID)
 	repos := a.effPol(bot.ID).EffectiveGitHubRepos(bot.GitHubAllow)
@@ -753,9 +753,9 @@ func (a *App) gateShell(ctx context.Context, bot store.Bot, command string) (boo
 			}
 		}
 		if d.Reason == "" {
-			return false, errors.New("denied")
+			return false, &toolDeniedError{detail: toolDeniedMarker}
 		}
-		return false, errors.New(d.Reason)
+		return false, &toolDeniedError{detail: d.Reason}
 	}
 	a.noteShellPlan(bot.ID, plan)
 	return true, nil
