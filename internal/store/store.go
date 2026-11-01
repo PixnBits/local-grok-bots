@@ -293,13 +293,16 @@ type Message struct {
 	CreatedAt string  `json:"created_at"`
 	// TimedOut is set when this bot reply is the partial kept after a timeout.
 	TimedOut bool `json:"timed_out,omitempty"`
-	// Kind is set only by AddHookNote. Empty means ordinary text.
-	// Role and content are not a trust signal.
+	// Kind is set only by AddHookNote or AddRunNotice. Empty means ordinary
+	// text. Role and content are not a trust signal.
 	Kind string `json:"kind,omitempty"`
 }
 
 // KindHookNote is a daemon decision note. Only AddHookNote stores it.
 const KindHookNote = "hook_note"
+
+// KindRunFailed is a run-failure notice. Only AddRunNotice stores it.
+const KindRunFailed = "run_failed"
 
 // SanitizeSystemText removes the invisible separator and the old in-band
 // label from text that will be stored as a system message. It does not
@@ -1385,7 +1388,8 @@ func (s *Store) DeleteMemory(botID, key string) error {
 func (s *Store) AddMessage(m Message) (Message, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Kind is not a caller-controlled field. AddHookNote is the only writer.
+	// Kind is not a caller-controlled field. AddHookNote and AddRunNotice
+	// are the only writers.
 	m.Kind = ""
 	return s.addMessage(m)
 }
@@ -1397,6 +1401,20 @@ func (s *Store) AddHookNote(m Message) (Message, error) {
 	defer s.mu.Unlock()
 	m.Role = "system"
 	m.Kind = KindHookNote
+	if m.Thread == "" {
+		m.Thread = "user"
+	}
+	return s.addMessage(m)
+}
+
+// AddRunNotice stores the notice finishRun writes when a run does not
+// finish done. The role is system and the kind is KindRunFailed.
+// AddMessage clears kind, so a caller cannot forge this.
+func (s *Store) AddRunNotice(m Message) (Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m.Role = "system"
+	m.Kind = KindRunFailed
 	if m.Thread == "" {
 		m.Thread = "user"
 	}

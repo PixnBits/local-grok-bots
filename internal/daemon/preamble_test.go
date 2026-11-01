@@ -117,11 +117,15 @@ func TestToolRoundNarrationIsNotTheReply(t *testing.T) {
 		t.Fatalf("expected a later turn, calls=%d", len(reqs))
 	}
 	later := reqs[2]
-	if sawRoleContent(later, "assistant", "Let me check the roster.") {
-		t.Fatal("later turn was shown the narration")
+	for _, m := range later {
+		if strings.Contains(m.Content, "Let me check the roster.") {
+			t.Fatalf("later turn was shown the narration: %#v", m)
+		}
 	}
-	if !sawRoleContent(later, "assistant", "Ada is the only bot.") {
-		t.Fatal("later turn lost the stored reply")
+	// The stored reply is unchanged. Replay appends the run's tool outcomes.
+	wantReply := "Ada is the only bot.\n" + toolSummaryPrefix + "list_bots(ok)]"
+	if !sawRoleContent(later, "assistant", wantReply) {
+		t.Fatalf("later turn lost the stored reply: %#v", later)
 	}
 }
 

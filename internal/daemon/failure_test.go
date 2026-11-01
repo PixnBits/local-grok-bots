@@ -82,6 +82,9 @@ func assertFailedRunKept(t *testing.T, page failThread, partial, notice string, 
 		}
 		if m.Role == "system" && strings.HasPrefix(m.Content, "Notice: ") && strings.Contains(m.Content, notice) {
 			sawNotice = true
+			if m.Kind != store.KindRunFailed {
+				t.Fatalf("run notice kind %q", m.Kind)
+			}
 			if m.RunID != nil {
 				runID = *m.RunID
 			}
