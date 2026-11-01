@@ -78,7 +78,7 @@ An inbound DM is also represented in the receiving bot’s user thread as a syst
 |---|---|---|
 | id | string (uuid) | Returned to the client as `run_id`. |
 | bot_id | string | |
-| status | enum | `running` \| `done` \| `error` \| `cancelled` \| `timeout`. `timeout` is an Ollama stall, first-output wait, model cap, or run cap that was not retried. |
+| status | enum | `running` \| `waiting` \| `done` \| `error` \| `cancelled` \| `timeout`. `waiting` is a native run suspended for a permission decision on the same run id; it is not terminal. `timeout` is an Ollama stall, first-output wait, model cap, or run cap that was not retried. |
 | started_at | timestamp | |
 | finished_at | timestamp, nullable | |
 | error | text, nullable | Includes `tool round limit`, `daemon_restart`, `timed out`, `shutdown`. For status `timeout` it is the human sentence without the `Notice: ` prefix, naming the limit and its value. |

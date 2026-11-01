@@ -610,10 +610,17 @@ func (a *App) clearBotSession(botID, sessionID string) {
 }
 
 func (a *App) noteUserMessage(botID, msgID, text string) {
-	if a == nil || a.broker == nil || msgID == "" || !a.effPol(botID).BrokerHook(botID) {
+	if a == nil || msgID == "" {
 		return
 	}
-	a.broker.NoteUserText(botID, msgID, text)
+	if a.broker != nil && a.effPol(botID).BrokerHook(botID) {
+		a.broker.NoteUserText(botID, msgID, text)
+	}
+	// A new user message ends the previous task. Its checkpoint must not run.
+	// An unreadable checkpoint cannot be cancelled by that walk, so a
+	// waiting run it no longer covers is failed here and the bot goes idle.
+	a.cancelApprovalsExceptTask(botID, msgID, "message")
+	a.failUncoveredWaiting(botID, "missing")
 }
 
 func lastUserTask(inputs []store.Message) string {
@@ -724,13 +731,27 @@ func (a *App) gateShell(ctx context.Context, bot store.Bot, command string) (boo
 	if cerr != nil {
 		return false, cerr
 	}
+	// A resumed native call was already re-evaluated. The slot is one
+	// command, and shellExecRel still runs before the jail.
+	if a.takeShellOnce(ctx, bot.ID, command, cwd) {
+		a.noteShellPlan(bot.ID, plan)
+		return true, nil
+	}
 	d := a.broker.Evaluate(ctx, permbroker.Request{
-		BotID: bot.ID, SessionID: "shell:" + bot.ID, TaskID: a.broker.UserTask(bot.ID),
-		Cwd: cwd, Workspace: ws, Repos: repos,
-		ToolName: "run_shell", ToolInput: raw,
+		BotID: bot.ID, SessionID: "shell:" + bot.ID, RunID: runIDFrom(ctx),
+		TaskID: a.broker.UserTask(bot.ID), Cwd: cwd, Workspace: ws, Repos: repos,
+		ToolName: "run_shell", ToolInput: raw, Origin: permbroker.OriginNative,
 	})
 	if d.Verdict != permbroker.VerdictAllow {
 		a.clearShellPlan(bot.ID)
+		if d.PendingID != "" {
+			task := a.broker.UserTask(bot.ID)
+			return false, &approvalWaitError{
+				PendingID: d.PendingID, Reason: d.Reason, Cwd: cwd,
+				SessionID: "shell:" + bot.ID, TaskID: task, Level: string(d.Level),
+				Command: command,
+			}
+		}
 		if d.Reason == "" {
 			return false, errors.New("denied")
 		}

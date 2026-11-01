@@ -270,6 +270,8 @@ type Bot struct {
 	LastRunError  string  `json:"last_run_error,omitempty"`
 	// ContinueRunID is not a column. The daemon fills it from the in-memory offer.
 	ContinueRunID string `json:"continue_run_id,omitempty"`
+	// WaitingTool is not a column. The daemon fills it from an open checkpoint.
+	WaitingTool string `json:"waiting_tool,omitempty"`
 	// PendingPermissions is not a column: open permission or question
 	// requests for this bot, from the daemon's broker.
 	PendingPermissions int `json:"pending_permissions,omitempty"`
@@ -291,10 +293,25 @@ type Message struct {
 	CreatedAt string  `json:"created_at"`
 	// TimedOut is set when this bot reply is the partial kept after a timeout.
 	TimedOut bool `json:"timed_out,omitempty"`
+	// Kind is set only by AddHookNote. Empty means ordinary text.
+	// Role and content are not a trust signal.
+	Kind string `json:"kind,omitempty"`
+}
+
+// KindHookNote is a daemon decision note. Only AddHookNote stores it.
+const KindHookNote = "hook_note"
+
+// SanitizeSystemText removes the invisible separator and the old in-band
+// label from text that will be stored as a system message. It does not
+// decide the role. Callers that are not system messages leave the text alone.
+func SanitizeSystemText(s string) string {
+	s = strings.ReplaceAll(s, "\u2063", "")
+	s = strings.ReplaceAll(s, "lgb-hook-note", "")
+	return s
 }
 
 // messageCols is the column list every message read scans, in order.
-const messageCols = `id, bot_id, thread, role, content, run_id, created_at, timed_out`
+const messageCols = `id, bot_id, thread, role, content, run_id, created_at, timed_out, kind`
 
 type Timer struct {
 	ID         string  `json:"id"`
@@ -316,6 +333,11 @@ type Run struct {
 	StartedAt  string  `json:"started_at"`
 	FinishedAt *string `json:"finished_at"`
 	Error      *string `json:"error"`
+	// WaitingPendingID is the pending id this run is suspended on.
+	// WaitingSeq is the monotonic per-run sequence of that wait.
+	// A checkpoint restores only when both match.
+	WaitingPendingID string `json:"waiting_pending_id,omitempty"`
+	WaitingSeq       int64  `json:"waiting_seq,omitempty"`
 }
 
 type LogEvent struct {
@@ -420,7 +442,8 @@ CREATE TABLE IF NOT EXISTS messages (
   content TEXT NOT NULL,
   run_id TEXT,
   created_at TEXT NOT NULL,
-  timed_out INTEGER NOT NULL DEFAULT 0
+  timed_out INTEGER NOT NULL DEFAULT 0,
+  kind TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(bot_id, thread, created_at, id);
 CREATE TABLE IF NOT EXISTS timers (
@@ -441,7 +464,9 @@ CREATE TABLE IF NOT EXISTS runs (
   status TEXT NOT NULL,
   started_at TEXT NOT NULL,
   finished_at TEXT,
-  error TEXT
+  error TEXT,
+  waiting_pending_id TEXT NOT NULL DEFAULT '',
+  waiting_seq INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_runs_bot ON runs(bot_id, started_at);
 CREATE TABLE IF NOT EXISTS run_tools (
@@ -548,6 +573,9 @@ func (s *Store) evolve() error {
 		{"bots", "tool_snapshot", "TEXT"},
 		{"bots", "server_tools", "TEXT"},
 		{"messages", "timed_out", "INTEGER NOT NULL DEFAULT 0"},
+		{"messages", "kind", "TEXT NOT NULL DEFAULT ''"},
+		{"runs", "waiting_pending_id", "TEXT NOT NULL DEFAULT ''"},
+		{"runs", "waiting_seq", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, a := range adds {
 		ok, err := s.hasColumn(a.table, a.col)
@@ -1357,6 +1385,21 @@ func (s *Store) DeleteMemory(botID, key string) error {
 func (s *Store) AddMessage(m Message) (Message, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Kind is not a caller-controlled field. AddHookNote is the only writer.
+	m.Kind = ""
+	return s.addMessage(m)
+}
+
+// AddHookNote stores a daemon decision note. The role is system and the
+// kind is KindHookNote. Other system writers cannot set that kind.
+func (s *Store) AddHookNote(m Message) (Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m.Role = "system"
+	m.Kind = KindHookNote
+	if m.Thread == "" {
+		m.Thread = "user"
+	}
 	return s.addMessage(m)
 }
 
@@ -1367,12 +1410,15 @@ func (s *Store) addMessage(m Message) (Message, error) {
 	if m.CreatedAt == "" {
 		m.CreatedAt = FormatTime(Now())
 	}
+	if m.Role == "system" {
+		m.Content = SanitizeSystemText(m.Content)
+	}
 	timed := 0
 	if m.TimedOut {
 		timed = 1
 	}
-	_, err := s.db.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at, timed_out) VALUES(?,?,?,?,?,?,?,?)`,
-		m.ID, m.BotID, m.Thread, m.Role, m.Content, nullStr(m.RunID), m.CreatedAt, timed)
+	_, err := s.db.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at, timed_out, kind) VALUES(?,?,?,?,?,?,?,?,?)`,
+		m.ID, m.BotID, m.Thread, m.Role, m.Content, nullStr(m.RunID), m.CreatedAt, timed, m.Kind)
 	if err != nil {
 		return Message{}, err
 	}
@@ -1401,17 +1447,17 @@ func (s *Store) AddDMPair(fromID, toID, content, runID string) (sent Message, re
 	if err := tx.QueryRow(`SELECT name FROM bots WHERE id=?`, fromID).Scan(&fromName); err != nil {
 		return Message{}, Message{}, err
 	}
-	notice := Message{ID: id.New(), BotID: toID, Thread: "user", Role: "system", Content: "Message from " + fromName, CreatedAt: FormatTime(Now())}
-	if _, err := tx.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at, timed_out) VALUES(?,?,?,?,?,?,?,?)`,
-		sent.ID, sent.BotID, sent.Thread, sent.Role, sent.Content, run, sent.CreatedAt, 0); err != nil {
+	notice := Message{ID: id.New(), BotID: toID, Thread: "user", Role: "system", Content: SanitizeSystemText("Message from " + fromName), CreatedAt: FormatTime(Now())}
+	if _, err := tx.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at, timed_out, kind) VALUES(?,?,?,?,?,?,?,?,?)`,
+		sent.ID, sent.BotID, sent.Thread, sent.Role, sent.Content, run, sent.CreatedAt, 0, ""); err != nil {
 		return Message{}, Message{}, err
 	}
-	if _, err := tx.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at, timed_out) VALUES(?,?,?,?,?,?,?,?)`,
-		received.ID, received.BotID, received.Thread, received.Role, received.Content, nil, received.CreatedAt, 0); err != nil {
+	if _, err := tx.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at, timed_out, kind) VALUES(?,?,?,?,?,?,?,?,?)`,
+		received.ID, received.BotID, received.Thread, received.Role, received.Content, nil, received.CreatedAt, 0, ""); err != nil {
 		return Message{}, Message{}, err
 	}
-	if _, err := tx.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at, timed_out) VALUES(?,?,?,?,?,?,?,?)`,
-		notice.ID, notice.BotID, notice.Thread, notice.Role, notice.Content, nil, notice.CreatedAt, 0); err != nil {
+	if _, err := tx.Exec(`INSERT INTO messages(id, bot_id, thread, role, content, run_id, created_at, timed_out, kind) VALUES(?,?,?,?,?,?,?,?,?)`,
+		notice.ID, notice.BotID, notice.Thread, notice.Role, notice.Content, nil, notice.CreatedAt, 0, ""); err != nil {
 		return Message{}, Message{}, err
 	}
 	if err := s.addLogTx(tx, fromID, "dm_sent", map[string]any{"message_id": sent.ID, "other_bot_id": toID}); err != nil {
@@ -1470,7 +1516,7 @@ func scanMessage(sc interface{ Scan(...any) error }) (Message, error) {
 	var m Message
 	var run sql.NullString
 	var timed int
-	if err := sc.Scan(&m.ID, &m.BotID, &m.Thread, &m.Role, &m.Content, &run, &m.CreatedAt, &timed); err != nil {
+	if err := sc.Scan(&m.ID, &m.BotID, &m.Thread, &m.Role, &m.Content, &run, &m.CreatedAt, &timed, &m.Kind); err != nil {
 		return Message{}, err
 	}
 	if run.Valid {
@@ -1538,6 +1584,7 @@ func (s *Store) NeedsRun(botID string) (bool, error) {
 const turnInput = `(
 		(thread='user' AND role='user')
 		OR (thread='user' AND role='system' AND content NOT LIKE 'Notice: %')
+		OR (thread='user' AND role='system' AND kind='hook_note')
 		OR (thread LIKE 'dm:%' AND role='user')
 	)`
 
@@ -1655,13 +1702,103 @@ func (s *Store) FinishRun(id, status, errText string) (bool, error) {
 	return true, nil
 }
 
+// SuspendRun moves a running run to waiting on pendingID at seq.
+// prevSeq is the sequence currently stored. The update matches it, so a
+// second suspend cannot replace the wait. It does not set finished_at
+// and it does not write a failure notice. False means it was not running
+// at that sequence.
+func (s *Store) SuspendRun(id, pendingID string, seq, prevSeq int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var botID string
+	err := s.db.QueryRow(`SELECT bot_id FROM runs WHERE id=? AND status='running' AND waiting_seq=?`, id, prevSeq).Scan(&botID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	res, err := s.db.Exec(`UPDATE runs SET status='waiting', finished_at=NULL, error=NULL, waiting_pending_id=?, waiting_seq=? WHERE id=? AND status='running' AND waiting_seq=?`, pendingID, seq, id, prevSeq)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return false, nil
+	}
+	if err := s.logUnlocked(botID, "run_waiting", map[string]any{"run_id": id, "status": "waiting", "pending_id": pendingID}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ResumeRun moves a waiting run back to running so the same id can continue.
+func (s *Store) ResumeRun(id string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var botID string
+	err := s.db.QueryRow(`SELECT bot_id FROM runs WHERE id=? AND status='waiting'`, id).Scan(&botID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if _, err := s.db.Exec(`UPDATE runs SET status='running', finished_at=NULL, error=NULL, waiting_pending_id='' WHERE id=? AND status='waiting'`, id); err != nil {
+		return false, err
+	}
+	if err := s.logUnlocked(botID, "run_resumed", map[string]any{"run_id": id, "status": "running"}); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// CancelWaiting marks a waiting run cancelled. A running run is left alone.
+func (s *Store) CancelWaiting(id string) (bool, error) {
+	return s.finishWaiting(id, "cancelled", "")
+}
+
+// FailWaiting marks a waiting run as error. It does not run the saved call.
+func (s *Store) FailWaiting(id, errText string) (bool, error) {
+	return s.finishWaiting(id, "error", errText)
+}
+
+func (s *Store) finishWaiting(id, status, errText string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var botID string
+	err := s.db.QueryRow(`SELECT bot_id FROM runs WHERE id=? AND status='waiting'`, id).Scan(&botID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	now := FormatTime(Now())
+	var e any
+	if errText != "" {
+		e = errText
+	}
+	if _, err := s.db.Exec(`UPDATE runs SET status=?, finished_at=?, error=?, waiting_pending_id='' WHERE id=? AND status='waiting'`, status, now, e, id); err != nil {
+		return false, err
+	}
+	detail := map[string]any{"run_id": id, "status": status}
+	if errText != "" {
+		detail["error"] = errText
+	}
+	if err := s.logUnlocked(botID, "run_finished", detail); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *Store) GetRun(id string) (Run, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var r Run
 	var fin, errText sql.NullString
-	err := s.db.QueryRow(`SELECT id, bot_id, status, started_at, finished_at, error FROM runs WHERE id=?`, id).
-		Scan(&r.ID, &r.BotID, &r.Status, &r.StartedAt, &fin, &errText)
+	err := s.db.QueryRow(`SELECT id, bot_id, status, started_at, finished_at, error, waiting_pending_id, waiting_seq FROM runs WHERE id=?`, id).
+		Scan(&r.ID, &r.BotID, &r.Status, &r.StartedAt, &fin, &errText, &r.WaitingPendingID, &r.WaitingSeq)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Run{}, ErrNotFound
 	}
@@ -1675,6 +1812,36 @@ func (s *Store) GetRun(id string) (Run, error) {
 		r.Error = &errText.String
 	}
 	return r, nil
+}
+
+// ListWaiting returns every run still waiting on an approval.
+func (s *Store) ListWaiting() ([]Run, error) {
+	if s == nil {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT id, bot_id, status, started_at, finished_at, error FROM runs WHERE status='waiting' ORDER BY started_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Run
+	for rows.Next() {
+		var r Run
+		var fin, errText sql.NullString
+		if err := rows.Scan(&r.ID, &r.BotID, &r.Status, &r.StartedAt, &fin, &errText); err != nil {
+			return nil, err
+		}
+		if fin.Valid {
+			r.FinishedAt = &fin.String
+		}
+		if errText.Valid {
+			r.Error = &errText.String
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // LatestRun is the bot's newest run. started_at is strictly increasing;

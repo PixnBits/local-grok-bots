@@ -72,7 +72,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 			return
 		}
 	}
-	prompt, err := a.cliPrompt(bot, fresh, inputs)
+	prompt, system, err := a.cliPrompt(bot, fresh, inputs)
 	if err != nil {
 		if errors.Is(err, clisession.ErrSlash) {
 			a.recordACPHostFail(bot.ID, runID, "acp", nil, err.Error())
@@ -88,6 +88,14 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 			a.clearBotSession(bot.ID, sessionID)
 		}
 		return
+	}
+	if strings.TrimSpace(system) != "" {
+		if err := a.screenDLP(ctx, bot.ID, runID, backend, system); err != nil {
+			if fresh {
+				a.clearBotSession(bot.ID, sessionID)
+			}
+			return
+		}
 	}
 	ws, err := cliWorkspace(a.ws, bot.ID)
 	if err != nil {
@@ -150,7 +158,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 	}
 	spec := clisession.Spec{
 		Backend: backend, SessionID: sessionID, Fresh: fresh,
-		Prompt: prompt, Workspace: ws, PermissionMode: mode,
+		Prompt: prompt, AppendSystem: cliSpecSystem(backend, system), Workspace: ws, PermissionMode: mode,
 		AllowRules: append(append([]string(nil), turnPol.ToolAllow...), lgbAllow(lgbEnv)...),
 		DenyRules:  append([]string(nil), turnPol.ToolDeny...),
 		Isolate:    iso,
@@ -1882,34 +1890,57 @@ func (a *App) failCLI(botID, runID, backend string, err error) {
 	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": msg})
 }
 
-func (a *App) cliPrompt(bot store.Bot, fresh bool, inputs []store.Message) (string, error) {
+// cliSpecSystem is the system channel for this backend. Claude takes it
+// as --append-system-prompt. Grok has no system flag, so the text stays
+// off argv and out of the user prompt.
+func cliSpecSystem(backend, system string) string {
+	if !strings.EqualFold(strings.TrimSpace(backend), "claude") {
+		return ""
+	}
+	return system
+}
+
+func (a *App) cliPrompt(bot store.Bot, fresh bool, inputs []store.Message) (string, string, error) {
 	turnPol := a.effPol(bot.ID)
 
-	var b strings.Builder
+	var user strings.Builder
+	var sys strings.Builder
 	if fresh {
-		if err := a.writeCLIPreamble(&b, bot); err != nil {
-			return "", err
+		if err := a.writeCLIPreamble(&user, bot); err != nil {
+			return "", "", err
 		}
 	}
 	names, err := a.st.BotNames()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if len(inputs) == 0 {
-		b.WriteString("Continue.\n")
-		return b.String(), nil
+		user.WriteString("Continue.\n")
+		return user.String(), "", nil
 	}
 	grok := strings.EqualFold(turnPol.EffectiveBackend(), "grok")
-	for i, m := range inputs {
+	firstUser := true
+	for _, m := range inputs {
+		if m.Kind == store.KindHookNote {
+			if sys.Len() > 0 {
+				sys.WriteString("\n")
+			}
+			sys.WriteString(mapHist(m, names).Content)
+			continue
+		}
 		if grok && clisession.SlashPrompt(m.Content) {
-			return "", clisession.ErrSlash
+			return "", "", clisession.ErrSlash
 		}
-		if i > 0 {
-			b.WriteString("\n")
+		if !firstUser {
+			user.WriteString("\n")
 		}
-		b.WriteString(mapHist(m, names).Content)
+		firstUser = false
+		user.WriteString(mapHist(m, names).Content)
 	}
-	return b.String(), nil
+	if user.Len() == 0 {
+		user.WriteString("Continue.\n")
+	}
+	return user.String(), sys.String(), nil
 }
 
 // cliBoundary tells a CLI bot what actually confines it. The daemon's own

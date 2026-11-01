@@ -69,6 +69,13 @@ type Request struct {
 	ToolUseID string
 	PeerUID   int
 	PeerPID   int
+	// Origin is "native" for a daemon run_shell ask and "hook" for the
+	// CLI socket. Empty keeps the older once-token behaviour.
+	Origin string
+	// ResumeID is set only by ResumeEval. A would-be ask then consumes a
+	// one-shot bind for that pending id, or denies. It does not open a
+	// new pending item. The checkpoint is not authority.
+	ResumeID string
 }
 
 // Decision is what the hook is allowed to see, plus the audit fields.
@@ -143,6 +150,7 @@ type pendingItem struct {
 	CreatedAt  time.Time
 	Ruleset    int
 	Classifier string
+	Origin     string
 }
 
 // Pending is the redacted view returned to an admin.
@@ -172,6 +180,7 @@ type Pending struct {
 	Suggest    bool          `json:"suggest_always"`
 	CritReason string        `json:"critical_reason"`
 	GitReason  string        `json:"git_reason,omitempty"`
+	Origin     string        `json:"origin,omitempty"`
 }
 
 // PendingPart is one command inside a pending card.
@@ -246,6 +255,11 @@ type Engine struct {
 	byKey  map[string]string
 	denied map[string]struct{}
 	dead   map[string]struct{}
+	// staged hides a native ask until its checkpoint is durable.
+	staged map[string]struct{}
+	// binds are one-shot critical approvals keyed by pending id.
+	// takeToken does not accept them. Only ResumeEval can consume one.
+	binds  map[string]resumeBind
 	tokens []token
 	grants []grant
 	active map[string]Turn
@@ -341,6 +355,8 @@ func Open(dir string, risks []RiskEntry, auditor Auditor) (*Engine, error) {
 		byKey:           map[string]string{},
 		denied:          map[string]struct{}{},
 		dead:            map[string]struct{}{},
+		staged:          map[string]struct{}{},
+		binds:           map[string]resumeBind{},
 		active:          map[string]Turn{},
 		resolver:        resolvePinned,
 		bots:            map[string]botCtx{},
@@ -1297,6 +1313,7 @@ func (e *Engine) cancelSessionLocked(bot, session string) {
 			delete(e.denied, k)
 		}
 	}
+	e.dropBindsLocked(bot, session)
 }
 
 func (e *Engine) endTaskLocked(bot, keepTask string) {
@@ -1305,6 +1322,7 @@ func (e *Engine) endTaskLocked(bot, keepTask string) {
 			e.dead[id] = struct{}{}
 			delete(e.byID, id)
 			delete(e.byKey, collapseKey(item))
+			delete(e.staged, id)
 		}
 	}
 	e.grants = filterGrants(e.grants, func(g grant) bool {
@@ -1313,6 +1331,7 @@ func (e *Engine) endTaskLocked(bot, keepTask string) {
 		}
 		return g.TaskID == keepTask
 	})
+	e.dropBindsLocked(bot, "")
 }
 
 func (e *Engine) dropTaskLocked(bot, session, keepTask string) {
@@ -1461,12 +1480,20 @@ func (e *Engine) applyRule(req Request, in inspected, rule *Rule) Decision {
 }
 
 func (e *Engine) ask(req Request, in inspected) Decision {
+	// A resumed call must not open another card. The bind, when one was
+	// recorded for this pending id, allows exactly that execution.
+	if req.ResumeID != "" {
+		if e.consumeBind(req, in) {
+			return e.finish(req, in, VerdictAllow, "approved", req.ResumeID, "human", "")
+		}
+		return e.finish(req, in, VerdictDeny, "denied", "", "policy", "")
+	}
 	key := collapseKeyReq(req, in)
 	if _, ok := e.denied[key]; ok {
 		return e.finish(req, in, VerdictDeny, "denied", "", "human", "")
 	}
 	if id, ok := e.byKey[key]; ok {
-		return e.finish(req, in, VerdictDeny, pendingReason(id), id, "policy", "")
+		return e.finishAsk(req, in, id)
 	}
 	item := &pendingItem{
 		ID:         newID("p_"),
@@ -1495,10 +1522,34 @@ func (e *Engine) ask(req Request, in inspected) Decision {
 		CreatedAt:  e.now(),
 		Ruleset:    e.rules.Version,
 		Classifier: in.ClassNote,
+		Origin:     req.Origin,
 	}
 	e.byID[item.ID] = item
 	e.byKey[key] = item.ID
-	return e.finish(req, in, VerdictDeny, pendingReason(item.ID), item.ID, "policy", "")
+	// Stage only asks that belong to a durable run. Direct execTool calls
+	// (no run id) stay visible to ListPending. The run loop hides the card
+	// until the checkpoint file and the waiting status are both durable.
+	if req.Origin == OriginNative && req.RunID != "" {
+		if e.staged == nil {
+			e.staged = map[string]struct{}{}
+		}
+		e.staged[item.ID] = struct{}{}
+	}
+	return e.finishAsk(req, in, item.ID)
+}
+
+// finishAsk records an ask. The hook still receives a deny, because it
+// cannot wait. The audit row is "ask", not "deny": nothing was refused.
+func (e *Engine) finishAsk(req Request, in inspected, pendingID string) Decision {
+	reason := pendingReason(pendingID)
+	e.noteRequest(req, in)
+	e.noteOutcome(req, in, VerdictDeny, reason, pendingID, "")
+	e.auditDecision(req, in, "ask", reason, pendingID, "policy", "", "")
+	return Decision{
+		Verdict: VerdictDeny, Reason: reason, PendingID: pendingID,
+		Level: in.Level, Actor: "policy", RuleID: "", InputHash: in.Hash,
+		Eligible: in.Eligible, Compound: in.Compound,
+	}
 }
 
 func pendingReason(id string) string {
@@ -1514,6 +1565,9 @@ func (e *Engine) ListPending() []Pending {
 	defer e.mu.Unlock()
 	out := make([]Pending, 0, len(e.byID))
 	for _, item := range e.byID {
+		if _, hide := e.staged[item.ID]; hide {
+			continue
+		}
 		out = append(out, e.pendingView(item))
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -1542,6 +1596,10 @@ func (e *Engine) pendingView(item *pendingItem) Pending {
 		Advisory:  Advisory{Text: item.Advisory, Source: source, Checked: item.AdvChecked},
 		TaskText:  item.TaskText, Suggest: e.suggestAlways(item),
 		CritReason: item.CritReason, GitReason: item.GitReason,
+		Origin: item.Origin,
+	}
+	if item.Origin == OriginHook && item.Level == LevelCritical {
+		view.Allowed = withoutScope(view.Allowed, ScopeOnce)
 	}
 	if view.Operators == nil {
 		view.Operators = []string{}
@@ -1682,6 +1740,15 @@ func (e *Engine) Decide(id, decision, scope string) error {
 		}
 		switch scope {
 		case ScopeOnce:
+			if item.Origin == OriginHook && item.Level == LevelCritical {
+				return ErrScope
+			}
+			// A native critical approval is bound to this pending id.
+			// It is not a once-token. takeToken still refuses critical.
+			if item.Origin == OriginNative && item.Level == LevelCritical {
+				e.keepResumeBind(item)
+				break
+			}
 			e.keepOnceToken(item, "")
 		case ScopeTask:
 			exp := e.grantExpiry()
@@ -1813,7 +1880,16 @@ func (e *Engine) ApproveAll(ids []string) (BatchReport, error) {
 			rep.Skipped++
 			continue
 		}
-		e.keepOnceToken(item, "")
+		if item.Origin == OriginHook && item.Level == LevelCritical {
+			rep.Results = append(rep.Results, BatchItem{ID: id, Error: ErrScope.Error()})
+			rep.Skipped++
+			continue
+		}
+		if item.Origin == OriginNative && item.Level == LevelCritical {
+			e.keepResumeBind(item)
+		} else {
+			e.keepOnceToken(item, "")
+		}
 		e.bury(item)
 		e.auditHuman(item, "approve", ScopeOnce)
 		e.noteApproval(item)
@@ -1867,6 +1943,7 @@ func (e *Engine) bury(item *pendingItem) {
 	e.dead[item.ID] = struct{}{}
 	delete(e.byID, item.ID)
 	delete(e.byKey, collapseKey(item))
+	delete(e.staged, item.ID)
 }
 
 func (e *Engine) addRuleLocked(item *pendingItem, scope string) error {
@@ -1911,6 +1988,8 @@ func (e *Engine) invalidateLocked() {
 	e.tokens = nil
 	e.grants = nil
 	e.denied = map[string]struct{}{}
+	e.binds = map[string]resumeBind{}
+	e.staged = map[string]struct{}{}
 }
 
 func (e *Engine) grantExpiry() time.Time {

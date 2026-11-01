@@ -5,7 +5,10 @@ security boundary. The broker is the ask path. It fails closed: a down,
 late, or ambiguous answer is a deny. A non-admin path cannot approve a
 call or create a rule.
 
-The flag is off unless policy sets it.
+The flag is off unless policy sets it. An ask exists only when `broker`
+is `hook`. With the broker off there is no permission policy: the daemon
+does not classify the command, does not open a card, and does not suspend
+the run.
 
 ```toml
 [cli.permission]
@@ -148,13 +151,28 @@ allow. Every doubt exits 2 and prints a PreToolUse deny. Exit 2 blocks the
 tool even if the JSON says allow. The hook never waits for a person.
 
 On an ask, the daemon records a pending item and the hook denies with
-`pending approval <id>; retry the identical command after approval`. A
-human approves that item, then the same command may be retried once. A
-second retry, a different argv, a different cwd, or a different session
-does not use that approval. The once token is also bound to the tool
-name, and it expires. The default lifetime is 15 minutes. A once-token
-kept from a task, bot, or global approval stays held for that task. After
-the task id changes, that token can still allow one call within the same
+`pending approval <id>; retry the identical command after approval`. The
+hook does not wait. Its audit row is decision `ask`, actor `policy`.
+
+For a native `run_shell` ask, the run stays `waiting`: it is paused until
+a person approves or denies the pending card, and nothing runs meanwhile.
+Approve resumes the same run once. Deny tells the model `denied by user`
+and the run continues. A new user message, Stop, or deleting the bot
+cancels a waiting run. A run that cannot be resumed is failed and the bot
+returns to idle.
+
+Paused calls are saved under `DATA/permbroker/checkpoints/`. They are
+signed with a key at `DATA/permbroker/checkpoint.key` (mode 0600 in a
+0700 directory). The key is kept with the daemon's other data and is not
+mounted into the sandbox. Finished checkpoints and related markers are
+removed after 7 days. Consumed decision records live beside those
+checkpoints, signed with that key. A record is removed after 7 days
+once its checkpoint file is gone.
+
+A hook once-token is bound to the bot, session, tool, input hash, and cwd,
+and it expires. The default lifetime is 15 minutes. A once-token kept
+from a task, bot, or global approval stays held for that task. After the
+task id changes, that token can still allow one call within the same
 lifetime.
 `[cli.permission] approval_ttl` sets it. The accepted range is 1 minute
 to 24 hours inclusive. A value outside that range makes the policy fail

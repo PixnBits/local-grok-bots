@@ -704,6 +704,7 @@
   .thread-sub .dot.running { background: var(--status-running); box-shadow: 0 0 0 3px var(--accent-soft); }
   .thread-sub .dot.idle { background: var(--status-idle); }
   .thread-sub .dot.paused { background: var(--status-paused); }
+  .thread-sub .dot.waiting { background: var(--attention); }
   .thread-id .role { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .menu { position: relative; flex: none; }
   .menu-pop {

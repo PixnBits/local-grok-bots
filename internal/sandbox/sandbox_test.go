@@ -65,6 +65,31 @@ func findEvent(events []Event, kind, grant, host string) (Event, bool) {
 	return Event{}, false
 }
 
+// TestCancelReportsInterrupted fails if a canceled command is reported
+// as a shell timeout. The touch file is the signal that the command started.
+func TestCancelReportsInterrupted(t *testing.T) {
+	requireBin(t, "bwrap")
+	ws := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := filepath.Join(ws, "started")
+	go func() {
+		deadline := time.Now().Add(20 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(started); err == nil {
+				cancel()
+				return
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+		cancel()
+	}()
+	_, err := Run(ctx, Request{Workspace: ws, Command: "touch started && sleep 30"})
+	if err == nil || err.Error() != "shell interrupted" {
+		t.Fatalf("err=%v", err)
+	}
+}
+
 func TestCheckWriteAndRestore(t *testing.T) {
 	ws := t.TempDir()
 	hook := filepath.Join(ws, ".git", "hooks", "pre-commit")

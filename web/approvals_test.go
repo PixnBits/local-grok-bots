@@ -490,6 +490,8 @@ check("arm-yes", armReady({armedAt: 1000}, 2500) === true, armReady({armedAt: 10
 check("arm-unset", armReady({armedAt: 0}, 5000) === false, armReady({armedAt: 0}, 5000));
 const critAct = approvalActions({level: "critical", allowed_scopes: ["once"]});
 check("crit-act", critAct.deny === "fill" && critAct.approve === "confirm" && critAct.chevron === false, JSON.stringify(critAct));
+const hookCrit = approvalActions({level: "critical", origin: "hook", allowed_scopes: ["once"]});
+check("hook-critical-no-once", hookCrit.approve === "none" && hookCrit.deny === "fill" && String(hookCrit.note).indexOf("can't be approved once") >= 0, JSON.stringify(hookCrit));
 const highAct = approvalActions({level: "high", allowed_scopes: ["once", "bot"]});
 check("high-act", highAct.deny === "outline" && highAct.lockGlobal === true && highAct.chevron === true, JSON.stringify(highAct));
 const lowAct = approvalActions({level: "low", allowed_scopes: ["once", "task", "bot", "global"]});

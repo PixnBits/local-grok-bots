@@ -162,6 +162,7 @@ func waitRequest(bot string, turn Turn, msg wireRequest, uid, pid int) Request {
 		BotID: bot, SessionID: turn.Session, RunID: turn.Run, TaskID: turn.Task,
 		Cwd: msg.Cwd, ToolName: msg.ToolName, ToolInput: msg.ToolInput,
 		ToolUseID: msg.ToolUseID, PeerUID: uid, PeerPID: pid,
+		Origin: OriginHook,
 	}
 }
 

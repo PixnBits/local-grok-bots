@@ -3,6 +3,7 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -761,7 +762,7 @@ func captureReady(ctx context.Context, cmd *exec.Cmd, started func(), ready func
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		_ = cmd.Process.Kill()
 		<-waitErr
-		runErr = fmt.Errorf("shell timed out")
+		runErr = shellStopErr(ctx)
 	case err := <-waitErr:
 		runErr = err
 	}
@@ -770,12 +771,21 @@ func captureReady(ctx context.Context, cmd *exec.Cmd, started func(), ready func
 	stdout := truncate(outBuf.String())
 	stderr := truncate(errBuf.String())
 	if runErr != nil {
-		if runErr.Error() == "shell timed out" {
+		if runErr.Error() == "shell timed out" || runErr.Error() == "shell interrupted" {
 			return stdout, stderr, runErr
 		}
 		return stdout, stderr, fmt.Errorf("exit %s", exitCode(runErr))
 	}
 	return stdout, stderr, nil
+}
+
+// shellStopErr is what the model is told when the shell context ends.
+// A deadline is a timeout. Cancel, including daemon shutdown, is not.
+func shellStopErr(ctx context.Context) error {
+	if ctx != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("shell timed out")
+	}
+	return fmt.Errorf("shell interrupted")
 }
 
 func allowlistEvent(raw string) Event {
