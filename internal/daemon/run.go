@@ -54,7 +54,7 @@ func (a *App) execute(botID, runID string) {
 		a.takePending(runID)
 		a.dropResume(botID)
 		_, _ = a.finishRun(runID, "error", err.Error())
-		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": audit.RedactText(err.Error())})
 		return
 	}
 	modelName := a.cfg.Model
@@ -77,7 +77,7 @@ func (a *App) execute(botID, runID string) {
 		a.takePending(runID)
 		a.dropResume(bot.ID)
 		_, _ = a.finishRun(runID, "error", err.Error())
-		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": audit.RedactText(err.Error())})
 		return
 	}
 	// A continuation already holds the transcript, including tool results.
@@ -85,7 +85,7 @@ func (a *App) execute(botID, runID string) {
 	run, err := a.st.GetRun(runID)
 	if err != nil {
 		_, _ = a.finishRun(runID, "error", err.Error())
-		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": audit.RedactText(err.Error())})
 		return
 	}
 	// seen holds turn input already in the transcript, so a message that
@@ -101,7 +101,7 @@ func (a *App) execute(botID, runID string) {
 		msgs, hist, err = a.buildMessagesHist(bot, tools)
 		if err != nil {
 			_, _ = a.finishRun(runID, "error", err.Error())
-			a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+			a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": audit.RedactText(err.Error())})
 			return
 		}
 		for _, m := range hist {
@@ -111,6 +111,8 @@ func (a *App) execute(botID, runID string) {
 	through := run.StartedAt
 
 	parseRetried := false
+	schemaRetried := false
+	sawToolCall := false
 	retriesLeft := turnPol.EffectiveOllamaStallRetries()
 	retried := 0
 	var lastFirst time.Duration
@@ -190,13 +192,13 @@ func (a *App) execute(botID, runID string) {
 				if errLogged == nil {
 					errLogged = ctx.Err()
 				}
-				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, errLogged, 0, limit, limitValue)
+				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, errLogged, 0, limit, limitValue, tools)
 				a.finishOllamaCtx(bot, runID, ctx, msgs, shown, retried, first)
 				return
 			}
 			if te != nil && (te.Limit == "first_output_timeout" || te.Limit == "stall_timeout") {
 				willRetry := retriesLeft > 0
-				a.logOllamaCall(bot.ID, modelName, false, attempt, willRetry, first, te, 0, te.Limit, compactDuration(a.limitDuration(bot.ID, te.Limit)))
+				a.logOllamaCall(bot.ID, modelName, false, attempt, willRetry, first, te, 0, te.Limit, compactDuration(a.limitDuration(bot.ID, te.Limit)), tools)
 				if willRetry {
 					retriesLeft--
 					retried++
@@ -208,7 +210,7 @@ func (a *App) execute(botID, runID string) {
 				return
 			}
 			if te != nil && te.Limit == "model_timeout" {
-				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, te, 0, "model_timeout", compactDuration(turnPol.EffectiveOllamaModelTimeout()))
+				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, te, 0, "model_timeout", compactDuration(turnPol.EffectiveOllamaModelTimeout()), tools)
 				a.finishOllamaTimeout(bot, runID, msgs, "model_timeout", bestPartial, retried, first)
 				return
 			}
@@ -217,30 +219,40 @@ func (a *App) execute(botID, runID string) {
 				// One more call, and only when a round remains. The failed call still counts toward the cap.
 				if errors.As(err, &parseErr) && !parseRetried && round+1 < maxToolRounds {
 					parseRetried = true
-					a.logOllamaCall(bot.ID, modelName, false, attempt, true, first, err, 0, "", "")
+					a.logOllamaCall(bot.ID, modelName, false, attempt, true, first, err, 0, "", "", tools)
 					a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "retrying"})
 					msgs = append(msgs, model.Message{
 						Role:    "user",
-						Content: "The tool call could not be parsed: " + clip(parseErr.Detail, 500) + ". Call the tool again with valid arguments, or reply in text.",
+						Content: "The tool call could not be parsed: " + clip(audit.RedactText(parseErr.Detail), 500) + ". Call the tool again with valid arguments, or reply in text.",
 					})
 					parseContinue = true
 					break
 				}
-				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, err, 0, "", "")
+				a.logOllamaCall(bot.ID, modelName, false, attempt, false, first, err, 0, "", "", tools)
 				if t := strings.TrimSpace(partial); t != "" {
 					a.persistBotText(bot.ID, runID, t, false)
 				}
 				_, _ = a.finishRun(runID, "error", err.Error())
-				a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+				a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": audit.RedactText(err.Error())})
 				return
 			}
-			a.logOllamaCall(bot.ID, modelName, true, attempt, false, first, nil, resp.PromptTokens+resp.OutputTokens, "", "")
+			a.logOllamaCall(bot.ID, modelName, true, attempt, false, first, nil, resp.PromptTokens+resp.OutputTokens, "", "", tools)
 			break
 		}
 		if parseContinue {
 			continue
 		}
 		if len(resp.ToolCalls) == 0 {
+			// One automatic retry when the reply denies an attached tool
+			// and this execute has not called a tool yet.
+			if a.shouldSchemaRetry(runID, round, schemaRetried, sawToolCall, resp.Content, tools) {
+				schemaRetried = true
+				joined, n := attachedToolLog(tools)
+				a.log(bot.ID, "tool_schema_retry", map[string]any{"tools": joined, "tool_count": n})
+				a.bus.Publish(runID, "stream_reset", map[string]any{"run_id": runID, "reason": "tool_schema"})
+				msgs = append(msgs, model.Message{Role: "system", Content: toolSchemaReminder(tools)})
+				continue
+			}
 			if strings.TrimSpace(resp.Content) != "" {
 				a.persistBotText(bot.ID, runID, resp.Content, false)
 			}
@@ -248,6 +260,7 @@ func (a *App) execute(botID, runID string) {
 			a.bus.Publish(runID, "done", map[string]any{"run_id": runID})
 			return
 		}
+		sawToolCall = true
 		// This text is on the live stream and in this run's transcript.
 		// It is not a thread message: stored announcements teach the next
 		// turn to stop after "Let me check" without calling a tool.
@@ -274,7 +287,7 @@ func (a *App) execute(botID, runID string) {
 				// Suspend instead of handing the retry sentence back to the model.
 				if err := a.suspendForApproval(bot, runID, msgs, tc.Name, tc.Arguments, strconv.Itoa(i), wait); err != nil {
 					_, _ = a.finishRun(runID, "error", err.Error())
-					a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": err.Error()})
+					a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": audit.RedactText(err.Error())})
 				}
 				return
 			}
@@ -288,9 +301,7 @@ func (a *App) execute(botID, runID string) {
 			msgs = append(msgs, model.Message{Role: "tool", ToolName: tc.Name, Content: body})
 			a.bus.Publish(runID, "tool_result", payload)
 			argJSON, _ := json.Marshal(redacted)
-			_ = a.st.AddRunTool(runID, bot.ID, store.ToolRecord{
-				Name: tc.Name, Arguments: argJSON, OK: terr == nil, Result: clip(body, 4000),
-			})
+			_ = a.st.AddRunTool(runID, bot.ID, callRecord(tc.Name, argJSON, body, terr))
 		}
 	}
 	msg := "tool round limit"
@@ -314,7 +325,7 @@ func (a *App) finishInterrupted(botID, runID string, ctx context.Context) {
 		a.bus.Publish(runID, "done", map[string]any{"run_id": runID, "status": "cancelled"})
 		return
 	}
-	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": errText})
+	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": audit.RedactText(errText)})
 }
 
 // finishRun stores a run's end state. A run that did not finish "done"
@@ -323,6 +334,8 @@ func (a *App) finishInterrupted(botID, runID string, ctx context.Context) {
 // message of the run) after a failure, the same as after a reply. Notices are
 // not turn input, so they do not start another run.
 func (a *App) finishRun(runID, status, errText string) (bool, error) {
+	// Redact before the notice and the row. quoteRunError truncates later.
+	errText = audit.RedactText(errText)
 	if status != "done" {
 		if run, err := a.st.GetRun(runID); err == nil && run.Status == "running" {
 			a.persistRunNotice(run.BotID, runID, status, errText)
@@ -331,30 +344,113 @@ func (a *App) finishRun(runID, status, errText string) (bool, error) {
 	return a.st.FinishRun(runID, status, errText)
 }
 
+// runNoticeText is the thread line for a run that did not finish done.
+// The sentence is chosen from status and a known code. errText is never copied.
 func runNoticeText(status, errText string) string {
-	errText = strings.TrimSpace(audit.RedactText(errText))
-	switch {
-	case status == "cancelled":
-		return "Notice: Run cancelled."
-	case status == "timeout":
-		if errText == "" {
-			return "Notice: Run timed out."
+	return "Notice: " + runNoticeSentence(status, strings.TrimSpace(errText))
+}
+
+func runNoticeSentence(status, errText string) string {
+	switch status {
+	case "cancelled":
+		return "Run cancelled."
+	case "stopped":
+		return "Run stopped."
+	case "timeout":
+		if code := timeoutLimitCode(errText); code != "" {
+			return "Run timed out (" + code + ")."
 		}
-		return "Notice: " + errText
-	case errText == "interrupted":
-		return "Notice: Run interrupted before it finished."
-	case errText == "turn_timeout" || errText == "timed out":
-		return "Notice: Run timed out (" + errText + "). Partial output and tool results are kept above."
-	case errText == "":
-		return "Notice: Run failed."
+		return "Run timed out."
+	}
+	switch errText {
+	case "":
+		return "Run failed."
+	case "interrupted":
+		return "Run interrupted before it finished."
+	case "turn_timeout":
+		return "Run timed out (turn_timeout)."
+	case "timed out":
+		return "Run timed out."
+	case "shutdown":
+		return "Run stopped."
+	case "tool round limit":
+		return "Run failed (tool round limit)."
+	case "approval refused":
+		return "Run failed (approval refused)."
+	case "approval interrupted":
+		return "Run failed (approval interrupted)."
+	case "stall_timeout", "first_output_timeout", "model_timeout", "run_timeout":
+		return "Run timed out (" + errText + ")."
 	default:
-		return "Notice: Run failed: " + clip(errText, 2000)
+		return "Run failed (model error)."
 	}
 }
 
+// timeoutLimitCode reads a limit token that timeoutBody writes in parentheses.
+// The returned code is one of the fixed list, never a slice of errText.
+func timeoutLimitCode(errText string) string {
+	for _, code := range []string{"first_output_timeout", "stall_timeout", "model_timeout", "run_timeout", "turn_timeout"} {
+		if strings.Contains(errText, "("+code+")") {
+			return code
+		}
+	}
+	return ""
+}
+
+// shouldSchemaRetry is the only gate for the attached-tool claim retry.
+// sawToolCall covers this execute. runHasToolCall covers a call already
+// stored on the run, including one resumed after approval.
+func (a *App) shouldSchemaRetry(runID string, round int, schemaRetried, sawToolCall bool, content string, tools []model.Tool) bool {
+	if a == nil || schemaRetried || sawToolCall || round+1 >= maxToolRounds || a.runHasToolCall(runID) {
+		return false
+	}
+	return claimsAttachedToolUnavailable(content, tools)
+}
+
+// runHasToolCall reports a persisted kind=call row for this run.
+// Ok, error, and denied calls all count. Text and permission rows do not.
+func (a *App) runHasToolCall(runID string) bool {
+	if a == nil || a.st == nil || runID == "" {
+		return false
+	}
+	recs, err := a.st.RunTools([]string{runID})
+	if err != nil {
+		return false
+	}
+	for _, rec := range recs[runID] {
+		if rec.Kind == "call" {
+			return true
+		}
+	}
+	return false
+}
+
+// toolDeniedError is a broker, policy, or hook refusal of one tool call.
+// Error() may carry the broker's reason for the live tool message.
+// The stored run_tools row uses toolDeniedMarker instead.
+type toolDeniedError struct{ detail string }
+
+func (e *toolDeniedError) Error() string {
+	if e == nil || strings.TrimSpace(e.detail) == "" {
+		return toolDeniedMarker
+	}
+	return e.detail
+}
+
+func callRecord(name string, args json.RawMessage, body string, terr error) store.ToolRecord {
+	rec := store.ToolRecord{Kind: "call", Name: name, Arguments: args, OK: terr == nil, Result: clip(body, 4000)}
+	var denied *toolDeniedError
+	if errors.As(terr, &denied) {
+		rec.OK = false
+		rec.Result = toolDeniedMarker
+		rec.Arguments = json.RawMessage(`{}`)
+	}
+	return rec
+}
+
 func (a *App) persistRunNotice(botID, runID, status, errText string) {
-	m, err := a.st.AddMessage(store.Message{
-		BotID: botID, Thread: "user", Role: "system", Content: runNoticeText(status, errText), RunID: &runID,
+	m, err := a.st.AddRunNotice(store.Message{
+		BotID: botID, Content: runNoticeText(status, errText), RunID: &runID,
 	})
 	if err != nil {
 		return
@@ -363,7 +459,7 @@ func (a *App) persistRunNotice(botID, runID, status, errText string) {
 }
 
 func (a *App) persistBotText(botID, runID, content string, timedOut bool) {
-	content = clip(content, maxReplyBytes)
+	content = clip(stripToolTrailers(content), maxReplyBytes)
 	m, err := a.st.AddMessage(store.Message{
 		BotID: botID, Thread: "user", Role: "bot", Content: content, RunID: &runID, TimedOut: timedOut,
 	})
@@ -405,7 +501,7 @@ func (a *App) finishOllamaTimeout(bot store.Bot, runID string, msgs []model.Mess
 	dur := a.limitDuration(bot.ID, limit)
 	kept := ""
 	if t := strings.TrimSpace(partial); t != "" {
-		kept = clip(t, maxReplyBytes)
+		kept = clip(stripToolTrailers(t), maxReplyBytes)
 		a.persistBotText(bot.ID, runID, kept, true)
 		resume := append([]model.Message{}, msgs...)
 		resume = append(resume, model.Message{Role: "assistant", Content: kept})
@@ -414,7 +510,7 @@ func (a *App) finishOllamaTimeout(bot store.Bot, runID string, msgs []model.Mess
 	}
 	body := timeoutBody(limit, dur, retried, kept)
 	_, _ = a.finishRun(runID, "timeout", body)
-	a.bus.Publish(runID, "timeout", map[string]any{"run_id": runID, "error": body, "limit": limit})
+	a.bus.Publish(runID, "timeout", map[string]any{"run_id": runID, "error": audit.RedactText(body), "limit": limit})
 	a.log(bot.ID, "run_timed_out", map[string]any{
 		"run_id":          runID,
 		"limit":           limit,
@@ -460,13 +556,16 @@ func (a *App) limitDuration(botID, limit string) time.Duration {
 	}
 }
 
-func (a *App) logOllamaCall(botID, modelName string, ok bool, attempt int, retry bool, first time.Duration, err error, tokens int, limit, limitValue string) {
+func (a *App) logOllamaCall(botID, modelName string, ok bool, attempt int, retry bool, first time.Duration, err error, tokens int, limit, limitValue string, tools []model.Tool) {
+	joined, n := attachedToolLog(tools)
 	detail := map[string]any{
 		"model":           modelName,
 		"ok":              ok,
 		"attempt":         attempt,
 		"retry":           retry,
 		"first_output_ms": first.Milliseconds(),
+		"tools":           joined,
+		"tool_count":      n,
 	}
 	if err != nil {
 		detail["error"] = err.Error()
@@ -481,7 +580,8 @@ func (a *App) logOllamaCall(botID, modelName string, ok bool, attempt int, retry
 	a.log(botID, "model_call", detail)
 }
 
-// timeoutBody is the run error text. The thread notice prefixes "Notice: ".
+// timeoutBody is the run error text stored on the run. The thread notice is a
+// fixed sentence from runNoticeText, not a copy of this body.
 func timeoutBody(limit string, d time.Duration, retried int, partial string) string {
 	shown := compactDuration(d)
 	var b strings.Builder
@@ -614,11 +714,39 @@ func (a *App) buildMessagesHist(bot store.Bot, tools []model.Tool) ([]model.Mess
 		b.WriteString("\n")
 	}
 	b.WriteString("\n" + attachedToolsLine(tools) + "\n" + toolAuthority + "\n\nYou can call tools. create_bot creates a bot: pass name and description. description is the standing prompt the new bot is given. instructions is an old name for that same field and still works. Do not use the shell to create a bot. update_bot changes a bot. list_bots and read_bot inspect bots. send_dm sends a direct message. write_memory and delete_memory keep notes. set_timer schedules a prompt back to you: pass prompt plus one of in (one-shot duration such as \"5m\"), at (one-shot RFC 3339 time), or every (repeating interval); list_timers and clear_timer manage them. Each tool's arguments are described in its schema; use those names. read_file, write_file, edit_file, and delete_file stay inside the workspace; paths outside it are rejected and symlinks are refused. run_shell stays inside the workspace. go, gofmt, and other tools installed under /usr are on PATH. Tests stay offline unless net is granted. The build grant does not add a network exception. GitHub remotes are HTTPS to allowlisted repositories. git push waits for an approval card and the daemon sends it; the jail does not send the push. create_pr waits for an approval card. pr_status reads one allowlisted pull request. SSH stays off unless the user turned it on in the profile. After tools, send a short reply to the user. Direct messages from other bots appear as user messages prefixed with [DM from Name]. Scheduled prompts are prefixed with [scheduled]. If you need a tool, call it in this response. Do not reply with only an announcement such as \"Let me check.\"\n")
+	byRun, err := a.toolRecordsForHist(hist)
+	if err != nil {
+		return nil, nil, err
+	}
 	out := []model.Message{{Role: "system", Content: b.String()}}
 	for _, m := range hist {
-		out = append(out, mapHist(m, names))
+		if m.Role == "bot" {
+			m.Content = stripToolTrailers(m.Content)
+		}
+		msg := mapHist(m, names)
+		if m.Role == "bot" {
+			msg.Content = appendToolUseSummary(msg.Content, toolUseSummary(toolRecsFor(byRun, m)))
+		}
+		out = append(out, msg)
+		if m.Kind == store.KindRunFailed {
+			if text := quoteRunError(a.runErrorFor(m)); text != "" {
+				out = append(out, model.Message{Role: "assistant", Content: text})
+			}
+		}
 	}
 	return out, hist, nil
+}
+
+// runErrorFor is the run's stored error, replayed as data. It is not the notice text.
+func (a *App) runErrorFor(m store.Message) string {
+	if a == nil || a.st == nil || m.RunID == nil || *m.RunID == "" {
+		return ""
+	}
+	run, err := a.st.GetRun(*m.RunID)
+	if err != nil || run.Error == nil {
+		return ""
+	}
+	return *run.Error
 }
 
 func mapHist(m store.Message, names map[string]string) model.Message {
@@ -639,7 +767,11 @@ func mapHist(m store.Message, names map[string]string) model.Message {
 	case "system":
 		// Kind is the check. The visible sentence is not: a person can
 		// type the same words, and a stored prefix is not a role.
-		if m.Kind == store.KindHookNote {
+		// A run-failure notice stays role=system: the daemon recorded
+		// that the run failed, and the model should not hear that as the
+		// user. Omitting it would hide the failure. An empty kind keeps
+		// the mapping below, including a "Notice: " row stored earlier.
+		if m.Kind == store.KindHookNote || m.Kind == store.KindRunFailed {
 			return model.Message{Role: "system", Content: m.Content}
 		}
 		if strings.HasPrefix(m.Content, "Message from ") || strings.HasPrefix(m.Content, "Notice: ") {
@@ -672,12 +804,8 @@ func botTools(bot store.Bot) []model.Tool {
 	return toolDefs()
 }
 
-// attachedToolsLine names every tool in tools, the slice sent with the
-// model request.
+// attachedToolsLine names the tools sent with the model request.
+// Names are sanitized, empty names are skipped, and the list is capped.
 func attachedToolsLine(tools []model.Tool) string {
-	names := make([]string, len(tools))
-	for i, t := range tools {
-		names[i] = t.Name
-	}
-	return "Attached tools: " + strings.Join(names, ", ")
+	return "Attached tools: " + promptToolList(tools)
 }

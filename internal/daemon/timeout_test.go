@@ -78,6 +78,10 @@ func postRetry(t *testing.T, base, botID, runID string) (*http.Response, []byte)
 	return do(t, http.MethodPost, base+"/api/bots/"+botID+"/runs/"+runID+"/retry", nil, "")
 }
 
+func fixedTimeoutNotice(limit string) string {
+	return "Notice: Run timed out (" + limit + ")."
+}
+
 func threadNotice(page failThread) string {
 	for i := len(page.Messages) - 1; i >= 0; i-- {
 		m := page.Messages[i]
@@ -155,7 +159,13 @@ func TestCompactDurationAndTimeoutBody(t *testing.T) {
 		if c.got != c.want {
 			t.Fatalf("got %q want %q", c.got, c.want)
 		}
-		if runNoticeText("timeout", c.got) != "Notice: "+c.want {
+		code := ""
+		for _, limit := range []string{"first_output_timeout", "stall_timeout", "model_timeout", "run_timeout", "turn_timeout"} {
+			if strings.Contains(c.want, "("+limit+")") {
+				code = limit
+			}
+		}
+		if code == "" || runNoticeText("timeout", c.got) != fixedTimeoutNotice(code) {
 			t.Fatalf("notice %q", runNoticeText("timeout", c.got))
 		}
 	}
@@ -257,7 +267,7 @@ func TestStallRetriesZeroKeepsPartial(t *testing.T) {
 		t.Fatalf("calls %d retries %d", len(mdl.snapshot()), retryLogs(t, srv.URL))
 	}
 	page := readThread(t, srv.URL, bot.ID)
-	if threadNotice(page) != "Notice: "+body {
+	if threadNotice(page) != fixedTimeoutNotice("stall_timeout") {
 		t.Fatalf("notice %q", threadNotice(page))
 	}
 	replies := botReplies(page)
@@ -362,7 +372,7 @@ func TestNoRetryOnStopOrRunTimeout(t *testing.T) {
 			t.Fatalf("calls %d", mdl.calls.Load())
 		}
 		page := readThread(t, srv.URL, bot.ID)
-		if threadNotice(page) != "Notice: "+body {
+		if threadNotice(page) != fixedTimeoutNotice("run_timeout") {
 			t.Fatalf("notice %q", threadNotice(page))
 		}
 		if len(botReplies(page)) != 0 {
@@ -398,7 +408,7 @@ func TestModelTimeoutIsNotRetried(t *testing.T) {
 		t.Fatalf("calls %d", len(mdl.snapshot()))
 	}
 	page := readThread(t, srv.URL, bot.ID)
-	if threadNotice(page) != "Notice: "+body {
+	if threadNotice(page) != fixedTimeoutNotice("model_timeout") {
 		t.Fatalf("notice %q", threadNotice(page))
 	}
 	replies := botReplies(page)
@@ -836,7 +846,7 @@ func TestStallRetryKeepsLongestPartial(t *testing.T) {
 		t.Fatalf("continue %q", bot.ContinueRunID)
 	}
 	page := readThread(t, srv.URL, bot.ID)
-	if threadNotice(page) != "Notice: "+body {
+	if threadNotice(page) != fixedTimeoutNotice("stall_timeout") {
 		t.Fatalf("notice %q", threadNotice(page))
 	}
 	replies := botReplies(page)
@@ -875,7 +885,7 @@ func TestFirstOutputTimeoutWithoutPartialHasNoContinue(t *testing.T) {
 		t.Fatalf("status %s error %q continue %q", bot.LastRunStatus, bot.LastRunError, bot.ContinueRunID)
 	}
 	page := readThread(t, srv.URL, bot.ID)
-	if threadNotice(page) != "Notice: "+body {
+	if threadNotice(page) != fixedTimeoutNotice("first_output_timeout") {
 		t.Fatalf("notice %q", threadNotice(page))
 	}
 	if len(botReplies(page)) != 0 {
@@ -1074,7 +1084,7 @@ func TestInheritedSilenceAtModelCapIsNotRetried(t *testing.T) {
 		t.Fatal("stream_reset")
 	}
 	page := readThread(t, srv.URL, bot.ID)
-	if threadNotice(page) != "Notice: "+body {
+	if threadNotice(page) != fixedTimeoutNotice("model_timeout") {
 		t.Fatalf("notice %q", threadNotice(page))
 	}
 	if len(botReplies(page)) != 0 {
@@ -1145,7 +1155,7 @@ func TestInheritedStallAtModelCapKeepsPartial(t *testing.T) {
 		t.Fatal("stream_reset")
 	}
 	page := readThread(t, srv.URL, bot.ID)
-	if threadNotice(page) != "Notice: "+body {
+	if threadNotice(page) != fixedTimeoutNotice("model_timeout") {
 		t.Fatalf("notice %q", threadNotice(page))
 	}
 	replies := botReplies(page)

@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/permbroker"
 	"github.com/PixnBits/local-grok-bots/internal/store"
@@ -570,7 +571,7 @@ func (a *App) refuseSnap(snap permbroker.PendingSnapshot, id, scope string) {
 	a.broker.DropFreshApproval(snap.BotID, snap.SessionID, snap.InputHash, snap.Cwd, id)
 	a.auditResumeRefused(snap.BotID, snap.SessionID, snap.RunID, snap.TaskID, snap.Cwd, snap.Tool, id, scope)
 	if snap.RunID != "" {
-		if ok, _ := a.st.FailWaiting(snap.RunID, "approval refused"); ok {
+		if ok, _ := a.st.FailWaiting(snap.RunID, audit.RedactText("approval refused")); ok {
 			a.persistRunNotice(snap.BotID, snap.RunID, "error", "approval refused")
 		}
 		_ = a.st.SetStatus(snap.BotID, "idle")
@@ -608,6 +609,7 @@ func (a *App) failApproval(ck checkpoint, msg string) {
 	if a == nil || a.st == nil || ck.RunID == "" {
 		return
 	}
+	msg = audit.RedactText(msg)
 	if ok, _ := a.st.FailWaiting(ck.RunID, msg); ok {
 		a.persistRunNotice(ck.BotID, ck.RunID, "error", msg)
 	} else if run, err := a.st.GetRun(ck.RunID); err == nil && run.Status == "running" {
@@ -621,6 +623,7 @@ func (a *App) resumeDenied(ck checkpoint) {
 	if !a.markConsumed(ck.PendingID) {
 		return
 	}
+	a.recordDeniedTool(ck.RunID, ck.BotID, ck.ToolName)
 	a.saveResult(ck.PendingID, deniedByUser)
 	a.continueApproval(ck, deniedByUser, "deny")
 }
@@ -651,6 +654,7 @@ func (a *App) resumeApproved(ck checkpoint) {
 		ToolName: ck.ToolName, ToolInput: raw, Origin: permbroker.OriginNative,
 	}, ck.PendingID)
 	if d.Verdict != permbroker.VerdictAllow {
+		a.recordDeniedTool(ck.RunID, ck.BotID, ck.ToolName)
 		a.broker.DropFreshApproval(ck.BotID, ck.SessionID, ck.Pending.InputHash, ck.Cwd, ck.PendingID)
 		a.refuseCheckpoint(ck, "policy")
 		return
@@ -701,9 +705,7 @@ func (a *App) execSavedCall(ck checkpoint) {
 	}
 	a.saveResult(ck.PendingID, body)
 	argJSON, _ := json.Marshal(redactValue(ck.ToolArgs))
-	_ = a.st.AddRunTool(ck.RunID, ck.BotID, store.ToolRecord{
-		Name: ck.ToolName, Arguments: argJSON, OK: terr == nil, Result: clip(body, 4000),
-	})
+	_ = a.st.AddRunTool(ck.RunID, ck.BotID, callRecord(ck.ToolName, argJSON, body, terr))
 	a.continueApproval(ck, body, "approve")
 }
 
@@ -1587,7 +1589,7 @@ func (a *App) failUncoveredWaiting(botID, scope string) {
 		if covered[run.ID] {
 			continue
 		}
-		if ok, _ := a.st.FailWaiting(run.ID, "approval refused"); ok {
+		if ok, _ := a.st.FailWaiting(run.ID, audit.RedactText("approval refused")); ok {
 			a.persistRunNotice(run.BotID, run.ID, "error", "approval refused")
 		}
 		_ = a.st.SetStatus(run.BotID, "idle")

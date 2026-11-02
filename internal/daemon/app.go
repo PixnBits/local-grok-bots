@@ -596,9 +596,15 @@ func (a *App) fireDue() {
 }
 
 func (a *App) log(botID, kind string, detail any) {
+	// Clip first so a sandbox_block row keeps today's length limit. AddLog and
+	// the audit mirror then both see that same clipped value, with every
+	// secret-shaped string removed. RedactDetail copies; the caller value is
+	// not modified. The store redacts again at insert, and a second pass does
+	// not change this output.
 	if kind == "sandbox_block" {
 		detail = clipSandboxDetail(detail)
 	}
+	detail = audit.RedactDetail(detail)
 	_ = a.st.AddLog(botID, kind, detail)
 	if kind == "sandbox_block" {
 		a.auditSandboxBlock(botID, detail)
@@ -714,7 +720,7 @@ func (a *App) kickLocked(botID string) string {
 		return ""
 	}
 	if err := a.st.SetStatus(botID, "running"); err != nil {
-		_, _ = a.st.FinishRun(run.ID, "error", err.Error())
+		_, _ = a.st.FinishRun(run.ID, "error", audit.RedactText(err.Error()))
 		return ""
 	}
 	st.running = true
@@ -761,7 +767,7 @@ func (a *App) continueRun(botID, fromRun string) (string, int, error) {
 		return "", http.StatusInternalServerError, err
 	}
 	if err := a.st.SetStatus(botID, "running"); err != nil {
-		_, _ = a.st.FinishRun(run.ID, "error", err.Error())
+		_, _ = a.st.FinishRun(run.ID, "error", audit.RedactText(err.Error()))
 		a.resume[botID] = offer
 		return "", http.StatusInternalServerError, err
 	}
@@ -826,14 +832,14 @@ func (a *App) retryRun(botID, fromRun string) (string, int, error) {
 		return "", http.StatusInternalServerError, err
 	}
 	if err := a.st.SetStatus(botID, "running"); err != nil {
-		_, _ = a.st.FinishRun(newRun.ID, "error", err.Error())
+		_, _ = a.st.FinishRun(newRun.ID, "error", audit.RedactText(err.Error()))
 		if hadOffer {
 			a.resume[botID] = offer
 		}
 		return "", http.StatusInternalServerError, err
 	}
 	if err := a.st.DeleteRunOutput(botID, fromRun); err != nil {
-		_, _ = a.st.FinishRun(newRun.ID, "error", err.Error())
+		_, _ = a.st.FinishRun(newRun.ID, "error", audit.RedactText(err.Error()))
 		_ = a.st.SetStatus(botID, "idle")
 		if hadOffer {
 			a.resume[botID] = offer
