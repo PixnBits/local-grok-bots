@@ -596,9 +596,13 @@ func (a *App) fireDue() {
 }
 
 func (a *App) log(botID, kind string, detail any) {
+	// Clip first so a sandbox_block row keeps today's length limit. AddLog and
+	// the audit mirror then both see that same clipped value, with token-shaped
+	// text removed. Redaction copies; the caller map is not modified.
 	if kind == "sandbox_block" {
 		detail = clipSandboxDetail(detail)
 	}
+	detail = redactLogDetail(detail)
 	_ = a.st.AddLog(botID, kind, detail)
 	if kind == "sandbox_block" {
 		a.auditSandboxBlock(botID, detail)
