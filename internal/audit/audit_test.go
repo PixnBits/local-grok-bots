@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFileSinkRedacts(t *testing.T) {
@@ -191,4 +193,190 @@ func TestWriteRedactsNestedSecretsWithoutClipping(t *testing.T) {
 			t.Fatalf("missing %q in %s", want, body)
 		}
 	}
+}
+
+// TestRedactValueOutputUnchanged pins the behaviors RedactDetail must not
+// take over: string clip, []byte passthrough, and numeric secret-key redaction.
+func TestRedactValueOutputUnchanged(t *testing.T) {
+	long := strings.Repeat("a", 600)
+	got := RedactValue(long).(string)
+	want := strings.Repeat("a", 500) + "…(truncated)"
+	if got != want {
+		t.Fatalf("clip %q", got)
+	}
+
+	tok := "ghp_" + strings.Repeat("A1b2", 9)
+	b := []byte("prefix-" + tok)
+	out := RedactValue(b).([]byte)
+	if string(out) != string(b) || len(out) == 0 || &out[0] != &b[0] {
+		t.Fatalf("[]byte passthrough got %q", out)
+	}
+
+	num := RedactValue(map[string]any{"tokens": 12}).(map[string]any)
+	if num["tokens"] != "[redacted]" {
+		t.Fatalf("numeric secret key %#v", num["tokens"])
+	}
+}
+
+func TestRedactDetailKeepsScalars(t *testing.T) {
+	tok := "ghp_" + strings.Repeat("A1b2", 9)
+	other := "ghp_" + strings.Repeat("C3d4", 9)
+	long := strings.Repeat("b", 600)
+	if RedactDetail(long).(string) != long {
+		t.Fatal("detail clipped a long string")
+	}
+
+	got := RedactDetail(map[string]any{
+		"tokens":     12,
+		"ok":         true,
+		"note":       nil,
+		"n":          json.Number("4"),
+		"api_key":    "hello",
+		"token_name": "alice",
+	}).(map[string]any)
+	if got["tokens"] != 12 || got["ok"] != true || got["note"] != nil || got["api_key"] != "[redacted]" || got["token_name"] != "alice" {
+		t.Fatalf("scalars %#v", got)
+	}
+	if n, _ := got["n"].(json.Number); n != "4" {
+		t.Fatalf("number %T %#v", got["n"], got["n"])
+	}
+
+	when := time.Date(2026, 11, 2, 3, 4, 5, 0, time.UTC)
+	stamp, ok := RedactDetail(when).(string)
+	if !ok || stamp != "2026-11-02T03:04:05Z" {
+		t.Fatalf("time %T %q", RedactDetail(when), stamp)
+	}
+
+	keys := RedactDetail(map[string]any{
+		tok:     "one",
+		other:   "two",
+		"plain": "kept",
+	}).(map[string]any)
+	if len(keys) != 3 || keys["[redacted]"] != "one" || keys["[redacted]#2"] != "two" || keys["plain"] != "kept" {
+		t.Fatalf("keys %#v", keys)
+	}
+	if strings.Contains(fmt.Sprint(keys), tok) || strings.Contains(fmt.Sprint(keys), other) {
+		t.Fatalf("key leaked %#v", keys)
+	}
+	if again := RedactDetail(keys); !reflect.DeepEqual(again, keys) {
+		t.Fatalf("not idempotent %#v then %#v", keys, again)
+	}
+
+	raw := json.RawMessage("notice " + tok)
+	text, ok := RedactDetail(raw).(string)
+	if !ok || strings.Contains(text, tok) || text != "notice [redacted]" {
+		t.Fatalf("invalid raw %T %q", RedactDetail(raw), text)
+	}
+	valid := json.RawMessage(`{"note":"notice ` + tok + `"}`)
+	cleaned, ok := RedactDetail(valid).(json.RawMessage)
+	if !ok || !json.Valid(cleaned) || strings.Contains(string(cleaned), tok) || !strings.Contains(string(cleaned), "notice [redacted]") {
+		t.Fatalf("valid raw %s", cleaned)
+	}
+
+	buf := []byte("notice " + tok)
+	red := RedactDetail(buf).([]byte)
+	if string(buf) != "notice "+tok || strings.Contains(string(red), tok) || !strings.Contains(string(red), "notice [redacted]") {
+		t.Fatalf("bytes %q caller %q", red, buf)
+	}
+
+	type hiddenChan struct {
+		C chan int
+	}
+	if got := RedactDetail(hiddenChan{C: make(chan int)}); got != "[unencodable]" {
+		t.Fatalf("unencodable %#v", got)
+	}
+}
+
+func TestRedactDetailCycles(t *testing.T) {
+	tok := "ghp_" + strings.Repeat("A1b2", 9)
+	notice := "notice " + tok
+
+	t.Run("map", func(t *testing.T) {
+		m := map[string]any{"note": notice}
+		m["self"] = m
+		body := redactQuick(t, tok, m)
+		if !strings.Contains(body, "[cycle]") || !strings.Contains(body, "notice [redacted]") {
+			t.Fatalf("cycle %s", body)
+		}
+		if m["note"] != notice || m["self"].(map[string]any)["note"] != notice {
+			t.Fatal("caller map mutated")
+		}
+		valueBody := mustMarshalRedacted(t, tok, RedactValue(m))
+		if !strings.Contains(valueBody, "[cycle]") || !strings.Contains(valueBody, "notice [redacted]") {
+			t.Fatalf("RedactValue cycle %s", valueBody)
+		}
+	})
+
+	t.Run("slice", func(t *testing.T) {
+		s := make([]any, 2)
+		s[0] = s
+		s[1] = notice
+		body := redactQuick(t, tok, s)
+		if !strings.Contains(body, "[cycle]") || !strings.Contains(body, "notice [redacted]") {
+			t.Fatalf("cycle %s", body)
+		}
+		if s[1] != notice {
+			t.Fatal("caller slice mutated")
+		}
+	})
+
+	t.Run("deep", func(t *testing.T) {
+		root := map[string]any{"note": notice}
+		leaf := map[string]any{"leaf": notice}
+		var cur any = leaf
+		for i := 0; i < 10000; i++ {
+			cur = map[string]any{"down": cur}
+		}
+		root["deep"] = cur
+		body := redactQuick(t, tok, root)
+		if !strings.Contains(body, "[depth]") || !strings.Contains(body, "notice [redacted]") {
+			t.Fatalf("deep %s", body)
+		}
+		if root["note"] != notice || leaf["leaf"] != notice {
+			t.Fatal("caller deep value mutated")
+		}
+	})
+
+	t.Run("shared", func(t *testing.T) {
+		shared := map[string]any{"note": notice}
+		out := RedactDetail(map[string]any{"a": shared, "b": shared}).(map[string]any)
+		for _, key := range []string{"a", "b"} {
+			child, _ := out[key].(map[string]any)
+			if child["note"] != "notice [redacted]" {
+				t.Fatalf("%s %#v", key, out[key])
+			}
+		}
+		if shared["note"] != notice {
+			t.Fatal("shared map mutated")
+		}
+	})
+
+	t.Run("empty slices", func(t *testing.T) {
+		body := mustMarshalRedacted(t, tok, RedactDetail([]any{[]any{}, []any{notice}}))
+		if strings.Contains(body, "[cycle]") || !strings.Contains(body, "notice [redacted]") {
+			t.Fatalf("empty slices %s", body)
+		}
+	})
+}
+
+func redactQuick(t *testing.T, tok string, v any) string {
+	t.Helper()
+	start := time.Now()
+	out := RedactDetail(v)
+	if time.Since(start) > time.Second {
+		t.Fatalf("slow %s", time.Since(start))
+	}
+	return mustMarshalRedacted(t, tok, out)
+}
+
+func mustMarshalRedacted(t *testing.T, tok string, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal %v", err)
+	}
+	if strings.Contains(string(b), tok) {
+		t.Fatalf("leaked %s", b)
+	}
+	return string(b)
 }

@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/github"
 	"github.com/PixnBits/local-grok-bots/internal/id"
 	_ "modernc.org/sqlite"
@@ -781,6 +782,7 @@ func parsePositiveInt(s string) (int, error) {
 }
 
 func (s *Store) addLogTx(tx *sql.Tx, botID, kind string, detail any) error {
+	detail = audit.RedactDetail(detail)
 	b, err := json.Marshal(detail)
 	if err != nil {
 		return err
@@ -893,6 +895,7 @@ func (s *Store) InsertBot(d BotDraft, by string) (Bot, error) {
 }
 
 func (s *Store) logUnlocked(botID, kind string, detail any) error {
+	detail = audit.RedactDetail(detail)
 	b, err := json.Marshal(detail)
 	if err != nil {
 		return err
