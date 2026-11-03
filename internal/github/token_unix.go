@@ -21,6 +21,19 @@ func ioTokenReason(err error) error {
 	}
 }
 
+// ownerBeforeOpen reports a file owned by someone other than the daemon
+// before the file is opened. A loose mode or a failed open would hide that.
+func ownerBeforeOpen(uid uint32) error {
+	if tokenCheck != nil {
+		return nil
+	}
+	id := tokenEUID()
+	if id < 0 || uint32(id) != tokenOwner(uid) {
+		return errToken("owner")
+	}
+	return nil
+}
+
 func readTokenFile(path string) (string, error) {
 	if !filepath.IsAbs(path) || strings.ContainsAny(path, "\r\n\x00") {
 		return "", errToken("path")
@@ -31,6 +44,10 @@ func readTokenFile(path string) (string, error) {
 	}
 	if lst.Mode&unix.S_IFMT != unix.S_IFREG {
 		return "", errToken("type")
+	}
+	// Owner is compared before open. tokenCheck, when set, replaces this check.
+	if err := ownerBeforeOpen(lst.Uid); err != nil {
+		return "", err
 	}
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {

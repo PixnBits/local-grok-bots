@@ -3,6 +3,8 @@ package daemon
 import (
 	"fmt"
 	"os"
+	"os/user"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -12,8 +14,26 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
-func (a *App) botWarnings(b store.Bot) []string {
-	w := descriptionWarnings(b.Description)
+// daemonUserName is the account this process runs as, looked up once.
+// A failed lookup uses the numeric user id.
+var daemonUserName = sync.OnceValue(func() string {
+	u, err := user.Current()
+	if err == nil && u != nil {
+		if name := strings.TrimSpace(u.Username); name != "" {
+			return name
+		}
+	}
+	return strconv.Itoa(os.Geteuid())
+})
+
+func (a *App) botWarnings(b store.Bot) []store.Warning {
+	var w []store.Warning
+	for _, text := range descriptionWarnings(b.Description) {
+		if text == "" {
+			continue
+		}
+		w = append(w, store.Warning{Field: "description", Text: text})
+	}
 	var pol policy.Policy
 	if a != nil {
 		pol = a.effPol(b.ID)
@@ -26,21 +46,31 @@ func (a *App) botWarnings(b store.Bot) []string {
 	return w
 }
 
-func broadHostWarnings(allow []string) []string {
+func broadHostWarnings(allow []string) []store.Warning {
 	for _, raw := range allow {
 		h := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(raw, ".")))
 		if h == "storage.googleapis.com" {
-			return []string{"storage.googleapis.com is on net_allow. It reaches all of Google Cloud Storage, not one project. See docs/sandbox.md and https://github.com/PixnBits/local-grok-bots/issues/33."}
+			return []store.Warning{{
+				Field: "net_allow",
+				Text:  "storage.googleapis.com gives this bot access to all of Google Cloud Storage, not just your project. Remove it unless the bot needs it.",
+				Link: &store.WarningLink{
+					Href:  "https://github.com/PixnBits/local-grok-bots/issues/33",
+					Label: "Why this matters (GitHub issue #33)",
+				},
+			}}
 		}
 	}
 	return nil
 }
 
-func githubConfigWarnings(pol policy.Policy, grants, allow []string) []string {
-	var out []string
+func githubConfigWarnings(pol policy.Policy, grants, allow []string) []store.Warning {
+	var out []store.Warning
 	if len(allow) > 0 {
+		names := repoNames(allow)
 		if len(pol.GitHub.Repos) == 0 {
-			out = append(out, fmt.Sprintf("The policy [github].repos ceiling is empty, so these github_allow repositories cannot be used: %s.", joinRepoNames(allow)))
+			if len(names) > 0 {
+				out = append(out, store.Warning{Field: "github_allow", Text: emptyCeilingText(names)})
+			}
 		} else {
 			ceiling := map[string]bool{}
 			for _, raw := range pol.GitHub.Repos {
@@ -49,31 +79,27 @@ func githubConfigWarnings(pol policy.Policy, grants, allow []string) []string {
 				}
 			}
 			var missing []string
-			for _, raw := range allow {
-				name, err := github.NormalizeRepo(raw)
-				if err != nil {
-					name = strings.ToLower(strings.TrimSpace(raw))
-				}
+			for _, name := range names {
 				if name == "" || ceiling[name] {
 					continue
 				}
 				missing = append(missing, name)
 			}
 			if len(missing) > 0 {
-				out = append(out, fmt.Sprintf("The policy [github].repos ceiling does not include %s from this bot's github_allow.", strings.Join(missing, ", ")))
+				out = append(out, store.Warning{Field: "github_allow", Text: ceilingGapText(missing)})
 			}
 		}
 	}
 	path := strings.TrimSpace(pol.GitHub.TokenFile)
 	if path != "" && (len(allow) > 0 || granted(grants, "github")) {
 		if msg := tokenFileWarning(path); msg != "" {
-			out = append(out, msg)
+			out = append(out, store.Warning{Field: "github_token", Text: msg})
 		}
 	}
 	return out
 }
 
-func joinRepoNames(allow []string) string {
+func repoNames(allow []string) []string {
 	names := make([]string, 0, len(allow))
 	for _, raw := range allow {
 		name, err := github.NormalizeRepo(raw)
@@ -84,7 +110,23 @@ func joinRepoNames(allow []string) string {
 			names = append(names, name)
 		}
 	}
-	return strings.Join(names, ", ")
+	return names
+}
+
+func emptyCeilingText(names []string) string {
+	list := strings.Join(names, ", ")
+	if len(names) == 1 {
+		return fmt.Sprintf("The policy allows no GitHub repositories, so this bot can't use %s. Add it to `repos` under `[github]` in policy.toml.", list)
+	}
+	return fmt.Sprintf("The policy allows no GitHub repositories, so this bot can't use %s. Add them to `repos` under `[github]` in policy.toml.", list)
+}
+
+func ceilingGapText(missing []string) string {
+	list := strings.Join(missing, ", ")
+	if len(missing) == 1 {
+		return fmt.Sprintf("%s isn't in the policy's GitHub repository list, so this bot can't use it. Add it to `repos` under `[github]` in policy.toml, or remove it here.", list)
+	}
+	return fmt.Sprintf("%s aren't in the policy's GitHub repository list, so this bot can't use them. Add them to `repos` under `[github]` in policy.toml, or remove them here.", list)
 }
 
 // readTokenForWarn reads a token file for the bot-page warning. Tests count
@@ -159,26 +201,25 @@ func tokenWarnStat(path string) (tokenWarnID, bool) {
 }
 
 func tokenWarningText(path, reason string) string {
+	who := daemonUserName()
+	var msg string
 	switch reason {
 	case "missing":
-		return fmt.Sprintf("The policy [github].token_file %s is missing.", path)
+		msg = fmt.Sprintf("The GitHub token file %s doesn't exist. Create it, or fix `token_file` in policy.toml. GitHub actions fail until then.", path)
 	case "mode":
-		return fmt.Sprintf("The policy [github].token_file %s is not mode 0600.", path)
+		msg = fmt.Sprintf("The GitHub token file %s can be read by other users. Run `chmod 600 %s`.", path, path)
 	case "token file: not owned by daemon":
-		return fmt.Sprintf("The policy [github].token_file %s is not owned by the daemon user.", path)
-	case "type":
-		return fmt.Sprintf("The policy [github].token_file %s is not a regular file.", path)
+		msg = fmt.Sprintf("The GitHub token file %s belongs to another user. Run `chown %s %s`, then `chmod 600 %s`.", path, who, path, path)
 	case "permission denied":
-		return fmt.Sprintf("The policy [github].token_file %s is not readable.", path)
-	case "read error":
-		return fmt.Sprintf("The policy [github].token_file %s could not be read.", path)
+		msg = fmt.Sprintf("The daemon can't read the GitHub token file %s. It may be owned by root. Run `sudo chown %s %s`, then `chmod 600 %s`.", path, who, path, path)
+	case "type":
+		msg = fmt.Sprintf("The GitHub token file %s isn't a regular file. Point `token_file` in policy.toml at a regular file.", path)
 	case "shape":
-		return fmt.Sprintf("The policy [github].token_file %s is not a valid token file.", path)
+		msg = fmt.Sprintf("The GitHub token file %s doesn't hold a valid token. Put one token on a single line.", path)
 	case "size":
-		return fmt.Sprintf("The policy [github].token_file %s is empty or too large.", path)
-	case "check":
-		return fmt.Sprintf("The policy [github].token_file %s failed its permission check.", path)
+		msg = fmt.Sprintf("The GitHub token file %s is empty or too large. Put one token in it.", path)
 	default:
-		return fmt.Sprintf("The policy [github].token_file %s could not be read.", path)
+		msg = fmt.Sprintf("The daemon can't read the GitHub token file %s. Check the file, then run `chmod 600 %s`.", path, path)
 	}
+	return msg + " This applies to every bot with GitHub access."
 }

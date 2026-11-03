@@ -181,9 +181,12 @@
                   <textarea id="profile-description" placeholder="Standing prompt. This is what the model is given."></textarea>
                   <p class="help changed" hidden>Changed</p>
                 </label>
-                <div class="advisory" id="profile-warn" hidden>
+                <div class="advisory" id="profile-warn" role="note" hidden>
                   <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M12 4l9 16H3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 10v4M12 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-                  <span id="profile-warn-text"></span>
+                  <div class="advisory-copy">
+                    <span class="sr">Warning: </span>
+                    <ul></ul>
+                  </div>
                 </div>
                 <label class="fld" id="fld-model">
                   <span class="lbl">Model override</span>
@@ -282,6 +285,13 @@
                     <input id="profile-net" placeholder="Add host…" autocomplete="off" aria-label="Network allowlist">
                   </div>
                   <p class="help" id="help-net">Press Enter or comma to add. Paste a list to add several.</p>
+                  <div class="advisory" id="warn-net" role="note" hidden>
+                    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M12 4l9 16H3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 10v4M12 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                    <div class="advisory-copy">
+                      <span class="sr">Warning: </span>
+                      <ul></ul>
+                    </div>
+                  </div>
                   <p class="help changed" hidden>Changed</p>
                 </div>
                 <div class="fld" id="fld-ssh">
@@ -298,6 +308,13 @@
                     <input id="profile-github" placeholder="Add owner/repo…" autocomplete="off" aria-label="GitHub repositories">
                   </div>
                   <p class="help" id="help-github">An empty GitHub list allows no repositories. It does not inherit the policy list. It can only narrow the policy ceiling.</p>
+                  <div class="advisory" id="warn-github" role="note" hidden>
+                    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M12 4l9 16H3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 10v4M12 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                    <div class="advisory-copy">
+                      <span class="sr">Warning: </span>
+                      <ul></ul>
+                    </div>
+                  </div>
                   <p class="help changed" hidden>Changed</p>
                 </div>
               </section>

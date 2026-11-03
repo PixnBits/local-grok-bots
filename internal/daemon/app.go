@@ -909,7 +909,7 @@ func (a *App) decorateBot(b store.Bot) store.Bot {
 
 func (a *App) decorateBots(bots []store.Bot) []store.Bot {
 	counts := a.perm.PendingCounts()
-	warnings := make([][]string, len(bots))
+	warnings := make([][]store.Warning, len(bots))
 	for i := range bots {
 		// ListBots omits the standing prompt. Warnings are computed from it
 		// anyway, matching GET /api/bots/{id}, and the list body still omits it.

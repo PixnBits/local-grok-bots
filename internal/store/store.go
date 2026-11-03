@@ -250,10 +250,10 @@ type Bot struct {
 	Archived    bool    `json:"archived"`
 	ArchivedAt  *string `json:"archived_at,omitempty"`
 	// Warnings are advisory notes the daemon computes on read; not stored.
-	Warnings []string `json:"warnings,omitempty"`
-	Grants   []string `json:"grants"`
-	NetAllow []string `json:"net_allow"`
-	SSHAllow []string `json:"ssh_allow"`
+	Warnings []Warning `json:"warnings,omitempty"`
+	Grants   []string  `json:"grants"`
+	NetAllow []string  `json:"net_allow"`
+	SSHAllow []string  `json:"ssh_allow"`
 	// GitHubAllow narrows the policy repository ceiling. Empty allows none.
 	// It does not inherit the policy list.
 	GitHubAllow []string `json:"github_allow"`

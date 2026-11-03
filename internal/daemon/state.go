@@ -9,16 +9,16 @@ import (
 
 // botState is everything the UI's state panel shows for one bot, read-only.
 type botState struct {
-	Timers      []store.Timer  `json:"timers"`
-	Memory      []store.Memory `json:"memory"`
-	Grants      []string       `json:"grants"`
-	NetAllow    []string       `json:"net_allow"`
-	SSHAllow    []string       `json:"ssh_allow"`
-	GitHubAllow []string       `json:"github_allow"`
-	ServerTools *[]string      `json:"server_tools"`
-	Tools       stateTools     `json:"tools"`
-	Runs        []store.Run    `json:"runs"`
-	Warnings    []string       `json:"warnings,omitempty"`
+	Timers      []store.Timer   `json:"timers"`
+	Memory      []store.Memory  `json:"memory"`
+	Grants      []string        `json:"grants"`
+	NetAllow    []string        `json:"net_allow"`
+	SSHAllow    []string        `json:"ssh_allow"`
+	GitHubAllow []string        `json:"github_allow"`
+	ServerTools *[]string       `json:"server_tools"`
+	Tools       stateTools      `json:"tools"`
+	Runs        []store.Run     `json:"runs"`
+	Warnings    []store.Warning `json:"warnings,omitempty"`
 }
 
 type stateTools struct {

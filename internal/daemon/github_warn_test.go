@@ -23,9 +23,9 @@ func TestGitHubWarningEmptyCeiling(t *testing.T) {
 		t.Fatalf("patch %d %s", res.StatusCode, b)
 	}
 	got := fetchBot(t, srv.URL, bot.ID)
-	joined := strings.Join(got.Warnings, "\n")
-	if !strings.Contains(joined, "policy [github].repos ceiling is empty") || !strings.Contains(joined, "acme/widgets") || !strings.Contains(joined, "other/nope") {
-		t.Fatalf("warnings %q", got.Warnings)
+	const want = "The policy allows no GitHub repositories, so this bot can't use acme/widgets, other/nope. Add them to `repos` under `[github]` in policy.toml."
+	if len(got.Warnings) != 1 || got.Warnings[0].Field != "github_allow" || got.Warnings[0].Text != want {
+		t.Fatalf("warnings %+v", got.Warnings)
 	}
 	res, b = do(t, "GET", srv.URL+"/api/bots/"+bot.ID+"/state", nil, "")
 	if res.StatusCode != 200 {
@@ -33,8 +33,8 @@ func TestGitHubWarningEmptyCeiling(t *testing.T) {
 	}
 	var st botState
 	decodeJSON(t, b, &st)
-	if !strings.Contains(strings.Join(st.Warnings, "\n"), "ceiling is empty") {
-		t.Fatalf("state warnings %q", st.Warnings)
+	if len(st.Warnings) != 1 || st.Warnings[0].Field != "github_allow" || st.Warnings[0].Text != want {
+		t.Fatalf("state warnings %+v", st.Warnings)
 	}
 }
 
@@ -48,9 +48,12 @@ func TestGitHubWarningRepoNotInCeiling(t *testing.T) {
 		t.Fatalf("patch %d %s", res.StatusCode, b)
 	}
 	got := fetchBot(t, srv.URL, bot.ID)
-	joined := strings.Join(got.Warnings, "\n")
-	if !strings.Contains(joined, "does not include other/nope") || strings.Contains(joined, "acme/widgets") {
-		t.Fatalf("warnings %q", got.Warnings)
+	const want = "other/nope isn't in the policy's GitHub repository list, so this bot can't use it. Add it to `repos` under `[github]` in policy.toml, or remove it here."
+	if len(got.Warnings) != 1 || got.Warnings[0].Field != "github_allow" || got.Warnings[0].Text != want {
+		t.Fatalf("warnings %+v", got.Warnings)
+	}
+	if strings.Contains(got.Warnings[0].Text, "acme/widgets") || strings.Contains(got.Warnings[0].Text, "Saving still works") {
+		t.Fatalf("warnings %+v", got.Warnings)
 	}
 }
 
@@ -64,16 +67,20 @@ func TestGitHubWarningTokenMissing(t *testing.T) {
 	srv := serve(t, app)
 	plain := createBot(t, srv.URL, "Plain")
 	if w := fetchBot(t, srv.URL, plain.ID).Warnings; len(w) != 0 {
-		t.Fatalf("token warning without github_allow or grant: %q", w)
+		t.Fatalf("token warning without github_allow or grant: %+v", w)
 	}
 	bot := createBot(t, srv.URL, "Tok")
 	res, b := do(t, "PATCH", srv.URL+"/api/bots/"+bot.ID, map[string]any{"github_allow": []string{"acme/widgets"}}, "")
 	if res.StatusCode != 200 {
 		t.Fatalf("patch %d %s", res.StatusCode, b)
 	}
-	joined := strings.Join(fetchBot(t, srv.URL, bot.ID).Warnings, "\n")
-	if !strings.Contains(joined, missing) || !strings.Contains(joined, "missing") {
-		t.Fatalf("warnings %q", joined)
+	got := fetchBot(t, srv.URL, bot.ID)
+	want := "The GitHub token file " + missing + " doesn't exist. Create it, or fix `token_file` in policy.toml. GitHub actions fail until then. This applies to every bot with GitHub access."
+	if len(got.Warnings) != 1 || got.Warnings[0].Field != "github_token" || got.Warnings[0].Text != want {
+		t.Fatalf("warnings %+v", got.Warnings)
+	}
+	if strings.Contains(got.Warnings[0].Text, "Saving still works") {
+		t.Fatalf("config warning %q", got.Warnings[0].Text)
 	}
 }
 
@@ -97,12 +104,13 @@ func TestGitHubWarningTokenMode(t *testing.T) {
 	if res.StatusCode != 200 {
 		t.Fatalf("patch %d %s", res.StatusCode, b)
 	}
-	joined := strings.Join(fetchBot(t, srv.URL, bot.ID).Warnings, "\n")
-	if !strings.Contains(joined, "not mode 0600") || !strings.Contains(joined, path) {
-		t.Fatalf("warnings %q", joined)
+	got := fetchBot(t, srv.URL, bot.ID)
+	want := "The GitHub token file " + path + " can be read by other users. Run `chmod 600 " + path + "`. This applies to every bot with GitHub access."
+	if len(got.Warnings) != 1 || got.Warnings[0].Field != "github_token" || got.Warnings[0].Text != want {
+		t.Fatalf("warnings %+v", got.Warnings)
 	}
-	if strings.Contains(joined, canary) || strings.Contains(joined, "github token refused") {
-		t.Fatalf("warning leaked token details: %q", joined)
+	if strings.Contains(got.Warnings[0].Text, canary) || strings.Contains(got.Warnings[0].Text, "github token refused") || strings.Contains(got.Warnings[0].Text, "Saving still works") {
+		t.Fatalf("warning leaked token details: %q", got.Warnings[0].Text)
 	}
 	if err := os.WriteFile(path, []byte(canary+"\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -110,9 +118,9 @@ func TestGitHubWarningTokenMode(t *testing.T) {
 	if err := os.Chmod(path, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	joined = strings.Join(fetchBot(t, srv.URL, bot.ID).Warnings, "\n")
-	if strings.Contains(joined, "token_file") || strings.Contains(joined, canary) {
-		t.Fatalf("valid token still warned: %q", joined)
+	cleared := fetchBot(t, srv.URL, bot.ID).Warnings
+	if len(cleared) != 0 {
+		t.Fatalf("valid token still warned: %+v", cleared)
 	}
 }
 
@@ -216,9 +224,9 @@ func TestGitHubWarningTokenGrantEmptyAllow(t *testing.T) {
 	})
 	srv := serve(t, app)
 	bot := createGrantedBot(t, srv.URL, "Grant", []string{"github"})
-	joined := strings.Join(fetchBot(t, srv.URL, bot.ID).Warnings, "\n")
-	if !strings.Contains(joined, missing) || !strings.Contains(joined, "missing") {
-		t.Fatalf("warnings %q", joined)
+	got := fetchBot(t, srv.URL, bot.ID)
+	if len(got.Warnings) != 1 || got.Warnings[0].Field != "github_token" || !strings.Contains(got.Warnings[0].Text, missing) || !strings.Contains(got.Warnings[0].Text, "doesn't exist") {
+		t.Fatalf("warnings %+v", got.Warnings)
 	}
 }
 
@@ -244,7 +252,7 @@ func TestTokenWarningCachedUntilChange(t *testing.T) {
 	if reads.Load() != 1 {
 		t.Fatalf("reads after two warnings: %d", reads.Load())
 	}
-	if first != second || !strings.Contains(first, "not mode 0600") || strings.Contains(first, canary) {
+	if first != second || !strings.Contains(first, "can be read by other users") || strings.Contains(first, canary) || strings.Contains(first, "Saving still works") {
 		t.Fatalf("mode warning %q", first)
 	}
 	if err := os.Chmod(path, 0o600); err != nil {
@@ -267,7 +275,7 @@ func TestTokenWarningCachedUntilChange(t *testing.T) {
 	if reads.Load() != 3 {
 		t.Fatalf("reads after rewrite: %d", reads.Load())
 	}
-	if !strings.Contains(shaped, "not a valid token file") || strings.Contains(shaped, "bad token") || strings.Contains(shaped, canary) {
+	if !strings.Contains(shaped, "doesn't hold a valid token") || strings.Contains(shaped, "bad token") || strings.Contains(shaped, canary) {
 		t.Fatalf("shape warning %q", shaped)
 	}
 }
@@ -303,7 +311,7 @@ func TestTokenWarningRefreshesWhenCtimeChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	msg := tokenFileWarning(path)
-	if !strings.Contains(msg, "not a valid token file") || strings.Contains(msg, "ghp ") {
+	if !strings.Contains(msg, "doesn't hold a valid token") || strings.Contains(msg, "ghp ") {
 		t.Fatalf("warning %q", msg)
 	}
 }
@@ -339,5 +347,149 @@ func TestTokenWarningExpires(t *testing.T) {
 	}
 	if reads.Load() != 2 {
 		t.Fatalf("reads after expiry %d", reads.Load())
+	}
+}
+
+func TestGitHubConfigWarningCopy(t *testing.T) {
+	var pol policy.Policy
+	oneEmpty := githubConfigWarnings(pol, nil, []string{"example-org/other-repo"})
+	const emptyOne = "The policy allows no GitHub repositories, so this bot can't use example-org/other-repo. Add it to `repos` under `[github]` in policy.toml."
+	if len(oneEmpty) != 1 || oneEmpty[0].Field != "github_allow" || oneEmpty[0].Text != emptyOne || oneEmpty[0].Link != nil {
+		t.Fatalf("empty one %+v", oneEmpty)
+	}
+	manyEmpty := githubConfigWarnings(pol, nil, []string{"a/x", "b/y"})
+	const emptyMany = "The policy allows no GitHub repositories, so this bot can't use a/x, b/y. Add them to `repos` under `[github]` in policy.toml."
+	if len(manyEmpty) != 1 || manyEmpty[0].Field != "github_allow" || manyEmpty[0].Text != emptyMany {
+		t.Fatalf("empty many %+v", manyEmpty)
+	}
+	pol.GitHub.Repos = []string{"example-org/allowed-repo"}
+	one := githubConfigWarnings(pol, nil, []string{"example-org/allowed-repo", "example-org/other-repo"})
+	const gapOne = "example-org/other-repo isn't in the policy's GitHub repository list, so this bot can't use it. Add it to `repos` under `[github]` in policy.toml, or remove it here."
+	if len(one) != 1 || one[0].Field != "github_allow" || one[0].Text != gapOne || one[0].Link != nil {
+		t.Fatalf("gap one %+v", one)
+	}
+	many := githubConfigWarnings(pol, nil, []string{"a/x", "b/y"})
+	const gapMany = "a/x, b/y aren't in the policy's GitHub repository list, so this bot can't use them. Add them to `repos` under `[github]` in policy.toml, or remove them here."
+	if len(many) != 1 || many[0].Field != "github_allow" || many[0].Text != gapMany {
+		t.Fatalf("gap many %+v", many)
+	}
+	for _, w := range []store.Warning{oneEmpty[0], manyEmpty[0], one[0], many[0]} {
+		if strings.Contains(w.Text, "Saving still works") {
+			t.Fatalf("config suffix %q", w.Text)
+		}
+	}
+}
+
+func TestTokenWarningCopy(t *testing.T) {
+	const path = "/var/empty/token"
+	who := daemonUserName()
+	const suffix = " This applies to every bot with GitHub access."
+	cases := []struct {
+		reason string
+		want   string
+	}{
+		{"missing", "The GitHub token file " + path + " doesn't exist. Create it, or fix `token_file` in policy.toml. GitHub actions fail until then." + suffix},
+		{"mode", "The GitHub token file " + path + " can be read by other users. Run `chmod 600 " + path + "`." + suffix},
+		{"token file: not owned by daemon", "The GitHub token file " + path + " belongs to another user. Run `chown " + who + " " + path + "`, then `chmod 600 " + path + "`." + suffix},
+		{"permission denied", "The daemon can't read the GitHub token file " + path + ". It may be owned by root. Run `sudo chown " + who + " " + path + "`, then `chmod 600 " + path + "`." + suffix},
+		{"type", "The GitHub token file " + path + " isn't a regular file. Point `token_file` in policy.toml at a regular file." + suffix},
+		{"shape", "The GitHub token file " + path + " doesn't hold a valid token. Put one token on a single line." + suffix},
+		{"size", "The GitHub token file " + path + " is empty or too large. Put one token in it." + suffix},
+		{"read error", "The daemon can't read the GitHub token file " + path + ". Check the file, then run `chmod 600 " + path + "`." + suffix},
+		{"check", "The daemon can't read the GitHub token file " + path + ". Check the file, then run `chmod 600 " + path + "`." + suffix},
+		{"other", "The daemon can't read the GitHub token file " + path + ". Check the file, then run `chmod 600 " + path + "`." + suffix},
+	}
+	for _, c := range cases {
+		got := tokenWarningText(path, c.reason)
+		if got != c.want {
+			t.Errorf("reason %s\n got %q\nwant %q", c.reason, got, c.want)
+		}
+		if !strings.Contains(got, "chown ") && (c.reason == "token file: not owned by daemon" || c.reason == "permission denied") {
+			t.Errorf("missing chown for %s: %q", c.reason, got)
+		}
+		if strings.Contains(got, "Saving still works") {
+			t.Errorf("config suffix on %s", c.reason)
+		}
+	}
+	owner := tokenWarningText(path, "token file: not owned by daemon")
+	if strings.Contains(owner, "sudo chown") {
+		t.Fatalf("owner warning used sudo: %q", owner)
+	}
+}
+
+func TestTokenWarningUnreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can read a mode 000 file")
+	}
+	path := t.TempDir() + "/token"
+	if err := os.WriteFile(path, []byte("ghp_CANARYSECRETVALUE\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	msg := tokenFileWarning(path)
+	want := tokenWarningText(path, "permission denied")
+	if msg != want {
+		t.Fatalf("got %q\nwant %q", msg, want)
+	}
+	if !strings.Contains(msg, "sudo chown") || !strings.Contains(msg, daemonUserName()) {
+		t.Fatalf("unreadable warning %q", msg)
+	}
+}
+
+func TestBotWarningFields(t *testing.T) {
+	app := newApp(t, "", fakeModel{})
+	missing := t.TempDir() + "/no-such-token"
+	app.editPol(func(p *policy.Policy) {
+		p.GitHub.Repos = []string{"example-org/allowed-repo"}
+		p.GitHub.TokenFile = missing
+	})
+	srv := serve(t, app)
+	bot := createBot(t, srv.URL, "All")
+	res, b := do(t, "PATCH", srv.URL+"/api/bots/"+bot.ID, map[string]any{
+		"net_allow":    []string{"storage.googleapis.com"},
+		"github_allow": []string{"example-org/other-repo"},
+	}, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("patch %d %s", res.StatusCode, b)
+	}
+	var patched store.Bot
+	decodeJSON(t, b, &patched)
+	checkWarningFields(t, patched.Warnings, missing)
+	checkWarningFields(t, fetchBot(t, srv.URL, bot.ID).Warnings, missing)
+	res, b = do(t, "GET", srv.URL+"/api/bots/"+bot.ID+"/state", nil, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("state %d %s", res.StatusCode, b)
+	}
+	var st botState
+	decodeJSON(t, b, &st)
+	checkWarningFields(t, st.Warnings, missing)
+}
+
+func checkWarningFields(t *testing.T, got []store.Warning, tokenPath string) {
+	t.Helper()
+	if len(got) != 3 {
+		t.Fatalf("warnings %+v", got)
+	}
+	if got[0].Field != "github_allow" || got[1].Field != "github_token" || got[2].Field != "net_allow" {
+		t.Fatalf("fields %+v", got)
+	}
+	const gap = "example-org/other-repo isn't in the policy's GitHub repository list, so this bot can't use it. Add it to `repos` under `[github]` in policy.toml, or remove it here."
+	if got[0].Text != gap || got[0].Link != nil {
+		t.Fatalf("repo %+v", got[0])
+	}
+	token := "The GitHub token file " + tokenPath + " doesn't exist. Create it, or fix `token_file` in policy.toml. GitHub actions fail until then. This applies to every bot with GitHub access."
+	if got[1].Text != token || got[1].Link != nil {
+		t.Fatalf("token %+v", got[1])
+	}
+	const host = "storage.googleapis.com gives this bot access to all of Google Cloud Storage, not just your project. Remove it unless the bot needs it."
+	if got[2].Text != host || got[2].Link == nil || got[2].Link.Href != "https://github.com/PixnBits/local-grok-bots/issues/33" || got[2].Link.Label != "Why this matters (GitHub issue #33)" {
+		t.Fatalf("host %+v", got[2])
+	}
+	if strings.Contains(got[2].Text, "docs/sandbox.md") || strings.Contains(got[2].Text, "https://") {
+		t.Fatalf("host text %q", got[2].Text)
+	}
+	for _, w := range got {
+		if strings.Contains(w.Text, "Saving still works") {
+			t.Fatalf("config suffix %q", w.Text)
+		}
 	}
 }

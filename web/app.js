@@ -3131,49 +3131,114 @@ function paintDirty() {
   paintFieldMarks(labels);
   paintSaveBar();
 }
-function appendLinkedWarning(parent, msg) {
-  // Split so this file has no scheme literal. Static checks reject one.
-  const prefix = "https:" + "//github.com/PixnBits/local-grok-bots/";
-  let rest = String(msg || "");
-  while (rest) {
-    const i = rest.indexOf(prefix);
-    if (i < 0) {
-      parent.appendChild(document.createTextNode(rest));
-      return;
-    }
-    if (i > 0) parent.appendChild(document.createTextNode(rest.slice(0, i)));
-    let j = i;
-    while (j < rest.length && !/\s/.test(rest.charAt(j))) j++;
-    let url = rest.slice(i, j);
-    while (url.length > prefix.length && /[.,);:\]]$/.test(url)) url = url.slice(0, -1);
-    if (url.indexOf(prefix) !== 0) {
-      parent.appendChild(document.createTextNode(rest.slice(i, j)));
-      rest = rest.slice(j);
-      continue;
-    }
-    const a = document.createElement("a");
-    a.href = url;
-    a.rel = "noopener noreferrer";
-    a.textContent = url;
-    parent.appendChild(a);
-    rest = rest.slice(i + url.length);
-  }
+// warn-logic:begin
+function githubProjectHref(href) {
+  let parsed;
+  try { parsed = new URL(String(href || "")); }
+  catch (err) { return false; }
+  const path = parsed.pathname || "";
+  return parsed.host === "github.com" && path.startsWith("/PixnBits/local-grok-bots/");
 }
-function paintWarnings(list) {
-  const box = $("#profile-warn");
-  const text = $("#profile-warn-text");
-  if (!box || !text) return;
-  const words = (list || []).filter(Boolean);
-  if (!words.length) {
-    box.hidden = true;
-    text.replaceChildren();
+function warningTextOf(item) {
+  if (!item || typeof item !== "object") return "";
+  return String(item.text || "");
+}
+function warningsForFields(list, fields) {
+  const want = {};
+  for (const field of fields) want[field] = true;
+  const out = [];
+  for (const item of list || []) {
+    if (!item || typeof item !== "object") continue;
+    const field = String(item.field || "");
+    if (!want[field] || !warningTextOf(item)) continue;
+    out.push(item);
+  }
+  return out;
+}
+function descriptionWarningText(text) {
+  const s = String(text || "");
+  if (s.indexOf("Saving still works") >= 0) return s;
+  return s + " Saving still works.";
+}
+function warningParts(text) {
+  const src = String(text || "");
+  const out = [];
+  let i = 0;
+  while (i < src.length) {
+    const start = src.indexOf("`", i);
+    if (start < 0) {
+      if (i < src.length) out.push({code: false, text: src.slice(i)});
+      break;
+    }
+    if (start > i) out.push({code: false, text: src.slice(i, start)});
+    const end = src.indexOf("`", start + 1);
+    if (end < 0) {
+      out.push({code: false, text: src.slice(start)});
+      break;
+    }
+    out.push({code: true, text: src.slice(start + 1, end)});
+    i = end + 1;
+  }
+  return out;
+}
+// warn-logic:end
+function appendWarningContent(parent, text, item) {
+  for (const part of warningParts(text)) {
+    if (!part.text) continue;
+    if (part.code) parent.appendChild(el("code", null, part.text));
+    else parent.appendChild(document.createTextNode(part.text));
+  }
+  appendWarningLink(parent, item && item.link);
+}
+function appendWarningLink(parent, link) {
+  if (!link || typeof link !== "object") return;
+  const label = String(link.label || "");
+  const href = String(link.href || "");
+  const kids = parent.childNodes || parent.kids;
+  if (githubProjectHref(href)) {
+    if (kids && kids.length) parent.appendChild(document.createTextNode(" "));
+    const a = el("a");
+    a.href = href;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    a.textContent = label;
+    a.appendChild(el("span", "sr", " (opens in a new tab)"));
+    parent.appendChild(a);
     return;
   }
-  let msg = words.join(" ");
-  if (msg.indexOf("Saving still works") < 0) msg += " Saving still works.";
-  text.replaceChildren();
-  appendLinkedWarning(text, msg);
+  if (!label) return;
+  if (kids && kids.length) parent.appendChild(document.createTextNode(" "));
+  parent.appendChild(document.createTextNode(label));
+}
+function fillWarningBox(box, rows, saving) {
+  if (!box) return;
+  const ul = box.querySelector("ul");
+  if (!ul) return;
+  ul.replaceChildren();
+  if (!rows || !rows.length) {
+    box.hidden = true;
+    return;
+  }
+  for (const row of rows) {
+    const li = document.createElement("li");
+    const text = saving ? descriptionWarningText(warningTextOf(row)) : warningTextOf(row);
+    appendWarningContent(li, text, row);
+    ul.appendChild(li);
+  }
   box.hidden = false;
+}
+function setWarningDescribed(input, helpId, box) {
+  if (!input) return;
+  if (box && box.id && !box.hidden) input.setAttribute("aria-describedby", helpId + " " + box.id);
+  else input.removeAttribute("aria-describedby");
+}
+function paintWarnings(list) {
+  const items = list || [];
+  fillWarningBox($("#profile-warn"), warningsForFields(items, ["description"]), true);
+  fillWarningBox($("#warn-net"), warningsForFields(items, ["net_allow"]), false);
+  fillWarningBox($("#warn-github"), warningsForFields(items, ["github_allow", "github_token"]), false);
+  setWarningDescribed($("#profile-net"), "help-net", $("#warn-net"));
+  setWarningDescribed($("#profile-github"), "help-github", $("#warn-github"));
 }
 function setGrants(list) {
   const on = new Set(list || []);
@@ -4449,8 +4514,10 @@ function renderState(box, s) {
     for (const w of s.warnings) {
       const span = el("span");
       span.appendChild(document.createTextNode("⚠ "));
-      appendLinkedWarning(span, w);
-      sec.append(stRow(span));
+      appendWarningContent(span, warningTextOf(w), w);
+      const row = stRow(span);
+      row.classList.add("st-warn");
+      sec.append(row);
     }
     out.push(sec);
   }
