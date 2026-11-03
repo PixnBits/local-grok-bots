@@ -2,7 +2,10 @@ package daemon
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -175,7 +178,10 @@ func TestShellPushThenSleepIsCapped(t *testing.T) {
 				return sandbox.PushResult{Code: 1, Stderr: "git push denied: cancelled\n"}
 			}
 		}
-		got, runErr, elapsed := run(t, pushCmd+" & sleep 50; echo SLEPT")
+		// One tick per second in the bot workspace. Trim has to stop this loop
+		// at the shell cap while the push is still pending. The post-push
+		// re-arm would otherwise keep writing until about slow+capD.
+		got, runErr, elapsed := run(t, pushCmd+" & i=0; while [ $i -lt 50 ]; do i=$((i+1)); echo $i > bgtick; sleep 1; done; echo SLEPT")
 		if cancelled.Load() || hits.Load() != 1 {
 			t.Fatalf("push cancelled=%v hits=%d elapsed=%s\n%s\n%v", cancelled.Load(), hits.Load(), elapsed, got, runErr)
 		}
@@ -184,6 +190,20 @@ func TestShellPushThenSleepIsCapped(t *testing.T) {
 		}
 		if elapsed >= 40*time.Second || elapsed >= sleepFor {
 			t.Fatalf("ran for %s, cap %s", elapsed, capD)
+		}
+		raw, err := os.ReadFile(filepath.Join(app.botWorkspace(bot.ID), "bgtick"))
+		if err != nil {
+			t.Fatalf("bgtick: %v elapsed=%s", err, elapsed)
+		}
+		tick, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+		if err != nil {
+			t.Fatalf("bgtick %q: %v", raw, err)
+		}
+		if time.Duration(tick)*time.Second > capD+3*time.Second {
+			t.Fatalf("background work ran past the cap: tick=%d elapsed=%s cap=%s", tick, elapsed, capD)
+		}
+		if elapsed >= slow+5*time.Second {
+			t.Fatalf("shell outlived the push: elapsed=%s slow=%s cap=%s", elapsed, slow, capD)
 		}
 	})
 }
