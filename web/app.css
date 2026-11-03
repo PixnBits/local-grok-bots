@@ -695,6 +695,7 @@
   .st-row { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; border-top: 1px solid var(--border); font-size: 14px; }
   .st-warn { color: var(--attention-text); }
   .st-warn .st-main { overflow-wrap: anywhere; }
+  .st-warn a { color: var(--accent-text); }
   .st-row:first-of-type { border-top: 0; }
   .st-main { flex: 1; min-width: 0; }
   .st-main .st-sub { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
