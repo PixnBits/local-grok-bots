@@ -277,6 +277,9 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	if err := prepareAdminDir(cfg.DataDir); err != nil {
 		return nil, err
 	}
+	if err := sandbox.SetCacheDir(filepath.Join(cfg.DataDir, "cache", "sandbox")); err != nil {
+		return nil, err
+	}
 	tok, tokPath, err := ensureAdminToken(cfg.DataDir, cfg.AuthToken, pol.UsesCLI())
 	if err != nil {
 		return nil, err
@@ -892,12 +895,12 @@ func cloneMsgs(in []model.Message) []model.Message {
 
 func (a *App) decorateBot(b store.Bot) store.Bot {
 	b.PendingPermissions = a.perm.PendingCounts()[b.ID]
+	b.Warnings = a.botWarnings(b)
 	a.rtMu.Lock()
 	defer a.rtMu.Unlock()
 	if h, ok := a.resume[b.ID]; ok {
 		b.ContinueRunID = h.runID
 	}
-	b.Warnings = descriptionWarnings(b.Description)
 	if b.LastRunStatus == "waiting" {
 		b.WaitingTool = a.waitingTool(b.ID)
 	}
@@ -906,10 +909,23 @@ func (a *App) decorateBot(b store.Bot) store.Bot {
 
 func (a *App) decorateBots(bots []store.Bot) []store.Bot {
 	counts := a.perm.PendingCounts()
+	warnings := make([][]store.Warning, len(bots))
+	for i := range bots {
+		// ListBots omits the standing prompt. Warnings are computed from it
+		// anyway, matching GET /api/bots/{id}, and the list body still omits it.
+		src := bots[i]
+		if a != nil && a.st != nil {
+			if full, err := a.st.GetBot(src.ID); err == nil {
+				src.Description = full.Description
+			}
+		}
+		warnings[i] = a.botWarnings(src)
+	}
 	a.rtMu.Lock()
 	defer a.rtMu.Unlock()
 	for i := range bots {
 		bots[i].PendingPermissions = counts[bots[i].ID]
+		bots[i].Warnings = warnings[i]
 		if h, ok := a.resume[bots[i].ID]; ok {
 			bots[i].ContinueRunID = h.runID
 		}

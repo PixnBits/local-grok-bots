@@ -802,6 +802,9 @@ func (a *App) auditEgress(botID, runID string, ev sandbox.EgressEvent) {
 		"decision": decision,
 		"reason":   ev.Reason,
 	}
+	if ev.Count > 1 {
+		fields["count"] = ev.Count
+	}
 	a.log(botID, "cli_egress_request", fields)
 	if a == nil || a.audit == nil || !a.audit.Enabled() {
 		return

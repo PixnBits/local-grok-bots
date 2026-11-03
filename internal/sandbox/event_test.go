@@ -65,7 +65,7 @@ func TestWrapperAllowlistLineStaysOneLine(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%v was allowed: %s", args, out)
 		}
-		if !strings.Contains(string(out), "not allowlisted") {
+		if !strings.Contains(string(out), RepoNotAvailable) {
 			t.Fatalf("%v: %v\n%s", args, err, out)
 		}
 	}

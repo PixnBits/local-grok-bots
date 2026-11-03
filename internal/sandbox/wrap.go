@@ -15,13 +15,73 @@ import (
 // charset check produces a wrapper that refuses every git command and does
 // not contain that value.
 type gitWrapOpts struct {
-	Grant  bool
-	Repos  []string
+	Grant bool
+	// Repos is the bot's effective allowlist. It is the only list embedded
+	// in the wrapper. Policy-only names are not written into the jail.
+	Repos []string
+	// Hub is the github grant. It does not add repositories.
+	Hub bool
+	// Bridge is set when the credential socket is mounted.
 	Bridge bool
 	Name   string
 	Email  string
 	// RefuseAuthor denies every git command and embeds no author value.
 	RefuseAuthor bool
+}
+
+const (
+	// RepoNotAvailable is the only jail-visible denial for a repository
+	// outside the bot's effective list. It does not say which list omitted it.
+	RepoNotAvailable = "repository is not available to this bot"
+	// GitHubGrantOff is the jail-visible text when the repository is on the
+	// effective list and the github grant is off.
+	GitHubGrantOff = "GitHub access is not enabled for this bot (github grant is off)"
+	// GitHubBridgeDown is the jail-visible text when the repository is on the
+	// effective list, the github grant is on, and the credential bridge is not running.
+	GitHubBridgeDown = "GitHub access is unavailable right now (credential bridge not running)"
+)
+
+const (
+	gitHubListBoth    = "the policy [github].repos ceiling and the bot's github_allow"
+	gitHubListCeiling = "the policy [github].repos ceiling"
+	gitHubListBot     = "the bot's github_allow"
+)
+
+// GitHubAllowlistWhere names the list that omits owner/repo.
+// Both lists containing the repo returns an empty string. An empty name
+// returns both lists. The allow decision stays the effective intersection.
+func GitHubAllowlistWhere(policy, bot []string, owner, repo string) string {
+	owner = strings.ToLower(strings.TrimSpace(owner))
+	repo = strings.ToLower(strings.TrimSpace(repo))
+	if owner == "" || repo == "" || strings.Contains(owner, "/") || strings.Contains(repo, "/") {
+		return gitHubListBoth
+	}
+	inPol := repoListed(policy, owner, repo)
+	inBot := repoListed(bot, owner, repo)
+	switch {
+	case inPol && inBot:
+		return ""
+	case !inPol && !inBot:
+		return gitHubListBoth
+	case !inPol:
+		return gitHubListCeiling
+	default:
+		return gitHubListBot
+	}
+}
+
+func repoListed(list []string, owner, repo string) bool {
+	want := owner + "/" + repo
+	for _, raw := range list {
+		name, err := github.NormalizeRepo(raw)
+		if err != nil {
+			continue
+		}
+		if name == want {
+			return true
+		}
+	}
+	return false
 }
 
 func gitWrap(opts gitWrapOpts) string {
@@ -37,9 +97,12 @@ func gitWrap(opts gitWrapOpts) string {
 	if !authorEmbeddable(opts.Name, opts.Email) {
 		return denyAuthorScript
 	}
-	grant, bridge := "0", "0"
+	grant, hub, bridge := "0", "0", "0"
 	if opts.Grant {
 		grant = "1"
+	}
+	if opts.Hub {
+		hub = "1"
 	}
 	if opts.Bridge {
 		bridge = "1"
@@ -54,10 +117,14 @@ func gitWrap(opts gitWrapOpts) string {
 	}
 	script := gitWrapScript
 	script = strings.ReplaceAll(script, "@@GRANT@@", grant)
+	script = strings.ReplaceAll(script, "@@HUB@@", hub)
 	script = strings.ReplaceAll(script, "@@BRIDGE@@", bridge)
 	script = strings.ReplaceAll(script, "@@NAME@@", opts.Name)
 	script = strings.ReplaceAll(script, "@@EMAIL@@", opts.Email)
 	script = strings.ReplaceAll(script, "@@REPOS@@", arms.String())
+	script = strings.ReplaceAll(script, "@@DENY_REPO@@", RepoNotAvailable)
+	script = strings.ReplaceAll(script, "@@DENY_GRANT@@", GitHubGrantOff)
+	script = strings.ReplaceAll(script, "@@DENY_BRIDGE@@", GitHubBridgeDown)
 	return script
 }
 
@@ -84,12 +151,13 @@ const gitWrapScript = `#!/bin/sh
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
-unset SSH_AUTH_SOCK http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+unset SSH_AUTH_SOCK http_proxy https_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY no_proxy
 real=/lgb/bin/git
 log=/lgb/events/log
 nl='
 '
 grant=@@GRANT@@
+hub=@@HUB@@
 bridge=@@BRIDGE@@
 author_name=@@NAME@@
 author_email=@@EMAIL@@
@@ -135,28 +203,25 @@ deny_allow() {
       ;;
   esac
 }
+say_deny() {
+  echo "git ${sub} denied: @@DENY_REPO@@" >&2
+  deny_allow "$1"
+  exit 1
+}
 vet() {
   case "$1" in
     *"$nl"*)
-      echo "git ${sub} denied: repository is not allowlisted" >&2
-      deny_allow "$1"
-      exit 1
+      say_deny "$1"
       ;;
   esac
-  folded=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || {
-    echo "git ${sub} denied: repository is not allowlisted" >&2
-    deny_allow "$1"
-    exit 1
-  }
+  folded=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || say_deny "$1"
   case "$folded" in
     ""|file://*)
       return 0
       ;;
 @@REPOS@@
     *://*|git@*)
-      echo "git ${sub} denied: repository is not allowlisted" >&2
-      deny_allow "$1"
-      exit 1
+      say_deny "$1"
       ;;
   esac
   return 0
@@ -180,12 +245,17 @@ ensure_bridge() {
   if [ -n "$GHPORT" ]; then
     return 0
   fi
-  if [ "$bridge" != "1" ] || [ ! -S /lgb/sock/github.sock ]; then
-    echo "git denied: github proxy unavailable" >&2
+  if [ "$hub" != "1" ]; then
+    echo "git denied: @@DENY_GRANT@@" >&2
     printf '%s\n' "deny git ${sub}" >> "$log"
     return 1
   fi
-  /lgb/bin/ghbridge http /lgb/sock/github.sock > /tmp/gh.port &
+  if [ "$bridge" != "1" ] || [ ! -S /lgb/sock/github.sock ]; then
+    echo "git denied: @@DENY_BRIDGE@@" >&2
+    printf '%s\n' "deny git ${sub}" >> "$log"
+    return 1
+  fi
+  /lgb/bin/ghbridge http /lgb/sock/github.sock </dev/null >/tmp/gh.port 2>/dev/null &
   i=0
   p=
   while [ "$i" -lt 100000 ]; do
@@ -198,7 +268,7 @@ ensure_bridge() {
     i=$((i + 1))
   done
   if [ -z "$p" ]; then
-    echo "git denied: github proxy unavailable" >&2
+    echo "git denied: @@DENY_BRIDGE@@" >&2
     printf '%s\n' "deny git ${sub}" >> "$log"
     return 1
   fi

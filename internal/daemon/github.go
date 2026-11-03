@@ -163,7 +163,7 @@ func (a *App) auditSandboxNet(botID string, ev sandbox.Event) {
 	if action == "" {
 		return
 	}
-	a.writeNetAudit(botID, ev, action, 0)
+	a.writeNetAudit(botID, ev, action, ev.Count)
 }
 
 // netAuditAction is the audit action for one trusted net or ssh event.
@@ -176,6 +176,10 @@ func netAuditAction(ev sandbox.Event) string {
 	switch ev.Kind {
 	case "grant_denied":
 		if ev.Grant == "net" || ev.Grant == "ssh" {
+			return "grant_denied"
+		}
+		// Shell egress has no grant name on a header or busy denial.
+		if ev.Grant == "" && (ev.Detail == "header" || ev.Detail == "busy" || strings.HasPrefix(ev.Detail, "busy ")) {
 			return "grant_denied"
 		}
 	case "net_request":

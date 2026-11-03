@@ -95,7 +95,13 @@ func enterJail(jail string, cfg stage2File) error {
 	}
 	if cfg.CleanBash {
 		env = dropEnvKeys(env, "BASH_ENV", "ENV")
+		if cfg.Egress {
+			return unix.Exec("/bin/sh", []string{"/bin/sh", "/lgb/netwrap", "/bin/bash", "--norc", "--noprofile", "-c", command}, env)
+		}
 		return unix.Exec("/bin/bash", []string{"bash", "--norc", "--noprofile", "-c", command}, env)
+	}
+	if cfg.Egress {
+		return unix.Exec("/bin/sh", []string{"/bin/sh", "/lgb/netwrap", "/bin/sh", "-c", command}, env)
 	}
 	return unix.Exec("/bin/sh", []string{"sh", "-c", command}, env)
 }

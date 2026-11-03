@@ -18,6 +18,17 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
+// shellRunCap is the run_shell limit. It is not a user setting. The cap
+// keeps running while a git push is in flight. When it expires during a
+// push, other processes in the jail are stopped and the push itself may
+// continue until prompt_timeout+15s. If nothing else was stopped, the
+// budget left at the start of the push is armed again when the push ends.
+// A push with nothing else running is not cut off by this cap.
+var shellRunCap = 30 * time.Second
+
+// gitPushHook, when set, replaces handleGitPush for run_shell. Tests set it.
+var gitPushHook func(context.Context, store.Bot, string, []string) sandbox.PushResult
+
 // prop is one JSON Schema property with a description the model reads.
 func prop(typ, desc string) map[string]any {
 	return map[string]any{"type": typ, "description": desc}
@@ -453,31 +464,82 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		}
 		shellCtx, shellCancel := context.WithCancel(ctx)
 		defer shellCancel()
+		guard := &sandbox.ShellGuard{}
 		var timerMu sync.Mutex
 		var shellTimer *time.Timer
+		var pushTimer *time.Timer
 		var timerFired bool
+		var capHeld bool
+		var capMissed bool
+		var pushDepth int
+		var pushSnips []string
+		var shellStart time.Time
+		var shellBudget time.Duration
+		var shellLeft time.Duration
+		var resumeShell func(time.Duration)
 		armShell := func(d time.Duration) {
-			timerMu.Lock()
-			defer timerMu.Unlock()
 			if shellTimer != nil {
 				shellTimer.Stop()
 			}
+			shellStart = time.Now()
+			shellBudget = d
 			shellTimer = time.AfterFunc(d, func() {
 				timerMu.Lock()
 				timerFired = true
+				depth := pushDepth
 				timerMu.Unlock()
-				shellCancel()
+				if depth == 0 {
+					shellCancel()
+					return
+				}
+				if guard.Trim() {
+					timerMu.Lock()
+					capHeld = true
+					timerMu.Unlock()
+					return
+				}
+				timerMu.Lock()
+				left := shellLeft
+				ended := pushDepth == 0
+				if !ended {
+					capMissed = true
+				}
+				timerMu.Unlock()
+				if ended {
+					resumeShell(left)
+				}
 			})
 		}
-		armShell(30 * time.Second)
+		// resumeShell arms the budget recorded when the push started.
+		// A non-positive budget cancels. A short positive one uses a
+		// small floor so the command after the push can still start.
+		resumeShell = func(left time.Duration) {
+			if left <= 0 {
+				shellCancel()
+				return
+			}
+			if left < time.Second {
+				left = time.Second
+			}
+			timerMu.Lock()
+			armShell(left)
+			timerMu.Unlock()
+		}
+		timerMu.Lock()
+		armShell(shellRunCap)
+		timerMu.Unlock()
 		defer func() {
 			timerMu.Lock()
 			if shellTimer != nil {
 				shellTimer.Stop()
 			}
+			if pushTimer != nil {
+				pushTimer.Stop()
+			}
 			timerMu.Unlock()
 		}()
-		ghSock, ghRepos := "", []string(nil)
+		ghSock := ""
+		ghRepos := turnPol.EffectiveGitHubRepos(current.GitHubAllow)
 		author, email, aerr := github.CommitAuthor(current.Name, turnPol.GitHub.AuthorName, turnPol.GitHub.AuthorEmail)
 		if aerr != nil {
 			author, email = "", ""
@@ -491,7 +553,6 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 				px = opened
 				defer px.Close()
 				ghSock = px.Sock()
-				ghRepos = turnPol.EffectiveGitHubRepos(current.GitHubAllow)
 				a.noteGitHubSock(current.ID, ghSock)
 				defer a.noteGitHubSock(current.ID, "")
 			}
@@ -541,11 +602,65 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			GitAuthor:       author,
 			GitAuthorEmail:  email,
 			GitAuthorRefuse: aerr != nil,
+			Guard:           guard,
 			OnPushStart: func() {
-				armShell(turnPol.EffectivePromptTimeout() + 15*time.Second)
+				// The shell cap is not paused. Record the budget left so it
+				// can be armed again if this push ends with nothing else
+				// stopped. A separate timer bounds the push.
+				timerMu.Lock()
+				defer timerMu.Unlock()
+				if pushDepth == 0 {
+					if pushTimer != nil {
+						pushTimer.Stop()
+					}
+					d := turnPol.EffectivePromptTimeout() + 15*time.Second
+					pushTimer = time.AfterFunc(d, func() {
+						timerMu.Lock()
+						timerFired = true
+						timerMu.Unlock()
+						shellCancel()
+					})
+					shellLeft = shellBudget - time.Since(shellStart)
+				}
+				pushDepth++
+			},
+			OnPushEnd: func() {
+				timerMu.Lock()
+				if pushDepth > 0 {
+					pushDepth--
+				}
+				if pushDepth == 0 && pushTimer != nil {
+					pushTimer.Stop()
+					pushTimer = nil
+				}
+				held := capHeld && pushDepth == 0
+				missed := capMissed && pushDepth == 0
+				left := shellLeft
+				if pushDepth == 0 {
+					capMissed = false
+				}
+				timerMu.Unlock()
+				if held {
+					shellCancel()
+					return
+				}
+				if missed {
+					resumeShell(left)
+				}
 			},
 			OnPush: func(pctx context.Context, cwd string, pushArgs []string) sandbox.PushResult {
-				return a.handleGitPush(pctx, ctx, current, gate, cwd, pushArgs)
+				var res sandbox.PushResult
+				if gitPushHook != nil {
+					res = gitPushHook(pctx, current, cwd, pushArgs)
+				} else {
+					res = a.handleGitPush(pctx, ctx, current, gate, cwd, pushArgs)
+				}
+				if res.Stdout != "" || res.Stderr != "" {
+					timerMu.Lock()
+					pushSnips = append(pushSnips, res.Stdout, res.Stderr)
+					timerMu.Unlock()
+				}
+				return res
 			},
 			Dial: a.shellDial,
 		})
@@ -553,7 +668,17 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		summary := formatShell(res.Stdout, res.Stderr)
 		timerMu.Lock()
 		fired := timerFired
+		snips := append([]string{}, pushSnips...)
 		timerMu.Unlock()
+		for _, snip := range snips {
+			if snip == "" || strings.Contains(summary, snip) {
+				continue
+			}
+			summary += snip
+			if !strings.HasSuffix(snip, "\n") {
+				summary += "\n"
+			}
+		}
 		err = adjustShellStop(ctx, fired, err)
 		if err != nil {
 			a.clearShellPlan(current.ID)
@@ -591,7 +716,9 @@ type netAuditRow struct {
 // text was reported more than once. A dropped-line count is included on
 // the first notice only, or as its own summary when there is no notice.
 // Trusted net and ssh audit rows are deduped per action, grant, and host.
-// The bot log stays one row per event. Trusted notices stay one per event.
+// A row count is the sum of event counts. A missing count is one.
+// The bot log stays one row per event. A count above 1 is included on that row.
+// Trusted notices stay one per event.
 func (a *App) recordSandboxEvents(botID string, events []sandbox.Event) {
 	counts := map[string]int{}
 	var order []string
@@ -614,15 +741,16 @@ func (a *App) recordSandboxEvents(botID string, events []sandbox.Event) {
 		if action := netAuditAction(ev); action != "" {
 			a.logSandboxEvent(botID, ev)
 			key := netAuditKey{action: action, grant: ev.Grant, host: ev.Host}
+			n := eventCount(ev)
 			if row := netRows[key]; row != nil {
-				row.n++
+				row.n += n
 				continue
 			}
 			if len(netOrder) >= 64 {
-				suppressed++
+				suppressed += n
 				continue
 			}
-			netRows[key] = &netAuditRow{ev: ev, n: 1}
+			netRows[key] = &netAuditRow{ev: ev, n: n}
 			netOrder = append(netOrder, key)
 			continue
 		}
@@ -681,7 +809,17 @@ func sandboxEventDetail(ev sandbox.Event) map[string]any {
 	if ev.Detail != "" {
 		detail["detail"] = ev.Detail
 	}
+	if ev.Count > 1 {
+		detail["count"] = ev.Count
+	}
 	return detail
+}
+
+func eventCount(ev sandbox.Event) int {
+	if ev.Count > 1 {
+		return ev.Count
+	}
+	return 1
 }
 
 func droppedLines(ev sandbox.Event) int {

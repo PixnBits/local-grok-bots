@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -81,6 +82,120 @@ func TestHTTPAllowProxyFiltersTargets(t *testing.T) {
 	}
 	if len(dialed) != 1 {
 		t.Fatalf("denied target was dialed %v", dialed)
+	}
+}
+
+func TestEgressDecideReplacesAllowList(t *testing.T) {
+	var mu sync.Mutex
+	var events []Event
+	var dialed []string
+	snapshot := func() ([]Event, []string) {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]Event(nil), events...), append([]string(nil), dialed...)
+	}
+	up := listenLocal(t)
+	defer up.Close()
+	go func() {
+		for {
+			c, err := up.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = io.WriteString(c, "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+			_ = c.Close()
+		}
+	}()
+	p, err := StartHTTPAllowProxy(t.TempDir(), EgressConfig{
+		Allow: []string{"allowed.test", "10.1.2.3"},
+		Resolve: func(context.Context, string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("203.0.113.10")}, nil
+		},
+		Dial: func(_ context.Context, _, addr string) (net.Conn, error) {
+			mu.Lock()
+			dialed = append(dialed, addr)
+			mu.Unlock()
+			return net.Dial("tcp", up.Addr().String())
+		},
+		Decide: func(host string, port int) (bool, Event) {
+			switch {
+			case host == "allowed.test":
+				return false, Event{Kind: "net_request", Grant: "net", Host: host, Detail: "not allowlisted"}
+			case host == "other.test" && port == 80:
+				return true, Event{Kind: "grant_use", Grant: "net", Host: host}
+			case host == "other.test" && port == 22:
+				return true, Event{Kind: "grant_use", Grant: "ssh", Host: host, Notice: "SSH to other.test"}
+			case host == "10.1.2.3":
+				return true, Event{Kind: "grant_use", Grant: "net", Host: host}
+			default:
+				return false, Event{Kind: "grant_denied", Grant: "net", Host: host, Detail: "missing"}
+			}
+		},
+		Record: func(ev Event) {
+			mu.Lock()
+			events = append(events, ev)
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if !strings.Contains(proxyText(t, p.Sock(), "GET http://allowed.test/x HTTP/1.1\r\nHost: allowed.test\r\n\r\n"), "403") {
+		t.Fatal("Decide deny was ignored")
+	}
+	gotEvents, gotDialed := snapshot()
+	if len(gotEvents) != 1 || gotEvents[0].Kind != "net_request" || gotEvents[0].Host != "allowed.test" {
+		t.Fatalf("deny event %+v", gotEvents)
+	}
+	if len(gotDialed) != 0 {
+		t.Fatalf("denied host dialed %v", gotDialed)
+	}
+	body := proxyText(t, p.Sock(), "GET http://other.test/x HTTP/1.1\r\nHost: other.test\r\n\r\n")
+	gotEvents, gotDialed = snapshot()
+	if !strings.Contains(body, "204") {
+		t.Fatalf("Decide allow did not pass the Allow list: %q events %+v", body, gotEvents)
+	}
+	if len(gotDialed) != 1 || gotDialed[0] != "203.0.113.10:80" {
+		t.Fatalf("dialed %v", gotDialed)
+	}
+	var use Event
+	for _, ev := range gotEvents {
+		if ev.Host == "other.test" && ev.Kind == "grant_use" && ev.Detail == "" {
+			use = ev
+		}
+	}
+	if use.Grant != "net" {
+		t.Fatalf("allow event missing: %+v", gotEvents)
+	}
+	if !strings.Contains(proxyText(t, p.Sock(), "CONNECT other.test:22 HTTP/1.1\r\nHost: other.test:22\r\n\r\n"), "403") {
+		t.Fatal("port 22 was allowed")
+	}
+	gotEvents, gotDialed = snapshot()
+	sawPort := false
+	for _, ev := range gotEvents {
+		if ev.Host == "other.test" && ev.Detail == "port" {
+			sawPort = ev.Kind == "grant_denied" && ev.Notice == ""
+		}
+	}
+	if !sawPort {
+		t.Fatalf("port denial %+v", gotEvents)
+	}
+	if len(gotDialed) != 1 {
+		t.Fatalf("port denial dialed %v", gotDialed)
+	}
+	if !strings.Contains(proxyText(t, p.Sock(), "CONNECT 10.1.2.3:443 HTTP/1.1\r\nHost: 10.1.2.3:443\r\n\r\n"), "403") {
+		t.Fatal("forbidden address was allowed")
+	}
+	gotEvents, gotDialed = snapshot()
+	sawAddr := false
+	for _, ev := range gotEvents {
+		if ev.Host == "10.1.2.3" && ev.Detail == "address" && ev.Kind == "grant_denied" {
+			sawAddr = true
+		}
+	}
+	if !sawAddr || len(gotDialed) != 1 {
+		t.Fatalf("address denial events %+v dialed %v", gotEvents, gotDialed)
 	}
 }
 

@@ -197,6 +197,37 @@ func TestAuditNetDedupe(t *testing.T) {
 	})
 }
 
+func TestCoalescedDenyLogsOnce(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "no"}, nil
+	}})
+	auditPath := filepath.Join(t.TempDir(), "audit.log")
+	lg, err := audit.Open(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lg.Close() })
+	app.audit = lg
+	const n = 10000
+	app.recordSandboxEvents("bot_1", []sandbox.Event{{
+		Kind: "grant_denied", Grant: "net", Host: "nope.test", Detail: "not allowlisted", Count: n,
+	}})
+	logs, err := app.st.ListLog("bot_1", "grant_denied", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("log rows %d", len(logs))
+	}
+	if !strings.Contains(string(logs[0].Detail), `"count":10000`) {
+		t.Fatalf("detail %s", logs[0].Detail)
+	}
+	raw := readAudit(t, auditPath)
+	if strings.Count(raw, `"action":"grant_denied"`) != 1 || !strings.Contains(raw, `"count":10000`) {
+		t.Fatalf("audit:\n%s", raw)
+	}
+}
+
 func TestOffAllowlistPushAuditsOnce(t *testing.T) {
 	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
 		return model.ChatResponse{Content: "no"}, nil
@@ -215,10 +246,11 @@ func TestOffAllowlistPushAuditsOnce(t *testing.T) {
 	res := app.handleGitPush(t.Context(), t.Context(), bot, nil, ".", []string{
 		"git", "push", "https://github.com/other/nope.git", "feature",
 	})
-	if res.Code == 0 || !strings.Contains(res.Stderr, "allowlist") {
+	if res.Code == 0 || !strings.Contains(res.Stderr, sandbox.RepoNotAvailable) || strings.Contains(res.Stderr, "allowlist") {
 		t.Fatalf("push result %+v", res)
 	}
-	if len(res.Events) != 1 || res.Events[0].Detail != "push allowlist (claimed other/nope from argv)" {
+	const wantDetail = "push allowlist (claimed other/nope from argv) (the policy [github].repos ceiling and the bot's github_allow)"
+	if len(res.Events) != 1 || res.Events[0].Detail != wantDetail {
 		t.Fatalf("detail %+v", res.Events)
 	}
 	for _, ev := range res.Events {
@@ -231,7 +263,7 @@ func TestOffAllowlistPushAuditsOnce(t *testing.T) {
 	if strings.Count(raw, `"action":"github_push_denied"`) != 1 || strings.Contains(raw, `"action":"github_refuse"`) {
 		t.Fatalf("audit:\n%s", raw)
 	}
-	if !strings.Contains(raw, `"owner":"other"`) || !strings.Contains(raw, `"repo":"nope"`) || !strings.Contains(raw, `"reason":"allowlist"`) || !strings.Contains(raw, `"claimed_from":"argv"`) {
+	if !strings.Contains(raw, `"owner":"other"`) || !strings.Contains(raw, `"repo":"nope"`) || !strings.Contains(raw, `"reason":"allowlist"`) || !strings.Contains(raw, `"claimed_from":"argv"`) || !strings.Contains(raw, `"detail":"the policy [github].repos ceiling and the bot's github_allow"`) {
 		t.Fatalf("audit fields:\n%s", raw)
 	}
 }
@@ -386,7 +418,7 @@ func TestPushDenyDetail(t *testing.T) {
 		{"missing grant", "push missing grant"},
 	}
 	for _, tc := range cases {
-		ev := app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "deny", tc.reason, "")
+		ev := app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "deny", tc.reason, "", "")
 		if ev.Detail != tc.detail {
 			t.Fatalf("%q detail %q", tc.reason, ev.Detail)
 		}
@@ -408,16 +440,16 @@ func TestPushDenyDetail(t *testing.T) {
 		if tc.reason == "missing grant" {
 			owner, repo = "", ""
 		}
-		ev := app.auditPush(store.Bot{ID: "bot_1"}, owner, repo, "deny", tc.reason, tc.from)
+		ev := app.auditPush(store.Bot{ID: "bot_1"}, owner, repo, "deny", tc.reason, tc.from, "")
 		if ev.Detail != tc.detail {
 			t.Fatalf("%q %q detail %q", tc.reason, tc.from, ev.Detail)
 		}
 	}
-	ev := app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "allow", "sent", "")
+	ev := app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "allow", "sent", "", "")
 	if ev.Detail != "sent" || ev.Kind != "grant_use" {
 		t.Fatalf("allow %+v", ev)
 	}
-	ev = app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "allow", "sent", "argv")
+	ev = app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "allow", "sent", "argv", "")
 	if ev.Detail != "sent" || ev.Kind != "grant_use" {
 		t.Fatalf("allow with claim %+v", ev)
 	}
@@ -433,8 +465,8 @@ func TestAllowedPushOmitsClaimedFrom(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.audit = lg
-	app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "allow", "sent", "argv")
-	app.auditPush(store.Bot{ID: "bot_1"}, "", "", "deny", "missing grant", "")
+	app.auditPush(store.Bot{ID: "bot_1"}, "acme", "widgets", "allow", "sent", "argv", "")
+	app.auditPush(store.Bot{ID: "bot_1"}, "", "", "deny", "missing grant", "", "")
 	_ = lg.Close()
 	raw := readAudit(t, path)
 	lines := strings.Split(strings.TrimRight(raw, "\n"), "\n")

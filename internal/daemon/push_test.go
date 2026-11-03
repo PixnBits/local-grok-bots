@@ -21,6 +21,7 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
+	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
@@ -379,7 +380,7 @@ echo PUSH_DONE
 		app, evals, auditPath := newPushApp(t)
 		before := packs.Load()
 		out, err := runPush(t, app, auditPath, nil, feature("feature", "note-empty", "git push https://github.com/acme/widgets.git feature"), false)
-		if err == nil || !strings.Contains(out, "allowlist") || evals.Load() != 0 || packs.Load() != before {
+		if err == nil || !strings.Contains(out, "git push denied: "+sandbox.RepoNotAvailable) || strings.Contains(out, "not allowlisted") || strings.Contains(out, "missing from") || evals.Load() != 0 || packs.Load() != before {
 			t.Fatalf("empty allowlist: %v evals=%d\n%s", err, evals.Load(), out)
 		}
 	})

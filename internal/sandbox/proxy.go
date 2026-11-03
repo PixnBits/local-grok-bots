@@ -15,6 +15,7 @@ import (
 // Untrusted events are lines the jail wrote. Reported is the kind that line
 // claimed. A jailed process can write anything, so those fields are not a
 // grant decision and are not a sandbox_block.
+// Count is how many identical events this entry stands for. Zero means one.
 type Event struct {
 	Kind      string `json:"kind"`
 	Grant     string `json:"grant,omitempty"`
@@ -25,7 +26,11 @@ type Event struct {
 	Repo      string `json:"repo,omitempty"`
 	Untrusted bool   `json:"untrusted,omitempty"`
 	Reported  string `json:"reported,omitempty"`
+	Count     int    `json:"count,omitempty"`
 }
+
+// eventCap is the most distinct events kept for one run.
+const eventCap = 256
 
 type proxy struct {
 	ln       net.Listener
@@ -36,6 +41,10 @@ type proxy struct {
 	dial     func(context.Context, string, string) (net.Conn, error)
 	mu       sync.Mutex
 	events   []Event
+	dropped  int
+	slotMu   sync.Mutex
+	slots    int
+	busy     busyNote
 }
 
 func startProxy(ctx context.Context, sock string, grants, netAllow, sshAllow []string, dial func(context.Context, string, string) (net.Conn, error)) (*proxy, error) {
@@ -83,8 +92,38 @@ func (p *proxy) serve() {
 		if err != nil {
 			return
 		}
-		go p.handle(c)
+		p.slotMu.Lock()
+		if p.slots >= connLimit {
+			p.slotMu.Unlock()
+			p.rejectBusy(c)
+			continue
+		}
+		p.slots++
+		p.slotMu.Unlock()
+		go func(conn net.Conn) {
+			defer p.releaseSlot()
+			p.handle(conn)
+		}(c)
 	}
+}
+
+func (p *proxy) releaseSlot() {
+	p.slotMu.Lock()
+	if p.slots > 0 {
+		p.slots--
+	}
+	p.slotMu.Unlock()
+}
+
+// rejectBusy closes a connection that is not HTTP. The busy event is
+// recorded at most once per second.
+func (p *proxy) rejectBusy(conn net.Conn) {
+	_ = conn.Close()
+	emit, detail := p.busy.mark()
+	if !emit {
+		return
+	}
+	p.add(Event{Kind: "grant_denied", Detail: detail})
 }
 
 func (p *proxy) close() {
@@ -100,14 +139,80 @@ func (p *proxy) drain() []Event {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := p.events
+	dropped := p.dropped
 	p.events = nil
+	p.dropped = 0
+	if dropped > 0 {
+		out = append(out, Event{Kind: "grant_denied", Detail: "events dropped", Count: dropped})
+	}
 	return out
 }
 
 func (p *proxy) add(ev Event) {
+	n := ev.Count
+	if n < 1 {
+		n = 1
+	}
+	ev.Count = n
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range p.events {
+		if sameEvent(p.events[i], ev) {
+			p.events[i].Count += n
+			return
+		}
+	}
+	if len(p.events) >= eventCap {
+		p.dropped += n
+		return
+	}
 	p.events = append(p.events, ev)
-	p.mu.Unlock()
+}
+
+func sameEvent(a, b Event) bool {
+	return a.Kind == b.Kind && a.Grant == b.Grant && a.Host == b.Host && a.Detail == b.Detail &&
+		a.Notice == b.Notice && a.Owner == b.Owner && a.Repo == b.Repo &&
+		a.Untrusted == b.Untrusted && a.Reported == b.Reported
+}
+
+// dialUpstream bounds every dial, including a test dial, at 10s.
+// Close of the returned connection releases the dial context. The context
+// is not cancelled when the dial succeeds, so a dialer that follows ctx
+// does not drop a live connection. The timer is stopped on success.
+func (p *proxy) dialUpstream(host string, port int) (net.Conn, error) {
+	dial := p.dial
+	if dial == nil {
+		d := &net.Dialer{Timeout: 10 * time.Second}
+		dial = d.DialContext
+	}
+	ctx, cancel := context.WithCancel(p.ctx)
+	stop := time.AfterFunc(10*time.Second, cancel)
+	up, err := dial(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		stop.Stop()
+		cancel()
+		return nil, err
+	}
+	if !stop.Stop() {
+		_ = up.Close()
+		cancel()
+		return nil, context.DeadlineExceeded
+	}
+	return &cancelOnClose{Conn: up, cancel: cancel}, nil
+}
+
+type cancelOnClose struct {
+	net.Conn
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnClose) Close() error {
+	err := c.Conn.Close()
+	if c.cancel != nil {
+		c.cancel()
+		c.cancel = nil
+	}
+	return err
 }
 
 func (p *proxy) handle(conn net.Conn) {
@@ -129,12 +234,7 @@ func (p *proxy) handle(conn net.Conn) {
 		_, _ = conn.Write([]byte("DENY\n"))
 		return
 	}
-	dial := p.dial
-	if dial == nil {
-		d := &net.Dialer{Timeout: 10 * time.Second}
-		dial = d.DialContext
-	}
-	up, err := dial(p.ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	up, err := p.dialUpstream(host, port)
 	if err != nil {
 		ev.Notice = ""
 		ev.Detail = "dial failed"
