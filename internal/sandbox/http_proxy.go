@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -38,11 +39,13 @@ type EgressConfig struct {
 }
 
 // EgressEvent is one allow or deny. It has no header and no body.
+// Count is how many denials this emission stands for. Zero means one allow.
 type EgressEvent struct {
 	Host   string
 	Port   int
 	Allow  bool
 	Reason string
+	Count  int
 }
 
 // HTTPAllow is an HTTP CONNECT and forward proxy. It dials only exact
@@ -65,7 +68,17 @@ type HTTPAllow struct {
 	slotMu  sync.Mutex
 	slots   int
 	busy    busyNote
+	denies  reasonNote
+
+	closeOnce sync.Once
+	wg        sync.WaitGroup
+	liveMu    sync.Mutex
+	live      map[net.Conn]struct{}
+	shut      bool
 }
+
+// upstreamIdle is how long a plain response may sit without progress.
+const upstreamIdle = 60 * time.Second
 
 // StartHTTPAllowProxy listens on a mode-0600 socket named sock in a 0700
 // directory under parent.
@@ -106,7 +119,7 @@ func StartHTTPAllowProxy(parent string, cfg EgressConfig) (*HTTPAllow, error) {
 		decide: cfg.Decide, record: cfg.Record,
 		ctx: ctx, cancel: cancel,
 	}
-	go p.serve()
+	p.start()
 	return p, nil
 }
 
@@ -137,7 +150,7 @@ func listenShellEgress(ctx context.Context, sock string, cfg EgressConfig) (*HTT
 		decide: cfg.Decide, record: cfg.Record,
 		ctx: cctx, cancel: cancel,
 	}
-	go p.serve()
+	p.start()
 	return p, nil
 }
 
@@ -148,22 +161,42 @@ func (p *HTTPAllow) Sock() string {
 	return p.sock
 }
 
+func (p *HTTPAllow) start() {
+	p.wg.Add(1)
+	go p.serve()
+	go p.watchParent()
+}
+
+func (p *HTTPAllow) watchParent() {
+	if p == nil || p.ctx == nil {
+		return
+	}
+	<-p.ctx.Done()
+	p.Close()
+}
+
 func (p *HTTPAllow) Close() {
 	if p == nil {
 		return
 	}
-	if p.cancel != nil {
-		p.cancel()
-	}
-	if p.ln != nil {
-		_ = p.ln.Close()
-	}
-	if p.dir != "" {
-		_ = os.RemoveAll(p.dir)
-	}
+	p.closeOnce.Do(func() {
+		if p.cancel != nil {
+			p.cancel()
+		}
+		if p.ln != nil {
+			_ = p.ln.Close()
+		}
+		p.closeLive()
+		p.wg.Wait()
+		p.flushDenies()
+		if p.dir != "" {
+			_ = os.RemoveAll(p.dir)
+		}
+	})
 }
 
 func (p *HTTPAllow) serve() {
+	defer p.wg.Done()
 	for {
 		c, err := p.ln.Accept()
 		if err != nil {
@@ -177,7 +210,9 @@ func (p *HTTPAllow) serve() {
 		}
 		p.slots++
 		p.slotMu.Unlock()
+		p.wg.Add(1)
 		go func(conn net.Conn) {
+			defer p.wg.Done()
 			defer p.releaseSlot()
 			p.serveConn(conn)
 		}(c)
@@ -217,6 +252,10 @@ const httpHeaderMax = 64 << 10
 
 func (p *HTTPAllow) serveConn(conn net.Conn) {
 	defer conn.Close()
+	if !p.addLive(conn) {
+		return
+	}
+	defer p.removeLive(conn)
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	lim := &byteCap{r: conn, max: httpHeaderMax}
 	br := bufio.NewReader(lim)
@@ -224,12 +263,8 @@ func (p *HTTPAllow) serveConn(conn net.Conn) {
 	if err != nil {
 		if lim.over() {
 			_, _ = io.WriteString(conn, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-			if p.record != nil {
-				p.record(Event{Kind: "grant_denied", Detail: "header"})
-			}
-			if p.audit != nil {
-				p.audit(EgressEvent{Allow: false, Reason: "header"})
-			}
+			ev := Event{Kind: "grant_denied", Detail: "header"}
+			p.noteDeny("header", "", 0, &ev)
 		}
 		return
 	}
@@ -240,10 +275,13 @@ func (p *HTTPAllow) serveConn(conn net.Conn) {
 		return
 	}
 	audit := func(allow bool, reason string) {
-		if p.audit == nil {
+		if allow {
+			if p.audit != nil {
+				p.audit(EgressEvent{Host: host, Port: port, Allow: true, Reason: reason})
+			}
 			return
 		}
-		p.audit(EgressEvent{Host: host, Port: port, Allow: allow, Reason: reason})
+		p.noteDeny(reason, host, port, nil)
 	}
 	record := func(ev Event) {
 		if p.record != nil {
@@ -319,6 +357,11 @@ func (p *HTTPAllow) serveConn(conn net.Conn) {
 		writeDeny(conn)
 		return
 	}
+	if !p.addLive(up) {
+		_ = up.Close()
+		return
+	}
+	defer p.removeLive(up)
 	defer up.Close()
 	if req.Method == http.MethodConnect {
 		if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
@@ -351,6 +394,12 @@ func (p *HTTPAllow) serveConn(conn net.Conn) {
 	req.URL.Host = ""
 	req.Header.Del("Proxy-Connection")
 	req.Header.Del("Proxy-Authorization")
+	req.Header.Del("Connection")
+	// The body is written with the request, and one response is read.
+	// Leave Expect off so the upstream does not send 100 Continue first.
+	req.Header.Del("Expect")
+	req.Close = true
+	_ = up.SetWriteDeadline(time.Now().Add(upstreamIdle))
 	if err := req.Write(up); err != nil {
 		if havePolicy {
 			ev := policy
@@ -362,12 +411,116 @@ func (p *HTTPAllow) serveConn(conn net.Conn) {
 		writeDeny(conn)
 		return
 	}
+	_ = up.SetWriteDeadline(time.Time{})
 	if havePolicy {
 		record(policy)
 	}
 	audit(true, "ok")
 	_ = conn.SetDeadline(time.Time{})
-	_, _ = io.Copy(conn, up)
+	p.copyResponse(conn, up, req)
+}
+
+// copyResponse reads one upstream response and writes it to the client.
+// Both connections are closed before it returns. A client close closes upstream.
+func (p *HTTPAllow) copyResponse(conn, up net.Conn, req *http.Request) {
+	var stop atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		var one [1]byte
+		_, err := conn.Read(one[:])
+		if stop.Load() || err == nil {
+			return
+		}
+		_ = up.Close()
+	}()
+	defer func() {
+		stop.Store(true)
+		_ = up.Close()
+		_ = conn.Close()
+		<-done
+	}()
+	resp, err := http.ReadResponse(bufio.NewReader(idleConn{Conn: up, idle: upstreamIdle}), req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	resp.Header.Del("Connection")
+	resp.Close = true
+	_ = resp.Write(idleConn{Conn: conn, idle: upstreamIdle})
+}
+
+func (p *HTTPAllow) noteDeny(reason, host string, port int, rec *Event) {
+	em, ok := p.denies.mark(reason, host, port, rec)
+	if !ok {
+		return
+	}
+	p.emitDeny(em)
+}
+
+func (p *HTTPAllow) flushDenies() {
+	for _, em := range p.denies.flush() {
+		p.emitDeny(em)
+	}
+}
+
+func (p *HTTPAllow) emitDeny(em reasonEmit) {
+	if em.count < 1 {
+		return
+	}
+	if em.doRec && p.record != nil {
+		ev := em.record
+		ev.Count = em.count
+		p.record(ev)
+	}
+	if p.audit != nil {
+		p.audit(EgressEvent{
+			Host: em.host, Port: em.port, Allow: false, Reason: em.reason, Count: em.count,
+		})
+	}
+}
+
+func (p *HTTPAllow) addLive(c net.Conn) bool {
+	if c == nil {
+		return false
+	}
+	p.liveMu.Lock()
+	shut := p.shut
+	if !shut {
+		if p.live == nil {
+			p.live = map[net.Conn]struct{}{}
+		}
+		p.live[c] = struct{}{}
+	}
+	p.liveMu.Unlock()
+	if shut {
+		_ = c.Close()
+		return false
+	}
+	return true
+}
+
+func (p *HTTPAllow) removeLive(c net.Conn) {
+	if c == nil {
+		return
+	}
+	p.liveMu.Lock()
+	delete(p.live, c)
+	p.liveMu.Unlock()
+}
+
+func (p *HTTPAllow) closeLive() {
+	p.liveMu.Lock()
+	p.shut = true
+	conns := make([]net.Conn, 0, len(p.live))
+	for c := range p.live {
+		conns = append(conns, c)
+	}
+	p.live = nil
+	p.liveMu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
 }
 
 func (p *HTTPAllow) allowed(host string) bool {
@@ -585,6 +738,26 @@ func (b *byteCap) Read(p []byte) (int, error) {
 func (b *byteCap) lift() { b.max = 0 }
 
 func (b *byteCap) over() bool { return b != nil && b.max > 0 && b.n >= b.max }
+
+// idleConn refreshes the read and write deadlines on each call.
+type idleConn struct {
+	net.Conn
+	idle time.Duration
+}
+
+func (c idleConn) Read(p []byte) (int, error) {
+	if c.idle > 0 {
+		_ = c.Conn.SetReadDeadline(time.Now().Add(c.idle))
+	}
+	return c.Conn.Read(p)
+}
+
+func (c idleConn) Write(p []byte) (int, error) {
+	if c.idle > 0 {
+		_ = c.Conn.SetWriteDeadline(time.Now().Add(c.idle))
+	}
+	return c.Conn.Write(p)
+}
 
 type streamConn struct {
 	net.Conn

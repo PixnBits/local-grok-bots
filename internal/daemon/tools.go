@@ -716,7 +716,9 @@ type netAuditRow struct {
 // text was reported more than once. A dropped-line count is included on
 // the first notice only, or as its own summary when there is no notice.
 // Trusted net and ssh audit rows are deduped per action, grant, and host.
-// The bot log stays one row per event. Trusted notices stay one per event.
+// A row count is the sum of event counts. A missing count is one.
+// The bot log stays one row per event. A count above 1 is included on that row.
+// Trusted notices stay one per event.
 func (a *App) recordSandboxEvents(botID string, events []sandbox.Event) {
 	counts := map[string]int{}
 	var order []string
@@ -739,15 +741,16 @@ func (a *App) recordSandboxEvents(botID string, events []sandbox.Event) {
 		if action := netAuditAction(ev); action != "" {
 			a.logSandboxEvent(botID, ev)
 			key := netAuditKey{action: action, grant: ev.Grant, host: ev.Host}
+			n := eventCount(ev)
 			if row := netRows[key]; row != nil {
-				row.n++
+				row.n += n
 				continue
 			}
 			if len(netOrder) >= 64 {
-				suppressed++
+				suppressed += n
 				continue
 			}
-			netRows[key] = &netAuditRow{ev: ev, n: 1}
+			netRows[key] = &netAuditRow{ev: ev, n: n}
 			netOrder = append(netOrder, key)
 			continue
 		}
@@ -806,7 +809,17 @@ func sandboxEventDetail(ev sandbox.Event) map[string]any {
 	if ev.Detail != "" {
 		detail["detail"] = ev.Detail
 	}
+	if ev.Count > 1 {
+		detail["count"] = ev.Count
+	}
 	return detail
+}
+
+func eventCount(ev sandbox.Event) int {
+	if ev.Count > 1 {
+		return ev.Count
+	}
+	return 1
 }
 
 func droppedLines(ev sandbox.Event) int {

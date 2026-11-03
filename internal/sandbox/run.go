@@ -201,6 +201,11 @@ func Run(ctx context.Context, req Request) (Result, error) {
 
 	stdout, stderr, runErr := launch(ctx, p)
 	blockErr := p.before.restore()
+	// Close the HTTP proxy before draining so a trailing deny emission is kept.
+	if p.egress != nil {
+		p.egress.Close()
+		p.egress = nil
+	}
 	events := append([]Event{}, p.extra...)
 	if p.proxy != nil {
 		events = append(events, p.proxy.drain()...)

@@ -197,6 +197,37 @@ func TestAuditNetDedupe(t *testing.T) {
 	})
 }
 
+func TestCoalescedDenyLogsOnce(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "no"}, nil
+	}})
+	auditPath := filepath.Join(t.TempDir(), "audit.log")
+	lg, err := audit.Open(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lg.Close() })
+	app.audit = lg
+	const n = 10000
+	app.recordSandboxEvents("bot_1", []sandbox.Event{{
+		Kind: "grant_denied", Grant: "net", Host: "nope.test", Detail: "not allowlisted", Count: n,
+	}})
+	logs, err := app.st.ListLog("bot_1", "grant_denied", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("log rows %d", len(logs))
+	}
+	if !strings.Contains(string(logs[0].Detail), `"count":10000`) {
+		t.Fatalf("detail %s", logs[0].Detail)
+	}
+	raw := readAudit(t, auditPath)
+	if strings.Count(raw, `"action":"grant_denied"`) != 1 || !strings.Contains(raw, `"count":10000`) {
+		t.Fatalf("audit:\n%s", raw)
+	}
+}
+
 func TestOffAllowlistPushAuditsOnce(t *testing.T) {
 	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
 		return model.ChatResponse{Content: "no"}, nil

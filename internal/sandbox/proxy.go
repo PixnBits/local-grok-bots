@@ -15,6 +15,7 @@ import (
 // Untrusted events are lines the jail wrote. Reported is the kind that line
 // claimed. A jailed process can write anything, so those fields are not a
 // grant decision and are not a sandbox_block.
+// Count is how many identical events this entry stands for. Zero means one.
 type Event struct {
 	Kind      string `json:"kind"`
 	Grant     string `json:"grant,omitempty"`
@@ -25,7 +26,11 @@ type Event struct {
 	Repo      string `json:"repo,omitempty"`
 	Untrusted bool   `json:"untrusted,omitempty"`
 	Reported  string `json:"reported,omitempty"`
+	Count     int    `json:"count,omitempty"`
 }
+
+// eventCap is the most distinct events kept for one run.
+const eventCap = 256
 
 type proxy struct {
 	ln       net.Listener
@@ -36,6 +41,7 @@ type proxy struct {
 	dial     func(context.Context, string, string) (net.Conn, error)
 	mu       sync.Mutex
 	events   []Event
+	dropped  int
 	slotMu   sync.Mutex
 	slots    int
 	busy     busyNote
@@ -133,14 +139,40 @@ func (p *proxy) drain() []Event {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	out := p.events
+	dropped := p.dropped
 	p.events = nil
+	p.dropped = 0
+	if dropped > 0 {
+		out = append(out, Event{Kind: "grant_denied", Detail: "events dropped", Count: dropped})
+	}
 	return out
 }
 
 func (p *proxy) add(ev Event) {
+	n := ev.Count
+	if n < 1 {
+		n = 1
+	}
+	ev.Count = n
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	for i := range p.events {
+		if sameEvent(p.events[i], ev) {
+			p.events[i].Count += n
+			return
+		}
+	}
+	if len(p.events) >= eventCap {
+		p.dropped += n
+		return
+	}
 	p.events = append(p.events, ev)
-	p.mu.Unlock()
+}
+
+func sameEvent(a, b Event) bool {
+	return a.Kind == b.Kind && a.Grant == b.Grant && a.Host == b.Host && a.Detail == b.Detail &&
+		a.Notice == b.Notice && a.Owner == b.Owner && a.Repo == b.Repo &&
+		a.Untrusted == b.Untrusted && a.Reported == b.Reported
 }
 
 // dialUpstream bounds every dial, including a test dial, at 10s.

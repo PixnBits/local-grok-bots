@@ -44,6 +44,8 @@ static void copy_one(int from, int to) {
         }
         if (n < 0) {
             if (errno == EINTR) continue;
+            shutdown(from, SHUT_RDWR);
+            shutdown(to, SHUT_RDWR);
             return;
         }
         ssize_t off = 0;
@@ -51,9 +53,15 @@ static void copy_one(int from, int to) {
             ssize_t w = write(to, buf + off, (size_t)(n - off));
             if (w < 0) {
                 if (errno == EINTR) continue;
+                shutdown(from, SHUT_RDWR);
+                shutdown(to, SHUT_RDWR);
                 return;
             }
-            if (w == 0) return;
+            if (w == 0) {
+                shutdown(from, SHUT_RDWR);
+                shutdown(to, SHUT_RDWR);
+                return;
+            }
             off += w;
         }
     }
@@ -94,6 +102,8 @@ static int serve(int port, const char *sock) {
                 _exit(0);
             }
             copy_one(u, c);
+            close(u);
+            close(c);
             _exit(0);
         }
         close(c);
