@@ -3,10 +3,12 @@ package daemon
 import (
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
+	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
@@ -110,22 +112,152 @@ func TestGitHubWarningTokenMode(t *testing.T) {
 	}
 }
 
-func TestGitPushDenialNamesMissingList(t *testing.T) {
+func TestGitPushDenialIsGeneric(t *testing.T) {
+	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{Content: "no"}, nil
+	}})
+	const url = "https://github.com/other/nope.git"
+	push := func(policyRepos, allow []string) sandbox.PushResult {
+		t.Helper()
+		app.editPol(func(p *policy.Policy) { p.GitHub.Repos = policyRepos })
+		bot := store.Bot{ID: "bot_1", Grants: []string{"git", "github"}, GitHubAllow: allow}
+		return app.handleGitPush(t.Context(), t.Context(), bot, nil, ".", []string{
+			"git", "push", url, "feature",
+		})
+	}
+	wantStderr := "git push denied: " + sandbox.RepoNotAvailable + "\n"
+	check := func(res sandbox.PushResult, where string, stderrLeak, detailLeak string) {
+		t.Helper()
+		if res.Code == 0 || res.Stderr != wantStderr {
+			t.Fatalf("stderr %q", res.Stderr)
+		}
+		for _, leaked := range []string{"allowlist", "missing from", "not allowlisted", "ceiling", "github_allow", stderrLeak} {
+			if leaked != "" && strings.Contains(res.Stderr, leaked) {
+				t.Fatalf("stderr contains %q: %q", leaked, res.Stderr)
+			}
+		}
+		want := "push allowlist (claimed other/nope from argv) (" + where + ")"
+		if len(res.Events) != 1 || res.Events[0].Detail != want {
+			t.Fatalf("detail %+v", res.Events)
+		}
+		if detailLeak != "" && strings.Contains(res.Events[0].Detail, detailLeak) {
+			t.Fatalf("detail names %q: %q", detailLeak, res.Events[0].Detail)
+		}
+	}
+	// The repository is on the bot list and absent from the policy ceiling.
+	t.Run("bot-only", func(t *testing.T) {
+		check(push([]string{"acme/widgets"}, []string{"other/nope"}), "the policy [github].repos ceiling", "bot's github_allow", "bot's github_allow")
+	})
+	// The repository is on the policy ceiling and absent from the bot list.
+	t.Run("policy-only", func(t *testing.T) {
+		check(push([]string{"other/nope"}, []string{"acme/widgets"}), "the bot's github_allow", "ceiling", "ceiling")
+	})
+	t.Run("neither", func(t *testing.T) {
+		check(push([]string{"acme/widgets"}, []string{"acme/widgets"}), "the policy [github].repos ceiling and the bot's github_allow", "", "")
+	})
+}
+
+func TestGitPushGitHubAccessMessages(t *testing.T) {
 	app := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
 		return model.ChatResponse{Content: "no"}, nil
 	}})
 	app.editPol(func(p *policy.Policy) { p.GitHub.Repos = []string{"acme/widgets"} })
-	bot := store.Bot{ID: "bot_1", Grants: []string{"git", "github"}, GitHubAllow: []string{"other/nope"}}
-	res := app.handleGitPush(t.Context(), t.Context(), bot, nil, ".", []string{
-		"git", "push", "https://github.com/other/nope.git", "feature",
+	args := []string{"git", "push", "https://github.com/acme/widgets.git", "feature"}
+	t.Run("grant off", func(t *testing.T) {
+		bot := store.Bot{ID: "bot_1", Grants: []string{"git"}, GitHubAllow: []string{"acme/widgets"}}
+		res := app.handleGitPush(t.Context(), t.Context(), bot, nil, ".", args)
+		want := "git push denied: " + sandbox.GitHubGrantOff + "\n"
+		if res.Code == 0 || res.Stderr != want {
+			t.Fatalf("stderr %q", res.Stderr)
+		}
+		if strings.Contains(res.Stderr, sandbox.RepoNotAvailable) || strings.Contains(res.Stderr, "not allowlisted") || strings.Contains(res.Stderr, "allowlist") {
+			t.Fatalf("grant-off denial used the allowlist sentence: %q", res.Stderr)
+		}
+		if len(res.Events) != 1 || res.Events[0].Detail != "push missing grant (claimed acme/widgets from argv)" {
+			t.Fatalf("detail %+v", res.Events)
+		}
 	})
-	if res.Code == 0 || !strings.Contains(res.Stderr, "missing from the policy [github].repos ceiling") {
-		t.Fatalf("stderr %q", res.Stderr)
+	t.Run("grant off and not in list", func(t *testing.T) {
+		bot := store.Bot{ID: "bot_1", Grants: []string{"git"}, GitHubAllow: []string{"acme/widgets"}}
+		res := app.handleGitPush(t.Context(), t.Context(), bot, nil, ".", []string{
+			"git", "push", "https://github.com/other/nope.git", "feature",
+		})
+		want := "git push denied: " + sandbox.RepoNotAvailable + "\n"
+		if res.Code == 0 || res.Stderr != want || strings.Contains(res.Stderr, sandbox.GitHubGrantOff) {
+			t.Fatalf("stderr %q", res.Stderr)
+		}
+	})
+	t.Run("bridge down", func(t *testing.T) {
+		bot := store.Bot{ID: "bot_1", Grants: []string{"git", "github"}, GitHubAllow: []string{"acme/widgets"}}
+		res := app.handleGitPush(t.Context(), t.Context(), bot, nil, ".", args)
+		want := "git push denied: " + sandbox.GitHubBridgeDown + "\n"
+		if res.Code == 0 || res.Stderr != want {
+			t.Fatalf("stderr %q", res.Stderr)
+		}
+		if strings.Contains(res.Stderr, sandbox.RepoNotAvailable) || strings.Contains(res.Stderr, "not allowlisted") || strings.Contains(res.Stderr, sandbox.GitHubGrantOff) {
+			t.Fatalf("bridge denial used another sentence: %q", res.Stderr)
+		}
+		if len(res.Events) != 1 || res.Events[0].Detail != "push proxy unavailable (claimed acme/widgets from argv)" {
+			t.Fatalf("detail %+v", res.Events)
+		}
+	})
+}
+
+func TestGitHubWarningTokenGrantEmptyAllow(t *testing.T) {
+	app := newApp(t, "", fakeModel{})
+	missing := t.TempDir() + "/no-such-token"
+	app.editPol(func(p *policy.Policy) {
+		p.GitHub.Repos = nil
+		p.GitHub.TokenFile = missing
+	})
+	srv := serve(t, app)
+	bot := createGrantedBot(t, srv.URL, "Grant", []string{"github"})
+	joined := strings.Join(fetchBot(t, srv.URL, bot.ID).Warnings, "\n")
+	if !strings.Contains(joined, missing) || !strings.Contains(joined, "missing") {
+		t.Fatalf("warnings %q", joined)
 	}
-	if strings.Contains(res.Stderr, "bot's github_allow") {
-		t.Fatalf("named the bot list too: %q", res.Stderr)
+}
+
+func TestTokenWarningCachedUntilChange(t *testing.T) {
+	var reads atomic.Int32
+	prev := readTokenForWarn
+	readTokenForWarn = func(path string) (string, error) {
+		reads.Add(1)
+		return prev(path)
 	}
-	if len(res.Events) != 1 || res.Events[0].Detail != "push allowlist (claimed other/nope from argv)" {
-		t.Fatalf("detail %+v", res.Events)
+	t.Cleanup(func() { readTokenForWarn = prev })
+
+	const canary = "ghp_CANARYSECRETVALUE"
+	path := t.TempDir() + "/token"
+	if err := os.WriteFile(path, []byte(canary+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	first := tokenFileWarning(path)
+	second := tokenFileWarning(path)
+	if reads.Load() != 1 {
+		t.Fatalf("reads after two warnings: %d", reads.Load())
+	}
+	if first != second || !strings.Contains(first, "not mode 0600") || strings.Contains(first, canary) {
+		t.Fatalf("mode warning %q", first)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cleared := tokenFileWarning(path)
+	if reads.Load() != 2 {
+		t.Fatalf("reads after chmod: %d", reads.Load())
+	}
+	if cleared != "" || strings.Contains(cleared, canary) {
+		t.Fatalf("valid file warned: %q", cleared)
+	}
+	if err := os.WriteFile(path, []byte("bad token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shaped := tokenFileWarning(path)
+	if reads.Load() != 3 {
+		t.Fatalf("reads after rewrite: %d", reads.Load())
+	}
+	if !strings.Contains(shaped, "not a valid token file") || strings.Contains(shaped, "bad token") || strings.Contains(shaped, canary) {
+		t.Fatalf("shape warning %q", shaped)
 	}
 }

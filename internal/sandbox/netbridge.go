@@ -1,12 +1,7 @@
 package sandbox
 
 import (
-	"crypto/sha256"
 	_ "embed"
-	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strconv"
 )
 
@@ -17,45 +12,26 @@ var netBridgeSrc string
 // namespace. The namespace has no other listeners, so a fixed port is safe.
 const jailHTTPProxyPort = 18080
 
+func netBridgeBin() cachedBin {
+	return cachedBin{
+		name: "lgb-netbridge",
+		src:  netBridgeSrc,
+		build: func() ([]byte, error) {
+			return gccBytes("netbridge.c", []byte(netBridgeSrc), "netbridge", "net bridge compile",
+				[]string{"-O2"}, nil)
+		},
+	}
+}
+
 // ensureNetBridge compiles the in-jail TCP-to-unix splice once and caches it.
 // Without gcc the HTTP proxy env is not set. LD_PRELOAD still applies when
 // the connect shim compiled.
 func ensureNetBridge() (string, error) {
-	sum := sha256.Sum256([]byte(netBridgeSrc))
-	dest := filepath.Join(os.TempDir(), fmt.Sprintf("lgb-netbridge-%x", sum[:8]))
-	if st, err := os.Stat(dest); err == nil && st.Size() > 0 && st.Mode()&0o111 != 0 {
-		return dest, nil
-	}
-	if _, err := exec.LookPath("gcc"); err != nil {
-		return "", fmt.Errorf("gcc not available: %w", err)
-	}
-	dir, err := os.MkdirTemp("", "lgb-cc-")
-	if err != nil {
-		return "", err
-	}
-	defer os.RemoveAll(dir)
-	src := filepath.Join(dir, "netbridge.c")
-	if err := os.WriteFile(src, []byte(netBridgeSrc), 0o644); err != nil {
-		return "", err
-	}
-	out := filepath.Join(dir, "netbridge")
-	cmd := exec.Command("gcc", "-O2", "-o", out, src)
-	if b, err := cmd.CombinedOutput(); err != nil {
-		return "", fmt.Errorf("net bridge compile: %v %s", err, b)
-	}
-	b, err := os.ReadFile(out)
-	if err != nil {
-		return "", err
-	}
-	tmp := dest + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o755); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, dest); err != nil {
-		_ = os.Remove(tmp)
-		return "", err
-	}
-	return dest, nil
+	return ensureCached(netBridgeBin())
+}
+
+func ensureNetBridgeIn(dir string) (string, error) {
+	return ensureCachedIn(dir, netBridgeBin())
 }
 
 func shellProxyURL() string {
@@ -89,14 +65,14 @@ fi
 "$bridge" "$port" "$sock" >/tmp/lgb-net.ready &
 pid=$!
 trap 'kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null; wait "$pid" 2>/dev/null' EXIT
-i=0
+deadline=$(($(date +%s) + 5))
 ok=0
-while [ "$i" -lt 100000 ]; do
+while [ "$(date +%s)" -lt "$deadline" ]; do
   if [ -s /tmp/lgb-net.ready ] && "$bridge" probe "$port"; then
     ok=1
     break
   fi
-  i=$((i + 1))
+  sleep 0.1
 done
 if [ "$ok" != 1 ]; then
   echo "network proxy unavailable" >&2

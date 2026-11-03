@@ -42,14 +42,10 @@ type Request struct {
 	ProtectTripped string
 	SSHKey         string
 	// GitHubSock is the host credential-proxy socket. Empty leaves GitHub
-	// fetch unavailable. GitHubRepos is the effective allowlist copied into
-	// the wrapper's allow arms. GitHubPolicyRepos and GitHubBotRepos are the
-	// two lists that intersection came from. They are only used to name
-	// which list rejected a remote. They do not change the allow decision.
-	GitHubSock        string
-	GitHubRepos       []string
-	GitHubPolicyRepos []string
-	GitHubBotRepos    []string
+	// fetch unavailable. GitHubRepos is the bot's effective allowlist copied
+	// into the wrapper's allow arms. Policy-only names are not passed in.
+	GitHubSock  string
+	GitHubRepos []string
 	// Resolve, when set, is the shell HTTP proxy's lookup. The connect
 	// shim still passes the hostname to Dial. Nil uses the host resolver.
 	Resolve         func(context.Context, string) ([]net.IP, error)
@@ -59,8 +55,11 @@ type Request struct {
 	// OnPush answers a git push while the shell is still running. Nil denies.
 	// The string is the shell's logical directory relative to /work.
 	// OnPushStart runs after the request is read and before OnPush.
+	// OnPushEnd runs after OnPush returns, including denial and a dropped
+	// push connection. It does not run when the request itself cannot be read.
 	OnPush      func(context.Context, string, []string) PushResult
 	OnPushStart func()
+	OnPushEnd   func()
 	// Dial, when set, is the proxy's outbound TCP dial. Tests use it.
 	Dial func(context.Context, string, string) (net.Conn, error)
 	// CleanBash runs the command with bash --norc --noprofile and without
@@ -335,8 +334,7 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 		if err := writeExec(filepath.Join(ro, "gitwrap"), gitWrap(gitWrapOpts{
 			Grant:        grants["git"],
 			Repos:        req.GitHubRepos,
-			PolicyRepos:  req.GitHubPolicyRepos,
-			BotRepos:     req.GitHubBotRepos,
+			Hub:          grants["github"],
 			Bridge:       ghSock != "",
 			Name:         req.GitAuthor,
 			Email:        req.GitAuthorEmail,
@@ -356,7 +354,7 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 			touch(filepath.Join(rw, "bin", "ghbridge"))
 			p.mounts = append(p.mounts, mount{Src: filepath.Join(ro, "ghbridge"), Dst: "/lgb/bin/ghbridge", RO: true})
 		}
-		ps, perr := startPush(ctx, filepath.Join(dir, "push.sock"), req.OnPush, req.OnPushStart)
+		ps, perr := startPush(ctx, filepath.Join(dir, "push.sock"), req.OnPush, req.OnPushStart, req.OnPushEnd)
 		if perr != nil {
 			p.extra = append(p.extra, Event{Kind: "grant_denied", Grant: "git", Detail: "push socket unavailable"})
 		} else {

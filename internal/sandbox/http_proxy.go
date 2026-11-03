@@ -170,14 +170,30 @@ func (p *HTTPAllow) serve() {
 	}
 }
 
+// httpHeaderMax is the cap on the request line plus headers. The limit is
+// lifted after a successful parse so a CONNECT tunnel or a request body is
+// not cut off by it.
+const httpHeaderMax = 64 << 10
+
 func (p *HTTPAllow) serveConn(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
-	br := bufio.NewReader(conn)
+	lim := &byteCap{r: conn, max: httpHeaderMax}
+	br := bufio.NewReader(lim)
 	req, err := http.ReadRequest(br)
 	if err != nil {
+		if lim.over() {
+			_, _ = io.WriteString(conn, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+			if p.record != nil {
+				p.record(Event{Kind: "grant_denied", Detail: "header"})
+			}
+			if p.audit != nil {
+				p.audit(EgressEvent{Allow: false, Reason: "header"})
+			}
+		}
 		return
 	}
+	lim.lift()
 	host, port, ok := requestTarget(req)
 	if !ok {
 		writeDeny(conn)
@@ -504,6 +520,31 @@ func allZero(b []byte) bool {
 func writeDeny(conn net.Conn) {
 	_, _ = io.WriteString(conn, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 }
+
+// byteCap counts bytes from r. max > 0 stops further reads at that many
+// bytes. max 0 is unlimited. lift clears the cap without discarding bytes
+// already buffered by the caller.
+type byteCap struct {
+	r   io.Reader
+	n   int
+	max int
+}
+
+func (b *byteCap) Read(p []byte) (int, error) {
+	if b.max > 0 && b.n >= b.max {
+		return 0, io.ErrUnexpectedEOF
+	}
+	if b.max > 0 && len(p) > b.max-b.n {
+		p = p[:b.max-b.n]
+	}
+	n, err := b.r.Read(p)
+	b.n += n
+	return n, err
+}
+
+func (b *byteCap) lift() { b.max = 0 }
+
+func (b *byteCap) over() bool { return b != nil && b.max > 0 && b.n >= b.max }
 
 type streamConn struct {
 	net.Conn

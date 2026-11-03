@@ -32,12 +32,13 @@ type pushSrv struct {
 	ctx   context.Context
 	fn    func(context.Context, string, []string) PushResult
 	start func()
+	end   func()
 	mu    sync.Mutex
 	wg    sync.WaitGroup
 	ev    []Event
 }
 
-func startPush(ctx context.Context, path string, fn func(context.Context, string, []string) PushResult, start func()) (*pushSrv, error) {
+func startPush(ctx context.Context, path string, fn func(context.Context, string, []string) PushResult, start, end func()) (*pushSrv, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -50,7 +51,7 @@ func startPush(ctx context.Context, path string, fn func(context.Context, string
 		return nil, err
 	}
 	_ = os.Chmod(path, 0o666)
-	s := &pushSrv{ln: ln, ctx: ctx, fn: fn, start: start}
+	s := &pushSrv{ln: ln, ctx: ctx, fn: fn, start: start, end: end}
 	go s.serve()
 	return s, nil
 }
@@ -120,6 +121,11 @@ func (s *pushSrv) handle(conn net.Conn) {
 	}
 	if s.start != nil {
 		s.start()
+	}
+	// end runs after OnPush on success, denial, and a dropped client.
+	// A request that never parsed did not call start, so it does not call end.
+	if s.start != nil && s.end != nil {
+		defer s.end()
 	}
 	if s.fn == nil {
 		res.Events = []Event{{Kind: "grant_denied", Grant: "git", Detail: "push not sent"}}

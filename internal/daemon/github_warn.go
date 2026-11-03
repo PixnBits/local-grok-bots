@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"fmt"
+	"os"
 	"strings"
+	"sync"
 
 	"github.com/PixnBits/local-grok-bots/internal/github"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
@@ -73,12 +75,68 @@ func joinRepoNames(allow []string) string {
 	return strings.Join(names, ", ")
 }
 
+// readTokenForWarn reads a token file for the bot-page warning. Tests count
+// calls. The push path keeps using readGitHubToken.
+var readTokenForWarn = github.ReadToken
+
+type tokenWarnID struct {
+	dev, ino uint64
+	size     int64
+	mtime    int64
+	mode     uint32
+	uid      uint32
+	missing  bool
+}
+
+type tokenWarnEnt struct {
+	id  tokenWarnID
+	msg string
+}
+
+var (
+	tokenWarnMu sync.Mutex
+	tokenWarns  = map[string]tokenWarnEnt{}
+)
+
 func tokenFileWarning(path string) string {
-	if _, err := github.ReadToken(path); err == nil {
-		return ""
-	} else {
-		return tokenWarningText(path, github.TokenFailureReason(err))
+	id, ok := tokenWarnStat(path)
+	if ok {
+		tokenWarnMu.Lock()
+		if ent, hit := tokenWarns[path]; hit && ent.id == id {
+			msg := ent.msg
+			tokenWarnMu.Unlock()
+			return msg
+		}
+		tokenWarnMu.Unlock()
 	}
+	msg := ""
+	if _, err := readTokenForWarn(path); err != nil {
+		msg = tokenWarningText(path, github.TokenFailureReason(err))
+	}
+	if ok {
+		tokenWarnMu.Lock()
+		tokenWarns[path] = tokenWarnEnt{id: id, msg: msg}
+		tokenWarnMu.Unlock()
+	}
+	return msg
+}
+
+func tokenWarnStat(path string) (tokenWarnID, bool) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return tokenWarnID{missing: true}, true
+		}
+		return tokenWarnID{}, false
+	}
+	dev, ino, uid, ok := tokenFileID(fi)
+	if !ok {
+		return tokenWarnID{}, false
+	}
+	return tokenWarnID{
+		dev: dev, ino: ino, size: fi.Size(), mtime: fi.ModTime().UnixNano(),
+		mode: uint32(fi.Mode()), uid: uid,
+	}, true
 }
 
 func tokenWarningText(path, reason string) string {

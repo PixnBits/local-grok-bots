@@ -89,3 +89,38 @@ func TestGetBotIncludesWarnings(t *testing.T) {
 		t.Fatalf("warnings = %q", got.Warnings)
 	}
 }
+
+func TestListBotsIncludesWarnings(t *testing.T) {
+	app := newApp(t, "", fakeModel{})
+	srv := serve(t, app)
+	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]string{"name": "Smith", "description": codeSmithDesc}, "")
+	if res.StatusCode != 200 && res.StatusCode != 201 {
+		t.Fatalf("create %d %s", res.StatusCode, b)
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	decodeJSON(t, b, &created)
+	res, b = do(t, "GET", srv.URL+"/api/bots", nil, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("list %d %s", res.StatusCode, b)
+	}
+	var bots []struct {
+		ID       string   `json:"id"`
+		Warnings []string `json:"warnings"`
+	}
+	decodeJSON(t, b, &bots)
+	var found bool
+	for _, bot := range bots {
+		if bot.ID != created.ID {
+			continue
+		}
+		found = true
+		if len(bot.Warnings) != 1 {
+			t.Fatalf("list warnings = %q", bot.Warnings)
+		}
+	}
+	if !found {
+		t.Fatalf("bot %s missing from list %s", created.ID, b)
+	}
+}

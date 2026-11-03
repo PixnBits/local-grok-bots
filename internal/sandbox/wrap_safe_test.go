@@ -49,44 +49,107 @@ func TestGitHubAllowlistWhere(t *testing.T) {
 	}
 }
 
-func TestGitWrapDenialNamesMissingList(t *testing.T) {
-	run := func(t *testing.T, opts gitWrapOpts, remote, want string, absent ...string) {
-		t.Helper()
-		script := gitWrap(opts)
-		dir := t.TempDir()
-		path := filepath.Join(dir, "gitwrap")
-		if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if out, err := exec.Command("sh", "-n", path).CombinedOutput(); err != nil {
-			t.Fatalf("sh -n: %v\n%s", err, out)
-		}
-		cmd := exec.Command(path, "clone", remote, "dest")
-		out, err := cmd.CombinedOutput()
-		if err == nil {
-			t.Fatalf("allowed %s: %s", remote, out)
-		}
-		text := string(out)
-		if !strings.Contains(text, want) {
-			t.Fatalf("missing %q\n%s", want, text)
-		}
-		for _, bad := range absent {
-			if strings.Contains(text, bad) {
-				t.Fatalf("message names %q\n%s", bad, text)
-			}
-		}
-		if !strings.Contains(text, "not allowlisted") {
-			t.Fatalf("message: %s", text)
+func TestGitHubAllowlistWhereNormalizesOwner(t *testing.T) {
+	lists := []string{"acme/widgets"}
+	for _, tc := range []struct{ owner, repo string }{
+		{" Acme ", " Widgets "},
+		{"ACME", "widgets"},
+		{"Acme", "WIDGETS"},
+	} {
+		if got := GitHubAllowlistWhere(lists, lists, tc.owner, tc.repo); got != "" {
+			t.Fatalf("%q %q -> %q", tc.owner, tc.repo, got)
 		}
 	}
-	both := "the policy [github].repos ceiling and the bot's github_allow"
-	ceiling := "the policy [github].repos ceiling"
-	bot := "the bot's github_allow"
-	run(t, gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost"}, "https://github.com/missing/repo.git", "missing from "+both)
-	run(t, gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost", BotRepos: []string{"onlybot/repo"}}, "https://github.com/onlybot/repo.git", "missing from "+ceiling, "bot's github_allow")
-	run(t, gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost", PolicyRepos: []string{"onlypol/repo"}}, "https://github.com/OnlyPol/repo.git", "missing from "+bot, ceiling)
-	run(t, gitWrapOpts{
-		Grant: true, Name: "Ada", Email: "bot@localhost",
-		Repos: []string{"acme/widgets"}, PolicyRepos: []string{"acme/widgets"}, BotRepos: []string{"acme/widgets"},
-	}, "git@github.com:acme/widgets.git", "repository is not allowlisted", "missing from")
+	if GitHubAllowlistWhere(lists, nil, " acme ", "widgets") != gitHubListBot {
+		t.Fatal("bot list")
+	}
+}
+
+func TestGitWrapDenialIsGeneric(t *testing.T) {
+	run := func(t *testing.T, opts gitWrapOpts, remote string) {
+		t.Helper()
+		script := gitWrap(opts)
+		for _, leaked := range []string{gitHubListBoth, gitHubListCeiling, gitHubListBot, "not allowlisted", "missing from"} {
+			if strings.Contains(script, leaked) {
+				t.Fatalf("script contains %q", leaked)
+			}
+		}
+		text := runGitWrap(t, script, "clone", remote, "dest")
+		if !strings.Contains(text, "git clone denied: "+RepoNotAvailable) {
+			t.Fatalf("message: %s", text)
+		}
+		for _, leaked := range []string{gitHubListBoth, gitHubListCeiling, gitHubListBot, "not allowlisted", "missing from", GitHubGrantOff, GitHubBridgeDown} {
+			if strings.Contains(text, leaked) {
+				t.Fatalf("message names %q\n%s", leaked, text)
+			}
+		}
+	}
+	// Policy-only, bot-only, and neither are the same sentence. The wrapper
+	// only receives the effective list, so none of those names are inputs.
+	run(t, gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost"}, "https://github.com/missing/repo.git")
+	run(t, gitWrapOpts{Grant: true, Hub: true, Name: "Ada", Email: "bot@localhost", Repos: []string{"acme/widgets"}}, "https://github.com/onlybot/repo.git")
+	run(t, gitWrapOpts{Grant: true, Hub: true, Name: "Ada", Email: "bot@localhost", Repos: []string{"acme/widgets"}}, "https://github.com/OnlyPol/repo.git")
+	text := runGitWrap(t, gitWrap(gitWrapOpts{
+		Grant: true, Hub: true, Name: "Ada", Email: "bot@localhost", Repos: []string{"acme/widgets"},
+	}), "clone", "git@github.com:acme/widgets.git", "dest")
+	if !strings.Contains(text, RepoNotAvailable) || strings.Contains(text, "missing from") || strings.Contains(text, gitHubListCeiling) {
+		t.Fatalf("ssh: %s", text)
+	}
+}
+
+func TestGitWrapGitHubGrantOff(t *testing.T) {
+	script := gitWrap(gitWrapOpts{
+		Grant: true, Hub: false, Bridge: true,
+		Repos: []string{"acme/widgets"}, Name: "Ada", Email: "bot@localhost",
+	})
+	if !strings.Contains(script, "acme/widgets") || strings.Contains(script, gitHubListCeiling) {
+		t.Fatal("effective list missing or policy text embedded")
+	}
+	for _, args := range [][]string{
+		{"clone", "https://github.com/Acme/Widgets.git", "dest"},
+		{"fetch", "https://github.com/ACME/widgets.git"},
+		{"ls-remote", "https://github.com/acme/widgets"},
+	} {
+		text := runGitWrap(t, script, args...)
+		if !strings.Contains(text, GitHubGrantOff) || strings.Contains(text, RepoNotAvailable) || strings.Contains(text, "not allowlisted") {
+			t.Fatalf("%v: %s", args, text)
+		}
+	}
+	text := runGitWrap(t, script, "clone", "https://github.com/other/nope.git", "dest")
+	if !strings.Contains(text, RepoNotAvailable) || strings.Contains(text, GitHubGrantOff) {
+		t.Fatalf("off-list with grant off: %s", text)
+	}
+}
+
+func TestGitWrapBridgeDown(t *testing.T) {
+	script := gitWrap(gitWrapOpts{
+		Grant: true, Hub: true, Bridge: false,
+		Repos: []string{"acme/widgets"}, Name: "Ada", Email: "bot@localhost",
+	})
+	text := runGitWrap(t, script, "fetch", "https://github.com/acme/widgets.git")
+	if !strings.Contains(text, GitHubBridgeDown) || strings.Contains(text, RepoNotAvailable) || strings.Contains(text, "not allowlisted") || strings.Contains(text, GitHubGrantOff) {
+		t.Fatalf("bridge: %s", text)
+	}
+	text = runGitWrap(t, script, "clone", "https://github.com/other/nope.git", "dest")
+	if !strings.Contains(text, RepoNotAvailable) || strings.Contains(text, GitHubBridgeDown) {
+		t.Fatalf("off-list bridge: %s", text)
+	}
+}
+
+func runGitWrap(t *testing.T, script string, args ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gitwrap")
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("sh", "-n", path).CombinedOutput(); err != nil {
+		t.Fatalf("sh -n: %v\n%s", err, out)
+	}
+	cmd := exec.Command(path, args...)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("allowed %v: %s", args, out)
+	}
+	return string(out)
 }

@@ -18,6 +18,16 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
+// shellRunCap is the run_shell limit for time spent outside a git push.
+// It is not a user setting. OnPushStart pauses this budget and arms
+// prompt_timeout+15s for the push only. OnPushEnd resumes whatever budget
+// is left, so work after the push is still capped and a slow push is not
+// cut off by this cap.
+var shellRunCap = 30 * time.Second
+
+// gitPushHook, when set, replaces handleGitPush for run_shell. Tests set it.
+var gitPushHook func(context.Context, store.Bot, string, []string) sandbox.PushResult
+
 // prop is one JSON Schema property with a description the model reads.
 func prop(typ, desc string) map[string]any {
 	return map[string]any{"type": typ, "description": desc}
@@ -456,9 +466,10 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		var timerMu sync.Mutex
 		var shellTimer *time.Timer
 		var timerFired bool
-		armShell := func(d time.Duration) {
-			timerMu.Lock()
-			defer timerMu.Unlock()
+		var pushDepth int
+		var spent time.Duration
+		var segStart time.Time
+		armLocked := func(d time.Duration) {
 			if shellTimer != nil {
 				shellTimer.Stop()
 			}
@@ -469,7 +480,10 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 				shellCancel()
 			})
 		}
-		armShell(30 * time.Second)
+		timerMu.Lock()
+		armLocked(shellRunCap)
+		segStart = time.Now()
+		timerMu.Unlock()
 		defer func() {
 			timerMu.Lock()
 			if shellTimer != nil {
@@ -477,7 +491,8 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			}
 			timerMu.Unlock()
 		}()
-		ghSock, ghRepos := "", []string(nil)
+		ghSock := ""
+		ghRepos := turnPol.EffectiveGitHubRepos(current.GitHubAllow)
 		author, email, aerr := github.CommitAuthor(current.Name, turnPol.GitHub.AuthorName, turnPol.GitHub.AuthorEmail)
 		if aerr != nil {
 			author, email = "", ""
@@ -491,7 +506,6 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 				px = opened
 				defer px.Close()
 				ghSock = px.Sock()
-				ghRepos = turnPol.EffectiveGitHubRepos(current.GitHubAllow)
 				a.noteGitHubSock(current.ID, ghSock)
 				defer a.noteGitHubSock(current.ID, "")
 			}
@@ -524,29 +538,57 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			return "", rerr
 		}
 		res, err := sandbox.Run(shellCtx, sandbox.Request{
-			Workspace:         shellWS,
-			Command:           command,
-			Chdir:             rel,
-			CleanBash:         cleanBash,
-			Grants:            current.Grants,
-			NetAllow:          current.NetAllow,
-			SSHAllow:          current.SSHAllow,
-			BuildBinds:        binds,
-			Protect:           protect,
-			ProtectInodes:     a.protectInodes(),
-			ProtectTripped:    a.protectBlockReason(),
-			SSHKey:            a.sshKeyPath(),
-			GitHubSock:        ghSock,
-			GitHubRepos:       ghRepos,
-			GitHubPolicyRepos: turnPol.GitHub.Repos,
-			GitHubBotRepos:    current.GitHubAllow,
-			GitAuthor:         author,
-			GitAuthorEmail:    email,
-			GitAuthorRefuse:   aerr != nil,
+			Workspace:       shellWS,
+			Command:         command,
+			Chdir:           rel,
+			CleanBash:       cleanBash,
+			Grants:          current.Grants,
+			NetAllow:        current.NetAllow,
+			SSHAllow:        current.SSHAllow,
+			BuildBinds:      binds,
+			Protect:         protect,
+			ProtectInodes:   a.protectInodes(),
+			ProtectTripped:  a.protectBlockReason(),
+			SSHKey:          a.sshKeyPath(),
+			GitHubSock:      ghSock,
+			GitHubRepos:     ghRepos,
+			GitAuthor:       author,
+			GitAuthorEmail:  email,
+			GitAuthorRefuse: aerr != nil,
 			OnPushStart: func() {
-				armShell(turnPol.EffectivePromptTimeout() + 15*time.Second)
+				// Pause the shell cap for the push itself. Time already spent
+				// outside the push stays spent. Nested pushes keep the long timer.
+				timerMu.Lock()
+				defer timerMu.Unlock()
+				if pushDepth == 0 {
+					if !segStart.IsZero() {
+						spent += time.Since(segStart)
+						segStart = time.Time{}
+					}
+					armLocked(turnPol.EffectivePromptTimeout() + 15*time.Second)
+				}
+				pushDepth++
+			},
+			OnPushEnd: func() {
+				timerMu.Lock()
+				defer timerMu.Unlock()
+				if pushDepth > 0 {
+					pushDepth--
+				}
+				if pushDepth > 0 {
+					return
+				}
+				left := shellRunCap - spent
+				if left < 0 {
+					left = 0
+				}
+				armLocked(left)
+				segStart = time.Now()
 			},
 			OnPush: func(pctx context.Context, cwd string, pushArgs []string) sandbox.PushResult {
+				if gitPushHook != nil {
+					return gitPushHook(pctx, current, cwd, pushArgs)
+				}
 				return a.handleGitPush(pctx, ctx, current, gate, cwd, pushArgs)
 			},
 			Dial: a.shellDial,

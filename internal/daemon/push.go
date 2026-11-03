@@ -42,7 +42,7 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 		owner, repo, from := a.deniedPushNames(cwd, args)
 		return a.pushDenied(bot, owner, repo, from, err.Error())
 	}
-	if !granted(bot.Grants, "git") || !granted(bot.Grants, "github") {
+	if !granted(bot.Grants, "git") {
 		return a.pushDenied(bot, "", "", "", "missing grant")
 	}
 	repos := []string(nil)
@@ -62,15 +62,18 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	if !repoAllowed(repos, owner, repo) {
 		return a.pushDenied(bot, owner, repo, claimedFrom, "allowlist")
 	}
+	if !granted(bot.Grants, "github") {
+		return a.pushDenied(bot, owner, repo, claimedFrom, "github grant off")
+	}
+	if gate == nil || gate.px == nil || gate.px.Sock() == "" {
+		return a.pushDenied(bot, owner, repo, claimedFrom, "bridge down")
+	}
 	tokenFile := ""
 	if a != nil {
 		tokenFile = turnPol.GitHub.TokenFile
 	}
 	if _, err := readGitHubToken(tokenFile); err != nil {
 		return a.pushDenied(bot, owner, repo, claimedFrom, "token")
-	}
-	if gate == nil || gate.px == nil || gate.px.Sock() == "" {
-		return a.pushDenied(bot, owner, repo, claimedFrom, "proxy unavailable")
 	}
 	held, locReason := resolveWorkspaceRepo(ws, cwd)
 	defer held.Close()
@@ -185,7 +188,7 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 		res.Stderr += sanitizePush(msg, tokenFile, gateSecret)
 		return res
 	}
-	ev := a.auditPush(bot, owner, repo, "allow", "sent", "")
+	ev := a.auditPush(bot, owner, repo, "allow", "sent", "", "")
 	return sandbox.PushResult{
 		Code:   0,
 		Stdout: "git push sent\n",
@@ -233,20 +236,31 @@ func (a *App) pushDenied(bot store.Bot, owner, repo, claimedFrom, reason string)
 	if reason == "" {
 		reason = "not sent"
 	}
-	ev := a.auditPush(bot, owner, repo, "deny", reason, claimedFrom)
-	stderr := "git push denied: " + reason + "\n"
-	if reason == "allowlist" {
+	// The jail sees one sentence. The audit row keeps a stable reason and,
+	// for an allowlist miss, the host-only list name.
+	auditReason := reason
+	jail := ""
+	listWhere := ""
+	switch reason {
+	case "allowlist":
+		jail = sandbox.RepoNotAvailable
 		var policyRepos, botRepos []string
 		if a != nil {
 			policyRepos = a.effPol(bot.ID).GitHub.Repos
 			botRepos = bot.GitHubAllow
 		}
-		where := sandbox.GitHubAllowlistWhere(policyRepos, botRepos, owner, repo)
-		if where != "" {
-			stderr = "git push denied: repository is not allowlisted (missing from " + where + ")\n"
-		} else {
-			stderr = "git push denied: repository is not allowlisted\n"
-		}
+		listWhere = sandbox.GitHubAllowlistWhere(policyRepos, botRepos, owner, repo)
+	case "github grant off":
+		auditReason = "missing grant"
+		jail = sandbox.GitHubGrantOff
+	case "bridge down":
+		auditReason = "proxy unavailable"
+		jail = sandbox.GitHubBridgeDown
+	}
+	ev := a.auditPush(bot, owner, repo, "deny", auditReason, claimedFrom, listWhere)
+	stderr := "git push denied: " + reason + "\n"
+	if jail != "" {
+		stderr = "git push denied: " + jail + "\n"
 	}
 	return sandbox.PushResult{
 		Code:   1,
@@ -255,7 +269,7 @@ func (a *App) pushDenied(bot store.Bot, owner, repo, claimedFrom, reason string)
 	}
 }
 
-func (a *App) auditPush(bot store.Bot, owner, repo, decision, reason, claimedFrom string) sandbox.Event {
+func (a *App) auditPush(bot store.Bot, owner, repo, decision, reason, claimedFrom, listWhere string) sandbox.Event {
 	action := "github_push_denied"
 	kind := "grant_denied"
 	if decision == "allow" {
@@ -275,11 +289,17 @@ func (a *App) auditPush(bot store.Bot, owner, repo, decision, reason, claimedFro
 		if decision != "allow" && claimedFrom != "" && owner != "" && repo != "" {
 			fields["claimed_from"] = claimedFrom
 		}
+		if listWhere != "" {
+			fields["detail"] = listWhere
+		}
 		a.audit.Write(fields)
 	}
 	detail := reason
 	if decision != "allow" {
 		detail = pushDenyDetail(reason, owner, repo, claimedFrom)
+	}
+	if listWhere != "" {
+		detail += " (" + listWhere + ")"
 	}
 	return sandbox.Event{Kind: kind, Grant: "github", Detail: detail}
 }
