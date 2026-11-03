@@ -110,6 +110,46 @@ func (p *proxy) add(ev Event) {
 	p.mu.Unlock()
 }
 
+// dialUpstream bounds every dial, including a test dial, at 10s.
+// Close of the returned connection releases the dial context. The context
+// is not cancelled when the dial succeeds, so a dialer that follows ctx
+// does not drop a live connection. The timer is stopped on success.
+func (p *proxy) dialUpstream(host string, port int) (net.Conn, error) {
+	dial := p.dial
+	if dial == nil {
+		d := &net.Dialer{Timeout: 10 * time.Second}
+		dial = d.DialContext
+	}
+	ctx, cancel := context.WithCancel(p.ctx)
+	stop := time.AfterFunc(10*time.Second, cancel)
+	up, err := dial(ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	if err != nil {
+		stop.Stop()
+		cancel()
+		return nil, err
+	}
+	if !stop.Stop() {
+		_ = up.Close()
+		cancel()
+		return nil, context.DeadlineExceeded
+	}
+	return &cancelOnClose{Conn: up, cancel: cancel}, nil
+}
+
+type cancelOnClose struct {
+	net.Conn
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnClose) Close() error {
+	err := c.Conn.Close()
+	if c.cancel != nil {
+		c.cancel()
+		c.cancel = nil
+	}
+	return err
+}
+
 func (p *proxy) handle(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
@@ -129,12 +169,7 @@ func (p *proxy) handle(conn net.Conn) {
 		_, _ = conn.Write([]byte("DENY\n"))
 		return
 	}
-	dial := p.dial
-	if dial == nil {
-		d := &net.Dialer{Timeout: 10 * time.Second}
-		dial = d.DialContext
-	}
-	up, err := dial(p.ctx, "tcp", net.JoinHostPort(host, strconv.Itoa(port)))
+	up, err := p.dialUpstream(host, port)
 	if err != nil {
 		ev.Notice = ""
 		ev.Detail = "dial failed"

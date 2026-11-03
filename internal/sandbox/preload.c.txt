@@ -5,6 +5,8 @@
 #include <errno.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <pwd.h>
 #include <stdio.h>
@@ -13,6 +15,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 /* Redirect non-loopback TCP connect() to a daemon proxy over a unix socket.
@@ -42,57 +45,150 @@ static void lower_copy(char *dst, size_t n, const char *src) {
     dst[i] = 0;
 }
 
-static int proxy_connect(int fd, const char *host, int port) {
-    const char *path;
-    int u, n, off;
-    struct sockaddr_un un;
-    char line[400];
-    char resp[80];
-    int rn = 0;
+/* The daemon dial is bounded at 10s. Wait a little longer so a DENY is
+   still read, then fail the handshake instead of blocking the caller. */
+#define HANDSHAKE_MS 12000
 
-    path = getenv("LGB_PROXY_SOCK");
-    if (!path || !path[0] || !real_connect) {
-        errno = EACCES;
-        return -1;
+struct proxy_job {
+    int client;
+    int pad;
+    int port;
+    char path[108];
+    char host[256];
+};
+
+struct copy_arg {
+    int from;
+    int to;
+};
+
+static long mono_ms(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (long)ts.tv_sec * 1000L + (long)ts.tv_nsec / 1000000L;
+}
+
+static int poll_until(int fd, short ev, long deadline) {
+    for (;;) {
+        long left = deadline - mono_ms();
+        struct pollfd pfd;
+        int r;
+        if (left <= 0) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        if (left > 10000) left = 10000;
+        pfd.fd = fd;
+        pfd.events = ev;
+        pfd.revents = 0;
+        r = poll(&pfd, 1, (int)left);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (r == 0) continue;
+        if (pfd.revents & (POLLERR | POLLNVAL)) {
+            errno = EIO;
+            return -1;
+        }
+        return 0;
     }
+}
+
+static int apply_status(int fd, int fl) {
+    int set = 0;
+    if (fl & O_NONBLOCK) set |= O_NONBLOCK;
+    if (fl & O_APPEND) set |= O_APPEND;
+#ifdef O_ASYNC
+    if (fl & O_ASYNC) set |= O_ASYNC;
+#endif
+    if (fcntl(fd, F_SETFL, set) < 0) return -1;
+    return 0;
+}
+
+static int apply_fdflags(int fd, int fdfl) {
+    if (fcntl(fd, F_SETFD, fdfl & FD_CLOEXEC) < 0) return -1;
+    return 0;
+}
+
+static int dial_unix_nb(const char *path, long deadline) {
+    int u, fl, so;
+    socklen_t sl;
+    struct sockaddr_un un;
+    size_t n;
+
     u = socket(AF_UNIX, SOCK_STREAM, 0);
     if (u < 0) return -1;
+    fl = fcntl(u, F_GETFL);
+    if (fl < 0 || fcntl(u, F_SETFL, fl | O_NONBLOCK) < 0 || fcntl(u, F_SETFD, FD_CLOEXEC) < 0) {
+        close(u);
+        return -1;
+    }
     memset(&un, 0, sizeof un);
     un.sun_family = AF_UNIX;
-    if (strlen(path) >= sizeof un.sun_path) {
+    n = strlen(path);
+    if (n == 0 || n >= sizeof un.sun_path) {
         close(u);
         errno = ENAMETOOLONG;
         return -1;
     }
-    memcpy(un.sun_path, path, strlen(path) + 1);
+    memcpy(un.sun_path, path, n + 1);
     if (real_connect(u, (struct sockaddr *)&un, sizeof un) < 0) {
-        int e = errno;
-        close(u);
-        errno = e;
-        return -1;
+        if (errno != EINPROGRESS && errno != EAGAIN) {
+            int e = errno;
+            close(u);
+            errno = e;
+            return -1;
+        }
+        if (poll_until(u, POLLOUT, deadline) < 0) {
+            close(u);
+            return -1;
+        }
+        so = 0;
+        sl = sizeof so;
+        if (getsockopt(u, SOL_SOCKET, SO_ERROR, &so, &sl) < 0 || so != 0) {
+            if (so == 0) so = errno;
+            close(u);
+            errno = so ? so : ECONNREFUSED;
+            return -1;
+        }
     }
+    return u;
+}
+
+static int proxy_handshake(int u, const char *host, int port, long deadline) {
+    char line[400];
+    char resp[80];
+    int n, off, rn;
+
     n = snprintf(line, sizeof line, "CONNECT %s %d\n", host, port);
     if (n <= 0 || n >= (int)sizeof line) {
-        close(u);
         errno = EINVAL;
         return -1;
     }
     off = 0;
     while (off < n) {
-        int w = (int)write(u, line + off, (size_t)(n - off));
+        int w;
+        if (poll_until(u, POLLOUT, deadline) < 0) return -1;
+        w = (int)send(u, line + off, (size_t)(n - off), MSG_NOSIGNAL);
         if (w < 0) {
-            if (errno == EINTR) continue;
-            close(u);
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            return -1;
+        }
+        if (w == 0) {
+            errno = ECONNRESET;
             return -1;
         }
         off += w;
     }
+    rn = 0;
     while (rn < (int)sizeof resp - 1) {
         char c;
-        int r = (int)read(u, &c, 1);
+        int r;
+        if (poll_until(u, POLLIN, deadline) < 0) return -1;
+        r = (int)recv(u, &c, 1, 0);
         if (r < 0) {
-            if (errno == EINTR) continue;
-            close(u);
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
             return -1;
         }
         if (r == 0) break;
@@ -100,11 +196,145 @@ static int proxy_connect(int fd, const char *host, int port) {
         if (c == '\n') break;
     }
     resp[rn] = 0;
-    if (strncmp(resp, "OK\n", 3) != 0) {
+    if (strncmp(resp, "OK\n", 3) == 0) return 1;
+    errno = EACCES;
+    return 0;
+}
+
+static void copy_loop(int from, int to) {
+    char buf[8192];
+    for (;;) {
+        ssize_t n = read(from, buf, sizeof buf);
+        ssize_t off = 0;
+        int bad = 0;
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (n == 0) break;
+        while (off < n) {
+            ssize_t w = send(to, buf + off, (size_t)(n - off), MSG_NOSIGNAL);
+            if (w < 0) {
+                if (errno == EINTR) continue;
+                bad = 1;
+                break;
+            }
+            if (w == 0) {
+                bad = 1;
+                break;
+            }
+            off += w;
+        }
+        if (bad) break;
+    }
+    shutdown(to, SHUT_WR);
+}
+
+static void *copy_start(void *arg) {
+    struct copy_arg *a = arg;
+    copy_loop(a->from, a->to);
+    return NULL;
+}
+
+static int discard_n(int fd, int n) {
+    char buf[8192];
+    while (n > 0) {
+        int chunk = n > (int)sizeof buf ? (int)sizeof buf : n;
+        ssize_t r = read(fd, buf, (size_t)chunk);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (r == 0) return -1;
+        n -= (int)r;
+    }
+    return 0;
+}
+
+static int fill_until_block(int fd, int *pad) {
+    char buf[8192];
+    int total = 0;
+    memset(buf, 0, sizeof buf);
+    for (;;) {
+        ssize_t w = send(fd, buf, sizeof buf, MSG_NOSIGNAL);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                *pad = total;
+                return total > 0 ? 0 : -1;
+            }
+            return -1;
+        }
+        if (w == 0) return -1;
+        total += (int)w;
+        if (total > 8 * 1024 * 1024) {
+            errno = ENOMEM;
+            return -1;
+        }
+    }
+}
+
+/* Hold the caller's end full until the handshake finishes. A normal
+   connected socketpair is writable immediately, which would make curl
+   treat connect as done and then block in recv if O_NONBLOCK was lost.
+   Filling the buffer keeps poll() waiting, so --max-time can fire. */
+static void *proxy_thread(void *arg) {
+    struct proxy_job *job = arg;
+    long deadline = mono_ms() + HANDSHAKE_MS;
+    int u = dial_unix_nb(job->path, deadline);
+    int hs = -1;
+    int fl;
+    pthread_t th;
+    struct copy_arg one;
+
+    if (u >= 0) hs = proxy_handshake(u, job->host, job->port, deadline);
+    if (hs != 1) {
+        shutdown(job->client, SHUT_RDWR);
+        close(job->client);
+        if (u >= 0) close(u);
+        free(job);
+        return NULL;
+    }
+    if (discard_n(job->client, job->pad) < 0) {
+        shutdown(job->client, SHUT_RDWR);
+        close(job->client);
         close(u);
-        errno = EACCES;
+        free(job);
+        return NULL;
+    }
+    fl = fcntl(u, F_GETFL);
+    if (fl >= 0) fcntl(u, F_SETFL, fl & ~O_NONBLOCK);
+    one.from = job->client;
+    one.to = u;
+    if (pthread_create(&th, NULL, copy_start, &one) != 0) {
+        shutdown(job->client, SHUT_RDWR);
+        close(job->client);
+        close(u);
+        free(job);
+        return NULL;
+    }
+    copy_loop(u, job->client);
+    pthread_join(th, NULL);
+    close(u);
+    close(job->client);
+    free(job);
+    return NULL;
+}
+
+static int proxy_connect_block(int fd, const char *host, int port, const char *path, int fl, int fdfl) {
+    long deadline = mono_ms() + HANDSHAKE_MS;
+    int u = dial_unix_nb(path, deadline);
+    int hs, ufl;
+    if (u < 0) return -1;
+    hs = proxy_handshake(u, host, port, deadline);
+    if (hs != 1) {
+        int e = errno;
+        close(u);
+        errno = e ? e : EACCES;
         return -1;
     }
+    ufl = fcntl(u, F_GETFL);
+    if (ufl >= 0) fcntl(u, F_SETFL, ufl & ~O_NONBLOCK);
     if (dup2(u, fd) < 0) {
         int e = errno;
         close(u);
@@ -112,7 +342,94 @@ static int proxy_connect(int fd, const char *host, int port) {
         return -1;
     }
     if (u != fd) close(u);
+    if (apply_status(fd, fl) < 0 || apply_fdflags(fd, fdfl) < 0) {
+        errno = EIO;
+        return -1;
+    }
     return 0;
+}
+
+static int proxy_connect_nb(int fd, const char *host, int port, const char *path, int fl, int fdfl) {
+    int sv[2];
+    int pad = 0;
+    struct proxy_job *job;
+    pthread_t th;
+    pthread_attr_t attr;
+    int pr;
+
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) return -1;
+    if (fcntl(sv[1], F_SETFD, FD_CLOEXEC) < 0 || apply_status(sv[0], fl | O_NONBLOCK) < 0) {
+        close(sv[0]);
+        close(sv[1]);
+        return -1;
+    }
+    if (fill_until_block(sv[0], &pad) < 0) {
+        int e = errno;
+        close(sv[0]);
+        close(sv[1]);
+        errno = e;
+        return -1;
+    }
+    job = calloc(1, sizeof *job);
+    if (!job) {
+        close(sv[0]);
+        close(sv[1]);
+        errno = ENOMEM;
+        return -1;
+    }
+    job->client = sv[1];
+    job->pad = pad;
+    job->port = port;
+    snprintf(job->path, sizeof job->path, "%s", path);
+    snprintf(job->host, sizeof job->host, "%s", host);
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    pr = pthread_create(&th, &attr, proxy_thread, job);
+    pthread_attr_destroy(&attr);
+    if (pr != 0) {
+        close(sv[0]);
+        close(sv[1]);
+        free(job);
+        errno = EAGAIN;
+        return -1;
+    }
+    if (dup2(sv[0], fd) < 0) {
+        int e = errno;
+        close(sv[0]);
+        errno = e;
+        return -1;
+    }
+    close(sv[0]);
+    apply_fdflags(fd, fdfl);
+    errno = EINPROGRESS;
+    return -1;
+}
+
+static int proxy_connect(int fd, const char *host, int port) {
+    const char *path;
+    int fl, fdfl;
+
+    path = getenv("LGB_PROXY_SOCK");
+    if (!path || !path[0] || !real_connect) {
+        errno = EACCES;
+        return -1;
+    }
+    {
+        struct sockaddr_un lim;
+        if (strlen(path) >= sizeof lim.sun_path) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+    }
+    fl = fcntl(fd, F_GETFL);
+    fdfl = fcntl(fd, F_GETFD);
+    if (fl < 0 || fdfl < 0) return -1;
+    /* dup2 of a fresh socket drops O_NONBLOCK and FD_CLOEXEC. Put the
+       caller's flags back. A non-blocking caller cannot sit inside the
+       handshake: curl's --max-time runs in its poll loop, which does not
+       run while connect() is blocked in the daemon dial. */
+    if (fl & O_NONBLOCK) return proxy_connect_nb(fd, host, port, path, fl, fdfl);
+    return proxy_connect_block(fd, host, port, path, fl, fdfl);
 }
 
 int connect(int fd, const struct sockaddr *addr, socklen_t len) {

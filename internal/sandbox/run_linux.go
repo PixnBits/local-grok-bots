@@ -162,7 +162,7 @@ func bwrapLaunchArgs(p *prepared) (args []string, extra, bindFiles []*os.File, i
 		args = append(args, "--setenv", k, v)
 	}
 	args = append(args, "--")
-	args = append(args, commandArgvMode(p.command, p.cleanBash)...)
+	args = append(args, commandArgvEgress(p.command, p.cleanBash, p.egressOn)...)
 	return args, extra, bindFiles, infoR, blockW, nil
 }
 
@@ -223,22 +223,40 @@ func commandArgv(command string) []string {
 }
 
 func commandArgvMode(command string, clean bool) []string {
+	return commandArgvEgress(command, clean, false)
+}
+
+func commandArgvEgress(command string, clean, egress bool) []string {
 	uid, gid := JailIDs()
 	if !jailDrops(uid) {
+		argv := []string{"/bin/sh", "-c", command}
 		if clean {
-			return []string{"/bin/bash", "--norc", "--noprofile", "-c", command}
+			argv = []string{"/bin/bash", "--norc", "--noprofile", "-c", command}
 		}
-		return []string{"/bin/sh", "-c", command}
+		if !egress {
+			return argv
+		}
+		return append([]string{"/bin/sh", "/lgb/netwrap"}, argv...)
 	}
-	return droppedArgv(uid, gid, command, clean)
+	return droppedArgvEgress(uid, gid, command, clean, egress)
 }
 
 // droppedArgv locks nested user namespaces, then drops to uid/gid.
 // command is a separate argument so it is not interpolated into the script.
 func droppedArgv(uid, gid int, command string, clean bool) []string {
+	return droppedArgvEgress(uid, gid, command, clean, false)
+}
+
+func droppedArgvEgress(uid, gid int, command string, clean, egress bool) []string {
 	shell := "/bin/sh -c \"$1\""
 	if clean {
 		shell = "/bin/bash --norc --noprofile -c \"$1\""
+	}
+	if egress {
+		shell = "/bin/sh /lgb/netwrap /bin/sh -c \"$1\""
+		if clean {
+			shell = "/bin/sh /lgb/netwrap /bin/bash --norc --noprofile -c \"$1\""
+		}
 	}
 	script := "echo 1 > /proc/sys/user/max_user_namespaces || exit 1\n" +
 		"exec /usr/bin/setpriv --reuid=" + strconv.Itoa(uid) +
@@ -343,7 +361,7 @@ func runUnshare(ctx context.Context, p *prepared) (string, string, error) {
 		}
 		mounts = append(mounts, m)
 	}
-	cfg := stage2File{Workspace: p.workspace, Command: p.command, Env: p.env, Mounts: mounts, CleanBash: p.cleanBash, WorkRel: p.workRel}
+	cfg := stage2File{Workspace: p.workspace, Command: p.command, Env: p.env, Mounts: mounts, CleanBash: p.cleanBash, WorkRel: p.workRel, Egress: p.egressOn}
 	b, err := json.Marshal(cfg)
 	if err != nil {
 		return "", "", err

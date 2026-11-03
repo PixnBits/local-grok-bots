@@ -15,13 +15,75 @@ import (
 // charset check produces a wrapper that refuses every git command and does
 // not contain that value.
 type gitWrapOpts struct {
-	Grant  bool
-	Repos  []string
-	Bridge bool
-	Name   string
-	Email  string
+	Grant bool
+	// Repos is the effective allowlist. It is the only list that allows a remote.
+	Repos []string
+	// PolicyRepos and BotRepos name which list omitted a remote. They do not
+	// allow anything on their own.
+	PolicyRepos []string
+	BotRepos    []string
+	Bridge      bool
+	Name        string
+	Email       string
 	// RefuseAuthor denies every git command and embeds no author value.
 	RefuseAuthor bool
+}
+
+const (
+	gitHubListBoth    = "the policy [github].repos ceiling and the bot's github_allow"
+	gitHubListCeiling = "the policy [github].repos ceiling"
+	gitHubListBot     = "the bot's github_allow"
+)
+
+// GitHubAllowlistWhere names the list that omits owner/repo.
+// Both lists containing the repo returns an empty string. An empty name
+// returns both lists. The allow decision stays the effective intersection.
+func GitHubAllowlistWhere(policy, bot []string, owner, repo string) string {
+	owner = strings.ToLower(strings.TrimSpace(owner))
+	repo = strings.ToLower(strings.TrimSpace(repo))
+	if owner == "" || repo == "" || strings.Contains(owner, "/") || strings.Contains(repo, "/") {
+		return gitHubListBoth
+	}
+	inPol := repoListed(policy, owner, repo)
+	inBot := repoListed(bot, owner, repo)
+	switch {
+	case inPol && inBot:
+		return ""
+	case !inPol && !inBot:
+		return gitHubListBoth
+	case !inPol:
+		return gitHubListCeiling
+	default:
+		return gitHubListBot
+	}
+}
+
+func repoListed(list []string, owner, repo string) bool {
+	want := owner + "/" + repo
+	for _, raw := range list {
+		name, err := github.NormalizeRepo(raw)
+		if err != nil {
+			continue
+		}
+		if name == want {
+			return true
+		}
+	}
+	return false
+}
+
+func repoFlagArms(repos []string, flag string) string {
+	var b strings.Builder
+	seen := map[string]bool{}
+	for _, raw := range repos {
+		repo, err := github.NormalizeRepo(raw)
+		if err != nil || seen[repo] {
+			continue
+		}
+		seen[repo] = true
+		fmt.Fprintf(&b, "    %s) %s=1 ;;\n", repo, flag)
+	}
+	return b.String()
 }
 
 func gitWrap(opts gitWrapOpts) string {
@@ -58,6 +120,11 @@ func gitWrap(opts gitWrapOpts) string {
 	script = strings.ReplaceAll(script, "@@NAME@@", opts.Name)
 	script = strings.ReplaceAll(script, "@@EMAIL@@", opts.Email)
 	script = strings.ReplaceAll(script, "@@REPOS@@", arms.String())
+	script = strings.ReplaceAll(script, "@@POLICY@@", repoFlagArms(opts.PolicyRepos, "pol"))
+	script = strings.ReplaceAll(script, "@@BOT@@", repoFlagArms(opts.BotRepos, "bot"))
+	script = strings.ReplaceAll(script, "@@MISS_BOTH@@", gitHubListBoth)
+	script = strings.ReplaceAll(script, "@@MISS_CEIL@@", gitHubListCeiling)
+	script = strings.ReplaceAll(script, "@@MISS_BOT@@", gitHubListBot)
 	return script
 }
 
@@ -84,7 +151,7 @@ const gitWrapScript = `#!/bin/sh
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
-unset SSH_AUTH_SOCK http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
+unset SSH_AUTH_SOCK http_proxy https_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY no_proxy
 real=/lgb/bin/git
 log=/lgb/events/log
 nl='
@@ -135,28 +202,85 @@ deny_allow() {
       ;;
   esac
 }
+repo_name() {
+  u=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || return 1
+  case "$u" in
+    *"$nl"*) return 1 ;;
+    https://github.com/*) u=${u#https://github.com/} ;;
+    http://github.com/*) u=${u#http://github.com/} ;;
+    ssh://git@github.com/*) u=${u#ssh://git@github.com/} ;;
+    git@github.com:*) u=${u#git@github.com:} ;;
+    *) return 1 ;;
+  esac
+  u=${u%%\?*}
+  u=${u%%\#*}
+  u=${u%/}
+  case "$u" in
+    *.git) u=${u%.git} ;;
+  esac
+  u=${u%/}
+  case "$u" in
+    */*/*) return 1 ;;
+  esac
+  kept=$(printf '%s' "$u" | tr -cd 'a-z0-9._/-') || return 1
+  if [ "$kept" != "$u" ]; then
+    return 1
+  fi
+  case "$u" in
+    */*) printf '%s' "$u" ;;
+    *) return 1 ;;
+  esac
+}
+list_gap() {
+  name=$(repo_name "$1") || {
+    printf '%s\n' "@@MISS_BOTH@@"
+    return
+  }
+  pol=0
+  bot=0
+  case "$name" in
+@@POLICY@@
+  esac
+  case "$name" in
+@@BOT@@
+  esac
+  if [ "$pol" = 1 ] && [ "$bot" = 1 ]; then
+    return
+  fi
+  if [ "$pol" != 1 ] && [ "$bot" != 1 ]; then
+    printf '%s\n' "@@MISS_BOTH@@"
+    return
+  fi
+  if [ "$pol" != 1 ]; then
+    printf '%s\n' "@@MISS_CEIL@@"
+    return
+  fi
+  printf '%s\n' "@@MISS_BOT@@"
+}
+say_deny() {
+  gap=$(list_gap "$1")
+  if [ -n "$gap" ]; then
+    echo "git ${sub} denied: repository is not allowlisted (missing from ${gap})" >&2
+  else
+    echo "git ${sub} denied: repository is not allowlisted" >&2
+  fi
+  deny_allow "$1"
+  exit 1
+}
 vet() {
   case "$1" in
     *"$nl"*)
-      echo "git ${sub} denied: repository is not allowlisted" >&2
-      deny_allow "$1"
-      exit 1
+      say_deny "$1"
       ;;
   esac
-  folded=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || {
-    echo "git ${sub} denied: repository is not allowlisted" >&2
-    deny_allow "$1"
-    exit 1
-  }
+  folded=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || say_deny "$1"
   case "$folded" in
     ""|file://*)
       return 0
       ;;
 @@REPOS@@
     *://*|git@*)
-      echo "git ${sub} denied: repository is not allowlisted" >&2
-      deny_allow "$1"
-      exit 1
+      say_deny "$1"
       ;;
   esac
   return 0

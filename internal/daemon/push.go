@@ -234,9 +234,23 @@ func (a *App) pushDenied(bot store.Bot, owner, repo, claimedFrom, reason string)
 		reason = "not sent"
 	}
 	ev := a.auditPush(bot, owner, repo, "deny", reason, claimedFrom)
+	stderr := "git push denied: " + reason + "\n"
+	if reason == "allowlist" {
+		var policyRepos, botRepos []string
+		if a != nil {
+			policyRepos = a.effPol(bot.ID).GitHub.Repos
+			botRepos = bot.GitHubAllow
+		}
+		where := sandbox.GitHubAllowlistWhere(policyRepos, botRepos, owner, repo)
+		if where != "" {
+			stderr = "git push denied: repository is not allowlisted (missing from " + where + ")\n"
+		} else {
+			stderr = "git push denied: repository is not allowlisted\n"
+		}
+	}
 	return sandbox.PushResult{
 		Code:   1,
-		Stderr: "git push denied: " + reason + "\n",
+		Stderr: stderr,
 		Events: []sandbox.Event{ev},
 	}
 }

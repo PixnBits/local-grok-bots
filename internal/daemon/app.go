@@ -892,12 +892,12 @@ func cloneMsgs(in []model.Message) []model.Message {
 
 func (a *App) decorateBot(b store.Bot) store.Bot {
 	b.PendingPermissions = a.perm.PendingCounts()[b.ID]
+	b.Warnings = a.botWarnings(b)
 	a.rtMu.Lock()
 	defer a.rtMu.Unlock()
 	if h, ok := a.resume[b.ID]; ok {
 		b.ContinueRunID = h.runID
 	}
-	b.Warnings = descriptionWarnings(b.Description)
 	if b.LastRunStatus == "waiting" {
 		b.WaitingTool = a.waitingTool(b.ID)
 	}

@@ -20,12 +20,21 @@ import (
 // Resolve, when set, replaces DNS. Dial, when set, replaces the TCP dial.
 // Both receive the address after the forbidden-IP check. Ports nil means
 // 443 and 80. An empty Ports list allows no port.
+//
+// Decide, when set, replaces the Allow-list host check. The bool is the
+// policy decision and the Event is the sandbox record. Port limits,
+// forbidden addresses, resolve-once, and CONNECT SNI still apply. Record
+// receives that event at the same moments as the splice proxy: immediately
+// on deny, after a failed dial, and when the request is allowed through.
+// Nil Decide keeps the Allow list and Audit behaviour used by the CLI jail.
 type EgressConfig struct {
 	Allow   []string
 	Ports   []int
 	Resolve func(context.Context, string) ([]net.IP, error)
 	Dial    func(context.Context, string, string) (net.Conn, error)
 	Audit   func(EgressEvent)
+	Decide  func(host string, port int) (bool, Event)
+	Record  func(Event)
 }
 
 // EgressEvent is one allow or deny. It has no header and no body.
@@ -49,6 +58,8 @@ type HTTPAllow struct {
 	resolve func(context.Context, string) ([]net.IP, error)
 	dial    func(context.Context, string, string) (net.Conn, error)
 	audit   func(EgressEvent)
+	decide  func(string, int) (bool, Event)
+	record  func(Event)
 	ctx     context.Context
 	cancel  context.CancelFunc
 }
@@ -89,7 +100,39 @@ func StartHTTPAllowProxy(parent string, cfg EgressConfig) (*HTTPAllow, error) {
 	p := &HTTPAllow{
 		dir: dir, sock: sock, ln: ln, allow: setOf(cfg.Allow), ports: cfg.Ports,
 		resolve: cfg.Resolve, dial: cfg.Dial, audit: cfg.Audit,
+		decide: cfg.Decide, record: cfg.Record,
 		ctx: ctx, cancel: cancel,
+	}
+	go p.serve()
+	return p, nil
+}
+
+// listenShellEgress serves cfg on an existing unix path. The socket is mode
+// 0666 so the jail uid can connect. The directory is not removed on Close.
+// The CLI jail keeps using StartHTTPAllowProxy.
+func listenShellEgress(ctx context.Context, sock string, cfg EgressConfig) (*HTTPAllow, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := os.MkdirAll(filepathDir(sock), 0o755); err != nil {
+		return nil, err
+	}
+	_ = os.Remove(sock)
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(sock, 0o666); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(sock)
+		return nil, err
+	}
+	cctx, cancel := context.WithCancel(ctx)
+	p := &HTTPAllow{
+		sock: sock, ln: ln, allow: setOf(cfg.Allow), ports: cfg.Ports,
+		resolve: cfg.Resolve, dial: cfg.Dial, audit: cfg.Audit,
+		decide: cfg.Decide, record: cfg.Record,
+		ctx: cctx, cancel: cancel,
 	}
 	go p.serve()
 	return p, nil
@@ -140,23 +183,56 @@ func (p *HTTPAllow) serveConn(conn net.Conn) {
 		writeDeny(conn)
 		return
 	}
-	decide := func(allow bool, reason string) {
+	audit := func(allow bool, reason string) {
 		if p.audit == nil {
 			return
 		}
 		p.audit(EgressEvent{Host: host, Port: port, Allow: allow, Reason: reason})
 	}
-	if !p.allowed(host) {
+	record := func(ev Event) {
+		if p.record != nil {
+			p.record(ev)
+		}
+	}
+	var policy Event
+	havePolicy := false
+	if p.decide != nil {
+		allow, ev := p.decide(host, port)
+		if !allow {
+			record(ev)
+			audit(false, "host")
+			writeDeny(conn)
+			return
+		}
+		if ip := net.ParseIP(host); ip != nil && forbiddenIP(ip) {
+			ev.Kind = "grant_denied"
+			ev.Detail = "address"
+			ev.Notice = ""
+			record(ev)
+			audit(false, "address")
+			writeDeny(conn)
+			return
+		}
+		policy = ev
+		havePolicy = true
+	} else if !p.allowed(host) {
 		reason := "host"
 		if ip := net.ParseIP(host); ip != nil && forbiddenIP(ip) {
 			reason = "address"
 		}
-		decide(false, reason)
+		audit(false, reason)
 		writeDeny(conn)
 		return
 	}
 	if !p.portAllowed(port) {
-		decide(false, "port")
+		if havePolicy {
+			ev := policy
+			ev.Kind = "grant_denied"
+			ev.Detail = "port"
+			ev.Notice = ""
+			record(ev)
+		}
+		audit(false, "port")
 		writeDeny(conn)
 		return
 	}
@@ -171,7 +247,19 @@ func (p *HTTPAllow) serveConn(conn net.Conn) {
 		} else if errors.Is(err, errResolve) {
 			reason = "resolve"
 		}
-		decide(false, reason)
+		if havePolicy {
+			ev := policy
+			if reason == "address" {
+				ev.Kind = "grant_denied"
+				ev.Detail = "address"
+				ev.Notice = ""
+			} else {
+				ev.Notice = ""
+				ev.Detail = "dial failed"
+			}
+			record(ev)
+		}
+		audit(false, reason)
 		writeDeny(conn)
 		return
 	}
@@ -184,10 +272,20 @@ func (p *HTTPAllow) serveConn(conn net.Conn) {
 		hello, reason := readConnectSNI(br, host)
 		_ = conn.SetDeadline(time.Time{})
 		if reason != "" {
-			decide(false, reason)
+			if havePolicy {
+				ev := policy
+				ev.Kind = "grant_denied"
+				ev.Detail = reason
+				ev.Notice = ""
+				record(ev)
+			}
+			audit(false, reason)
 			return
 		}
-		decide(true, "ok")
+		if havePolicy {
+			record(policy)
+		}
+		audit(true, "ok")
 		left := streamConn{Conn: conn, r: io.MultiReader(bytes.NewReader(hello), br)}
 		splice(left, up)
 		return
@@ -198,11 +296,20 @@ func (p *HTTPAllow) serveConn(conn net.Conn) {
 	req.Header.Del("Proxy-Connection")
 	req.Header.Del("Proxy-Authorization")
 	if err := req.Write(up); err != nil {
-		decide(false, "dial")
+		if havePolicy {
+			ev := policy
+			ev.Notice = ""
+			ev.Detail = "dial failed"
+			record(ev)
+		}
+		audit(false, "dial")
 		writeDeny(conn)
 		return
 	}
-	decide(true, "ok")
+	if havePolicy {
+		record(policy)
+	}
+	audit(true, "ok")
 	_ = conn.SetDeadline(time.Time{})
 	_, _ = io.Copy(conn, up)
 }

@@ -42,9 +42,17 @@ type Request struct {
 	ProtectTripped string
 	SSHKey         string
 	// GitHubSock is the host credential-proxy socket. Empty leaves GitHub
-	// fetch unavailable. GitHubRepos is the allowlist copied into the wrapper.
-	GitHubSock      string
-	GitHubRepos     []string
+	// fetch unavailable. GitHubRepos is the effective allowlist copied into
+	// the wrapper's allow arms. GitHubPolicyRepos and GitHubBotRepos are the
+	// two lists that intersection came from. They are only used to name
+	// which list rejected a remote. They do not change the allow decision.
+	GitHubSock        string
+	GitHubRepos       []string
+	GitHubPolicyRepos []string
+	GitHubBotRepos    []string
+	// Resolve, when set, is the shell HTTP proxy's lookup. The connect
+	// shim still passes the hostname to Dial. Nil uses the host resolver.
+	Resolve         func(context.Context, string) ([]net.IP, error)
 	GitAuthor       string
 	GitAuthorEmail  string
 	GitAuthorRefuse bool
@@ -90,6 +98,8 @@ type stage2File struct {
 	CleanBash bool     `json:"clean_bash,omitempty"`
 	// WorkRel is the directory under /work. Empty stays at /work.
 	WorkRel string `json:"work_rel,omitempty"`
+	// Egress runs the command under the in-jail HTTP proxy wrapper.
+	Egress bool `json:"egress,omitempty"`
 }
 
 type prepared struct {
@@ -108,11 +118,17 @@ type prepared struct {
 	eventsDir *os.File
 	cleanBash bool
 	proxy     *proxy
+	egress    *HTTPAllow
+	egressOn  bool
 	push      *pushSrv
 	before    *treeSnap
 	extra     []Event
 	grants    map[string]bool
 }
+
+// attachShellEgress starts the in-jail HTTP proxy when the net grant is on.
+// Linux sets it. Other systems leave it nil and do not open a listener.
+var attachShellEgress func(ctx context.Context, p *prepared, req Request, rw, ro string)
 
 // refuseUnshareBuildBinds reports that this turn will use the unshare jail.
 // That jail cannot bind-mount an O_PATH fd (mount of /proc/self/fd/N returns
@@ -126,6 +142,9 @@ func (p *prepared) close() {
 	}
 	if p.proxy != nil {
 		p.proxy.close()
+	}
+	if p.egress != nil {
+		p.egress.Close()
 	}
 	if p.push != nil {
 		p.push.close()
@@ -316,6 +335,8 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 		if err := writeExec(filepath.Join(ro, "gitwrap"), gitWrap(gitWrapOpts{
 			Grant:        grants["git"],
 			Repos:        req.GitHubRepos,
+			PolicyRepos:  req.GitHubPolicyRepos,
+			BotRepos:     req.GitHubBotRepos,
 			Bridge:       ghSock != "",
 			Name:         req.GitAuthor,
 			Email:        req.GitAuthorEmail,
@@ -438,6 +459,9 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 			"LD_PRELOAD=/lgb/preload.so",
 			"LGB_PROXY_SOCK=/lgb/sock/proxy.sock",
 		)
+	}
+	if attachShellEgress != nil {
+		attachShellEgress(ctx, p, req, rw, ro)
 	}
 	ok = true
 	return p, nil
