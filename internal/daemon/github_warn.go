@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/github"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
@@ -18,10 +19,21 @@ func (a *App) botWarnings(b store.Bot) []string {
 		pol = a.effPol(b.ID)
 	}
 	w = append(w, githubConfigWarnings(pol, b.Grants, b.GitHubAllow)...)
+	w = append(w, broadHostWarnings(b.NetAllow)...)
 	if len(w) == 0 {
 		return nil
 	}
 	return w
+}
+
+func broadHostWarnings(allow []string) []string {
+	for _, raw := range allow {
+		h := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(raw, ".")))
+		if h == "storage.googleapis.com" {
+			return []string{"storage.googleapis.com is on net_allow. It reaches all of Google Cloud Storage, not one project. See docs/sandbox.md and https://github.com/PixnBits/local-grok-bots/issues/33."}
+		}
+	}
+	return nil
 }
 
 func githubConfigWarnings(pol policy.Policy, grants, allow []string) []string {
@@ -80,17 +92,19 @@ func joinRepoNames(allow []string) string {
 var readTokenForWarn = github.ReadToken
 
 type tokenWarnID struct {
-	dev, ino uint64
-	size     int64
-	mtime    int64
-	mode     uint32
-	uid      uint32
-	missing  bool
+	dev, ino    uint64
+	size        int64
+	mtime       int64
+	csec, cnsec int64
+	mode        uint32
+	uid         uint32
+	missing     bool
 }
 
 type tokenWarnEnt struct {
 	id  tokenWarnID
 	msg string
+	at  time.Time
 }
 
 var (
@@ -102,7 +116,7 @@ func tokenFileWarning(path string) string {
 	id, ok := tokenWarnStat(path)
 	if ok {
 		tokenWarnMu.Lock()
-		if ent, hit := tokenWarns[path]; hit && ent.id == id {
+		if ent, hit := tokenWarns[path]; hit && ent.id == id && time.Since(ent.at) < 60*time.Second {
 			msg := ent.msg
 			tokenWarnMu.Unlock()
 			return msg
@@ -115,7 +129,7 @@ func tokenFileWarning(path string) string {
 	}
 	if ok {
 		tokenWarnMu.Lock()
-		tokenWarns[path] = tokenWarnEnt{id: id, msg: msg}
+		tokenWarns[path] = tokenWarnEnt{id: id, msg: msg, at: time.Now()}
 		tokenWarnMu.Unlock()
 	}
 	return msg
@@ -133,8 +147,13 @@ func tokenWarnStat(path string) (tokenWarnID, bool) {
 	if !ok {
 		return tokenWarnID{}, false
 	}
+	csec, cnsec, cok := tokenCtime(fi)
+	if !cok {
+		return tokenWarnID{}, false
+	}
 	return tokenWarnID{
 		dev: dev, ino: ino, size: fi.Size(), mtime: fi.ModTime().UnixNano(),
+		csec: csec, cnsec: cnsec,
 		mode: uint32(fi.Mode()), uid: uid,
 	}, true
 }

@@ -23,14 +23,14 @@ func netBridgeBin() cachedBin {
 	}
 }
 
-// ensureNetBridge compiles the in-jail TCP-to-unix splice once and caches it.
-// Without gcc the HTTP proxy env is not set. LD_PRELOAD still applies when
-// the connect shim compiled.
-func ensureNetBridge() (string, error) {
+// ensureNetBridge compiles the in-jail TCP-to-unix splice once per process
+// and returns those bytes. Without gcc the HTTP proxy env is not set.
+// LD_PRELOAD still applies when the connect shim compiled.
+func ensureNetBridge() ([]byte, error) {
 	return ensureCached(netBridgeBin())
 }
 
-func ensureNetBridgeIn(dir string) (string, error) {
+func ensureNetBridgeIn(dir string) ([]byte, error) {
 	return ensureCachedIn(dir, netBridgeBin())
 }
 
@@ -62,7 +62,7 @@ if [ ! -x "$bridge" ] || [ ! -S "$sock" ]; then
   echo "network proxy unavailable" >&2
   exit 1
 fi
-"$bridge" "$port" "$sock" >/tmp/lgb-net.ready &
+"$bridge" "$port" "$sock" </dev/null >/tmp/lgb-net.ready 2>/dev/null &
 pid=$!
 trap 'kill -TERM -"$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null; wait "$pid" 2>/dev/null' EXIT
 deadline=$(($(date +%s) + 5))

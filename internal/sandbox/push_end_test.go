@@ -40,7 +40,7 @@ func TestOnPushEndFollowsOnPush(t *testing.T) {
 			}, func() {
 				seq = append(seq, "end")
 				close(done)
-			})
+			}, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -85,7 +85,7 @@ func TestOnPushEndFollowsOnPush(t *testing.T) {
 			started <- struct{}{}
 		}, func() {
 			ended <- struct{}{}
-		})
+		}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

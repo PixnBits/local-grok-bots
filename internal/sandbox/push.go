@@ -33,12 +33,13 @@ type pushSrv struct {
 	fn    func(context.Context, string, []string) PushResult
 	start func()
 	end   func()
+	guard *ShellGuard
 	mu    sync.Mutex
 	wg    sync.WaitGroup
 	ev    []Event
 }
 
-func startPush(ctx context.Context, path string, fn func(context.Context, string, []string) PushResult, start, end func()) (*pushSrv, error) {
+func startPush(ctx context.Context, path string, fn func(context.Context, string, []string) PushResult, start, end func(), guard *ShellGuard) (*pushSrv, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -51,7 +52,7 @@ func startPush(ctx context.Context, path string, fn func(context.Context, string
 		return nil, err
 	}
 	_ = os.Chmod(path, 0o666)
-	s := &pushSrv{ln: ln, ctx: ctx, fn: fn, start: start, end: end}
+	s := &pushSrv{ln: ln, ctx: ctx, fn: fn, start: start, end: end, guard: guard}
 	go s.serve()
 	return s, nil
 }
@@ -110,6 +111,10 @@ func (s *pushSrv) add(evs []Event) {
 
 func (s *pushSrv) handle(conn net.Conn) {
 	defer conn.Close()
+	if pid := peerPID(conn); pid > 1 && s.guard != nil {
+		s.guard.notePush(pid)
+		defer s.guard.clearPush(pid)
+	}
 	res := PushResult{Code: 1, Stderr: "git push denied: not sent\n"}
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	cwd, args, err := readPush(conn)

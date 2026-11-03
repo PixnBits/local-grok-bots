@@ -15,11 +15,24 @@ import (
 func TestHTTPAllowHeaderCap(t *testing.T) {
 	t.Run("too large", func(t *testing.T) {
 		var dialed atomic.Int32
+		var mu sync.Mutex
+		var events []Event
+		var audits []EgressEvent
 		p, err := StartHTTPAllowProxy(t.TempDir(), EgressConfig{
 			Allow: []string{"example.com"},
 			Dial: func(context.Context, string, string) (net.Conn, error) {
 				dialed.Add(1)
 				return nil, io.ErrClosedPipe
+			},
+			Record: func(ev Event) {
+				mu.Lock()
+				events = append(events, ev)
+				mu.Unlock()
+			},
+			Audit: func(ev EgressEvent) {
+				mu.Lock()
+				audits = append(audits, ev)
+				mu.Unlock()
 			},
 		})
 		if err != nil {
@@ -69,6 +82,24 @@ func TestHTTPAllowHeaderCap(t *testing.T) {
 		if _, err := io.Copy(io.Discard, br); err != nil && err != io.EOF {
 			// A closed connection is the expected end.
 		}
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			mu.Lock()
+			ne, na := len(events), len(audits)
+			mu.Unlock()
+			if ne >= 1 && na >= 1 {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if len(events) != 1 || events[0].Kind != "grant_denied" || events[0].Detail != "header" {
+			t.Fatalf("events %+v", events)
+		}
+		if len(audits) != 1 || audits[0].Allow || audits[0].Reason != "header" {
+			t.Fatalf("audits %+v", audits)
+		}
 	})
 
 	t.Run("eight kibibytes", func(t *testing.T) {
@@ -114,6 +145,105 @@ func TestHTTPAllowHeaderCap(t *testing.T) {
 			t.Fatalf("dialed %d", dialed.Load())
 		}
 	})
+}
+
+func TestHTTPAllowBodyLargerThanHeaderCap(t *testing.T) {
+	const bodySize = 300 << 10
+	want := strings.Repeat("x", bodySize)
+	got := make(chan string, 1)
+	ln := listenLocal(t)
+	defer ln.Close()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			got <- err.Error()
+			return
+		}
+		defer c.Close()
+		br := bufio.NewReader(c)
+		var length int
+		for {
+			line, rerr := br.ReadString('\n')
+			if rerr != nil {
+				got <- rerr.Error()
+				return
+			}
+			if strings.HasPrefix(strings.ToLower(line), "content-length:") {
+				n, nerr := strconvHeaderLen(line)
+				if nerr != nil {
+					got <- nerr.Error()
+					return
+				}
+				length = n
+			}
+			if line == "\r\n" {
+				break
+			}
+		}
+		buf := make([]byte, length)
+		if _, err := io.ReadFull(br, buf); err != nil {
+			got <- err.Error()
+			return
+		}
+		got <- string(buf)
+		_, _ = io.WriteString(c, "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+	}()
+	p, err := StartHTTPAllowProxy(t.TempDir(), EgressConfig{
+		Allow: []string{"example.com"},
+		Resolve: func(context.Context, string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("203.0.113.10")}, nil
+		},
+		Dial: func(context.Context, string, string) (net.Conn, error) {
+			return net.Dial("tcp", ln.Addr().String())
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	req := "POST http://example.com/upload HTTP/1.1\r\nHost: example.com\r\nContent-Length: " +
+		itoa(bodySize) + "\r\n\r\n" + want
+	body := proxyText(t, p.Sock(), req)
+	if !strings.Contains(body, "204") {
+		t.Fatalf("status %q", body)
+	}
+	select {
+	case upstream := <-got:
+		if upstream != want {
+			t.Fatalf("upstream length %d", len(upstream))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("upstream read timed out")
+	}
+}
+
+func strconvHeaderLen(line string) (int, error) {
+	fields := strings.Fields(line)
+	if len(fields) != 2 {
+		return 0, io.ErrUnexpectedEOF
+	}
+	n := 0
+	for _, c := range fields[1] {
+		if c < '0' || c > '9' {
+			return 0, io.ErrUnexpectedEOF
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n, nil
+}
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b [16]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(b[i:])
 }
 
 func TestLiteralForbiddenIPAfterAllow(t *testing.T) {

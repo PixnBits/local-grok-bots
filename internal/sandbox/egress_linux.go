@@ -38,7 +38,7 @@ func attachShellEgressLinux(ctx context.Context, p *prepared, req Request, rw, r
 		eg.Close()
 		p.extra = append(p.extra, Event{Kind: "grant_denied", Grant: "net", Detail: "http proxy unavailable"})
 	}
-	if err := overlayFile(ro, "netbridge", mustRead(bin), 0o755); err != nil {
+	if err := overlayFile(ro, "netbridge", bin, 0o755); err != nil {
 		fail()
 		return
 	}

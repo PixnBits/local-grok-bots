@@ -18,11 +18,12 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
-// shellRunCap is the run_shell limit for time spent outside a git push.
-// It is not a user setting. OnPushStart pauses this budget and arms
-// prompt_timeout+15s for the push only. OnPushEnd resumes whatever budget
-// is left, so work after the push is still capped and a slow push is not
-// cut off by this cap.
+// shellRunCap is the run_shell limit. It is not a user setting. The cap
+// keeps running while a git push is in flight. When it expires during a
+// push, other processes in the jail are stopped and the push itself may
+// continue until prompt_timeout+15s. If nothing else was stopped, the
+// budget left at the start of the push is armed again when the push ends.
+// A push with nothing else running is not cut off by this cap.
 var shellRunCap = 30 * time.Second
 
 // gitPushHook, when set, replaces handleGitPush for run_shell. Tests set it.
@@ -463,31 +464,77 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		}
 		shellCtx, shellCancel := context.WithCancel(ctx)
 		defer shellCancel()
+		guard := &sandbox.ShellGuard{}
 		var timerMu sync.Mutex
 		var shellTimer *time.Timer
+		var pushTimer *time.Timer
 		var timerFired bool
+		var capHeld bool
+		var capMissed bool
 		var pushDepth int
-		var spent time.Duration
-		var segStart time.Time
-		armLocked := func(d time.Duration) {
+		var pushSnips []string
+		var shellStart time.Time
+		var shellBudget time.Duration
+		var shellLeft time.Duration
+		var resumeShell func(time.Duration)
+		armShell := func(d time.Duration) {
 			if shellTimer != nil {
 				shellTimer.Stop()
 			}
+			shellStart = time.Now()
+			shellBudget = d
 			shellTimer = time.AfterFunc(d, func() {
 				timerMu.Lock()
 				timerFired = true
+				depth := pushDepth
 				timerMu.Unlock()
-				shellCancel()
+				if depth == 0 {
+					shellCancel()
+					return
+				}
+				if guard.Trim() {
+					timerMu.Lock()
+					capHeld = true
+					timerMu.Unlock()
+					return
+				}
+				timerMu.Lock()
+				left := shellLeft
+				ended := pushDepth == 0
+				if !ended {
+					capMissed = true
+				}
+				timerMu.Unlock()
+				if ended {
+					resumeShell(left)
+				}
 			})
 		}
+		// resumeShell arms the budget recorded when the push started.
+		// A non-positive budget cancels. A short positive one uses a
+		// small floor so the command after the push can still start.
+		resumeShell = func(left time.Duration) {
+			if left <= 0 {
+				shellCancel()
+				return
+			}
+			if left < time.Second {
+				left = time.Second
+			}
+			timerMu.Lock()
+			armShell(left)
+			timerMu.Unlock()
+		}
 		timerMu.Lock()
-		armLocked(shellRunCap)
-		segStart = time.Now()
+		armShell(shellRunCap)
 		timerMu.Unlock()
 		defer func() {
 			timerMu.Lock()
 			if shellTimer != nil {
 				shellTimer.Stop()
+			}
+			if pushTimer != nil {
+				pushTimer.Stop()
 			}
 			timerMu.Unlock()
 		}()
@@ -555,41 +602,65 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			GitAuthor:       author,
 			GitAuthorEmail:  email,
 			GitAuthorRefuse: aerr != nil,
+			Guard:           guard,
 			OnPushStart: func() {
-				// Pause the shell cap for the push itself. Time already spent
-				// outside the push stays spent. Nested pushes keep the long timer.
+				// The shell cap is not paused. Record the budget left so it
+				// can be armed again if this push ends with nothing else
+				// stopped. A separate timer bounds the push.
 				timerMu.Lock()
 				defer timerMu.Unlock()
 				if pushDepth == 0 {
-					if !segStart.IsZero() {
-						spent += time.Since(segStart)
-						segStart = time.Time{}
+					if pushTimer != nil {
+						pushTimer.Stop()
 					}
-					armLocked(turnPol.EffectivePromptTimeout() + 15*time.Second)
+					d := turnPol.EffectivePromptTimeout() + 15*time.Second
+					pushTimer = time.AfterFunc(d, func() {
+						timerMu.Lock()
+						timerFired = true
+						timerMu.Unlock()
+						shellCancel()
+					})
+					shellLeft = shellBudget - time.Since(shellStart)
 				}
 				pushDepth++
 			},
 			OnPushEnd: func() {
 				timerMu.Lock()
-				defer timerMu.Unlock()
 				if pushDepth > 0 {
 					pushDepth--
 				}
-				if pushDepth > 0 {
+				if pushDepth == 0 && pushTimer != nil {
+					pushTimer.Stop()
+					pushTimer = nil
+				}
+				held := capHeld && pushDepth == 0
+				missed := capMissed && pushDepth == 0
+				left := shellLeft
+				if pushDepth == 0 {
+					capMissed = false
+				}
+				timerMu.Unlock()
+				if held {
+					shellCancel()
 					return
 				}
-				left := shellRunCap - spent
-				if left < 0 {
-					left = 0
+				if missed {
+					resumeShell(left)
 				}
-				armLocked(left)
-				segStart = time.Now()
 			},
 			OnPush: func(pctx context.Context, cwd string, pushArgs []string) sandbox.PushResult {
+				var res sandbox.PushResult
 				if gitPushHook != nil {
-					return gitPushHook(pctx, current, cwd, pushArgs)
+					res = gitPushHook(pctx, current, cwd, pushArgs)
+				} else {
+					res = a.handleGitPush(pctx, ctx, current, gate, cwd, pushArgs)
 				}
-				return a.handleGitPush(pctx, ctx, current, gate, cwd, pushArgs)
+				if res.Stdout != "" || res.Stderr != "" {
+					timerMu.Lock()
+					pushSnips = append(pushSnips, res.Stdout, res.Stderr)
+					timerMu.Unlock()
+				}
+				return res
 			},
 			Dial: a.shellDial,
 		})
@@ -597,7 +668,17 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		summary := formatShell(res.Stdout, res.Stderr)
 		timerMu.Lock()
 		fired := timerFired
+		snips := append([]string{}, pushSnips...)
 		timerMu.Unlock()
+		for _, snip := range snips {
+			if snip == "" || strings.Contains(summary, snip) {
+				continue
+			}
+			summary += snip
+			if !strings.HasSuffix(snip, "\n") {
+				summary += "\n"
+			}
+		}
 		err = adjustShellStop(ctx, fired, err)
 		if err != nil {
 			a.clearShellPlan(current.ID)

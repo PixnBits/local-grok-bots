@@ -178,6 +178,10 @@ func netAuditAction(ev sandbox.Event) string {
 		if ev.Grant == "net" || ev.Grant == "ssh" {
 			return "grant_denied"
 		}
+		// Shell egress has no grant name on a header or busy denial.
+		if ev.Grant == "" && (ev.Detail == "header" || ev.Detail == "busy" || strings.HasPrefix(ev.Detail, "busy ")) {
+			return "grant_denied"
+		}
 	case "net_request":
 		if strings.TrimSpace(ev.Detail) == "not allowlisted" {
 			return "grant_denied"

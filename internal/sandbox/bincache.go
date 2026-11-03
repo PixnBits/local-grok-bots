@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 )
 
@@ -19,14 +18,33 @@ var (
 	binCacheMu sync.Mutex
 	binBuildMu sync.Mutex
 	cacheDir   string
-	binMemos   = map[string][32]byte{}
+	// binBodies holds bytes built in this process, keyed by cache path.
+	// A file left on disk by a previous process is not an entry.
+	binBodies = map[string][]byte{}
+	// cacheFileUID is the owner check for the cache directory and for a
+	// regular file already at a cache path. Tests replace it.
+	cacheFileUID = fileUID
+	// cacheTempPath is the exclusive temporary name used to publish one file.
+	// Tests point it at a planted symlink.
+	cacheTempPath = func(dest string) string {
+		return dest + ".tmp." + tmpHex()
+	}
 )
 
+// CacheDir is the directory selected by SetCacheDir. It is empty until
+// that call succeeds.
+func CacheDir() string {
+	binCacheMu.Lock()
+	defer binCacheMu.Unlock()
+	return cacheDir
+}
+
 // SetCacheDir selects the directory ensureNetBridge, ensureBridge, and
-// ensurePreload reuse. dir is created mode 0700. An existing directory must
-// be a real directory owned by the effective uid; a group-writable directory
-// the process owns is narrowed to 0700. A symlink or another user's directory
-// is refused.
+// ensurePreload publish into. dir is created mode 0700. An existing directory
+// must be a real directory owned by the effective uid; a group-writable
+// directory the process owns is narrowed to 0700. A symlink or another user's
+// directory is refused. The bytes given to a jail come from memory, not from
+// a later read of this directory.
 func SetCacheDir(dir string) error {
 	if err := prepareCacheDir(dir); err != nil {
 		return err
@@ -101,7 +119,7 @@ func prepareCacheDir(dir string) error {
 	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
 		return fmt.Errorf("sandbox cache dir")
 	}
-	uid, ok := fileUID(fi)
+	uid, ok := cacheFileUID(fi)
 	if !ok || os.Geteuid() < 0 || int(uid) != os.Geteuid() {
 		return fmt.Errorf("sandbox cache dir")
 	}
@@ -129,90 +147,123 @@ func (b cachedBin) dest(dir string) string {
 	return filepath.Join(dir, fmt.Sprintf("%s-%x%s", b.name, sum[:8], b.suf))
 }
 
-func ensureCached(b cachedBin) (string, error) {
+func ensureCached(b cachedBin) ([]byte, error) {
 	dir, err := activeCacheDir()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	return ensureCachedIn(dir, b)
 }
 
-func ensureCachedIn(dir string, b cachedBin) (string, error) {
+func ensureCachedIn(dir string, b cachedBin) ([]byte, error) {
 	if err := prepareCacheDir(dir); err != nil {
-		return "", err
+		return nil, err
 	}
 	dest := b.dest(dir)
-	if reusable(dest) {
-		return dest, nil
+	// The first use in this process builds from source. A file already
+	// on disk, including one with a matching sidecar, is not trusted.
+	if body, ok := cachedBody(dest); ok {
+		return body, nil
 	}
 	binBuildMu.Lock()
 	defer binBuildMu.Unlock()
-	if reusable(dest) {
-		return dest, nil
+	if body, ok := cachedBody(dest); ok {
+		return body, nil
 	}
 	if b.build == nil {
-		return "", fmt.Errorf("sandbox cache")
+		return nil, fmt.Errorf("sandbox cache")
 	}
 	body, err := b.build()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if len(body) == 0 {
-		return "", fmt.Errorf("sandbox cache empty")
+		return nil, fmt.Errorf("sandbox cache empty")
 	}
-	sum := sha256.Sum256(body)
-	if err := writeNoFollow(dest, body, 0o700); err != nil {
-		return "", err
+	if err := publishCached(dest, body); err != nil {
+		return nil, err
 	}
-	if err := writeNoFollow(dest+".sha256", []byte(hex.EncodeToString(sum[:])+"\n"), 0o600); err != nil {
-		return "", err
+	storeCached(dest, body)
+	stored, ok := cachedBody(dest)
+	if !ok {
+		return nil, fmt.Errorf("sandbox cache")
 	}
-	binCacheMu.Lock()
-	binMemos[dest] = sum
-	binCacheMu.Unlock()
-	return dest, nil
+	return stored, nil
 }
 
-// reusable accepts a cached binary only when it is a regular file owned by
-// the effective uid, not group or other writable, and its bytes match the
-// sidecar hash and any in-process hash recorded for this path.
-func reusable(path string) bool {
-	fi, err := os.Lstat(path)
-	if err != nil || !fi.Mode().IsRegular() {
-		return false
-	}
-	uid, ok := fileUID(fi)
-	if !ok || os.Geteuid() < 0 || int(uid) != os.Geteuid() {
-		return false
-	}
-	if fi.Mode().Perm()&0o022 != 0 {
-		return false
-	}
-	body, err := os.ReadFile(path)
-	if err != nil || len(body) == 0 {
-		return false
-	}
-	sum := sha256.Sum256(body)
-	side, err := os.ReadFile(path + ".sha256")
-	if err != nil || strings.TrimSpace(string(side)) != hex.EncodeToString(sum[:]) {
-		return false
-	}
+// resetBinaryCache drops in-process bytes so the next ensure builds again.
+// Tests use it as a fresh process. It does not change the cache directory.
+func resetBinaryCache() {
 	binCacheMu.Lock()
-	memo, have := binMemos[path]
+	binBodies = map[string][]byte{}
 	binCacheMu.Unlock()
-	if have && memo != sum {
-		return false
+}
+
+func cachedBody(dest string) ([]byte, bool) {
+	binCacheMu.Lock()
+	defer binCacheMu.Unlock()
+	body, ok := binBodies[dest]
+	if !ok || len(body) == 0 {
+		return nil, false
 	}
-	if !have {
-		binCacheMu.Lock()
-		binMemos[path] = sum
-		binCacheMu.Unlock()
+	out := make([]byte, len(body))
+	copy(out, body)
+	return out, true
+}
+
+func storeCached(dest string, body []byte) {
+	cp := make([]byte, len(body))
+	copy(cp, body)
+	binCacheMu.Lock()
+	binBodies[dest] = cp
+	binCacheMu.Unlock()
+}
+
+// publishCached writes body without adopting bytes that were already on disk.
+// A regular file owned by someone else is left unchanged. A symlink or any
+// other non-regular file is not opened. A regular file this process owns is
+// read only to see whether it already matches body.
+func publishCached(dest string, body []byte) error {
+	fi, err := os.Lstat(dest)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("sandbox cache")
 	}
-	return true
+	if err == nil && fi.Mode().IsRegular() {
+		uid, ok := cacheFileUID(fi)
+		if !ok || os.Geteuid() < 0 || int(uid) != os.Geteuid() {
+			return fmt.Errorf("sandbox cache owner")
+		}
+		if verifyDisk(dest, body) == nil {
+			return writeSidecar(dest, body)
+		}
+	}
+	if err := writeNoFollow(dest, body, 0o700); err != nil {
+		return err
+	}
+	return writeSidecar(dest, body)
+}
+
+func verifyDisk(path string, body []byte) error {
+	disk, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if sha256.Sum256(disk) != sha256.Sum256(body) {
+		return fmt.Errorf("sandbox cache mismatch")
+	}
+	return nil
+}
+
+func writeSidecar(dest string, body []byte) error {
+	sum := sha256.Sum256(body)
+	return writeNoFollow(dest+".sha256", []byte(hex.EncodeToString(sum[:])+"\n"), 0o600)
 }
 
 func writeNoFollow(dest string, data []byte, mode os.FileMode) error {
-	tmp := fmt.Sprintf("%s.tmp.%s", dest, tmpHex())
+	tmp := cacheTempPath(dest)
+	if err := rejectFollow(tmp); err != nil {
+		return err
+	}
 	f, err := openExclusive(tmp, mode)
 	if err != nil {
 		return err

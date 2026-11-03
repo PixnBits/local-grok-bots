@@ -7,3 +7,7 @@ import "os"
 func tokenFileID(os.FileInfo) (dev, ino uint64, uid uint32, ok bool) {
 	return 0, 0, 0, false
 }
+
+func tokenCtime(os.FileInfo) (sec, nsec int64, ok bool) {
+	return 0, 0, false
+}

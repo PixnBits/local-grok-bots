@@ -36,6 +36,9 @@ type proxy struct {
 	dial     func(context.Context, string, string) (net.Conn, error)
 	mu       sync.Mutex
 	events   []Event
+	slotMu   sync.Mutex
+	slots    int
+	busy     busyNote
 }
 
 func startProxy(ctx context.Context, sock string, grants, netAllow, sshAllow []string, dial func(context.Context, string, string) (net.Conn, error)) (*proxy, error) {
@@ -83,8 +86,38 @@ func (p *proxy) serve() {
 		if err != nil {
 			return
 		}
-		go p.handle(c)
+		p.slotMu.Lock()
+		if p.slots >= connLimit {
+			p.slotMu.Unlock()
+			p.rejectBusy(c)
+			continue
+		}
+		p.slots++
+		p.slotMu.Unlock()
+		go func(conn net.Conn) {
+			defer p.releaseSlot()
+			p.handle(conn)
+		}(c)
 	}
+}
+
+func (p *proxy) releaseSlot() {
+	p.slotMu.Lock()
+	if p.slots > 0 {
+		p.slots--
+	}
+	p.slotMu.Unlock()
+}
+
+// rejectBusy closes a connection that is not HTTP. The busy event is
+// recorded at most once per second.
+func (p *proxy) rejectBusy(conn net.Conn) {
+	_ = conn.Close()
+	emit, detail := p.busy.mark()
+	if !emit {
+		return
+	}
+	p.add(Event{Kind: "grant_denied", Detail: detail})
 }
 
 func (p *proxy) close() {

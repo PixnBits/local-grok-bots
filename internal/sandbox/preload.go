@@ -19,12 +19,13 @@ func preloadBin() cachedBin {
 	}
 }
 
-// ensurePreload compiles the connect interceptor once and caches the .so.
-// Without gcc the shell still runs, and the network namespace stays closed.
-func ensurePreload() (string, error) {
+// ensurePreload compiles the connect interceptor once per process and returns
+// those bytes. Without gcc the shell still runs, and the network namespace
+// stays closed.
+func ensurePreload() ([]byte, error) {
 	return ensureCached(preloadBin())
 }
 
-func ensurePreloadIn(dir string) (string, error) {
+func ensurePreloadIn(dir string) ([]byte, error) {
 	return ensureCachedIn(dir, preloadBin())
 }

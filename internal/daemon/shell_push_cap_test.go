@@ -130,4 +130,60 @@ func TestShellPushThenSleepIsCapped(t *testing.T) {
 			t.Fatalf("push returned early: %s", elapsed)
 		}
 	})
+
+	t.Run("slow push then sleep is capped", func(t *testing.T) {
+		slow := capD + 8*time.Second
+		var cancelled atomic.Bool
+		gitPushHook = func(ctx context.Context, _ store.Bot, _ string, _ []string) sandbox.PushResult {
+			hits.Add(1)
+			select {
+			case <-time.After(slow):
+				return sandbox.PushResult{Code: 0, Stdout: "git push sent\n"}
+			case <-ctx.Done():
+				cancelled.Store(true)
+				return sandbox.PushResult{Code: 1, Stderr: "git push denied: cancelled\n"}
+			}
+		}
+		got, runErr, elapsed := run(t, pushCmd+"; sleep 50; echo SLEPT")
+		if hits.Load() != 1 || cancelled.Load() {
+			t.Fatalf("push cancelled=%v hits=%d elapsed=%s\n%s", cancelled.Load(), hits.Load(), elapsed, got)
+		}
+		if runErr == nil || !strings.Contains(runErr.Error(), "shell timed out") {
+			t.Fatalf("err=%v elapsed=%s\n%s", runErr, elapsed, got)
+		}
+		if !strings.Contains(got, "git push sent") {
+			t.Fatalf("push output missing: elapsed=%s\n%s", elapsed, got)
+		}
+		if strings.Contains(got, "SLEPT") || strings.Contains(runErr.Error(), "SLEPT") {
+			t.Fatalf("sleep finished after the push: elapsed=%s\n%s", elapsed, got)
+		}
+		if elapsed >= slow+capD+12*time.Second || elapsed >= sleepFor+slow {
+			t.Fatalf("slept for %s, cap %s slow %s", elapsed, capD, slow)
+		}
+	})
+
+	t.Run("background push does not extend the shell", func(t *testing.T) {
+		slow := capD + 8*time.Second
+		var cancelled atomic.Bool
+		gitPushHook = func(ctx context.Context, _ store.Bot, _ string, _ []string) sandbox.PushResult {
+			hits.Add(1)
+			select {
+			case <-time.After(slow):
+				return sandbox.PushResult{Code: 0, Stdout: "git push sent\n"}
+			case <-ctx.Done():
+				cancelled.Store(true)
+				return sandbox.PushResult{Code: 1, Stderr: "git push denied: cancelled\n"}
+			}
+		}
+		got, runErr, elapsed := run(t, pushCmd+" & sleep 50; echo SLEPT")
+		if cancelled.Load() || hits.Load() != 1 {
+			t.Fatalf("push cancelled=%v hits=%d elapsed=%s\n%s\n%v", cancelled.Load(), hits.Load(), elapsed, got, runErr)
+		}
+		if strings.Contains(got, "SLEPT") || (runErr != nil && strings.Contains(runErr.Error(), "SLEPT")) {
+			t.Fatalf("sleep finished: elapsed=%s err=%v\n%s", elapsed, runErr, got)
+		}
+		if elapsed >= 40*time.Second || elapsed >= sleepFor {
+			t.Fatalf("ran for %s, cap %s", elapsed, capD)
+		}
+	})
 }

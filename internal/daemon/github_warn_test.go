@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
@@ -81,6 +82,9 @@ func TestGitHubWarningTokenMode(t *testing.T) {
 	app := newApp(t, "", fakeModel{})
 	path := t.TempDir() + "/token"
 	if err := os.WriteFile(path, []byte(canary+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	app.editPol(func(p *policy.Policy) {
@@ -232,6 +236,9 @@ func TestTokenWarningCachedUntilChange(t *testing.T) {
 	if err := os.WriteFile(path, []byte(canary+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	first := tokenFileWarning(path)
 	second := tokenFileWarning(path)
 	if reads.Load() != 1 {
@@ -253,11 +260,84 @@ func TestTokenWarningCachedUntilChange(t *testing.T) {
 	if err := os.WriteFile(path, []byte("bad token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	shaped := tokenFileWarning(path)
 	if reads.Load() != 3 {
 		t.Fatalf("reads after rewrite: %d", reads.Load())
 	}
 	if !strings.Contains(shaped, "not a valid token file") || strings.Contains(shaped, "bad token") || strings.Contains(shaped, canary) {
 		t.Fatalf("shape warning %q", shaped)
+	}
+}
+
+func TestTokenWarningRefreshesWhenCtimeChanges(t *testing.T) {
+	const valid = "ghp_CANARYSECRETVALUE"
+	path := t.TempDir() + "/token"
+	body := []byte(valid + "\n")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if msg := tokenFileWarning(path); msg != "" {
+		t.Fatalf("valid file warned: %q", msg)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := []byte("ghp CANARYSECRETVALUE\n")
+	if len(next) != len(body) {
+		t.Fatalf("length %d %d", len(next), len(body))
+	}
+	if err := os.WriteFile(path, next, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, st.ModTime(), st.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	msg := tokenFileWarning(path)
+	if !strings.Contains(msg, "not a valid token file") || strings.Contains(msg, "ghp ") {
+		t.Fatalf("warning %q", msg)
+	}
+}
+
+func TestTokenWarningExpires(t *testing.T) {
+	path := t.TempDir() + "/token"
+	if err := os.WriteFile(path, []byte("ghp_CANARYSECRETVALUE\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var reads atomic.Int32
+	prev := readTokenForWarn
+	readTokenForWarn = func(p string) (string, error) {
+		reads.Add(1)
+		return prev(p)
+	}
+	t.Cleanup(func() { readTokenForWarn = prev })
+	if msg := tokenFileWarning(path); msg != "" {
+		t.Fatalf("valid file warned: %q", msg)
+	}
+	if reads.Load() != 1 {
+		t.Fatalf("reads %d", reads.Load())
+	}
+	tokenWarnMu.Lock()
+	ent := tokenWarns[path]
+	ent.at = time.Now().Add(-61 * time.Second)
+	tokenWarns[path] = ent
+	tokenWarnMu.Unlock()
+	if msg := tokenFileWarning(path); msg != "" {
+		t.Fatalf("valid file warned after expiry: %q", msg)
+	}
+	if reads.Load() != 2 {
+		t.Fatalf("reads after expiry %d", reads.Load())
 	}
 }

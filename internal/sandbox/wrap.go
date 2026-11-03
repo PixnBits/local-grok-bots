@@ -255,7 +255,7 @@ ensure_bridge() {
     printf '%s\n' "deny git ${sub}" >> "$log"
     return 1
   fi
-  /lgb/bin/ghbridge http /lgb/sock/github.sock > /tmp/gh.port &
+  /lgb/bin/ghbridge http /lgb/sock/github.sock </dev/null >/tmp/gh.port 2>/dev/null &
   i=0
   p=
   while [ "$i" -lt 100000 ]; do

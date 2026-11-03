@@ -21,13 +21,13 @@ func ghBridgeBin() cachedBin {
 	}
 }
 
-// ensureBridge compiles the in-jail HTTP bridge once and caches the binary.
-// Without gcc, GitHub fetch stays unavailable.
-func ensureBridge() (string, error) {
+// ensureBridge compiles the in-jail HTTP bridge once per process and returns
+// those bytes. Without gcc, GitHub fetch stays unavailable.
+func ensureBridge() ([]byte, error) {
 	return ensureCached(ghBridgeBin())
 }
 
-func ensureBridgeIn(dir string) (string, error) {
+func ensureBridgeIn(dir string) ([]byte, error) {
 	return ensureCachedIn(dir, ghBridgeBin())
 }
 

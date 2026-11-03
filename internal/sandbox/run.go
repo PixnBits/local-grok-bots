@@ -62,6 +62,9 @@ type Request struct {
 	OnPushEnd   func()
 	// Dial, when set, is the proxy's outbound TCP dial. Tests use it.
 	Dial func(context.Context, string, string) (net.Conn, error)
+	// Guard, when set, records the jail process and push clients so a shell
+	// cap can stop other work while a push is still running.
+	Guard *ShellGuard
 	// CleanBash runs the command with bash --norc --noprofile and without
 	// BASH_ENV or ENV. The broker sets it only after an allow. Other
 	// shells stay on /bin/sh.
@@ -120,6 +123,7 @@ type prepared struct {
 	egress    *HTTPAllow
 	egressOn  bool
 	push      *pushSrv
+	guard     *ShellGuard
 	before    *treeSnap
 	extra     []Event
 	grants    map[string]bool
@@ -245,7 +249,7 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &prepared{workspace: ws, command: req.Command, jailDir: jailDir, workRel: workRel, dir: dir, before: takeSnap(ws), cleanBash: req.CleanBash}
+	p := &prepared{workspace: ws, command: req.Command, jailDir: jailDir, workRel: workRel, dir: dir, before: takeSnap(ws), cleanBash: req.CleanBash, guard: req.Guard}
 	ok := false
 	defer func() {
 		if !ok {
@@ -286,7 +290,7 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 		grants[strings.ToLower(strings.TrimSpace(g))] = true
 	}
 
-	if path, err := ensurePreload(); err != nil {
+	if preload, err := ensurePreload(); err != nil {
 		if grants["net"] {
 			p.extra = append(p.extra, Event{Kind: "grant_denied", Grant: "net", Detail: "network proxy unavailable"})
 		}
@@ -294,7 +298,7 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 			p.extra = append(p.extra, Event{Kind: "grant_denied", Grant: "ssh", Detail: "network proxy unavailable"})
 		}
 	} else {
-		if err := overlayFile(ro, "preload.so", mustRead(path), 0o755); err != nil {
+		if err := overlayFile(ro, "preload.so", preload, 0o755); err != nil {
 			return nil, err
 		}
 		touch(filepath.Join(rw, "preload.so"))
@@ -310,15 +314,15 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 		return nil, err
 	}
 	ghSock := ""
-	bridgeBin := ""
+	var bridgeBin []byte
 	if b, err := ensureBridge(); err == nil {
 		bridgeBin = b
 	}
 	if githubSockOK(req.GitHubSock) {
-		if bridgeBin == "" {
+		if len(bridgeBin) == 0 {
 			p.extra = append(p.extra, Event{Kind: "grant_denied", Grant: "github", Detail: GitHubProxyDenied})
 		} else {
-			if err := overlayFile(ro, "ghbridge", mustRead(bridgeBin), 0o755); err != nil {
+			if err := overlayFile(ro, "ghbridge", bridgeBin, 0o755); err != nil {
 				return nil, err
 			}
 			touch(filepath.Join(rw, "bin", "ghbridge"))
@@ -347,14 +351,14 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 			mount{Src: path, Dst: "/lgb/bin/git", RO: true},
 			mount{Src: filepath.Join(ro, "gitwrap"), Dst: "/usr/bin/git", RO: true},
 		)
-		if bridgeBin != "" && ghSock == "" {
-			if err := overlayFile(ro, "ghbridge", mustRead(bridgeBin), 0o755); err != nil {
+		if len(bridgeBin) > 0 && ghSock == "" {
+			if err := overlayFile(ro, "ghbridge", bridgeBin, 0o755); err != nil {
 				return nil, err
 			}
 			touch(filepath.Join(rw, "bin", "ghbridge"))
 			p.mounts = append(p.mounts, mount{Src: filepath.Join(ro, "ghbridge"), Dst: "/lgb/bin/ghbridge", RO: true})
 		}
-		ps, perr := startPush(ctx, filepath.Join(dir, "push.sock"), req.OnPush, req.OnPushStart, req.OnPushEnd)
+		ps, perr := startPush(ctx, filepath.Join(dir, "push.sock"), req.OnPush, req.OnPushStart, req.OnPushEnd, req.Guard)
 		if perr != nil {
 			p.extra = append(p.extra, Event{Kind: "grant_denied", Grant: "git", Detail: "push socket unavailable"})
 		} else {
@@ -517,14 +521,6 @@ func rootOwnedDir(dir string) bool {
 		return false
 	}
 	return sys.Uid == 0
-}
-
-func mustRead(path string) []byte {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	return b
 }
 
 func overlayFile(dir, name string, data []byte, mode os.FileMode) error {

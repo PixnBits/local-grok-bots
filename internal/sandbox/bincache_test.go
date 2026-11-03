@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"syscall"
 	"testing"
 )
 
@@ -18,55 +17,41 @@ func TestBinaryCacheRejectsSwappedFile(t *testing.T) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	bins := []func(string) (string, error){ensureNetBridgeIn, ensureBridgeIn, ensurePreloadIn}
+	bins := []struct {
+		ensure func(string) ([]byte, error)
+		dest   func(string) string
+	}{
+		{ensureNetBridgeIn, func(dir string) string { return netBridgeBin().dest(dir) }},
+		{ensureBridgeIn, func(dir string) string { return ghBridgeBin().dest(dir) }},
+		{ensurePreloadIn, func(dir string) string { return preloadBin().dest(dir) }},
+	}
 	planted := []byte("planted-binary-contents-not-a-real-executable")
-	for _, ensure := range bins {
-		path, err := ensure(dir)
+	for _, bin := range bins {
+		first, err := bin.ensure(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		first, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		ino := fileIno(t, path)
+		path := bin.dest(dir)
 		if err := os.WriteFile(path, planted, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		again, err := ensure(dir)
+		again, err := bin.ensure(dir)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if again != path {
-			t.Fatalf("path %s %s", path, again)
-		}
-		body, err := os.ReadFile(again)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if bytes.Equal(body, planted) || bytes.Contains(body, []byte("planted-binary")) {
+		if bytes.Equal(again, planted) || bytes.Contains(again, []byte("planted-binary")) {
 			t.Fatal("planted bytes were returned")
 		}
-		if !bytes.Equal(body, first) {
-			t.Fatalf("rebuild hash changed for %s", path)
+		if !bytes.Equal(again, first) {
+			t.Fatalf("returned bytes changed for %s", path)
 		}
-		if fileIno(t, again) == ino {
-			t.Fatalf("reused inode for %s", path)
-		}
-		side, err := os.ReadFile(again + ".sha256")
+		side, err := os.ReadFile(path + ".sha256")
 		if err != nil {
 			t.Fatal(err)
 		}
-		sum := sha256.Sum256(body)
+		sum := sha256.Sum256(first)
 		if string(side) != hexEncode(sum[:])+"\n" && string(side) != hexEncode(sum[:]) {
 			t.Fatalf("sidecar %q", side)
-		}
-		fi, err := os.Lstat(again)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() || fi.Mode().Perm()&0o022 != 0 {
-			t.Fatalf("mode %v", fi.Mode())
 		}
 	}
 }
@@ -79,15 +64,11 @@ func TestBinaryCacheRejectsBadMode(t *testing.T) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	path, err := ensureNetBridgeIn(dir)
+	first, err := ensureNetBridgeIn(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ino := fileIno(t, path)
+	path := netBridgeBin().dest(dir)
 	if err := os.Chmod(path, 0o666); err != nil {
 		t.Fatal(err)
 	}
@@ -95,22 +76,8 @@ func TestBinaryCacheRejectsBadMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body, err := os.ReadFile(again)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(body, first) {
-		t.Fatal("rebuilt bytes differ")
-	}
-	if fileIno(t, again) == ino {
-		t.Fatal("group-writable file was reused")
-	}
-	fi, err := os.Lstat(again)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode().Perm()&0o022 != 0 {
-		t.Fatalf("mode %v", fi.Mode())
+	if !bytes.Equal(again, first) || bytes.Equal(again, nil) {
+		t.Fatal("group-writable file changed the returned bytes")
 	}
 }
 
@@ -122,14 +89,11 @@ func TestBinaryCacheRejectsSymlink(t *testing.T) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	path, err := ensureNetBridgeIn(dir)
+	first, err := ensureNetBridgeIn(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	path := netBridgeBin().dest(dir)
 	planted := filepath.Join(dir, "planted")
 	if err := os.WriteFile(planted, []byte("planted-via-symlink"), 0o600); err != nil {
 		t.Fatal(err)
@@ -144,19 +108,12 @@ func TestBinaryCacheRejectsSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fi, err := os.Lstat(again)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
-		t.Fatalf("still a symlink: %v", fi.Mode())
-	}
-	body, err := os.ReadFile(again)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if bytes.Contains(body, []byte("planted-via-symlink")) || !bytes.Equal(body, first) {
+	if bytes.Contains(again, []byte("planted-via-symlink")) || !bytes.Equal(again, first) {
 		t.Fatal("symlink target was used")
+	}
+	target, err := os.ReadFile(planted)
+	if err != nil || string(target) != "planted-via-symlink" {
+		t.Fatalf("symlink target changed: %q %v", target, err)
 	}
 }
 
@@ -213,19 +170,6 @@ func TestBinaryCacheDirMode(t *testing.T) {
 	if after.Mode() != mode {
 		t.Fatalf("foreign dir mode changed %v -> %v", mode, after.Mode())
 	}
-}
-
-func fileIno(t *testing.T, path string) uint64 {
-	t.Helper()
-	fi, err := os.Lstat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok || st == nil {
-		t.Fatal("no stat")
-	}
-	return uint64(st.Ino)
 }
 
 func hexEncode(b []byte) string {

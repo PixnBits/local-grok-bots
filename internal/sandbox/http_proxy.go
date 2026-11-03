@@ -62,6 +62,9 @@ type HTTPAllow struct {
 	record  func(Event)
 	ctx     context.Context
 	cancel  context.CancelFunc
+	slotMu  sync.Mutex
+	slots   int
+	busy    busyNote
 }
 
 // StartHTTPAllowProxy listens on a mode-0600 socket named sock in a 0700
@@ -166,7 +169,44 @@ func (p *HTTPAllow) serve() {
 		if err != nil {
 			return
 		}
-		go p.serveConn(c)
+		p.slotMu.Lock()
+		if p.slots >= connLimit {
+			p.slotMu.Unlock()
+			p.rejectBusy(c)
+			continue
+		}
+		p.slots++
+		p.slotMu.Unlock()
+		go func(conn net.Conn) {
+			defer p.releaseSlot()
+			p.serveConn(conn)
+		}(c)
+	}
+}
+
+func (p *HTTPAllow) releaseSlot() {
+	p.slotMu.Lock()
+	if p.slots > 0 {
+		p.slots--
+	}
+	p.slotMu.Unlock()
+}
+
+// rejectBusy answers 503 without starting a connection handler.
+// The audit and record hooks are notified at most once per second.
+func (p *HTTPAllow) rejectBusy(conn net.Conn) {
+	_ = conn.SetWriteDeadline(time.Now().Add(time.Second))
+	_, _ = io.WriteString(conn, "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+	_ = conn.Close()
+	emit, detail := p.busy.mark()
+	if !emit {
+		return
+	}
+	if p.record != nil {
+		p.record(Event{Kind: "grant_denied", Detail: detail})
+	}
+	if p.audit != nil {
+		p.audit(EgressEvent{Allow: false, Reason: "busy"})
 	}
 }
 

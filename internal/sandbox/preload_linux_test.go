@@ -16,11 +16,15 @@ import (
 func TestPreloadHandshakeTimesOut(t *testing.T) {
 	t.Parallel()
 	skipIfMissing(t, "gcc", "bwrap", "python3")
-	so, err := ensurePreload()
+	body, err := ensurePreload()
 	if err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
+	so := filepath.Join(dir, "preload.so")
+	if err := os.WriteFile(so, body, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	sock := filepath.Join(dir, "proxy.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
