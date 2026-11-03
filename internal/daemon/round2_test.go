@@ -85,7 +85,7 @@ func TestGolden_PermRoutesCrossPortOrigin(t *testing.T) {
 func TestGolden_PageCSP(t *testing.T) {
 	app := newApp(t, "", nil)
 	srv := serve(t, app)
-	for _, path := range []string{"/", "/rules", "/login", "/index.html", "/app.js", "/app.css", "/theme.js"} {
+	for _, path := range []string{"/", "/rules", "/login", "/index.html", "/app.js", "/app.css", "/theme.js", "/favicon.svg", "/favicon.ico", "/apple-touch-icon.png"} {
 		res, body := do(t, "GET", srv.URL+path, nil, "")
 		if res.Header.Get("Content-Security-Policy") != cspValue || res.Header.Get("X-Content-Type-Options") != "nosniff" {
 			t.Fatalf("%s csp %q nosniff %q", path, res.Header.Get("Content-Security-Policy"), res.Header.Get("X-Content-Type-Options"))
