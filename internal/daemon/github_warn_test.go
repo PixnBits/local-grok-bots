@@ -386,34 +386,63 @@ func TestTokenWarningCopy(t *testing.T) {
 	const suffix = " This applies to every bot with GitHub access."
 	cases := []struct {
 		reason string
+		size   int64
 		want   string
 	}{
-		{"missing", "The GitHub token file " + path + " doesn't exist. Create it, or fix `token_file` in policy.toml. GitHub actions fail until then." + suffix},
-		{"mode", "The GitHub token file " + path + " can be read by other users. Run `chmod 600 " + path + "`." + suffix},
-		{"token file: not owned by daemon", "The GitHub token file " + path + " belongs to another user. Run `chown " + who + " " + path + "`, then `chmod 600 " + path + "`." + suffix},
-		{"permission denied", "The daemon can't read the GitHub token file " + path + ". It may be owned by root. Run `sudo chown " + who + " " + path + "`, then `chmod 600 " + path + "`." + suffix},
-		{"type", "The GitHub token file " + path + " isn't a regular file. Point `token_file` in policy.toml at a regular file." + suffix},
-		{"shape", "The GitHub token file " + path + " doesn't hold a valid token. Put one token on a single line." + suffix},
-		{"size", "The GitHub token file " + path + " is empty or too large. Put one token in it." + suffix},
-		{"read error", "The daemon can't read the GitHub token file " + path + ". Check the file, then run `chmod 600 " + path + "`." + suffix},
-		{"check", "The daemon can't read the GitHub token file " + path + ". Check the file, then run `chmod 600 " + path + "`." + suffix},
-		{"other", "The daemon can't read the GitHub token file " + path + ". Check the file, then run `chmod 600 " + path + "`." + suffix},
+		{"missing", 0, "The GitHub token file " + path + " doesn't exist. Create it, or fix `token_file` in policy.toml. GitHub actions fail until then." + suffix},
+		{"mode", 0, "The GitHub token file " + path + " can be read by other users. Run `chmod 600 " + path + "`." + suffix},
+		{"token file: not owned by daemon", 0, "The GitHub token file " + path + " belongs to another user. Run `sudo chown " + who + " " + path + "`, then `chmod 600 " + path + "`." + suffix},
+		{"permission denied", 0, "The daemon can't open the GitHub token file " + path + ". Run `chmod 600 " + path + "`. If that doesn't help, make sure " + who + " can open the folder it's in." + suffix},
+		{"type", 0, "The GitHub token file " + path + " is a folder, a link, or another special file. Point `token_file` in policy.toml at the token file itself." + suffix},
+		{"shape", 0, "The GitHub token file " + path + " doesn't hold a valid token. Put just the token on one line, with no spaces." + suffix},
+		{"size", 0, "The GitHub token file " + path + " is empty. Put your token in it." + suffix},
+		{"size", 5000, "The GitHub token file " + path + " is too big to be a token. Put just one token in it." + suffix},
+		{"read error", 0, "The daemon couldn't read the GitHub token file " + path + ". Check that the path is right and that the file is a plain file you own, then run `chmod 600 " + path + "`." + suffix},
+		{"check", 0, "The daemon couldn't read the GitHub token file " + path + ". Check that the path is right and that the file is a plain file you own, then run `chmod 600 " + path + "`." + suffix},
+		{"other", 0, "The daemon couldn't read the GitHub token file " + path + ". Check that the path is right and that the file is a plain file you own, then run `chmod 600 " + path + "`." + suffix},
 	}
 	for _, c := range cases {
-		got := tokenWarningText(path, c.reason)
+		got := tokenWarningText(path, c.reason, c.size)
 		if got != c.want {
-			t.Errorf("reason %s\n got %q\nwant %q", c.reason, got, c.want)
+			t.Errorf("reason %s size %d\n got %q\nwant %q", c.reason, c.size, got, c.want)
 		}
-		if !strings.Contains(got, "chown ") && (c.reason == "token file: not owned by daemon" || c.reason == "permission denied") {
-			t.Errorf("missing chown for %s: %q", c.reason, got)
+		if c.reason == "permission denied" && (strings.Contains(got, "chown") || strings.Contains(strings.ReplaceAll(got, who, ""), "root") || !strings.Contains(got, who)) {
+			t.Errorf("denied warning %q", got)
 		}
 		if strings.Contains(got, "Saving still works") {
 			t.Errorf("config suffix on %s", c.reason)
 		}
 	}
-	owner := tokenWarningText(path, "token file: not owned by daemon")
-	if strings.Contains(owner, "sudo chown") {
-		t.Fatalf("owner warning used sudo: %q", owner)
+	owner := tokenWarningText(path, "token file: not owned by daemon", 0)
+	if !strings.Contains(owner, "sudo chown") {
+		t.Fatalf("owner warning missing sudo chown: %q", owner)
+	}
+}
+
+func TestTokenWarningSizeFile(t *testing.T) {
+	const suffix = " This applies to every bot with GitHub access."
+	write := func(body []byte) string {
+		t.Helper()
+		path := t.TempDir() + "/token"
+		if err := os.WriteFile(path, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	emptyPath := write(nil)
+	got := tokenFileWarning(emptyPath)
+	want := "The GitHub token file " + emptyPath + " is empty. Put your token in it." + suffix
+	if got != want {
+		t.Fatalf("empty file %q", got)
+	}
+	bigPath := write(make([]byte, 5000))
+	got = tokenFileWarning(bigPath)
+	want = "The GitHub token file " + bigPath + " is too big to be a token. Put just one token in it." + suffix
+	if got != want {
+		t.Fatalf("big file %q", got)
 	}
 }
 
@@ -426,11 +455,12 @@ func TestTokenWarningUnreadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	msg := tokenFileWarning(path)
-	want := tokenWarningText(path, "permission denied")
+	who := daemonUserName()
+	want := tokenWarningText(path, "permission denied", 0)
 	if msg != want {
 		t.Fatalf("got %q\nwant %q", msg, want)
 	}
-	if !strings.Contains(msg, "sudo chown") || !strings.Contains(msg, daemonUserName()) {
+	if strings.Contains(msg, "chown") || strings.Contains(strings.ReplaceAll(msg, who, ""), "root") || !strings.Contains(msg, who) {
 		t.Fatalf("unreadable warning %q", msg)
 	}
 }

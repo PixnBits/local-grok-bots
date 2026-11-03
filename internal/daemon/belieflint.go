@@ -102,7 +102,9 @@ func descriptionWarnings(description string) []string {
 			continue
 		}
 		// Only flag when the surrounding text talks about using/calling it.
-		idx := strings.Index(lowDesc, strings.ToLower(m))
+		// The window is taken from the lowered text. ToLower can change byte length.
+		lowName := strings.ToLower(m)
+		idx := strings.Index(lowDesc, lowName)
 		if idx < 0 {
 			continue
 		}
@@ -110,7 +112,14 @@ func descriptionWarnings(description string) []string {
 		if winStart < 0 {
 			winStart = 0
 		}
-		win := lowDesc[winStart : idx+len(m)+40]
+		end := idx + len(lowName) + 40
+		if end > len(lowDesc) {
+			end = len(lowDesc)
+		}
+		if winStart > end {
+			continue
+		}
+		win := lowDesc[winStart:end]
 		if !strings.Contains(win, "tool") && !strings.Contains(win, "call") &&
 			!strings.Contains(win, "use ") && !strings.Contains(win, "using ") &&
 			!strings.Contains(win, "invoke") && !strings.Contains(win, "via ") {

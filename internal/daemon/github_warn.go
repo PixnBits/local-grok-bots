@@ -167,7 +167,11 @@ func tokenFileWarning(path string) string {
 	}
 	msg := ""
 	if _, err := readTokenForWarn(path); err != nil {
-		msg = tokenWarningText(path, github.TokenFailureReason(err))
+		var size int64
+		if ok {
+			size = id.size
+		}
+		msg = tokenWarningText(path, github.TokenFailureReason(err), size)
 	}
 	if ok {
 		tokenWarnMu.Lock()
@@ -200,7 +204,7 @@ func tokenWarnStat(path string) (tokenWarnID, bool) {
 	}, true
 }
 
-func tokenWarningText(path, reason string) string {
+func tokenWarningText(path, reason string, size int64) string {
 	who := daemonUserName()
 	var msg string
 	switch reason {
@@ -209,17 +213,22 @@ func tokenWarningText(path, reason string) string {
 	case "mode":
 		msg = fmt.Sprintf("The GitHub token file %s can be read by other users. Run `chmod 600 %s`.", path, path)
 	case "token file: not owned by daemon":
-		msg = fmt.Sprintf("The GitHub token file %s belongs to another user. Run `chown %s %s`, then `chmod 600 %s`.", path, who, path, path)
+		msg = fmt.Sprintf("The GitHub token file %s belongs to another user. Run `sudo chown %s %s`, then `chmod 600 %s`.", path, who, path, path)
 	case "permission denied":
-		msg = fmt.Sprintf("The daemon can't read the GitHub token file %s. It may be owned by root. Run `sudo chown %s %s`, then `chmod 600 %s`.", path, who, path, path)
+		msg = fmt.Sprintf("The daemon can't open the GitHub token file %s. Run `chmod 600 %s`. If that doesn't help, make sure %s can open the folder it's in.", path, path, who)
 	case "type":
-		msg = fmt.Sprintf("The GitHub token file %s isn't a regular file. Point `token_file` in policy.toml at a regular file.", path)
+		msg = fmt.Sprintf("The GitHub token file %s is a folder, a link, or another special file. Point `token_file` in policy.toml at the token file itself.", path)
 	case "shape":
-		msg = fmt.Sprintf("The GitHub token file %s doesn't hold a valid token. Put one token on a single line.", path)
+		msg = fmt.Sprintf("The GitHub token file %s doesn't hold a valid token. Put just the token on one line, with no spaces.", path)
 	case "size":
-		msg = fmt.Sprintf("The GitHub token file %s is empty or too large. Put one token in it.", path)
+		// size is the Lstat length. Zero and unknown both use the empty-file text.
+		if size > 0 {
+			msg = fmt.Sprintf("The GitHub token file %s is too big to be a token. Put just one token in it.", path)
+		} else {
+			msg = fmt.Sprintf("The GitHub token file %s is empty. Put your token in it.", path)
+		}
 	default:
-		msg = fmt.Sprintf("The daemon can't read the GitHub token file %s. Check the file, then run `chmod 600 %s`.", path, path)
+		msg = fmt.Sprintf("The daemon couldn't read the GitHub token file %s. Check that the path is right and that the file is a plain file you own, then run `chmod 600 %s`.", path, path)
 	}
 	return msg + " This applies to every bot with GitHub access."
 }
