@@ -160,7 +160,6 @@ func TestLiteralForbiddenIPAfterAllow(t *testing.T) {
 		t.Fatalf("dialed %d", dialed.Load())
 	}
 	mu.Lock()
-	defer mu.Unlock()
 	var hits int
 	for _, ev := range events {
 		if ev.Kind == "grant_denied" && ev.Detail == "address" {
@@ -168,6 +167,34 @@ func TestLiteralForbiddenIPAfterAllow(t *testing.T) {
 		}
 	}
 	if hits != 4 {
+		mu.Unlock()
 		t.Fatalf("events %+v", events)
+	}
+	mu.Unlock()
+	// Ports outside the default list still take the address result.
+	plain := []struct {
+		host string
+		req  string
+	}{
+		{"127.0.0.1:8080", "GET http://127.0.0.1:8080/ HTTP/1.1\r\nHost: 127.0.0.1:8080\r\n\r\n"},
+		{"[::1]:8080", "GET http://[::1]:8080/ HTTP/1.1\r\nHost: [::1]:8080\r\n\r\n"},
+	}
+	for _, tc := range plain {
+		mu.Lock()
+		n := len(events)
+		mu.Unlock()
+		body := proxyText(t, p.Sock(), tc.req)
+		if !strings.Contains(body, "403") {
+			t.Fatalf("GET %s: %q", tc.host, body)
+		}
+		if dialed.Load() != 0 {
+			t.Fatalf("dialed %d", dialed.Load())
+		}
+		mu.Lock()
+		added := append([]Event(nil), events[n:]...)
+		mu.Unlock()
+		if len(added) != 1 || added[0].Kind != "grant_denied" || added[0].Detail != "address" {
+			t.Fatalf("GET %s: %+v", tc.host, added)
+		}
 	}
 }
