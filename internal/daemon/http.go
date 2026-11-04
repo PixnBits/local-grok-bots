@@ -448,17 +448,20 @@ func (a *App) handleListBots(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name         string      `json:"name"`
-		Label        string      `json:"label"`
-		Description  *string     `json:"description"`
-		Instructions *string     `json:"instructions"`
-		Mark         *store.Mark `json:"mark"`
-		Model        *string     `json:"model"`
-		Grants       []string    `json:"grants"`
-		NetAllow     []string    `json:"net_allow"`
-		SSHAllow     []string    `json:"ssh_allow"`
-		GitHubAllow  []string    `json:"github_allow"`
-		ServerTools  *[]string   `json:"server_tools"`
+		Name         string          `json:"name"`
+		Label        string          `json:"label"`
+		Description  *string         `json:"description"`
+		Instructions *string         `json:"instructions"`
+		Mark         *store.Mark     `json:"mark"`
+		Model        *string         `json:"model"`
+		Grants       []string        `json:"grants"`
+		NetAllow     []string        `json:"net_allow"`
+		SSHAllow     []string        `json:"ssh_allow"`
+		GitHubAllow  []string        `json:"github_allow"`
+		ServerTools  *[]string       `json:"server_tools"`
+		RunTimeout   *string         `json:"run_timeout"`
+		ShellTimeout *string         `json:"shell_timeout"`
+		ToolRounds   json.RawMessage `json:"tool_rounds"`
 	}
 	if err := readJSON(w, r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -483,19 +486,47 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 	if body.Mark != nil {
 		mark = *body.Mark
 	}
-	b, err := a.st.InsertBot(store.BotDraft{
-		Name: name, Label: body.Label, Description: description, Mark: mark, Model: modelPtr,
-		Grants: body.Grants, NetAllow: body.NetAllow, SSHAllow: body.SSHAllow, GitHubAllow: body.GitHubAllow, ServerTools: body.ServerTools,
-	}, "user")
-	if err != nil {
-		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
-			writeErr(w, err)
+	var runTO, shellTO time.Duration
+	var rounds int
+	if body.RunTimeout != nil {
+		runTO, err = parseDurationString(*body.RunTimeout)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+	}
+	if body.ShellTimeout != nil {
+		shellTO, err = parseDurationString(*body.ShellTimeout)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	pol := a.pol()
+	roundsSet := len(body.ToolRounds) != 0 && string(body.ToolRounds) != "null"
+	if roundsSet {
+		ceilN, _ := pol.ToolRoundsCeiling()
+		rounds, err = parseOptionalToolRounds(body.ToolRounds, ceilN)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+	}
+	if err := a.checkBotLimitCeilings(pol, runTO, shellTO, rounds, body.RunTimeout != nil, body.ShellTimeout != nil, roundsSet); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	b, err := a.st.InsertBot(store.BotDraft{
+		Name: name, Label: body.Label, Description: description, Mark: mark, Model: modelPtr,
+		Grants: body.Grants, NetAllow: body.NetAllow, SSHAllow: body.SSHAllow, GitHubAllow: body.GitHubAllow, ServerTools: body.ServerTools,
+		RunTimeout: runTO, ShellTimeout: shellTO, ToolRounds: rounds,
+	}, "user")
+	if err != nil {
+		writeSaveErr(w, err)
+		return
+	}
 	a.notePermCallback()
+	a.auditLimitChanges(store.Bot{}, b, "user")
 	writeJSON(w, http.StatusCreated, a.decorateBot(b))
 }
 
@@ -647,6 +678,34 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if v, ok := raw["run_timeout"]; ok {
+		d, err := parseOptionalDuration(v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		patch.RunTimeoutSet = true
+		patch.RunTimeout = d
+	}
+	if v, ok := raw["shell_timeout"]; ok {
+		d, err := parseOptionalDuration(v)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		patch.ShellTimeoutSet = true
+		patch.ShellTimeout = d
+	}
+	if v, ok := raw["tool_rounds"]; ok {
+		ceilN, _ := a.effPol(id).ToolRoundsCeiling()
+		n, err := parseOptionalToolRounds(v, ceilN)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		patch.ToolRoundsSet = true
+		patch.ToolRounds = n
+	}
 	var archived *bool
 	if v, ok := raw["archived"]; ok {
 		var on bool
@@ -655,6 +714,27 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		archived = &on
+	}
+	runSet, shellSet, roundsSet := patch.RunTimeoutSet, patch.ShellTimeoutSet, patch.ToolRoundsSet
+	if runSet || shellSet || roundsSet {
+		if cur, err := a.st.GetBot(id); err == nil {
+			if runSet && patch.RunTimeout == cur.RunTimeout.Duration() {
+				runSet = false
+			}
+			if shellSet && patch.ShellTimeout == cur.ShellTimeout.Duration() {
+				shellSet = false
+			}
+			if roundsSet && patch.ToolRounds == cur.ToolRounds {
+				roundsSet = false
+			}
+		}
+	}
+	if runSet || shellSet || roundsSet {
+		pol := a.effPol(id)
+		if err := a.checkBotLimitCeilings(pol, patch.RunTimeout, patch.ShellTimeout, patch.ToolRounds, runSet, shellSet, roundsSet); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 	var setIdle bool
 	if v, ok := raw["status"]; ok {
@@ -674,15 +754,12 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	b, err := a.st.UpdateBot(id, patch)
+	b, old, err := a.st.UpdateBot(id, patch)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConflict) {
-			writeErr(w, err)
-			return
-		}
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeSaveErr(w, err)
 		return
 	}
+	a.auditLimitChanges(old, b, patch.By)
 	if archived != nil {
 		if _, err := a.st.SetArchived(id, *archived, "user"); err != nil {
 			writeErr(w, err)
@@ -1215,6 +1292,21 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	_ = enc.Encode(v)
+}
+
+// writeSaveErr maps a bot insert or update error. Storage failures are 500.
+// Validation errors stay 400. A missing bot is 404 and a name clash is 409.
+func writeSaveErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConflict) {
+		writeErr(w, err)
+		return
+	}
+	var se *store.StorageError
+	if errors.As(err, &se) {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save the bot"})
+		return
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 }
 
 func writeErr(w http.ResponseWriter, err error) {

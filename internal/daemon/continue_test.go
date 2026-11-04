@@ -162,8 +162,9 @@ func TestContinueCappedRun(t *testing.T) {
 		return b.Status != "running" && b.ContinueRunID != ""
 	})
 	waitRunReleased(t, app, bot.ID)
-	if got.ContinueRunID != capped || got.LastRunStatus != "error" || got.LastRunError != "tool round limit" {
-		t.Fatalf("offer = %+v", got)
+	wantErr := toolRoundLimitBody(maxToolRounds, 0, maxToolRounds, "the built-in default")
+	if got.ContinueRunID != capped || got.LastRunStatus != "error" || got.LastRunError != wantErr {
+		t.Fatalf("offer = %+v want %q", got, wantErr)
 	}
 	if calls := mdl.snapshot(); len(calls) != maxToolRounds {
 		t.Fatalf("model calls before continue = %d", len(calls))
@@ -222,7 +223,7 @@ func TestContinueCappedRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cappedRun.Status != "error" || cappedRun.Error == nil || *cappedRun.Error != "tool round limit" {
+	if cappedRun.Status != "error" || cappedRun.Error == nil || *cappedRun.Error != wantErr {
 		t.Fatalf("capped run reopened: %+v", cappedRun)
 	}
 	nextRun, err := app.st.GetRun(next.RunID)

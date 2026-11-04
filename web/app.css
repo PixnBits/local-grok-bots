@@ -183,6 +183,7 @@
     border-radius: 10px;
     padding: 10px 12px;
   }
+  input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
   textarea { resize: vertical; min-height: 72px; }
   /* One viewport. The document does not scroll; paging stays on the message list. */
   .app { height: 100vh; height: 100dvh; overflow: hidden; display: flex; flex-direction: column; }
@@ -1143,6 +1144,9 @@
     #server-tools-seg button, .builder .seg button { height: 44px; min-height: 44px; }
     .shape-btn { width: 44px; height: 44px; }
     #color-custom { width: 44px; height: 44px; }
+    /* Clear the fixed save bar. 160px is the wrapped bar plus 16px. */
+    #sec-limits .fld { scroll-margin-bottom: 160px; }
+    #sec-limits .fld input { height: 44px; scroll-margin-bottom: 160px; }
   }
   @media (prefers-reduced-motion: reduce) {
     .state-sheet, .state-backdrop, .toast, .skel-mark, .skel-line { transition: none; animation: none; }

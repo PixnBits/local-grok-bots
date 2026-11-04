@@ -140,31 +140,41 @@ func sawStreamReset(app *App, runID, reason string) bool {
 
 func TestCompactDurationAndTimeoutBody(t *testing.T) {
 	if compactDuration(0) != "0s" || compactDuration(150*time.Millisecond) != "150ms" ||
+		compactDuration(1500*time.Millisecond) != "1.5s" || compactDuration(1001*time.Millisecond) != "1.001s" ||
 		compactDuration(45*time.Second) != "45s" || compactDuration(2*time.Minute) != "2m" ||
-		compactDuration(90*time.Minute) != "1h30m" || compactDuration(time.Hour+30*time.Second) != "1h30s" {
-		t.Fatalf("compact %s %s %s %s %s %s",
-			compactDuration(0), compactDuration(150*time.Millisecond), compactDuration(45*time.Second),
-			compactDuration(2*time.Minute), compactDuration(90*time.Minute), compactDuration(time.Hour+30*time.Second))
+		compactDuration(90*time.Minute) != "1h30m" || compactDuration(time.Hour+30*time.Second) != "1h30s" ||
+		compactDuration(90*time.Second+500*time.Millisecond) != "1m30.5s" {
+		t.Fatalf("compact %s %s %s %s %s %s %s %s %s",
+			compactDuration(0), compactDuration(150*time.Millisecond), compactDuration(1500*time.Millisecond),
+			compactDuration(1001*time.Millisecond), compactDuration(45*time.Second),
+			compactDuration(2*time.Minute), compactDuration(90*time.Minute), compactDuration(time.Hour+30*time.Second),
+			compactDuration(90*time.Second+500*time.Millisecond))
 	}
 	cases := []struct{ got, want string }{
-		{timeoutBody("stall_timeout", 2*time.Minute, 1, "Hello"), "No output from the model for 2m (stall_timeout). Retried once. The partial reply is kept above."},
-		{timeoutBody("stall_timeout", 2*time.Minute, 0, "Hello"), "No output from the model for 2m (stall_timeout). The partial reply is kept above."},
-		{timeoutBody("stall_timeout", 2*time.Minute, 0, "  "), "No output from the model for 2m (stall_timeout)."},
-		{timeoutBody("stall_timeout", 2*time.Minute, 2, ""), "No output from the model for 2m (stall_timeout). Retried 2 times."},
-		{timeoutBody("first_output_timeout", 5*time.Minute, 1, ""), "The model sent no output within 5m (first_output_timeout). Retried once."},
-		{timeoutBody("model_timeout", 10*time.Minute, 0, "Hello"), "The model call hit its 10m limit (model_timeout). The partial reply is kept above."},
-		{timeoutBody("run_timeout", 150*time.Millisecond, 0, ""), "The run hit its 150ms limit (run_timeout)."},
+		{timeoutBody("stall_timeout", 2*time.Minute, 1, "Hello", ""), "No output from the model for 2m (stall_timeout). Retried once. The partial reply is kept above."},
+		{timeoutBody("stall_timeout", 2*time.Minute, 0, "Hello", ""), "No output from the model for 2m (stall_timeout). The partial reply is kept above."},
+		{timeoutBody("stall_timeout", 2*time.Minute, 0, "  ", ""), "No output from the model for 2m (stall_timeout)."},
+		{timeoutBody("stall_timeout", 2*time.Minute, 2, "", ""), "No output from the model for 2m (stall_timeout). Retried 2 times."},
+		{timeoutBody("first_output_timeout", 5*time.Minute, 1, "", ""), "The model sent no output within 5m (first_output_timeout). Retried once."},
+		{timeoutBody("model_timeout", 10*time.Minute, 0, "Hello", ""), "The model call hit its 10m limit (model_timeout). The partial reply is kept above."},
+		{timeoutBody("run_timeout", 150*time.Millisecond, 0, "", ""), "The run hit its 150ms limit (the built-in default)."},
+		{timeoutBody("run_timeout", 5*time.Minute, 0, "", "set on this bot"), "The run hit its 5m limit (set on this bot)."},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
 			t.Fatalf("got %q want %q", c.got, c.want)
 		}
-		code := ""
-		for _, limit := range []string{"first_output_timeout", "stall_timeout", "model_timeout", "run_timeout", "turn_timeout"} {
-			if strings.Contains(c.want, "("+limit+")") {
-				code = limit
+		if strings.HasPrefix(c.got, "The run hit its ") {
+			wantNotice := "Notice: Run timed out (run_timeout)."
+			if strings.Contains(c.got, "hit its 5m limit") {
+				wantNotice = "Notice: Stopped: hit the 5m run limit."
 			}
+			if runNoticeText("timeout", c.got) != wantNotice {
+				t.Fatalf("notice %q want %q", runNoticeText("timeout", c.got), wantNotice)
+			}
+			continue
 		}
+		code := timeoutLimitCode(c.got)
 		if code == "" || runNoticeText("timeout", c.got) != fixedTimeoutNotice(code) {
 			t.Fatalf("notice %q", runNoticeText("timeout", c.got))
 		}
@@ -364,7 +374,7 @@ func TestNoRetryOnStopOrRunTimeout(t *testing.T) {
 		bot := createBot(t, srv.URL, "Bea")
 		postUser(t, srv.URL, bot.ID, "hi")
 		bot = waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool { return b.Status != "running" })
-		const body = "The run hit its 150ms limit (run_timeout)."
+		const body = "The run hit its 150ms limit (the built-in default)."
 		if bot.LastRunStatus != "timeout" || bot.LastRunError != body {
 			t.Fatalf("status %s %s", bot.LastRunStatus, bot.LastRunError)
 		}

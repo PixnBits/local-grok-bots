@@ -97,7 +97,7 @@ func TestServerToolsForPrecedence(t *testing.T) {
 		t.Fatalf("bot narrow %#v %s", allow, src)
 	}
 	wide := []string{"web_search", "x_search", "code_interpreter"}
-	if _, err := app.st.UpdateBot(bot.ID, store.BotPatch{ServerToolsSet: true, ServerTools: &wide}); err != nil {
+	if _, _, err := app.st.UpdateBot(bot.ID, store.BotPatch{ServerToolsSet: true, ServerTools: &wide}); err != nil {
 		t.Fatal(err)
 	}
 	allow, src = app.serverToolsFor(bot.ID)

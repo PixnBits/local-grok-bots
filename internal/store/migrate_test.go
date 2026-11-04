@@ -58,6 +58,9 @@ VALUES('t1', 'b1', '1h', 'do it', 1, '2999-01-01T00:00:00.000000000Z');
 	if bot.Description != "keep" || bot.Label != "" || bot.Mark.Shape != "circle" {
 		t.Fatalf("migrated bot %#v", bot)
 	}
+	if bot.RunTimeout != 0 || bot.ShellTimeout != 0 || bot.ToolRounds != 0 {
+		t.Fatalf("migrated limits %#v", bot)
+	}
 	if len(bot.Grants) != 0 || len(bot.NetAllow) != 0 || len(bot.SSHAllow) != 0 || bot.ServerTools != nil {
 		t.Fatalf("migrated grants %#v", bot)
 	}
@@ -68,7 +71,7 @@ VALUES('t1', 'b1', '1h', 'do it', 1, '2999-01-01T00:00:00.000000000Z');
 	if len(timers) != 1 || timers[0].Name != "" || timers[0].Prompt != "do it" {
 		t.Fatalf("migrated timers %#v", timers)
 	}
-	for _, col := range []string{"cli_pid", "cli_pgid", "cli_start", "cli_exe", "cli_marker", "server_tools"} {
+	for _, col := range []string{"cli_pid", "cli_pgid", "cli_start", "cli_exe", "cli_marker", "server_tools", "run_timeout_ms", "shell_timeout_ms", "tool_rounds"} {
 		ok, err := st.hasColumn("bots", col)
 		if err != nil {
 			t.Fatal(err)
@@ -129,5 +132,51 @@ func TestCLIProcKeptUntilCleared(t *testing.T) {
 	}
 	if cleared.PID != 0 || cleared.PGID != 0 || cleared.Start != "" || cleared.Exe != "" || cleared.Marker != "" {
 		t.Fatalf("clear left %+v", cleared)
+	}
+}
+
+func TestMigrateRunsErrorCode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+CREATE TABLE bots (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  name_lower TEXT NOT NULL UNIQUE,
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'idle',
+  model TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE runs (
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  error TEXT
+);
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ok, err := st.hasColumn("runs", "error_code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("migrate did not add error_code")
 	}
 }

@@ -694,7 +694,7 @@ func TestGrokNetworkWarnSkipsLinuxAndNetGrant(t *testing.T) {
 	old := cliGOOS
 	cliGOOS = "darwin"
 	t.Cleanup(func() { cliGOOS = old })
-	if _, err := app.st.UpdateBot(bot.ID, store.BotPatch{GrantsSet: true, Grants: []string{"net"}}); err != nil {
+	if _, _, err := app.st.UpdateBot(bot.ID, store.BotPatch{GrantsSet: true, Grants: []string{"net"}}); err != nil {
 		t.Fatal(err)
 	}
 	postGrok(t, srv.URL, bot.ID)

@@ -110,6 +110,7 @@
       </div>
     </section>
     <section class="view" id="view-profile">
+      <div id="limit-announce" class="sr" aria-live="polite"></div>
       <header class="solo-bar">
         <button type="button" class="back solo-back" id="solo-back" aria-label="Back"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
         <span class="mark" id="profile-head-mark" aria-hidden="true"></span>
@@ -136,6 +137,7 @@
         <nav class="profile-nav profile-nav-block" id="profile-nav-access" hidden aria-label="Permissions and access">
           <button type="button" class="nav-link" data-sec="sec-grants" aria-current="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 12h18M12 4c2 2.5 3 5 3 8s-1 5.5-3 8c-2-2.5-3-5-3-8s1-5.5 3-8z" fill="none" stroke="currentColor" stroke-width="2"/></svg>Grants</button>
           <button type="button" class="nav-link" data-sec="sec-allow"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M8 7h11M8 12h11M8 17h11M5 7h.01M5 12h.01M5 17h.01" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Allowlists</button>
+          <button type="button" class="nav-link" data-sec="sec-limits"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 8v4l3 2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>Run limits</button>
           <button type="button" class="nav-link" data-sec="sec-tools"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M14.5 6.5l3 3L8 19H5v-3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>Server tools</button>
           <button type="button" class="nav-link" data-sec="sec-rules"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>Permission rules</button>
         </nav>
@@ -236,7 +238,7 @@
               </div>
             </section>
             <button type="button" class="linkrow access-phone" id="open-access">
-              <span><b>Permissions &amp; access</b><span>Grants, allowlists, server tools, and rules</span></span>
+              <span><b>Permissions &amp; access</b><span>Grants, allowlists, run limits, server tools, and rules</span></span>
               <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
           </div>
@@ -315,6 +317,30 @@
                       <ul></ul>
                     </div>
                   </div>
+                  <p class="help changed" hidden>Changed</p>
+                </div>
+              </section>
+              <section class="sec" id="sec-limits">
+                <div class="sec-h"><h2>Run limits</h2><span class="aside">Saved with the profile</span></div>
+                <div class="fld" id="fld-run-timeout">
+                  <label for="profile-run-timeout">Run timeout</label>
+                  <input id="profile-run-timeout" autocomplete="off" placeholder="e.g. 90s, 5m, 1h" aria-describedby="help-run-timeout err-run-timeout">
+                  <p class="help" id="help-run-timeout"></p>
+                  <p class="help is-error" id="err-run-timeout" hidden></p>
+                  <p class="help changed" hidden>Changed</p>
+                </div>
+                <div class="fld" id="fld-tool-rounds">
+                  <label for="profile-tool-rounds">Tool rounds</label>
+                  <input id="profile-tool-rounds" inputmode="numeric" autocomplete="off" aria-describedby="help-tool-rounds err-tool-rounds">
+                  <p class="help" id="help-tool-rounds"></p>
+                  <p class="help is-error" id="err-tool-rounds" hidden></p>
+                  <p class="help changed" hidden>Changed</p>
+                </div>
+                <div class="fld" id="fld-shell-timeout">
+                  <label for="profile-shell-timeout">Shell timeout</label>
+                  <input id="profile-shell-timeout" autocomplete="off" placeholder="e.g. 90s, 5m, 1h" aria-describedby="help-shell-timeout err-shell-timeout">
+                  <p class="help" id="help-shell-timeout"></p>
+                  <p class="help is-error" id="err-shell-timeout" hidden></p>
                   <p class="help changed" hidden>Changed</p>
                 </div>
               </section>

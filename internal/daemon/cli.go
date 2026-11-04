@@ -133,7 +133,7 @@ func (a *App) executeCLI(ctx context.Context, bot store.Bot, runID string) {
 		a.broker.SetBotRuntime(bot.ID, home, userHome, iso.Env)
 		a.broker.SnapshotBot(bot.ID)
 	}
-	turnTimeout := turnPol.EffectiveTurnTimeout()
+	turnTimeout := a.effectiveRunTimeout(bot, turnPol)
 	turnCtx, turnCancel := context.WithTimeout(ctx, turnTimeout)
 	defer turnCancel()
 	a.setCLICancel(bot.ID, turnCancel)

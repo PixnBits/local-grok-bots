@@ -669,17 +669,17 @@ function paintHeader(b) {
     paintNote("attention", timeoutOffer.text, actions);
     return;
   }
-  const offer = !state.streaming && b.status !== "running" && b.last_run_error === "tool round limit" && b.continue_run_id;
-  if (offer) {
+  const endNote = (typeof runEndNote === "function") ? runEndNote(b, !!state.streaming) : null;
+  if (endNote && endNote.kind === "continue") {
     const btn = el("button", "primary small", "Continue");
     btn.type = "button";
     const runId = b.continue_run_id;
     btn.addEventListener("click", () => continueRun(runId));
-    paintNote("continue", "Stopped after 8 tool rounds. Continue picks up the same work for 8 more.", [btn]);
+    paintNote("continue", endNote.text, [btn]);
     return;
   }
-  if (!state.streaming && b.status !== "running" && b.last_run_status === "error" && b.last_run_error) {
-    paintFailedNote("Run failed: " + b.last_run_error);
+  if (endNote && endNote.kind === "failed") {
+    paintFailedNote(endNote.text);
   } else if (!state.streaming && state.stopNote !== "failed") {
     note.hidden = true;
     note.replaceChildren();
@@ -2464,7 +2464,7 @@ async function follow(runId) {
           }
           setWorking(false);
           if (state.stop.phase !== "stopped") {
-            if (event === "error" && payload.error !== "tool round limit") showRunError("Run failed: " + (payload.error || "unknown error"));
+            if (event === "error" && !(typeof isToolRoundLimitError === "function" && isToolRoundLimitError(payload.error, payload.code))) showRunError("Run failed: " + (payload.error || "unknown error"));
           }
           stopStream();
           if (state.stop && state.stop.phase === "stopped") {
@@ -2476,7 +2476,7 @@ async function follow(runId) {
           await loadThread();
           await refreshBot();
           loadState().catch(() => {});
-          if (event === "error" && payload.error === "tool round limit" && currentBot() && currentBot().status === "running") {
+          if (event === "error" && typeof isToolRoundLimitError === "function" && isToolRoundLimitError(payload.error, payload.code) && currentBot() && currentBot().status === "running") {
             await refreshBot();
           }
           if (event === "done") pollActive();
@@ -2718,7 +2718,162 @@ function dirtyFieldLabels(base, cur) {
   if (!sameList(b.ssh, c.ssh)) out.push("SSH allowlist");
   if (!sameList(b.github, c.github)) out.push("GitHub repositories");
   if (!sameTools(b.server_tools, c.server_tools)) out.push("Server tools");
+  if ((b.run_timeout || "") !== (c.run_timeout || "")) out.push("Run timeout");
+  if ((b.tool_rounds || "") !== (c.tool_rounds || "")) out.push("Tool rounds");
+  if ((b.shell_timeout || "") !== (c.shell_timeout || "")) out.push("Shell timeout");
   return out;
+}
+function limitLabel(field) {
+  if (field === "tool_rounds") return "Tool rounds";
+  if (field === "shell_timeout") return "Shell timeout";
+  return "Run timeout";
+}
+function aboveCeilingMessage(field, ceiling, source) {
+  const label = limitLabel(field);
+  const c = String(ceiling);
+  if (source === "your administrator") {
+    return label + " can be at most " + c + ", the most your administrator allows. Enter " + c + " or less.";
+  }
+  if (source === "this system") {
+    return label + " can be at most " + c + " on this system. Enter " + c + " or less.";
+  }
+  if (source === "policy.toml") {
+    return label + " can be at most " + c + " (set in policy.toml). Enter " + c + " or less, or leave it blank to use " + c + ".";
+  }
+  return label + " can be at most " + c + ". Enter " + c + " or less, or leave it blank.";
+}
+function toolRoundsRangeMessage(ceiling) {
+  let n = Number(ceiling);
+  if (!(n >= 1)) n = 1;
+  return "Enter a whole number from 1 to " + n + ".";
+}
+function durationPlaceholder(inherited) {
+  const hint = "e.g. 90s, 5m, 1h";
+  const shown = String(inherited == null ? "" : inherited).trim();
+  if (!shown) return hint;
+  return shown + " (" + hint + ")";
+}
+function limitPlaceholder(field, stored, inherited) {
+  if (field === "tool_rounds") return stored ? "" : String(inherited == null ? "" : inherited);
+  if (stored) return "e.g. 90s, 5m, 1h";
+  return durationPlaceholder(inherited);
+}
+function storedAbove(stored, effective) {
+  const s = String(stored == null ? "" : stored).trim();
+  const e = String(effective == null ? "" : effective).trim();
+  if (!s || !e) return false;
+  const sMs = parseGoDurationMs(s);
+  const eMs = parseGoDurationMs(e);
+  if (sMs > 0 && eMs > 0) return sMs > eMs;
+  const sn = Number(s);
+  const en = Number(e);
+  return Number.isFinite(sn) && Number.isFinite(en) && sn > en;
+}
+function durationHasFraction(raw) {
+  const ms = parseGoDurationMs(raw);
+  return Number.isFinite(ms) && ms > 0 && ms % 1000 !== 0;
+}
+function limitHelpText(value, source, ceiling, ceilingSource, stored) {
+  const shown = value == null ? "" : String(value);
+  let text;
+  if (source === "bot") {
+    text = "Using " + shown + ", set on this bot. Up to " + ceiling + " allowed.";
+  } else if (ceilingSource === "policy.toml") {
+    text = "Using " + shown + ", from policy.toml.";
+  } else if (ceilingSource === "your administrator") {
+    text = "Using " + shown + ", the most your administrator allows.";
+  } else if (ceilingSource === "this system") {
+    text = "Using " + shown + " on this system.";
+  } else {
+    text = "Using " + shown + ", the built-in default.";
+  }
+  if (storedAbove(stored, shown)) {
+    const asked = String(stored).trim();
+    text += " This bot asks for " + asked + ", but only " + shown + " is allowed now, so " + shown + " is used.";
+  }
+  if (durationHasFraction(shown) || durationHasFraction(stored)) {
+    text += " Whole seconds only when you change it.";
+  }
+  return text;
+}
+function changedLimitPayload(base, cur) {
+  const b = base || {};
+  const c = cur || {};
+  const out = {};
+  if (String(b.run_timeout || "") !== String(c.run_timeout || "")) out.run_timeout = c.run_timeout || "";
+  if (String(b.shell_timeout || "") !== String(c.shell_timeout || "")) out.shell_timeout = c.shell_timeout || "";
+  if (String(b.tool_rounds || "") !== String(c.tool_rounds || "")) {
+    const raw = String(c.tool_rounds == null ? "" : c.tool_rounds);
+    out.tool_rounds = raw === "" ? 0 : Number(raw);
+  }
+  return out;
+}
+function limitPrecheckError(field, raw, limits) {
+  const v = String(raw == null ? "" : raw).trim();
+  if (!v) return "";
+  const lim = limits && limits[field];
+  const ceiling = lim && lim.ceiling;
+  const src = (lim && lim.ceiling_source) ? lim.ceiling_source : "the built-in default";
+  if (field === "tool_rounds") {
+    if (!/^\d+$/.test(v) || Number(v) < 1 || Number(v) > 100) return toolRoundsRangeMessage(ceiling);
+    const n = Number(v);
+    if (ceiling != null && n > Number(ceiling)) return aboveCeilingMessage(field, ceiling, src);
+    return "";
+  }
+  const ms = parseGoDurationMs(v);
+  if (!(ms > 0)) return "Enter a time like 90s, 5m or 1h.";
+  if (ms < 1000 || ms % 1000 !== 0) return "Use whole seconds, like 2s.";
+  if (ceiling) {
+    const ceilMs = parseGoDurationMs(String(ceiling));
+    if (ceilMs > 0 && ms > ceilMs) return aboveCeilingMessage(field, ceiling, src);
+  }
+  return "";
+}
+function firstChangedLimitError(base, cur, limits, checkAll) {
+  const changed = checkAll ? { run_timeout: true, shell_timeout: true, tool_rounds: true } : changedLimitPayload(base, cur);
+  const fields = ["run_timeout", "shell_timeout", "tool_rounds"];
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i];
+    if (!checkAll && !Object.prototype.hasOwnProperty.call(changed, field)) continue;
+    const msg = limitPrecheckError(field, cur ? cur[field] : "", limits);
+    if (msg) return { field: field, message: msg };
+  }
+  return null;
+}
+function limitFieldForMessage(msg, limits, cur) {
+  const text = String(msg || "");
+  const fields = ["run_timeout", "shell_timeout", "tool_rounds"];
+  for (let i = 0; i < fields.length; i++) {
+    if (text.indexOf(limitLabel(fields[i])) === 0) return fields[i];
+  }
+  const values = cur || {};
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i];
+    if (limitPrecheckError(field, values[field], limits) === text) return field;
+  }
+  return "";
+}
+function parseGoDurationMs(s) {
+  const raw = String(s == null ? "" : s).trim();
+  if (!raw) return 0;
+  const re = /(-?\d+(?:\.\d+)?)(ns|us|µs|μs|ms|s|m|h)/g;
+  let total = 0;
+  let matched = 0;
+  let m;
+  while ((m = re.exec(raw))) {
+    matched += m[0].length;
+    const n = Number(m[1]);
+    let mul = 0;
+    if (m[2] === "h") mul = 3600000;
+    else if (m[2] === "m") mul = 60000;
+    else if (m[2] === "s") mul = 1000;
+    else if (m[2] === "ms") mul = 1;
+    else if (m[2] === "us" || m[2] === "µs" || m[2] === "μs") mul = 0.001;
+    else if (m[2] === "ns") mul = 1e-6;
+    total += n * mul;
+  }
+  if (!matched || raw.replace(/\s+/g, "").length !== matched) return NaN;
+  return total;
 }
 function scheduleFromBuilder(mode, n, unit) {
   if (mode !== "every") return "";
@@ -2848,7 +3003,10 @@ const DIRTY_FIELDS = [
   ["Network allowlist", "fld-net"],
   ["SSH allowlist", "fld-ssh"],
   ["GitHub repositories", "fld-github"],
-  ["Server tools", "fld-tools"]
+  ["Server tools", "fld-tools"],
+  ["Run timeout", "fld-run-timeout"],
+  ["Tool rounds", "fld-tool-rounds"],
+  ["Shell timeout", "fld-shell-timeout"]
 ];
 let navBypass = false;
 
@@ -3004,13 +3162,16 @@ function readProfile() {
     net: chipValues("net"),
     ssh: chipValues("ssh"),
     github: chipValues("github"),
-    server_tools: serverToolsPayload()
+    server_tools: serverToolsPayload(),
+    run_timeout: $("#profile-run-timeout") ? $("#profile-run-timeout").value.trim() : "",
+    tool_rounds: $("#profile-tool-rounds") ? $("#profile-tool-rounds").value.trim() : "",
+    shell_timeout: $("#profile-shell-timeout") ? $("#profile-shell-timeout").value.trim() : ""
   };
 }
 function profilePayload() {
   const cur = readProfile();
   const model = cur.model;
-  return {
+  const body = {
     name: cur.name,
     label: cur.label,
     description: cur.description,
@@ -3022,6 +3183,17 @@ function profilePayload() {
     github_allow: cur.github,
     server_tools: cur.server_tools
   };
+  if (state.draft) {
+    body.run_timeout = cur.run_timeout || "";
+    body.shell_timeout = cur.shell_timeout || "";
+    body.tool_rounds = cur.tool_rounds === "" ? 0 : Number(cur.tool_rounds);
+  } else {
+    const limits = changedLimitPayload(state.profileBase, cur);
+    if (Object.prototype.hasOwnProperty.call(limits, "run_timeout")) body.run_timeout = limits.run_timeout;
+    if (Object.prototype.hasOwnProperty.call(limits, "shell_timeout")) body.shell_timeout = limits.shell_timeout;
+    if (Object.prototype.hasOwnProperty.call(limits, "tool_rounds")) body.tool_rounds = limits.tool_rounds;
+  }
+  return body;
 }
 function profileDirty() {
   if (navBypass) return false;
@@ -3040,7 +3212,10 @@ const DIRTY_CONTROLS = {
   "Network allowlist": "chips-net",
   "SSH allowlist": "chips-ssh",
   "GitHub repositories": "chips-github",
-  "Server tools": "server-tools"
+  "Server tools": "server-tools",
+  "Run timeout": "profile-run-timeout",
+  "Tool rounds": "profile-tool-rounds",
+  "Shell timeout": "profile-shell-timeout"
 };
 function changedNote(node) {
   if (!node) return null;
@@ -3494,6 +3669,7 @@ function scrollProfileTo(id) {
 function applyBotFields(b) {
   const bot = b || {};
   state.mark = { shape: (bot.mark && bot.mark.shape) || "circle", color: (bot.mark && bot.mark.color) || COLORS[0] };
+  state.botLimits = bot.limits || null;
   $("#profile-name").value = bot.name || "";
   $("#profile-label").value = bot.label || "";
   $("#profile-description").value = bot.description || "";
@@ -3506,11 +3682,15 @@ function applyBotFields(b) {
   setServerMode(tools != null);
   paintServerTools(Array.isArray(tools) ? tools : []);
   paintWarnings(bot.warnings || []);
+  fillLimitInputs(bot);
+  paintLimitHelp();
+  clearLimitErrors();
   paintMarkPicker();
   syncProfileHeadingName();
 }
 function blankDraftFields() {
   state.mark = { shape: "circle", color: COLORS[0] };
+  state.botLimits = null;
   $("#profile-name").value = "";
   $("#profile-label").value = "";
   $("#profile-description").value = "";
@@ -3522,10 +3702,70 @@ function blankDraftFields() {
   setServerMode(false);
   paintServerTools([]);
   paintWarnings([]);
+  fillLimitInputs({});
+  paintLimitHelp();
+  clearLimitErrors();
   const err = $("#profile-err");
   if (err) { err.style.color = ""; err.textContent = ""; }
   paintMarkPicker();
   syncProfileHeadingName();
+}
+const LIMIT_FIELDS = [
+  { key: "run_timeout", input: "profile-run-timeout", help: "help-run-timeout", err: "err-run-timeout", fld: "fld-run-timeout" },
+  { key: "tool_rounds", input: "profile-tool-rounds", help: "help-tool-rounds", err: "err-tool-rounds", fld: "fld-tool-rounds" },
+  { key: "shell_timeout", input: "profile-shell-timeout", help: "help-shell-timeout", err: "err-shell-timeout", fld: "fld-shell-timeout" }
+];
+function storedLimitValue(bot, key) {
+  if (key === "tool_rounds") {
+    const n = bot && bot.tool_rounds;
+    return n ? String(n) : "";
+  }
+  return (bot && bot[key]) ? String(bot[key]) : "";
+}
+function fillLimitInputs(bot) {
+  const limits = (bot && bot.limits) || state.botLimits || {};
+  for (const f of LIMIT_FIELDS) {
+    const input = $("#" + f.input);
+    if (!input) continue;
+    const stored = storedLimitValue(bot, f.key);
+    input.value = stored;
+    const lim = limits[f.key] || {};
+    input.placeholder = limitPlaceholder(f.key, stored, lim.value || lim.ceiling || "");
+  }
+}
+function paintLimitHelp() {
+  const limits = state.botLimits || {};
+  for (const f of LIMIT_FIELDS) {
+    const help = $("#" + f.help);
+    if (!help) continue;
+    const lim = limits[f.key];
+    if (!lim || lim.value == null || lim.value === "") {
+      help.textContent = "";
+      continue;
+    }
+    const input = $("#" + f.input);
+    const stored = input ? input.value : "";
+    help.textContent = limitHelpText(lim.value, lim.source, lim.ceiling, lim.ceiling_source, stored);
+  }
+}
+function setLimitError(field, message) {
+  const f = LIMIT_FIELDS.find(x => x.key === field);
+  if (!f) return;
+  const input = $("#" + f.input);
+  const err = $("#" + f.err);
+  const fld = $("#" + f.fld);
+  if (fld) fld.classList.toggle("is-error", !!message);
+  if (input) {
+    input.setAttribute("aria-invalid", message ? "true" : "false");
+    input.setAttribute("aria-describedby", f.help + " " + f.err);
+  }
+  if (err) {
+    err.hidden = !message;
+    err.textContent = message || "";
+  }
+}
+function clearLimitErrors() {
+  for (const f of LIMIT_FIELDS) setLimitError(f.key, "");
 }
 function applySnapshot(snap) {
   const s = snap || {};
@@ -3540,6 +3780,11 @@ function applySnapshot(snap) {
   setChipList("github", s.github || []);
   setServerMode(s.server_tools != null);
   paintServerTools(Array.isArray(s.server_tools) ? s.server_tools : []);
+  if ($("#profile-run-timeout")) $("#profile-run-timeout").value = s.run_timeout || "";
+  if ($("#profile-tool-rounds")) $("#profile-tool-rounds").value = s.tool_rounds || "";
+  if ($("#profile-shell-timeout")) $("#profile-shell-timeout").value = s.shell_timeout || "";
+  paintLimitHelp();
+  clearLimitErrors();
   paintMarkPicker();
   syncProfileHeadingName();
   state.saveError = "";
@@ -3582,6 +3827,18 @@ function rescueFocus(fallback) {
   const a = document.activeElement;
   if (!a || a === document.body || !document.contains(a) || (a.closest && a.closest("[hidden]"))) (fallback || focusProfileHeading)();
 }
+function setLimitAnnounce(text) {
+  const live = $("#limit-announce");
+  if (live) live.textContent = text == null ? "" : String(text);
+}
+function revealLimitFailure(inputId, message) {
+  const access = $("#profile-access");
+  if (access && access.hidden) setProfilePane("access");
+  setLimitAnnounce(message || "");
+  const n = inputId ? $("#" + inputId) : null;
+  if (n && typeof n.focus === "function") n.focus();
+  if (n && typeof n.scrollIntoView === "function") n.scrollIntoView({ block: "center" });
+}
 function setSaving(on) {
   state.saving = !!on;
   const btn = $("#save-go");
@@ -3603,6 +3860,17 @@ async function saveProfile() {
     paintSaveBar();
     return;
   }
+  clearLimitErrors();
+  const cur = readProfile();
+  const limits = state.botLimits || {};
+  const limitPlan = firstChangedLimitError(state.profileBase, cur, limits, !!state.draft);
+  if (limitPlan) {
+    setLimitError(limitPlan.field, limitPlan.message);
+    state.saveError = limitPlan.message;
+    paintSaveBar();
+    revealLimitFailure("profile-" + limitPlan.field.replace(/_/g, "-"), limitPlan.message);
+    return;
+  }
   state.saveError = "";
   state.saveErrorChip = false;
   paintSaveBar();
@@ -3616,6 +3884,8 @@ async function saveProfile() {
         await openBot(bot.id, false);
         commitLevel({ view: "chat", bot: bot.id }, "replace");
       } finally { navBypass = false; }
+      setLimitAnnounce("Saved.");
+      clearLimitErrors();
       return;
     }
     if (!state.botId) return;
@@ -3624,16 +3894,22 @@ async function saveProfile() {
     state.profileBase = readProfile();
     state.saveError = "";
     state.saveErrorChip = false;
+    setLimitAnnounce("Saved.");
+    clearLimitErrors();
     paintDirty();
     showStatusToast("Saved");
     announce("Saved");
     rescueFocus();
     await loadBots();
   } catch (err) {
-    state.saveError = (state.draft ? "Couldn't create the bot. The daemon said: " : "Couldn't save. The daemon said: ") + (err && err.message ? err.message : String(err || ""));
+    const msg = err && err.message ? err.message : String(err || "");
+    const field = limitFieldForMessage(msg, state.botLimits || {}, readProfile());
+    if (field) setLimitError(field, msg);
+    state.saveError = (state.draft ? "Couldn't create the bot. The daemon said: " : "Couldn't save. The daemon said: ") + msg;
     paintSaveBar();
     setSaving(false);
-    rescueFocus(() => $("#save-go").focus());
+    if (field) revealLimitFailure("profile-" + field.replace(/_/g, "-"), msg);
+    else rescueFocus(() => $("#save-go").focus());
   } finally {
     setSaving(false);
   }
@@ -3997,6 +4273,10 @@ $("#profile-name").addEventListener("input", paintDirty);
 $("#profile-label").addEventListener("input", paintDirty);
 $("#profile-description").addEventListener("input", paintDirty);
 $("#profile-model").addEventListener("input", paintDirty);
+["profile-run-timeout", "profile-tool-rounds", "profile-shell-timeout"].forEach(id => {
+  const n = $("#" + id);
+  if (n) n.addEventListener("input", () => { paintDirty(); });
+});
 ["profile-name", "profile-label", "profile-model"].forEach(id => {
   $("#" + id).addEventListener("keydown", (e) => {
     if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
@@ -5275,6 +5555,42 @@ function themeRadioKey(key, index, count) {
 function retryTrigger(kind, unreachable, busy) {
   if (!unreachable || busy) return false;
   return kind === "visible" || kind === "focus" || kind === "online" || kind === "click";
+}
+
+// Stable tool-round stop. last_run_code wins; old stored rows match text.
+function isToolRoundLimitError(err, code) {
+  if (code === "tool_rounds") return true;
+  const t = err == null ? "" : String(err);
+  if (t === "tool round limit") return true;
+  return /^The run used all \d+ tool rounds? \(/.test(t);
+}
+
+// Continue after a tool-round stop. Same idle/continue_run_id rules as before.
+function toolRoundsContinueOffer(bot, streaming) {
+  if (streaming || !bot || bot.status === "running" || !bot.continue_run_id) return false;
+  if (bot.last_run_code === "tool_rounds") return true;
+  return isToolRoundLimitError(bot.last_run_error, bot.last_run_code);
+}
+
+// No Continue button here, so drop the "Press Continue" hint from the stop text.
+function dropContinueHint(t) {
+  return String(t).replace(/ Press Continue, or (\w)/, (m, c) => " " + c.toUpperCase()).replace(/ Press Continue\./, "");
+}
+
+// One thread note: Continue replaces Run failed; they are never both shown.
+function runEndNote(bot, streaming) {
+  if (toolRoundsContinueOffer(bot, streaming)) {
+    return {
+      kind: "continue",
+      text: "Stopped after the tool round limit. Continue picks up the same work for more rounds.",
+      actions: ["Continue"]
+    };
+  }
+  if (!streaming && bot && bot.status !== "running" && bot.last_run_status === "error" && bot.last_run_error) {
+    const err = isToolRoundLimitError(bot.last_run_error, bot.last_run_code) ? dropContinueHint(bot.last_run_error) : bot.last_run_error;
+    return { kind: "failed", text: "Run failed: " + err, actions: [] };
+  }
+  return null;
 }
 
 // Timeout note actions. Null hides the note. Continue is only offered

@@ -87,7 +87,17 @@ prompt_timeout = "10m"
 
 [ollama]
 # Whole Ollama run, all tool rounds. Default 10m. This is the backstop.
+# A per-bot run_timeout may only narrow this (or, for a CLI bot, the
+# effective cli.turn_timeout).
 run_timeout = "10m"
+# Model rounds one Ollama run may use. Default 8. Range 1..100.
+# A per-bot tool_rounds may only narrow this.
+tool_rounds = 8
+# Cap on one run_shell call. Default 30s. Whole seconds, at least 1s, up to 24h.
+# A per-bot shell_timeout may only narrow this. Git push may still
+# extend the command as described in the run_shell notes.
+# Where pidfd signalling is unavailable the effective ceiling is 30s.
+shell_timeout = "30s"
 # Optional hard cap on one model call. Unset means the effective run
 # timeout, so only run_timeout bounds the call. An explicit value stays a
 # hard per-call cap (and is not retried). Configs that set the old 3m
@@ -114,7 +124,39 @@ keep_alive = "30m"
 # max_first_output_timeout = "15m" # managed only
 # max_stall_timeout = "5m"         # managed only
 # max_stall_retries = 1            # managed only
+# max_tool_rounds = 8              # managed only
+# max_shell_timeout = "1m"         # managed only
 ```
+
+`run_timeout` bounds the whole run. `tool_rounds` bounds how many
+model rounds that run may use (default 8). `shell_timeout` bounds one
+`run_shell` call (default 30s). A bot may set `run_timeout`,
+`tool_rounds`, and `shell_timeout` below these effective values;
+it cannot raise them. For a CLI bot, `run_timeout` also narrows
+`cli.turn_timeout`. Empty bot values inherit the policy (or the
+built-in default). Managed `max_tool_rounds` and `max_shell_timeout`
+are ceilings only managed policy can set.
+
+Per-bot `run_timeout` and `shell_timeout` are a whole number of seconds,
+at least 1s (`90s`, `1m30s`, `2h`). `1.5s`, `1500ms`, `1ns`, and `90.001s`
+are rejected. `ollama.shell_timeout` and `ollama.max_shell_timeout` follow
+the same rule; a value under 1s still fails as "must be at least 1s".
+`tool_rounds` on the API is a JSON integer. Policy changes to these limits
+take effect after a daemon restart. A stored bot value above a lowered
+ceiling is kept, clamped when a run or `run_shell` uses it, and logged once
+per bot per field per start as `bot_limit_clamped`. A PATCH that sends a
+limit equal to the stored value is accepted even when that value is above
+the current ceiling. POST checks every sent limit. The limits JSON
+`ceiling_source` is a plain name (`policy.toml`, `your administrator`,
+`the built-in default`, or `this system`). `ceiling_key` holds the config
+key when there is one, and `bot_limit_clamped` keeps that key on `key`.
+
+On Linux, `run_shell` signals a process only after opening a pidfd, walking
+parents to the jail root, and checking that both pidfds still accept signal
+0. The signal itself is `pidfd_send_signal`. A PID that fails any of those
+checks is not signalled and is logged as `shell_signal_refused`. Where
+pidfd signalling is unavailable, shell timeouts above 30s are not used: the
+effective ceiling is 30s and policy load warns.
 
 `run_timeout` bounds the whole run. `first_output_timeout` and
 `stall_timeout` bound one call by silence, not by wall clock: output is any

@@ -9,16 +9,17 @@ import (
 
 // botState is everything the UI's state panel shows for one bot, read-only.
 type botState struct {
-	Timers      []store.Timer   `json:"timers"`
-	Memory      []store.Memory  `json:"memory"`
-	Grants      []string        `json:"grants"`
-	NetAllow    []string        `json:"net_allow"`
-	SSHAllow    []string        `json:"ssh_allow"`
-	GitHubAllow []string        `json:"github_allow"`
-	ServerTools *[]string       `json:"server_tools"`
-	Tools       stateTools      `json:"tools"`
-	Runs        []store.Run     `json:"runs"`
-	Warnings    []store.Warning `json:"warnings,omitempty"`
+	Timers      []store.Timer    `json:"timers"`
+	Memory      []store.Memory   `json:"memory"`
+	Grants      []string         `json:"grants"`
+	NetAllow    []string         `json:"net_allow"`
+	SSHAllow    []string         `json:"ssh_allow"`
+	GitHubAllow []string         `json:"github_allow"`
+	ServerTools *[]string        `json:"server_tools"`
+	Tools       stateTools       `json:"tools"`
+	Runs        []store.Run      `json:"runs"`
+	Warnings    []store.Warning  `json:"warnings,omitempty"`
+	Limits      *store.BotLimits `json:"limits,omitempty"`
 }
 
 type stateTools struct {
@@ -36,7 +37,7 @@ func (a *App) handleBotState(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	out := botState{Grants: bot.Grants, NetAllow: bot.NetAllow, SSHAllow: bot.SSHAllow, GitHubAllow: bot.GitHubAllow, ServerTools: bot.ServerTools, Warnings: a.botWarnings(bot)}
+	out := botState{Grants: bot.Grants, NetAllow: bot.NetAllow, SSHAllow: bot.SSHAllow, GitHubAllow: bot.GitHubAllow, ServerTools: bot.ServerTools, Warnings: a.botWarnings(bot), Limits: a.botLimits(bot)}
 	if out.Timers, err = a.st.ListTimers(id); err != nil {
 		writeErr(w, err)
 		return

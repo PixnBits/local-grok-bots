@@ -18,12 +18,9 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
-// shellRunCap is the run_shell limit. It is not a user setting. The cap
-// keeps running while a git push is in flight. When it expires during a
-// push, other processes in the jail are stopped and the push itself may
-// continue until prompt_timeout+15s. If nothing else was stopped, the
-// budget left at the start of the push is armed again when the push ends.
-// A push with nothing else running is not cut off by this cap.
+// shellRunCap is the default run_shell limit and a test override. Tests
+// may assign it. When it still equals the built-in 30s default, the
+// effective policy/bot shell timeout is used instead.
 var shellRunCap = 30 * time.Second
 
 // gitPushHook, when set, replaces handleGitPush for run_shell. Tests set it.
@@ -389,7 +386,7 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			patch.ServerToolsSet = true
 			patch.ServerTools = tools
 		}
-		updated, err := a.st.UpdateBot(target.ID, patch)
+		updated, _, err := a.st.UpdateBot(target.ID, patch)
 		if err != nil {
 			return "", err
 		}
@@ -465,6 +462,10 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		shellCtx, shellCancel := context.WithCancel(ctx)
 		defer shellCancel()
 		guard := &sandbox.ShellGuard{}
+		guard.OnRefused = func(pid int, reason string) {
+			a.noteShellSignalRefused(current, pid, reason)
+		}
+		defer guard.Close()
 		var timerMu sync.Mutex
 		var shellTimer *time.Timer
 		var pushTimer *time.Timer
@@ -525,8 +526,9 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			armShell(left)
 			timerMu.Unlock()
 		}
+		cap := a.shellCap(current)
 		timerMu.Lock()
-		armShell(shellRunCap)
+		armShell(cap)
 		timerMu.Unlock()
 		defer func() {
 			timerMu.Lock()
@@ -682,7 +684,11 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		err = adjustShellStop(ctx, fired, err)
 		if err != nil {
 			a.clearShellPlan(current.ID)
-			return summary, fmt.Errorf("%s\n%s", err.Error(), summary)
+			msg := err.Error()
+			if msg == "shell timed out" {
+				msg = a.shellCapMessage(current, cap)
+			}
+			return summary, fmt.Errorf("%s\n%s", msg, summary)
 		}
 		a.commitShellPlan(current.ID, shellWS)
 		return summary, nil
