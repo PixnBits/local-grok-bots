@@ -314,7 +314,9 @@ type Bot struct {
 // source is "bot" only when the stored bot value is set and in force.
 // Otherwise it is "policy" (including the built-in default). If policy
 // later drops below a stored bot value, value is the policy value and
-// source is "policy". ceiling_source names where the ceiling came from.
+// source is "policy". ceiling_source is a plain name: "policy.toml",
+// "your administrator", "the built-in default", or "this system".
+// ceiling_key is the config key when there is one.
 type BotLimits struct {
 	RunTimeout   LimitDuration `json:"run_timeout"`
 	ToolRounds   LimitInt      `json:"tool_rounds"`
@@ -327,6 +329,7 @@ type LimitDuration struct {
 	Source        string `json:"source"`
 	Ceiling       string `json:"ceiling"`
 	CeilingSource string `json:"ceiling_source"`
+	CeilingKey    string `json:"ceiling_key,omitempty"`
 }
 
 // LimitInt is one effective integer limit.
@@ -335,6 +338,7 @@ type LimitInt struct {
 	Source        string `json:"source"`
 	Ceiling       int    `json:"ceiling"`
 	CeilingSource string `json:"ceiling_source"`
+	CeilingKey    string `json:"ceiling_key,omitempty"`
 }
 
 type Memory struct {

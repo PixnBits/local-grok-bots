@@ -448,20 +448,20 @@ func (a *App) handleListBots(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Name         string      `json:"name"`
-		Label        string      `json:"label"`
-		Description  *string     `json:"description"`
-		Instructions *string     `json:"instructions"`
-		Mark         *store.Mark `json:"mark"`
-		Model        *string     `json:"model"`
-		Grants       []string    `json:"grants"`
-		NetAllow     []string    `json:"net_allow"`
-		SSHAllow     []string    `json:"ssh_allow"`
-		GitHubAllow  []string    `json:"github_allow"`
-		ServerTools  *[]string   `json:"server_tools"`
-		RunTimeout   *string     `json:"run_timeout"`
-		ShellTimeout *string     `json:"shell_timeout"`
-		ToolRounds   *int        `json:"tool_rounds"`
+		Name         string          `json:"name"`
+		Label        string          `json:"label"`
+		Description  *string         `json:"description"`
+		Instructions *string         `json:"instructions"`
+		Mark         *store.Mark     `json:"mark"`
+		Model        *string         `json:"model"`
+		Grants       []string        `json:"grants"`
+		NetAllow     []string        `json:"net_allow"`
+		SSHAllow     []string        `json:"ssh_allow"`
+		GitHubAllow  []string        `json:"github_allow"`
+		ServerTools  *[]string       `json:"server_tools"`
+		RunTimeout   *string         `json:"run_timeout"`
+		ShellTimeout *string         `json:"shell_timeout"`
+		ToolRounds   json.RawMessage `json:"tool_rounds"`
 	}
 	if err := readJSON(w, r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -489,32 +489,30 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 	var runTO, shellTO time.Duration
 	var rounds int
 	if body.RunTimeout != nil {
-		runTO, err = parseDurationString(*body.RunTimeout, "run_timeout")
+		runTO, err = parseDurationString(*body.RunTimeout)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 	}
 	if body.ShellTimeout != nil {
-		shellTO, err = parseDurationString(*body.ShellTimeout, "shell_timeout")
+		shellTO, err = parseDurationString(*body.ShellTimeout)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 	}
-	if body.ToolRounds != nil {
-		rounds = *body.ToolRounds
-		if rounds < 0 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tool_rounds must be positive"})
-			return
-		}
-		if rounds > 100 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tool_rounds must be an integer from 1 to 100"})
+	pol := a.pol()
+	roundsSet := len(body.ToolRounds) != 0 && string(body.ToolRounds) != "null"
+	if roundsSet {
+		ceilN, _ := pol.ToolRoundsCeiling()
+		rounds, err = parseOptionalToolRounds(body.ToolRounds, ceilN)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
 	}
-	pol := a.pol()
-	if err := a.checkBotLimitCeilings(pol, runTO, shellTO, rounds, body.RunTimeout != nil, body.ShellTimeout != nil, body.ToolRounds != nil); err != nil {
+	if err := a.checkBotLimitCeilings(pol, runTO, shellTO, rounds, body.RunTimeout != nil, body.ShellTimeout != nil, roundsSet); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
@@ -681,7 +679,7 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if v, ok := raw["run_timeout"]; ok {
-		d, err := parseOptionalDuration(v, "run_timeout")
+		d, err := parseOptionalDuration(v)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -690,7 +688,7 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 		patch.RunTimeout = d
 	}
 	if v, ok := raw["shell_timeout"]; ok {
-		d, err := parseOptionalDuration(v, "shell_timeout")
+		d, err := parseOptionalDuration(v)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -699,7 +697,8 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 		patch.ShellTimeout = d
 	}
 	if v, ok := raw["tool_rounds"]; ok {
-		n, err := parseOptionalToolRounds(v)
+		ceilN, _ := a.effPol(id).ToolRoundsCeiling()
+		n, err := parseOptionalToolRounds(v, ceilN)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return

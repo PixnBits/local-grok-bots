@@ -53,14 +53,14 @@ func TestProfileStatic(t *testing.T) {
 		`aria-live="polite"`,
 		`if (access && access.hidden) setProfilePane("access");`,
 		`$("#limit-announce")`,
-		`aria-describedby="help-run-timeout"`,
-		`aria-describedby="help-tool-rounds"`,
-		`aria-describedby="help-shell-timeout"`,
-		`<span class="lbl">Run timeout</span>`,
-		`<span class="lbl">Tool rounds</span>`,
-		`<span class="lbl">Shell timeout</span>`,
+		`aria-describedby="help-run-timeout err-run-timeout"`,
+		`aria-describedby="help-tool-rounds err-tool-rounds"`,
+		`aria-describedby="help-shell-timeout err-shell-timeout"`,
+		`<label for="profile-run-timeout">Run timeout</label>`,
+		`<label for="profile-tool-rounds">Tool rounds</label>`,
+		`<label for="profile-shell-timeout">Shell timeout</label>`,
 		`function limitHelpText`,
-		`In force: `,
+		`Using `,
 		`["profile-name", "profile-label", "profile-model"].forEach`,
 		`.toggle::before { content: ""; position: absolute; inset: -10px -2px; }`,
 	} {
@@ -209,7 +209,7 @@ func TestProfileLogic(t *testing.T) {
 	}
 	names := []string{
 		"splitChipTokens", "hostEntryValid", "repoEntryValid", "chipInvalidMessage",
-		"dirtyFieldLabels", "limitHelpText", "changedLimitPayload", "limitPrecheckError", "firstChangedLimitError", "parseGoDurationMs", "scheduleFromBuilder", "scheduleLabel", "builderFromSchedule",
+		"dirtyFieldLabels", "limitLabel", "aboveCeilingMessage", "toolRoundsRangeMessage", "durationPlaceholder", "limitPlaceholder", "storedAbove", "limitHelpText", "changedLimitPayload", "limitPrecheckError", "firstChangedLimitError", "limitFieldForMessage", "parseGoDurationMs", "scheduleFromBuilder", "scheduleLabel", "builderFromSchedule",
 		"routineWhen", "routineRelative", "routineMeta", "routinePreview",
 	}
 	assign := ""
@@ -273,12 +273,17 @@ check("dirty-tools-order", JSON.stringify(ctx.dirtyFieldLabels(
 )), "[]");
 check("dirty-tools-null", JSON.stringify(ctx.dirtyFieldLabels(base, cur({server_tools: []}))), JSON.stringify(["Server tools"]));
 check("dirty-run-timeout", JSON.stringify(ctx.dirtyFieldLabels(base, cur({run_timeout: "5m"}))), JSON.stringify(["Run timeout"]));
-check("help-policy", ctx.limitHelpText("10m", "policy", "10m"), "In force: 10m (policy)");
-check("help-bot", ctx.limitHelpText("5m", "bot", "10m"), "In force: 5m (this bot). Policy limit: 10m.");
-check("help-source", ctx.limitHelpText("10m", "policy", "10m", "the built-in default"), "In force: 10m (policy). Set by the built-in default.");
+check("help-default", ctx.limitHelpText("10m", "policy", "10m", "the built-in default"), "Using 10m, the built-in default.");
+check("help-policy", ctx.limitHelpText("3", "policy", "3", "policy.toml"), "Using 3, from policy.toml.");
+check("help-admin", ctx.limitHelpText("20s", "policy", "20s", "your administrator"), "Using 20s, the most your administrator allows.");
+check("help-bot", ctx.limitHelpText("5m", "bot", "10m", "policy.toml"), "Using 5m, set on this bot. Up to 10m allowed.");
+check("help-system", ctx.limitHelpText("30s", "policy", "30s", "this system"), "Using 30s on this system.");
+check("help-clamp", ctx.limitHelpText("2m", "policy", "2m", "policy.toml", "5m"), "Using 2m, from policy.toml. This bot asks for 5m, but only 2m is allowed now, so 2m is used.");
+check("help-clamp-rounds", ctx.limitHelpText(3, "policy", 3, "policy.toml", "5"), "Using 3, from policy.toml. This bot asks for 5, but only 3 is allowed now, so 3 is used.");
+check("help-no-clamp", ctx.limitHelpText("5m", "bot", "10m", "policy.toml", "5m"), "Using 5m, set on this bot. Up to 10m allowed.");
 const limits = {
   run_timeout: { value: "10m", source: "policy", ceiling: "10m", ceiling_source: "the built-in default" },
-  shell_timeout: { value: "30s", source: "policy", ceiling: "10s", ceiling_source: "ollama.shell_timeout in policy.toml" },
+  shell_timeout: { value: "30s", source: "policy", ceiling: "10s", ceiling_source: "policy.toml" },
   tool_rounds: { value: 8, source: "policy", ceiling: 8, ceiling_source: "the built-in default" }
 };
 const stored = { run_timeout: "20s", shell_timeout: "20s", tool_rounds: "6" };
@@ -286,9 +291,25 @@ check("payload-unchanged", JSON.stringify(ctx.changedLimitPayload(stored, stored
 check("payload-shell", JSON.stringify(ctx.changedLimitPayload(stored, { run_timeout: "20s", shell_timeout: "15s", tool_rounds: "6" })), JSON.stringify({ shell_timeout: "15s" }));
 check("payload-clear-rounds", JSON.stringify(ctx.changedLimitPayload(stored, { run_timeout: "20s", shell_timeout: "20s", tool_rounds: "" })), JSON.stringify({ tool_rounds: 0 }));
 check("precheck-skip-unchanged", ctx.firstChangedLimitError(stored, stored, limits, false), null);
-check("precheck-changed-shell", ctx.firstChangedLimitError(stored, { run_timeout: "20s", shell_timeout: "15s", tool_rounds: "6" }, limits, false).message, "shell_timeout 15s is above the limit of 10s set by ollama.shell_timeout in policy.toml");
-check("precheck-rounds", ctx.firstChangedLimitError({ tool_rounds: "3" }, { tool_rounds: "9" }, limits, false).message, "tool_rounds 9 is above the limit of 8 set by the built-in default");
-check("precheck-fraction", ctx.limitPrecheckError("run_timeout", "1.5s", limits), "run_timeout must be a whole number of seconds, at least 1s");
+check("precheck-changed-shell", ctx.firstChangedLimitError(stored, { run_timeout: "20s", shell_timeout: "15s", tool_rounds: "6" }, limits, false).message, "Shell timeout can be at most 10s (set in policy.toml). Enter 10s or less, or leave it blank to use 10s.");
+check("precheck-rounds", ctx.firstChangedLimitError({ tool_rounds: "3" }, { tool_rounds: "9" }, limits, false).message, "Tool rounds can be at most 8. Enter 8 or less, or leave it blank.");
+check("precheck-fraction", ctx.limitPrecheckError("run_timeout", "1.5s", limits), "Use whole seconds, like 2s.");
+check("precheck-zero", ctx.limitPrecheckError("run_timeout", "0", limits), "Enter a time like 90s, 5m or 1h.");
+check("precheck-negative", ctx.limitPrecheckError("shell_timeout", "-1m", limits), "Enter a time like 90s, 5m or 1h.");
+check("precheck-same-zero", ctx.limitPrecheckError("run_timeout", "0", limits) === ctx.limitPrecheckError("run_timeout", "-1m", limits), true);
+check("precheck-rounds-fraction", ctx.limitPrecheckError("tool_rounds", "2.5", limits), "Enter a whole number from 1 to 8.");
+check("precheck-rounds-zero", ctx.limitPrecheckError("tool_rounds", "0", limits), "Enter a whole number from 1 to 8.");
+check("precheck-rounds-neg", ctx.limitPrecheckError("tool_rounds", "-1", limits), "Enter a whole number from 1 to 8.");
+check("precheck-rounds-huge", ctx.limitPrecheckError("tool_rounds", "101", limits), "Enter a whole number from 1 to 8.");
+check("precheck-admin", ctx.limitPrecheckError("shell_timeout", "25s", { shell_timeout: { ceiling: "20s", ceiling_source: "your administrator" } }), "Shell timeout can be at most 20s, the most your administrator allows. Enter 20s or less.");
+check("precheck-system", ctx.limitPrecheckError("shell_timeout", "31s", { shell_timeout: { ceiling: "30s", ceiling_source: "this system" } }), "Shell timeout can be at most 30s on this system. Enter 30s or less.");
+check("precheck-default-run", ctx.aboveCeilingMessage("run_timeout", "10m", "the built-in default"), "Run timeout can be at most 10m. Enter 10m or less, or leave it blank.");
+check("placeholder-blank", ctx.durationPlaceholder("10m"), "10m (e.g. 90s, 5m, 1h)");
+check("placeholder-stored", ctx.limitPlaceholder("run_timeout", "5m", "10m"), "e.g. 90s, 5m, 1h");
+check("placeholder-rounds", ctx.limitPlaceholder("tool_rounds", "", "8"), "8");
+check("field-shell", ctx.limitFieldForMessage("Shell timeout can be at most 10s (set in policy.toml). Enter 10s or less, or leave it blank to use 10s.", limits, { shell_timeout: "15s" }), "shell_timeout");
+check("field-whole", ctx.limitFieldForMessage("Use whole seconds, like 2s.", limits, { shell_timeout: "500ms" }), "shell_timeout");
+check("field-rounds", ctx.limitFieldForMessage("Enter a whole number from 1 to 8.", limits, { tool_rounds: "2.5" }), "tool_rounds");
 check("dur-10m", ctx.parseGoDurationMs("10m"), 600000);
 check("dur-1s", ctx.parseGoDurationMs("1s"), 1000);
 check("sched-min", ctx.scheduleFromBuilder("every", 30, "minutes"), "every 30m");
@@ -442,11 +463,17 @@ func TestRevealLimitFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal("node not installed")
 	}
-	fn := sliceFrom(t, ClientSource(), "function revealLimitFailure", "function setSaving")
+	fn := sliceFrom(t, ClientSource(), "function setLimitAnnounce", "function setSaving")
 	script := `const fn = ` + jsonString(fn) + `;
 const access = { hidden: true };
-const live = { textContent: "" };
-const field = { focused: false, focus() { this.focused = true; } };
+const live = { textContent: "stale failure" };
+const order = [];
+const field = {
+  focused: false,
+  scrolled: null,
+  focus() { this.focused = true; order.push("focus"); },
+  scrollIntoView(opts) { this.scrolled = opts; order.push("scroll"); }
+};
 function $(sel) {
   if (sel === "#profile-access") return access;
   if (sel === "#limit-announce") return live;
@@ -456,7 +483,7 @@ function $(sel) {
 let pane = "";
 function setProfilePane(name) { pane = name; access.hidden = false; }
 eval(fn);
-const msg = "shell_timeout 15s is above the limit of 10s set by ollama.shell_timeout in policy.toml";
+const msg = "Shell timeout can be at most 10s (set in policy.toml). Enter 10s or less, or leave it blank to use 10s.";
 revealLimitFailure("profile-shell-timeout", msg);
 const cases = [];
 function check(name, got, want) { cases.push({name: name, ok: got === want, got: got, want: want}); }
@@ -464,6 +491,9 @@ check("opened", pane, "access");
 check("visible", access.hidden, false);
 check("focused", field.focused, true);
 check("announced", live.textContent, msg);
+check("replaced", live.textContent.indexOf("stale") < 0, true);
+check("order", order.join(","), "focus,scroll");
+check("scrolled", JSON.stringify(field.scrolled), JSON.stringify({block:"center"}));
 pane = "chat";
 field.focused = false;
 access.hidden = false;
@@ -475,4 +505,72 @@ console.log(JSON.stringify(cases));
 `
 	raw := runNode(t, node, script)
 	assertCases(t, raw)
+}
+
+func TestLimitCopyUI(t *testing.T) {
+	page := string(IndexHTML)
+	for _, id := range []string{"profile-run-timeout", "profile-tool-rounds", "profile-shell-timeout"} {
+		label := `<label for="` + id + `">`
+		i := strings.Index(page, label)
+		if i < 0 {
+			t.Fatalf("missing %s", label)
+		}
+		chunk := page[i:]
+		closeAt := strings.Index(chunk, "</label>")
+		if closeAt < 0 || strings.Contains(chunk[:closeAt], "<p") || strings.Contains(chunk[:closeAt], "<input") {
+			t.Fatalf("label wraps the input or help for %s", id)
+		}
+	}
+	if strings.Count(page, `placeholder="e.g. 90s, 5m, 1h"`) < 2 {
+		t.Fatal("duration hint missing on a timeout field")
+	}
+	css := string(AppCSS)
+	rule := "#sec-limits .fld input { height: 44px; scroll-margin-bottom: 160px; }"
+	idx := strings.Index(css, rule)
+	if idx < 0 {
+		t.Fatal("44px limit input rule missing")
+	}
+	media := strings.LastIndex(css[:idx], "@media (max-width: 540px)")
+	depth := 0
+	for i := media; i >= 0 && i < idx; i++ {
+		switch css[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+		}
+	}
+	if media < 0 || depth < 1 {
+		t.Fatal("44px rule is outside the 540px query")
+	}
+	if !strings.Contains(css, "#sec-limits .fld { scroll-margin-bottom: 160px; }") {
+		t.Fatal("field scroll margin missing")
+	}
+	js := string(AppJS)
+	n := 0
+	rest := js
+	needle := `setLimitAnnounce("Saved.");`
+	for {
+		i := strings.Index(rest, needle)
+		if i < 0 {
+			break
+		}
+		after := strings.TrimLeft(rest[i+len(needle):], "\n\t ")
+		if strings.HasPrefix(after, "clearLimitErrors();") {
+			n++
+		}
+		rest = rest[i+len(needle):]
+	}
+	if n < 2 {
+		t.Fatalf("successful save clears the live region %d times", n)
+	}
+	if !strings.Contains(js, `n.scrollIntoView({ block: "center" })`) {
+		t.Fatal("revealLimitFailure does not scroll the field")
+	}
+	if strings.Contains(js, `msg.indexOf(f.key)`) {
+		t.Fatal("save still matches raw field keys")
+	}
+	if !strings.Contains(js, `input.setAttribute("aria-describedby", f.help + " " + f.err);`) {
+		t.Fatal("aria-describedby drops the error id")
+	}
 }

@@ -354,7 +354,11 @@ func runNoticeText(status, errText string) string {
 
 func runNoticeSentence(status, errText string) string {
 	if n, ok := noticedToolRounds(errText); ok {
-		return fmt.Sprintf("Stopped: used all %d tool rounds.", n)
+		unit := "tool rounds"
+		if n == 1 {
+			unit = "tool round"
+		}
+		return fmt.Sprintf("Stopped: used all %d %s. Press Continue, or raise the limit under Permissions & access.", n, unit)
 	}
 	if d := noticedRunLimit(errText); d != "" {
 		return "Stopped: hit the " + d + " run limit."
@@ -434,10 +438,11 @@ func noticedToolRounds(errText string) (int, bool) {
 			return 0, false
 		}
 	}
-	if !strings.HasPrefix(rest[i:], " tool rounds (") {
-		return 0, false
+	tail := rest[i:]
+	if strings.HasPrefix(tail, " tool rounds (") || strings.HasPrefix(tail, " tool round (") {
+		return n, true
 	}
-	return n, true
+	return 0, false
 }
 
 // noticedRunLimit reads a whole-second compact duration from a run_timeout body.
@@ -713,7 +718,8 @@ func timeoutBody(limit string, d time.Duration, retried int, partial, origin str
 }
 
 // compactDuration drops zero units: 2m, 1h30m, 45s. Under a second it keeps
-// milliseconds so a short test limit stays exact.
+// milliseconds. A sub-second remainder is kept, same as store.CompactDuration.
+// Zero is "0s". Negative durations are shown as their absolute value.
 func compactDuration(d time.Duration) string {
 	if d < 0 {
 		d = -d
@@ -721,29 +727,7 @@ func compactDuration(d time.Duration) string {
 	if d == 0 {
 		return "0s"
 	}
-	if d < time.Second {
-		return fmt.Sprintf("%dms", d.Milliseconds())
-	}
-	d = d.Truncate(time.Second)
-	h := d / time.Hour
-	d -= h * time.Hour
-	m := d / time.Minute
-	d -= m * time.Minute
-	s := d / time.Second
-	var b strings.Builder
-	if h > 0 {
-		fmt.Fprintf(&b, "%dh", h)
-	}
-	if m > 0 {
-		fmt.Fprintf(&b, "%dm", m)
-	}
-	if s > 0 {
-		fmt.Fprintf(&b, "%ds", s)
-	}
-	if b.Len() == 0 {
-		return "0s"
-	}
-	return b.String()
+	return store.CompactDuration(d)
 }
 
 // foldInput appends turn input that arrived after through to the live

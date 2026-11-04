@@ -672,76 +672,120 @@ func (p Policy) EffectiveShellTimeout() time.Duration {
 	return d
 }
 
-// RunTimeoutCeiling is the highest run_timeout a bot may set, and a phrase
-// naming where that ceiling came from. A CLI bot is capped by the effective
+// ceilingRef is where a limit ceiling came from.
+// name is the plain phrase shown to people.
+// key is the config key for admins and audit rows, empty when there is none.
+type ceilingRef struct {
+	name string
+	key  string
+}
+
+// RunTimeoutCeiling is the highest run_timeout a bot may set, and a plain
+// name for where that ceiling came from. A CLI bot is capped by the effective
 // turn timeout; an Ollama bot by the effective Ollama run timeout.
+// The matching key is RunTimeoutCeilingKey.
 func (p Policy) RunTimeoutCeiling(cli bool) (time.Duration, string) {
+	d, ref := p.runTimeoutRef(cli)
+	return d, ref.name
+}
+
+// RunTimeoutCeilingKey is the config key for RunTimeoutCeiling, or "" for a
+// built-in default. cli.turn_timeout still reports the name "policy.toml".
+func (p Policy) RunTimeoutCeilingKey(cli bool) string {
+	_, ref := p.runTimeoutRef(cli)
+	return ref.key
+}
+
+func (p Policy) runTimeoutRef(cli bool) (time.Duration, ceilingRef) {
 	if cli {
-		return p.EffectiveTurnTimeout(), durationCeilingSource(
+		return p.EffectiveTurnTimeout(), durationCeilingRef(
 			p.TurnTimeout, p.localTurnSet || p.managedTurnSet,
 			DefaultTurnTimeout, p.MaxTurnTimeout,
-			"cli.turn_timeout in policy.toml", "the managed cli.max_turn_timeout",
+			"cli.turn_timeout", "cli.max_turn_timeout",
 		)
 	}
-	return p.EffectiveOllamaRunTimeout(), durationCeilingSource(
+	return p.EffectiveOllamaRunTimeout(), durationCeilingRef(
 		p.OllamaRunTimeout, p.localRunSet || p.managedRunSet,
 		DefaultOllamaRunTimeout, p.MaxOllamaRunTimeout,
-		"ollama.run_timeout in policy.toml", "the managed ollama.max_run_timeout",
+		"ollama.run_timeout", "ollama.max_run_timeout",
 	)
 }
 
-// ToolRoundsCeiling is the highest tool_rounds a bot may set, and a phrase
-// naming where that ceiling came from.
+// ToolRoundsCeiling is the highest tool_rounds a bot may set, and a plain
+// name for where that ceiling came from.
 func (p Policy) ToolRoundsCeiling() (int, string) {
-	return p.EffectiveToolRounds(), intCeilingSource(
+	n, ref := p.toolRoundsRef()
+	return n, ref.name
+}
+
+// ToolRoundsCeilingKey is the config key for ToolRoundsCeiling, or "".
+func (p Policy) ToolRoundsCeilingKey() string {
+	_, ref := p.toolRoundsRef()
+	return ref.key
+}
+
+func (p Policy) toolRoundsRef() (int, ceilingRef) {
+	return p.EffectiveToolRounds(), intCeilingRef(
 		p.OllamaToolRounds, p.localToolRoundsSet || p.managedToolRoundsSet,
 		DefaultOllamaToolRounds, p.MaxOllamaToolRounds,
-		"ollama.tool_rounds in policy.toml", "the managed ollama.max_tool_rounds",
+		"ollama.tool_rounds", "ollama.max_tool_rounds",
 	)
 }
 
-// ShellTimeoutCeiling is the highest shell_timeout a bot may set, and a phrase
-// naming where that ceiling came from. Without pidfd signalling, a higher
-// configured ceiling becomes 30s and the phrase names that system limit.
+// ShellTimeoutCeiling is the highest shell_timeout a bot may set, and a plain
+// name for where that ceiling came from. Without pidfd signalling, a higher
+// configured ceiling becomes 30s and the name is "this system".
 func (p Policy) ShellTimeoutCeiling() (time.Duration, string) {
+	d, ref := p.shellTimeoutRef()
+	return d, ref.name
+}
+
+// ShellTimeoutCeilingKey is the config key for ShellTimeoutCeiling, or "".
+// The system cap has no config key.
+func (p Policy) ShellTimeoutCeilingKey() string {
+	_, ref := p.shellTimeoutRef()
+	return ref.key
+}
+
+func (p Policy) shellTimeoutRef() (time.Duration, ceilingRef) {
 	uncapped := capped(p.OllamaShellTimeout, DefaultOllamaShellTimeout, p.MaxOllamaShellTimeout)
-	src := durationCeilingSource(
+	ref := durationCeilingRef(
 		p.OllamaShellTimeout, p.localShellSet || p.managedShellSet,
 		DefaultOllamaShellTimeout, p.MaxOllamaShellTimeout,
-		"ollama.shell_timeout in policy.toml", "the managed ollama.max_shell_timeout",
+		"ollama.shell_timeout", "ollama.max_shell_timeout",
 	)
 	if !shellSignalSupported() && uncapped > shellSignalCeiling {
-		return shellSignalCeiling, shellSignalSource
+		return shellSignalCeiling, ceilingRef{name: shellSignalSource}
 	}
-	return uncapped, src
+	return uncapped, ref
 }
 
-func durationCeilingSource(raw time.Duration, set bool, def, max time.Duration, keySrc, maxSrc string) string {
+func durationCeilingRef(raw time.Duration, set bool, def, max time.Duration, key, maxKey string) ceilingRef {
 	v := raw
 	if !set || v <= 0 {
 		v = def
 	}
 	if max > 0 && v > max {
-		return maxSrc
+		return ceilingRef{name: "your administrator", key: maxKey}
 	}
 	if set && raw > 0 {
-		return keySrc
+		return ceilingRef{name: "policy.toml", key: key}
 	}
-	return "the built-in default"
+	return ceilingRef{name: "the built-in default"}
 }
 
-func intCeilingSource(raw int, set bool, def, max int, keySrc, maxSrc string) string {
+func intCeilingRef(raw int, set bool, def, max int, key, maxKey string) ceilingRef {
 	v := raw
 	if !set || v <= 0 {
 		v = def
 	}
 	if max > 0 && v > max {
-		return maxSrc
+		return ceilingRef{name: "your administrator", key: maxKey}
 	}
 	if set && raw > 0 {
-		return keySrc
+		return ceilingRef{name: "policy.toml", key: key}
 	}
-	return "the built-in default"
+	return ceilingRef{name: "the built-in default"}
 }
 
 // EffectiveOllamaModelTimeout is the optional hard cap on one model call.

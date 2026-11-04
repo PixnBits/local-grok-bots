@@ -19,11 +19,12 @@ import (
 
 func TestLimitCopyNamesSource(t *testing.T) {
 	cases := []struct{ got, want string }{
-		{toolRoundLimitBody(3, 3, 8, "the built-in default"), "The run used all 3 tool rounds (tool_rounds, set on this bot). Raise it under Permissions & access, up to 8."},
-		{toolRoundLimitBody(8, 8, 8, "the built-in default"), "The run used all 8 tool rounds (tool_rounds, set on this bot). To allow more, set ollama.tool_rounds in policy.toml."},
-		{toolRoundLimitBody(2, 0, 2, "ollama.tool_rounds in policy.toml"), "The run used all 2 tool rounds (ollama.tool_rounds in policy.toml). To allow more, raise ollama.tool_rounds in policy.toml."},
-		{toolRoundLimitBody(2, 0, 2, "the managed ollama.max_tool_rounds"), "The run used all 2 tool rounds (the managed ollama.max_tool_rounds). To allow more, raise the managed ollama.max_tool_rounds."},
-		{toolRoundLimitBody(8, 0, 8, "the built-in default"), "The run used all 8 tool rounds (the built-in default). To allow more, set ollama.tool_rounds in policy.toml."},
+		{toolRoundLimitBody(3, 3, 8, "the built-in default"), "The run used all 3 tool rounds (set on this bot). Press Continue, or raise the limit under Permissions & access, up to 8."},
+		{toolRoundLimitBody(1, 1, 8, "the built-in default"), "The run used all 1 tool round (set on this bot). Press Continue, or raise the limit under Permissions & access, up to 8."},
+		{toolRoundLimitBody(8, 8, 8, "the built-in default"), "The run used all 8 tool rounds (the built-in default). Press Continue, or raise the limit in policy.toml."},
+		{toolRoundLimitBody(2, 0, 2, "policy.toml"), "The run used all 2 tool rounds (set in policy.toml). Press Continue, or ask whoever manages policy.toml to raise it."},
+		{toolRoundLimitBody(2, 0, 2, "your administrator"), "The run used all 2 tool rounds (the most your administrator allows). Press Continue."},
+		{toolRoundLimitBody(8, 0, 8, "the built-in default"), "The run used all 8 tool rounds (the built-in default). Press Continue, or raise the limit in policy.toml."},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
@@ -32,10 +33,10 @@ func TestLimitCopyNamesSource(t *testing.T) {
 	}
 	var a *App
 	bot := store.Bot{ShellTimeout: store.DurationMS(time.Second)}
-	if got := a.shellCapMessage(bot, time.Second); got != "stopped after 1s (shell_timeout, set on this bot)" {
+	if got := a.shellCapMessage(bot, time.Second); got != "stopped after 1s (shell timeout set on this bot)" {
 		t.Fatalf("shell bot %q", got)
 	}
-	if got := a.shellCapMessage(store.Bot{}, 30*time.Second); got != "stopped after 30s (the built-in default)" {
+	if got := a.shellCapMessage(store.Bot{}, 30*time.Second); got != "stopped after 30s (shell timeout, the built-in default)" {
 		t.Fatalf("shell default %q", got)
 	}
 }
@@ -59,9 +60,9 @@ func TestCeilingBoundaries(t *testing.T) {
 		body map[string]any
 		want string
 	}{
-		{map[string]any{"run_timeout": "10m1s"}, "run_timeout 10m1s is above the limit of 10m set by the built-in default"},
-		{map[string]any{"shell_timeout": "31s"}, "shell_timeout 31s is above the limit of 30s set by the built-in default"},
-		{map[string]any{"tool_rounds": 9}, "tool_rounds 9 is above the limit of 8 set by the built-in default"},
+		{map[string]any{"run_timeout": "10m1s"}, "Run timeout can be at most 10m. Enter 10m or less, or leave it blank."},
+		{map[string]any{"shell_timeout": "31s"}, "Shell timeout can be at most 30s. Enter 30s or less, or leave it blank."},
+		{map[string]any{"tool_rounds": 9}, "Tool rounds can be at most 8. Enter 8 or less, or leave it blank."},
 	}
 	for _, c := range bad {
 		res, b := do(t, "PATCH", srv.URL+"/api/bots/"+bot.ID, c.body, "")
@@ -127,13 +128,13 @@ func TestWholeSecondsRejected(t *testing.T) {
 		body map[string]any
 		want string
 	}{
-		{map[string]any{"run_timeout": "1.5s"}, "run_timeout must be a whole number of seconds, at least 1s"},
-		{map[string]any{"run_timeout": "1500ms"}, "run_timeout must be a whole number of seconds, at least 1s"},
-		{map[string]any{"run_timeout": "1ns"}, "run_timeout must be a whole number of seconds, at least 1s"},
-		{map[string]any{"run_timeout": "300us"}, "run_timeout must be a whole number of seconds, at least 1s"},
-		{map[string]any{"run_timeout": "90.001s"}, "run_timeout must be a whole number of seconds, at least 1s"},
-		{map[string]any{"shell_timeout": "500ms"}, "shell_timeout must be a whole number of seconds, at least 1s"},
-		{map[string]any{"shell_timeout": "1.5s"}, "shell_timeout must be a whole number of seconds, at least 1s"},
+		{map[string]any{"run_timeout": "1.5s"}, "Use whole seconds, like 2s."},
+		{map[string]any{"run_timeout": "1500ms"}, "Use whole seconds, like 2s."},
+		{map[string]any{"run_timeout": "1ns"}, "Use whole seconds, like 2s."},
+		{map[string]any{"run_timeout": "300us"}, "Use whole seconds, like 2s."},
+		{map[string]any{"run_timeout": "90.001s"}, "Use whole seconds, like 2s."},
+		{map[string]any{"shell_timeout": "500ms"}, "Use whole seconds, like 2s."},
+		{map[string]any{"shell_timeout": "1.5s"}, "Use whole seconds, like 2s."},
 	}
 	for _, c := range bad {
 		res, b := do(t, "PATCH", srv.URL+"/api/bots/"+bot.ID, c.body, "")
@@ -172,7 +173,7 @@ func TestToolRoundsRejectsFraction(t *testing.T) {
 			t.Fatal(err)
 		}
 		body, _ := readAll(res)
-		if res.StatusCode != 400 || !strings.Contains(string(body), "invalid tool_rounds") && !strings.Contains(string(body), "tool_rounds must be") {
+		if res.StatusCode != 400 || apiError(t, body) != "Enter a whole number from 1 to 8." {
 			t.Fatalf("%s %d %s", raw, res.StatusCode, body)
 		}
 	}
@@ -225,7 +226,7 @@ func TestUnchangedAboveCeilingCanBeSaved(t *testing.T) {
 		t.Fatalf("shellCap %s", app.shellCap(got))
 	}
 	res, b = do(t, "PATCH", srv.URL+"/api/bots/"+bot.ID, map[string]any{"shell_timeout": "15s"}, "")
-	if res.StatusCode != 400 || !strings.Contains(apiError(t, b), "shell_timeout 15s is above the limit of 10s") {
+	if res.StatusCode != 400 || apiError(t, b) != "Shell timeout can be at most 10s. Enter 10s or less, or leave it blank." {
 		t.Fatalf("changed above %d %s", res.StatusCode, b)
 	}
 	got = fetchBot(t, srv.URL, bot.ID)
@@ -433,25 +434,23 @@ func TestShellCeilingDropsWithoutSafeSignal(t *testing.T) {
 	app := newApp(t, "", fakeModel{})
 	setPolicy(app, func(p *policy.Policy) { p.OllamaShellTimeout = 2 * time.Minute })
 	d, src := app.pol().ShellTimeoutCeiling()
-	if d != 30*time.Second || src != "the 30s limit on this system" {
-		t.Fatalf("ceiling %s %q warnings %v", d, src, app.pol().Warnings)
+	if d != 30*time.Second || src != "this system" || app.pol().ShellTimeoutCeilingKey() != "" {
+		t.Fatalf("ceiling %s %q key %q warnings %v", d, src, app.pol().ShellTimeoutCeilingKey(), app.pol().Warnings)
 	}
 	if !strings.Contains(strings.Join(app.pol().Warnings, "\n"), "shell timeouts above 30s are unavailable on this system; the ceiling is 30s") {
 		t.Fatalf("warnings %v", app.pol().Warnings)
 	}
-	if got := app.shellCapMessage(store.Bot{}, d); got != "stopped after 30s (the 30s limit on this system)" {
+	if got := app.shellCapMessage(store.Bot{}, d); got != "stopped after 30s (shell timeout on this system)" {
 		t.Fatalf("message %q", got)
 	}
 }
 
 func TestAboveCeilingMessageValuesDiffer(t *testing.T) {
-	msg := aboveCeilingMessage("shell_timeout", "31s", "30s", "the built-in default")
-	if msg != "shell_timeout 31s is above the limit of 30s set by the built-in default" {
+	msg := aboveCeilingMessage("shell_timeout", "30s", "the built-in default")
+	if msg != "Shell timeout can be at most 30s. Enter 30s or less, or leave it blank." {
 		t.Fatal(msg)
 	}
-	value := "31s"
-	ceiling := "30s"
-	if value == ceiling || !strings.Contains(msg, value) || !strings.Contains(msg, ceiling) {
-		t.Fatalf("values not distinct %q", msg)
+	if strings.Contains(msg, "31s") || strings.Contains(msg, "shell_timeout") {
+		t.Fatalf("rejected value or raw key leaked into %q", msg)
 	}
 }

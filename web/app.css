@@ -1143,6 +1143,9 @@
     #server-tools-seg button, .builder .seg button { height: 44px; min-height: 44px; }
     .shape-btn { width: 44px; height: 44px; }
     #color-custom { width: 44px; height: 44px; }
+    /* Clear the fixed save bar. 160px is the wrapped bar plus 16px. */
+    #sec-limits .fld { scroll-margin-bottom: 160px; }
+    #sec-limits .fld input { height: 44px; scroll-margin-bottom: 160px; }
   }
   @media (prefers-reduced-motion: reduce) {
     .state-sheet, .state-backdrop, .toast, .skel-mark, .skel-line { transition: none; animation: none; }

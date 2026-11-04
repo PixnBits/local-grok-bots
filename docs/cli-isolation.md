@@ -146,10 +146,10 @@ take effect after a daemon restart. A stored bot value above a lowered
 ceiling is kept, clamped when a run or `run_shell` uses it, and logged once
 per bot per field per start as `bot_limit_clamped`. A PATCH that sends a
 limit equal to the stored value is accepted even when that value is above
-the current ceiling. POST checks every sent limit. The limits JSON includes
-`ceiling_source` (`ollama.shell_timeout in policy.toml`, `the managed
-ollama.max_shell_timeout`, `the built-in default`, or `the 30s limit on
-this system`).
+the current ceiling. POST checks every sent limit. The limits JSON
+`ceiling_source` is a plain name (`policy.toml`, `your administrator`,
+`the built-in default`, or `this system`). `ceiling_key` holds the config
+key when there is one, and `bot_limit_clamped` keeps that key on `key`.
 
 On Linux, `run_shell` signals a process only after opening a pidfd, walking
 parents to the jail root, and checking that both pidfds still accept signal

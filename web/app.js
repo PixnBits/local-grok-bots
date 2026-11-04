@@ -2723,14 +2723,69 @@ function dirtyFieldLabels(base, cur) {
   if ((b.shell_timeout || "") !== (c.shell_timeout || "")) out.push("Shell timeout");
   return out;
 }
-function limitHelpText(value, source, ceiling, ceilingSource) {
+function limitLabel(field) {
+  if (field === "tool_rounds") return "Tool rounds";
+  if (field === "shell_timeout") return "Shell timeout";
+  return "Run timeout";
+}
+function aboveCeilingMessage(field, ceiling, source) {
+  const label = limitLabel(field);
+  const c = String(ceiling);
+  if (source === "your administrator") {
+    return label + " can be at most " + c + ", the most your administrator allows. Enter " + c + " or less.";
+  }
+  if (source === "this system") {
+    return label + " can be at most " + c + " on this system. Enter " + c + " or less.";
+  }
+  if (source === "policy.toml") {
+    return label + " can be at most " + c + " (set in policy.toml). Enter " + c + " or less, or leave it blank to use " + c + ".";
+  }
+  return label + " can be at most " + c + ". Enter " + c + " or less, or leave it blank.";
+}
+function toolRoundsRangeMessage(ceiling) {
+  let n = Number(ceiling);
+  if (!(n >= 1)) n = 1;
+  return "Enter a whole number from 1 to " + n + ".";
+}
+function durationPlaceholder(inherited) {
+  const hint = "e.g. 90s, 5m, 1h";
+  const shown = String(inherited == null ? "" : inherited).trim();
+  if (!shown) return hint;
+  return shown + " (" + hint + ")";
+}
+function limitPlaceholder(field, stored, inherited) {
+  if (field === "tool_rounds") return stored ? "" : String(inherited == null ? "" : inherited);
+  if (stored) return "e.g. 90s, 5m, 1h";
+  return durationPlaceholder(inherited);
+}
+function storedAbove(stored, effective) {
+  const s = String(stored == null ? "" : stored).trim();
+  const e = String(effective == null ? "" : effective).trim();
+  if (!s || !e) return false;
+  const sMs = parseGoDurationMs(s);
+  const eMs = parseGoDurationMs(e);
+  if (sMs > 0 && eMs > 0) return sMs > eMs;
+  const sn = Number(s);
+  const en = Number(e);
+  return Number.isFinite(sn) && Number.isFinite(en) && sn > en;
+}
+function limitHelpText(value, source, ceiling, ceilingSource, stored) {
   const shown = value == null ? "" : String(value);
-  let text = source === "bot"
-    ? "In force: " + shown + " (this bot). Policy limit: " + ceiling + "."
-    : "In force: " + shown + " (policy)";
-  if (ceilingSource) {
-    if (text.charAt(text.length - 1) !== ".") text += ".";
-    text += " Set by " + ceilingSource + ".";
+  let text;
+  if (source === "bot") {
+    text = "Using " + shown + ", set on this bot. Up to " + ceiling + " allowed.";
+  } else if (ceilingSource === "policy.toml") {
+    text = "Using " + shown + ", from policy.toml.";
+  } else if (ceilingSource === "your administrator") {
+    text = "Using " + shown + ", the most your administrator allows.";
+  } else if (ceilingSource === "this system") {
+    text = "Using " + shown + " on this system.";
+  } else {
+    text = "Using " + shown + ", the built-in default.";
+  }
+  if (storedAbove(stored, shown)) {
+    const asked = String(stored).trim();
+    text += " This bot asks for " + asked + ", but only " + shown + " is allowed now, so " + shown + " is used.";
   }
   return text;
 }
@@ -2753,21 +2808,17 @@ function limitPrecheckError(field, raw, limits) {
   const ceiling = lim && lim.ceiling;
   const src = (lim && lim.ceiling_source) ? lim.ceiling_source : "the built-in default";
   if (field === "tool_rounds") {
-    if (!/^\d+$/.test(v) || Number(v) <= 0) return "tool_rounds must be positive";
+    if (!/^\d+$/.test(v) || Number(v) < 1 || Number(v) > 100) return toolRoundsRangeMessage(ceiling);
     const n = Number(v);
-    if (ceiling != null && n > Number(ceiling)) {
-      return "tool_rounds " + n + " is above the limit of " + ceiling + " set by " + src;
-    }
+    if (ceiling != null && n > Number(ceiling)) return aboveCeilingMessage(field, ceiling, src);
     return "";
   }
   const ms = parseGoDurationMs(v);
-  if (!(ms > 0)) return "invalid " + field;
-  if (ms < 1000 || ms % 1000 !== 0) return field + " must be a whole number of seconds, at least 1s";
+  if (!(ms > 0)) return "Enter a time like 90s, 5m or 1h.";
+  if (ms < 1000 || ms % 1000 !== 0) return "Use whole seconds, like 2s.";
   if (ceiling) {
-    const ceilMs = parseGoDurationMs(ceiling);
-    if (ceilMs > 0 && ms > ceilMs) {
-      return field + " " + v + " is above the limit of " + ceiling + " set by " + src;
-    }
+    const ceilMs = parseGoDurationMs(String(ceiling));
+    if (ceilMs > 0 && ms > ceilMs) return aboveCeilingMessage(field, ceiling, src);
   }
   return "";
 }
@@ -2781,6 +2832,19 @@ function firstChangedLimitError(base, cur, limits, checkAll) {
     if (msg) return { field: field, message: msg };
   }
   return null;
+}
+function limitFieldForMessage(msg, limits, cur) {
+  const text = String(msg || "");
+  const fields = ["run_timeout", "shell_timeout", "tool_rounds"];
+  for (let i = 0; i < fields.length; i++) {
+    if (text.indexOf(limitLabel(fields[i])) === 0) return fields[i];
+  }
+  const values = cur || {};
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i];
+    if (limitPrecheckError(field, values[field], limits) === text) return field;
+  }
+  return "";
 }
 function parseGoDurationMs(s) {
   const raw = String(s == null ? "" : s).trim();
@@ -3659,7 +3723,7 @@ function fillLimitInputs(bot) {
     const stored = storedLimitValue(bot, f.key);
     input.value = stored;
     const lim = limits[f.key] || {};
-    input.placeholder = stored ? "" : String(lim.value || lim.ceiling || "");
+    input.placeholder = limitPlaceholder(f.key, stored, lim.value || lim.ceiling || "");
   }
 }
 function paintLimitHelp() {
@@ -3672,7 +3736,9 @@ function paintLimitHelp() {
       help.textContent = "";
       continue;
     }
-    help.textContent = limitHelpText(lim.value, lim.source, lim.ceiling, lim.ceiling_source);
+    const input = $("#" + f.input);
+    const stored = input ? input.value : "";
+    help.textContent = limitHelpText(lim.value, lim.source, lim.ceiling, lim.ceiling_source, stored);
   }
 }
 function setLimitError(field, message) {
@@ -3684,9 +3750,7 @@ function setLimitError(field, message) {
   if (fld) fld.classList.toggle("is-error", !!message);
   if (input) {
     input.setAttribute("aria-invalid", message ? "true" : "false");
-    const ids = [f.help];
-    if (message) ids.push(f.err);
-    input.setAttribute("aria-describedby", ids.join(" "));
+    input.setAttribute("aria-describedby", f.help + " " + f.err);
   }
   if (err) {
     err.hidden = !message;
@@ -3756,13 +3820,17 @@ function rescueFocus(fallback) {
   const a = document.activeElement;
   if (!a || a === document.body || !document.contains(a) || (a.closest && a.closest("[hidden]"))) (fallback || focusProfileHeading)();
 }
+function setLimitAnnounce(text) {
+  const live = $("#limit-announce");
+  if (live) live.textContent = text == null ? "" : String(text);
+}
 function revealLimitFailure(inputId, message) {
   const access = $("#profile-access");
   if (access && access.hidden) setProfilePane("access");
-  const live = $("#limit-announce");
-  if (live) live.textContent = message || "";
+  setLimitAnnounce(message || "");
   const n = inputId ? $("#" + inputId) : null;
   if (n && typeof n.focus === "function") n.focus();
+  if (n && typeof n.scrollIntoView === "function") n.scrollIntoView({ block: "center" });
 }
 function setSaving(on) {
   state.saving = !!on;
@@ -3809,6 +3877,8 @@ async function saveProfile() {
         await openBot(bot.id, false);
         commitLevel({ view: "chat", bot: bot.id }, "replace");
       } finally { navBypass = false; }
+      setLimitAnnounce("Saved.");
+      clearLimitErrors();
       return;
     }
     if (!state.botId) return;
@@ -3817,6 +3887,8 @@ async function saveProfile() {
     state.profileBase = readProfile();
     state.saveError = "";
     state.saveErrorChip = false;
+    setLimitAnnounce("Saved.");
+    clearLimitErrors();
     paintDirty();
     showStatusToast("Saved");
     announce("Saved");
@@ -3824,10 +3896,7 @@ async function saveProfile() {
     await loadBots();
   } catch (err) {
     const msg = err && err.message ? err.message : String(err || "");
-    let field = "";
-    for (const f of LIMIT_FIELDS) {
-      if (msg.indexOf(f.key) === 0 || msg.indexOf(f.key + " ") === 0) { field = f.key; break; }
-    }
+    const field = limitFieldForMessage(msg, state.botLimits || {}, readProfile());
     if (field) setLimitError(field, msg);
     state.saveError = (state.draft ? "Couldn't create the bot. The daemon said: " : "Couldn't save. The daemon said: ") + msg;
     paintSaveBar();

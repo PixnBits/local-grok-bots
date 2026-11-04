@@ -40,7 +40,7 @@ func TestBotLimitsAPIAcceptRejectAndJSON(t *testing.T) {
 	if bot.RunTimeout.Duration() != 5*time.Minute || bot.ShellTimeout.Duration() != 10*time.Second || bot.ToolRounds != 3 {
 		t.Fatalf("stored %#v", bot)
 	}
-	if bot.Limits == nil || bot.Limits.RunTimeout.Value != "5m" || bot.Limits.RunTimeout.Source != "bot" || bot.Limits.RunTimeout.Ceiling != "10m" {
+	if bot.Limits == nil || bot.Limits.RunTimeout.Value != "5m" || bot.Limits.RunTimeout.Source != "bot" || bot.Limits.RunTimeout.Ceiling != "10m" || bot.Limits.RunTimeout.CeilingSource != "the built-in default" || bot.Limits.RunTimeout.CeilingKey != "" {
 		t.Fatalf("limits %#v", bot.Limits)
 	}
 	if bot.Limits.ToolRounds.Value != 3 || bot.Limits.ToolRounds.Source != "bot" || bot.Limits.ToolRounds.Ceiling != 8 {
@@ -93,7 +93,7 @@ func TestBotLimitsAPIAcceptRejectAndJSON(t *testing.T) {
 		t.Fatalf("above ceiling %d %s", res.StatusCode, b)
 	}
 	errText := apiError(t, b)
-	if !strings.Contains(errText, "shell_timeout 20m is above the limit of 30s set by the built-in default") {
+	if errText != "Shell timeout can be at most 30s. Enter 30s or less, or leave it blank." {
 		t.Fatalf("reject message %q", errText)
 	}
 	got := fetchBot(t, srv.URL, bot.ID)
@@ -102,19 +102,19 @@ func TestBotLimitsAPIAcceptRejectAndJSON(t *testing.T) {
 	}
 
 	res, b = do(t, "PATCH", srv.URL+"/api/bots/"+bot.ID, map[string]any{"run_timeout": "nope"}, "")
-	if res.StatusCode != 400 || !strings.Contains(apiError(t, b), "invalid run_timeout") {
+	if res.StatusCode != 400 || apiError(t, b) != "Enter a time like 90s, 5m or 1h." {
 		t.Fatalf("malformed %d %s", res.StatusCode, b)
 	}
 	res, b = do(t, "PATCH", srv.URL+"/api/bots/"+bot.ID, map[string]any{"run_timeout": "0s"}, "")
-	if res.StatusCode != 400 || !strings.Contains(apiError(t, b), "run_timeout must be positive") {
+	if res.StatusCode != 400 || apiError(t, b) != "Enter a time like 90s, 5m or 1h." {
 		t.Fatalf("zero %d %s", res.StatusCode, b)
 	}
 	res, b = do(t, "PATCH", srv.URL+"/api/bots/"+bot.ID, map[string]any{"tool_rounds": -1}, "")
-	if res.StatusCode != 400 || !strings.Contains(apiError(t, b), "tool_rounds must be positive") {
+	if res.StatusCode != 400 || apiError(t, b) != "Enter a whole number from 1 to 8." {
 		t.Fatalf("neg rounds %d %s", res.StatusCode, b)
 	}
 	res, b = do(t, "PATCH", srv.URL+"/api/bots/"+bot.ID, map[string]any{"tool_rounds": 20}, "")
-	if res.StatusCode != 400 || !strings.Contains(apiError(t, b), "tool_rounds 20 is above the limit of 8 set by the built-in default") {
+	if res.StatusCode != 400 || apiError(t, b) != "Tool rounds can be at most 8. Enter 8 or less, or leave it blank." {
 		t.Fatalf("rounds ceiling %d %s", res.StatusCode, b)
 	}
 
@@ -174,7 +174,7 @@ func TestBotLimitsCLIRunTimeoutCeiling(t *testing.T) {
 		t.Fatalf("status %d %s", res.StatusCode, b)
 	}
 	errText := apiError(t, b)
-	if !strings.Contains(errText, "run_timeout 45m is above the limit of 30m") {
+	if errText != "Run timeout can be at most 30m. Enter 30m or less, or leave it blank." {
 		t.Fatalf("message %q", errText)
 	}
 	if strings.Contains(errText, "ollama.run_timeout") {
@@ -271,7 +271,7 @@ func TestBotToolRoundsStopAtThree(t *testing.T) {
 		t.Fatalf("calls %d", len(calls))
 	}
 	page := readThread(t, srv.URL, bot.ID)
-	if threadNotice(page) != "Notice: Stopped: used all 3 tool rounds." {
+	if threadNotice(page) != "Notice: Stopped: used all 3 tool rounds. Press Continue, or raise the limit under Permissions & access." {
 		t.Fatalf("notice %q", threadNotice(page))
 	}
 }
@@ -318,7 +318,7 @@ func TestRunShellUsesBotShellTimeout(t *testing.T) {
 	defer cancel()
 	out, runErr := app.dispatchTool(ctx, bot, "run_shell", map[string]any{"command": "sleep 5"})
 	elapsed := time.Since(start)
-	if runErr == nil || !strings.Contains(runErr.Error(), "stopped after 1s (shell_timeout, set on this bot)") {
+	if runErr == nil || !strings.Contains(runErr.Error(), "stopped after 1s (shell timeout set on this bot)") {
 		t.Fatalf("err=%v out=%s", runErr, out)
 	}
 	if elapsed >= 4*time.Second {
@@ -327,7 +327,7 @@ func TestRunShellUsesBotShellTimeout(t *testing.T) {
 }
 
 func TestRunTimeoutBodyNamesBotSource(t *testing.T) {
-	if timeoutBody("run_timeout", 5*time.Minute, 0, "", "run_timeout, set on this bot") != "The run hit its 5m limit (run_timeout, set on this bot)." {
+	if timeoutBody("run_timeout", 5*time.Minute, 0, "", "set on this bot") != "The run hit its 5m limit (set on this bot)." {
 		t.Fatal("bot origin")
 	}
 	if timeoutBody("run_timeout", 10*time.Minute, 0, "", "") != "The run hit its 10m limit (the built-in default)." {
@@ -362,16 +362,20 @@ func TestPolicyNamedCeilingInRejectMessage(t *testing.T) {
 		t.Fatalf("status %d %s", res.StatusCode, b)
 	}
 	errText := apiError(t, b)
-	want := "shell_timeout 20m is above the limit of 10m set by ollama.shell_timeout in policy.toml"
+	want := "Shell timeout can be at most 10m (set in policy.toml). Enter 10m or less, or leave it blank to use 10m."
 	if errText != want {
 		t.Fatalf("got %q want %q", errText, want)
+	}
+	got := fetchBot(t, srv.URL, bot.ID)
+	if got.Limits == nil || got.Limits.ShellTimeout.Ceiling != "10m" || got.Limits.ShellTimeout.CeilingSource != "policy.toml" || got.Limits.ShellTimeout.CeilingKey != "ollama.shell_timeout" {
+		t.Fatalf("limits %#v", got.Limits)
 	}
 }
 
 func TestRunTimeoutOriginNamesSource(t *testing.T) {
 	var a *App
 	pol := policy.Policy{}
-	if got := a.runTimeoutOrigin(store.Bot{RunTimeout: store.DurationMS(5 * time.Minute)}, pol); got != "run_timeout, set on this bot" {
+	if got := a.runTimeoutOrigin(store.Bot{RunTimeout: store.DurationMS(5 * time.Minute)}, pol); got != "set on this bot" {
 		t.Fatalf("bot value: %q", got)
 	}
 	if got := a.runTimeoutOrigin(store.Bot{}, pol); got != "the built-in default" {

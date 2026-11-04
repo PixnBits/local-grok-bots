@@ -10,7 +10,7 @@ const shellSignalCeiling = 30 * time.Second
 
 const shellSignalWarning = "shell timeouts above 30s are unavailable on this system; the ceiling is 30s"
 
-const shellSignalSource = "the 30s limit on this system"
+const shellSignalSource = "this system"
 
 // shellSignalFn, when set, reports whether shell timeouts above 30s are safe.
 // Unset means they are allowed, so policy tests keep values above 30s.

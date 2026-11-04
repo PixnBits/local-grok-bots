@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -66,18 +67,21 @@ func (a *App) botLimits(b store.Bot) *store.BotLimits {
 			Source:        limitSource(b.RunTimeout.Duration() > 0 && b.RunTimeout.Duration() <= runCeil),
 			Ceiling:       compactDuration(runCeil),
 			CeilingSource: runSrc,
+			CeilingKey:    pol.RunTimeoutCeilingKey(pol.UsesCLI()),
 		},
 		ToolRounds: store.LimitInt{
 			Value:         roundVal,
 			Source:        limitSource(b.ToolRounds > 0 && b.ToolRounds <= roundCeil),
 			Ceiling:       roundCeil,
 			CeilingSource: roundSrc,
+			CeilingKey:    pol.ToolRoundsCeilingKey(),
 		},
 		ShellTimeout: store.LimitDuration{
 			Value:         compactDuration(shellVal),
 			Source:        limitSource(b.ShellTimeout.Duration() > 0 && b.ShellTimeout.Duration() <= shellCeil),
 			Ceiling:       compactDuration(shellCeil),
 			CeilingSource: shellSrc,
+			CeilingKey:    pol.ShellTimeoutCeilingKey(),
 		},
 	}
 }
@@ -92,42 +96,26 @@ func limitSource(botInForce bool) string {
 func (a *App) runTimeoutOrigin(bot store.Bot, pol policy.Policy) string {
 	ceil, src := pol.RunTimeoutCeiling(pol.UsesCLI())
 	botSet := bot.RunTimeout > 0 && bot.RunTimeout.Duration() <= ceil
-	return limitWhere("run_timeout", botSet, src)
-}
-
-// limitWhere is the parenthetical source for a limit that is in force.
-func limitWhere(field string, botInForce bool, ceilingSource string) string {
-	if botInForce {
-		return field + ", set on this bot"
+	if botSet {
+		return "set on this bot"
 	}
-	if ceilingSource == "" {
-		return "the built-in default"
-	}
-	return ceilingSource
-}
-
-// raiseCeiling says where a ceiling can be raised. policyKey is the policy.toml key.
-func raiseCeiling(ceilingSource, policyKey string) string {
-	switch {
-	case ceilingSource == "" || ceilingSource == "the built-in default":
-		return "To allow more, set " + policyKey + " in policy.toml."
-	case strings.HasPrefix(ceilingSource, "the managed "):
-		return "To allow more, raise " + ceilingSource + "."
-	case strings.HasSuffix(ceilingSource, " in policy.toml"):
-		key := strings.TrimSuffix(ceilingSource, " in policy.toml")
-		return "To allow more, raise " + key + " in policy.toml."
-	default:
-		return "To allow more, raise " + ceilingSource + "."
-	}
+	return ceilingParen(src)
 }
 
 func toolRoundLimitBody(n, botRounds, ceiling int, ceilingSource string) string {
-	botSet := botRounds > 0 && botRounds <= ceiling
-	head := fmt.Sprintf("The run used all %d tool rounds (%s).", n, limitWhere("tool_rounds", botSet, ceilingSource))
+	unit := roundsUnit(n)
 	if botRounds > 0 && botRounds < ceiling {
-		return head + fmt.Sprintf(" Raise it under Permissions & access, up to %d.", ceiling)
+		return fmt.Sprintf("The run used all %d %s (set on this bot). Press Continue, or raise the limit under Permissions & access, up to %d.", n, unit, ceiling)
 	}
-	return head + " " + raiseCeiling(ceilingSource, "ollama.tool_rounds")
+	head := fmt.Sprintf("The run used all %d %s (%s).", n, unit, ceilingParen(ceilingSource))
+	switch ceilingSource {
+	case "policy.toml":
+		return head + " Press Continue, or ask whoever manages policy.toml to raise it."
+	case "your administrator":
+		return head + " Press Continue."
+	default:
+		return head + " Press Continue, or raise the limit in policy.toml."
+	}
 }
 
 func (a *App) shellCapMessage(bot store.Bot, cap time.Duration) string {
@@ -137,7 +125,7 @@ func (a *App) shellCapMessage(bot store.Bot, cap time.Duration) string {
 	}
 	ceil, src := pol.ShellTimeoutCeiling()
 	botSet := bot.ShellTimeout > 0 && bot.ShellTimeout.Duration() <= ceil
-	return fmt.Sprintf("stopped after %s (%s)", compactDuration(cap), limitWhere("shell_timeout", botSet, src))
+	return fmt.Sprintf("stopped after %s (%s)", compactDuration(cap), shellParen(botSet, src))
 }
 
 func (a *App) auditLimitChanges(oldBot, newBot store.Bot, by string) {
@@ -171,36 +159,21 @@ func (a *App) auditLimitChanges(oldBot, newBot store.Bot, by string) {
 	}
 }
 
-func aboveCeilingMessage(field, value, ceiling, source string) string {
-	return fmt.Sprintf("%s %s is above the limit of %s set by %s", field, value, ceiling, source)
-}
-
-func parseOptionalDuration(raw json.RawMessage, field string) (time.Duration, error) {
+func parseOptionalDuration(raw json.RawMessage) (time.Duration, error) {
 	if string(raw) == "null" || string(raw) == `""` {
 		return 0, nil
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err != nil {
-		return 0, fmt.Errorf("invalid %s", field)
+		return 0, errors.New(msgDurationExample)
 	}
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return 0, nil
-	}
-	d, err := time.ParseDuration(s)
-	if err != nil {
-		return 0, fmt.Errorf("invalid %s", field)
-	}
-	if d <= 0 {
-		return 0, fmt.Errorf("%s must be positive", field)
-	}
-	if err := requireWholeSeconds(d, field); err != nil {
-		return 0, err
-	}
-	return d, nil
+	return parseDurationString(s)
 }
 
-func parseOptionalToolRounds(raw json.RawMessage) (int, error) {
+func parseOptionalToolRounds(raw json.RawMessage, ceiling int) (int, error) {
+	reject := func() (int, error) {
+		return 0, errors.New(toolRoundsRangeMessage(ceiling))
+	}
 	if string(raw) == "null" {
 		return 0, nil
 	}
@@ -208,77 +181,71 @@ func parseOptionalToolRounds(raw json.RawMessage) (int, error) {
 	dec.UseNumber()
 	var v any
 	if err := dec.Decode(&v); err != nil {
-		return 0, fmt.Errorf("invalid tool_rounds")
+		return reject()
 	}
 	switch n := v.(type) {
 	case json.Number:
 		i, err := n.Int64()
 		if err != nil || n.String() != strconv.FormatInt(i, 10) {
-			return 0, fmt.Errorf("invalid tool_rounds")
+			return reject()
 		}
 		if i == 0 {
 			return 0, nil
 		}
-		if i < 0 {
-			return 0, fmt.Errorf("tool_rounds must be positive")
-		}
 		if i < 1 || i > 100 {
-			return 0, fmt.Errorf("tool_rounds must be an integer from 1 to 100")
+			return reject()
 		}
 		return int(i), nil
 	default:
-		return 0, fmt.Errorf("invalid tool_rounds")
+		return reject()
 	}
 }
 
-func parseDurationString(s, field string) (time.Duration, error) {
+func parseDurationString(s string) (time.Duration, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, nil
 	}
 	d, err := time.ParseDuration(s)
-	if err != nil {
-		return 0, fmt.Errorf("invalid %s", field)
+	if err != nil || d <= 0 {
+		return 0, errors.New(msgDurationExample)
 	}
-	if d <= 0 {
-		return 0, fmt.Errorf("%s must be positive", field)
-	}
-	if err := requireWholeSeconds(d, field); err != nil {
+	if err := requireWholeSeconds(d); err != nil {
 		return 0, err
 	}
 	return d, nil
 }
 
-func requireWholeSeconds(d time.Duration, field string) error {
+func requireWholeSeconds(d time.Duration) error {
 	if d >= time.Second && d%time.Second == 0 {
 		return nil
 	}
-	return fmt.Errorf("%s must be a whole number of seconds, at least 1s", field)
+	return errors.New(msgWholeSeconds)
 }
 
 func (a *App) checkBotLimitCeilings(pol policy.Policy, run, shell time.Duration, rounds int, runSet, shellSet, roundsSet bool) error {
 	if runSet && run > 0 {
-		if err := requireWholeSeconds(run, "run_timeout"); err != nil {
+		if err := requireWholeSeconds(run); err != nil {
 			return err
 		}
 		ceil, src := pol.RunTimeoutCeiling(pol.UsesCLI())
 		if run > ceil {
-			return fmt.Errorf("%s", aboveCeilingMessage("run_timeout", compactDuration(run), compactDuration(ceil), src))
+			return errors.New(aboveCeilingMessage("run_timeout", compactDuration(ceil), src))
 		}
 	}
 	if shellSet && shell > 0 {
-		if err := requireWholeSeconds(shell, "shell_timeout"); err != nil {
+		if err := requireWholeSeconds(shell); err != nil {
 			return err
 		}
 		ceil, src := pol.ShellTimeoutCeiling()
 		if shell > ceil {
-			return fmt.Errorf("%s", aboveCeilingMessage("shell_timeout", compactDuration(shell), compactDuration(ceil), src))
+			return errors.New(aboveCeilingMessage("shell_timeout", compactDuration(ceil), src))
 		}
 	}
 	if roundsSet && rounds > 0 {
 		ceil, src := pol.ToolRoundsCeiling()
 		if rounds > ceil {
-			return fmt.Errorf("%s", aboveCeilingMessage("tool_rounds", strconv.Itoa(rounds), strconv.Itoa(ceil), src))
+			return errors.New(aboveCeilingMessage("tool_rounds", strconv.Itoa(ceil), src))
 		}
 	}
 	return nil
@@ -321,21 +288,24 @@ func (a *App) noteClampedLimits(pol policy.Policy) {
 	runCeil, runSrc := pol.RunTimeoutCeiling(pol.UsesCLI())
 	roundCeil, roundSrc := pol.ToolRoundsCeiling()
 	shellCeil, shellSrc := pol.ShellTimeoutCeiling()
+	runKey := pol.RunTimeoutCeilingKey(pol.UsesCLI())
+	roundKey := pol.ToolRoundsCeilingKey()
+	shellKey := pol.ShellTimeoutCeilingKey()
 	for _, b := range bots {
 		if d := b.RunTimeout.Duration(); d > runCeil {
-			a.noteClamp(b.ID, "run_timeout", compactDuration(d), compactDuration(runCeil), runSrc)
+			a.noteClamp(b.ID, "run_timeout", compactDuration(d), compactDuration(runCeil), runSrc, runKey)
 		}
 		if b.ToolRounds > roundCeil {
-			a.noteClamp(b.ID, "tool_rounds", b.ToolRounds, roundCeil, roundSrc)
+			a.noteClamp(b.ID, "tool_rounds", b.ToolRounds, roundCeil, roundSrc, roundKey)
 		}
 		if d := b.ShellTimeout.Duration(); d > shellCeil {
-			a.noteClamp(b.ID, "shell_timeout", compactDuration(d), compactDuration(shellCeil), shellSrc)
+			a.noteClamp(b.ID, "shell_timeout", compactDuration(d), compactDuration(shellCeil), shellSrc, shellKey)
 		}
 	}
 }
 
-func (a *App) noteClamp(botID, field string, stored, effective any, source string) {
-	key := fmt.Sprintf("%s|%s|%v|%v|%s", botID, field, stored, effective, source)
+func (a *App) noteClamp(botID, field string, stored, effective any, source, configKey string) {
+	key := fmt.Sprintf("%s|%s|%v|%v|%s|%s", botID, field, stored, effective, source, configKey)
 	a.clampMu.Lock()
 	if a.clampSeen == nil {
 		a.clampSeen = map[string]struct{}{}
@@ -353,15 +323,22 @@ func (a *App) noteClamp(botID, field string, stored, effective any, source strin
 		"effective": effective,
 		"source":    source,
 	}
+	if configKey != "" {
+		detail["key"] = configKey
+	}
 	a.log(botID, "bot_limit_clamped", detail)
 	if a.audit != nil && a.audit.Enabled() {
-		a.audit.Write(map[string]any{
+		rec := map[string]any{
 			"action":    "bot_limit_clamped",
 			"bot_id":    botID,
 			"field":     field,
 			"stored":    stored,
 			"effective": effective,
 			"source":    source,
-		})
+		}
+		if configKey != "" {
+			rec["key"] = configKey
+		}
+		a.audit.Write(rec)
 	}
 }

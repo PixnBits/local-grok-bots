@@ -8,6 +8,31 @@ import (
 	"time"
 )
 
+func TestCompactDurationKeepsRemainder(t *testing.T) {
+	if CompactDuration(1500*time.Millisecond) != "1.5s" {
+		t.Fatalf("1500ms %q", CompactDuration(1500*time.Millisecond))
+	}
+	if CompactDuration(1001*time.Millisecond) != "1.001s" {
+		t.Fatalf("1001ms %q", CompactDuration(1001*time.Millisecond))
+	}
+	if CompactDuration(90*time.Second+500*time.Millisecond) != "1m30.5s" {
+		t.Fatalf("90.5s %q", CompactDuration(90*time.Second+500*time.Millisecond))
+	}
+	if CompactDuration(time.Hour+500*time.Millisecond) != "1h0.5s" {
+		t.Fatalf("1h500ms %q", CompactDuration(time.Hour+500*time.Millisecond))
+	}
+	if CompactDuration(150*time.Millisecond) != "150ms" || CompactDuration(10*time.Minute) != "10m" || CompactDuration(90*time.Minute) != "1h30m" || CompactDuration(45*time.Second) != "45s" || CompactDuration(0) != "" {
+		t.Fatal("whole-second formatting changed")
+	}
+	raw, err := json.Marshal(DurationMS(1500 * time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != `"1.5s"` {
+		t.Fatalf("json %s", raw)
+	}
+}
+
 func TestBotLimitsRoundTripAndClear(t *testing.T) {
 	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {

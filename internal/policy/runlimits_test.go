@@ -12,20 +12,20 @@ func TestRunLimitDefaultsAndCeilings(t *testing.T) {
 		t.Fatalf("defaults rounds=%d shell=%s", p.EffectiveToolRounds(), p.EffectiveShellTimeout())
 	}
 	n, src := p.ToolRoundsCeiling()
-	if n != 8 || src != "the built-in default" {
-		t.Fatalf("rounds ceiling %d %q", n, src)
+	if n != 8 || src != "the built-in default" || p.ToolRoundsCeilingKey() != "" {
+		t.Fatalf("rounds ceiling %d %q key %q", n, src, p.ToolRoundsCeilingKey())
 	}
 	d, src := p.ShellTimeoutCeiling()
-	if d != 30*time.Second || src != "the built-in default" {
-		t.Fatalf("shell ceiling %s %q", d, src)
+	if d != 30*time.Second || src != "the built-in default" || p.ShellTimeoutCeilingKey() != "" {
+		t.Fatalf("shell ceiling %s %q key %q", d, src, p.ShellTimeoutCeilingKey())
 	}
 	d, src = p.RunTimeoutCeiling(false)
-	if d != 10*time.Minute || src != "the built-in default" {
-		t.Fatalf("ollama run ceiling %s %q", d, src)
+	if d != 10*time.Minute || src != "the built-in default" || p.RunTimeoutCeilingKey(false) != "" {
+		t.Fatalf("ollama run ceiling %s %q key %q", d, src, p.RunTimeoutCeilingKey(false))
 	}
 	d, src = p.RunTimeoutCeiling(true)
-	if d != 2*time.Hour || src != "the built-in default" {
-		t.Fatalf("cli run ceiling %s %q", d, src)
+	if d != 2*time.Hour || src != "the built-in default" || p.RunTimeoutCeilingKey(true) != "" {
+		t.Fatalf("cli run ceiling %s %q key %q", d, src, p.RunTimeoutCeilingKey(true))
 	}
 }
 
@@ -51,12 +51,12 @@ max_shell_timeout = "10s"
 		t.Fatalf("warnings %v", p.Warnings)
 	}
 	n, src := p.ToolRoundsCeiling()
-	if n != 12 || src != "ollama.tool_rounds in policy.toml" {
-		t.Fatalf("local rounds ceiling %d %q", n, src)
+	if n != 12 || src != "policy.toml" || p.ToolRoundsCeilingKey() != "ollama.tool_rounds" {
+		t.Fatalf("local rounds ceiling %d %q key %q", n, src, p.ToolRoundsCeilingKey())
 	}
 	d, src := p.ShellTimeoutCeiling()
-	if d != 2*time.Minute || src != "ollama.shell_timeout in policy.toml" {
-		t.Fatalf("local shell ceiling %s %q", d, src)
+	if d != 2*time.Minute || src != "policy.toml" || p.ShellTimeoutCeilingKey() != "ollama.shell_timeout" {
+		t.Fatalf("local shell ceiling %s %q key %q", d, src, p.ShellTimeoutCeilingKey())
 	}
 
 	managed := writePol(t, "managed.toml", `
@@ -72,12 +72,12 @@ max_shell_timeout = "45s"
 		t.Fatalf("capped rounds=%d shell=%s", p.EffectiveToolRounds(), p.EffectiveShellTimeout())
 	}
 	n, src = p.ToolRoundsCeiling()
-	if n != 4 || src != "the managed ollama.max_tool_rounds" {
-		t.Fatalf("managed rounds ceiling %d %q", n, src)
+	if n != 4 || src != "your administrator" || p.ToolRoundsCeilingKey() != "ollama.max_tool_rounds" {
+		t.Fatalf("managed rounds ceiling %d %q key %q", n, src, p.ToolRoundsCeilingKey())
 	}
 	d, src = p.ShellTimeoutCeiling()
-	if d != 45*time.Second || src != "the managed ollama.max_shell_timeout" {
-		t.Fatalf("managed shell ceiling %s %q", d, src)
+	if d != 45*time.Second || src != "your administrator" || p.ShellTimeoutCeilingKey() != "ollama.max_shell_timeout" {
+		t.Fatalf("managed shell ceiling %s %q key %q", d, src, p.ShellTimeoutCeilingKey())
 	}
 	warns := strings.Join(p.Warnings, "\n")
 	for _, w := range []string{
@@ -137,12 +137,12 @@ func TestManagedMaxRunLimitsCapDefault(t *testing.T) {
 		t.Fatalf("default capped rounds=%d shell=%s", p.EffectiveToolRounds(), p.EffectiveShellTimeout())
 	}
 	n, src := p.ToolRoundsCeiling()
-	if n != 2 || src != "the managed ollama.max_tool_rounds" {
-		t.Fatalf("default rounds ceiling %d %q", n, src)
+	if n != 2 || src != "your administrator" || p.ToolRoundsCeilingKey() != "ollama.max_tool_rounds" {
+		t.Fatalf("default rounds ceiling %d %q key %q", n, src, p.ToolRoundsCeilingKey())
 	}
 	d, src := p.ShellTimeoutCeiling()
-	if d != 5*time.Second || src != "the managed ollama.max_shell_timeout" {
-		t.Fatalf("default shell ceiling %s %q", d, src)
+	if d != 5*time.Second || src != "your administrator" || p.ShellTimeoutCeilingKey() != "ollama.max_shell_timeout" {
+		t.Fatalf("default shell ceiling %s %q key %q", d, src, p.ShellTimeoutCeilingKey())
 	}
 	if strings.Contains(strings.Join(p.Warnings, "\n"), "lowered") {
 		t.Fatalf("warned a clamped default: %v", p.Warnings)
@@ -161,12 +161,12 @@ run_timeout = "5m"
 		t.Fatal(err)
 	}
 	d, src := p.RunTimeoutCeiling(true)
-	if d != 30*time.Minute || src != "cli.turn_timeout in policy.toml" {
-		t.Fatalf("cli %s %q", d, src)
+	if d != 30*time.Minute || src != "policy.toml" || p.RunTimeoutCeilingKey(true) != "cli.turn_timeout" {
+		t.Fatalf("cli %s %q key %q", d, src, p.RunTimeoutCeilingKey(true))
 	}
 	d, src = p.RunTimeoutCeiling(false)
-	if d != 5*time.Minute || src != "ollama.run_timeout in policy.toml" {
-		t.Fatalf("ollama %s %q", d, src)
+	if d != 5*time.Minute || src != "policy.toml" || p.RunTimeoutCeilingKey(false) != "ollama.run_timeout" {
+		t.Fatalf("ollama %s %q key %q", d, src, p.RunTimeoutCeilingKey(false))
 	}
 	managed := writePol(t, "managed.toml", "[cli]\nmax_turn_timeout = \"10m\"\n")
 	p, err = Load(Options{Path: local, ManagedPath: managed})
@@ -174,8 +174,8 @@ run_timeout = "5m"
 		t.Fatal(err)
 	}
 	d, src = p.RunTimeoutCeiling(true)
-	if d != 10*time.Minute || src != "the managed cli.max_turn_timeout" {
-		t.Fatalf("cli capped %s %q", d, src)
+	if d != 10*time.Minute || src != "your administrator" || p.RunTimeoutCeilingKey(true) != "cli.max_turn_timeout" {
+		t.Fatalf("cli capped %s %q key %q", d, src, p.RunTimeoutCeilingKey(true))
 	}
 }
 
@@ -191,8 +191,8 @@ func TestLocalRunLimitWithinCeilingIsNotWarned(t *testing.T) {
 		t.Fatalf("warned within ceiling: %v", p.Warnings)
 	}
 	n, src := p.ToolRoundsCeiling()
-	if n != 3 || src != "ollama.tool_rounds in policy.toml" {
-		t.Fatalf("within rounds ceiling %d %q", n, src)
+	if n != 3 || src != "policy.toml" || p.ToolRoundsCeilingKey() != "ollama.tool_rounds" {
+		t.Fatalf("within rounds ceiling %d %q key %q", n, src, p.ToolRoundsCeilingKey())
 	}
 }
 
@@ -214,8 +214,8 @@ func TestShellTimeoutWholeSecondsAndSignalCap(t *testing.T) {
 		t.Fatalf("effective %s", p.EffectiveShellTimeout())
 	}
 	d, src := p.ShellTimeoutCeiling()
-	if d != 30*time.Second || src != "the 30s limit on this system" {
-		t.Fatalf("ceiling %s %q", d, src)
+	if d != 30*time.Second || src != "this system" || p.ShellTimeoutCeilingKey() != "" {
+		t.Fatalf("ceiling %s %q key %q", d, src, p.ShellTimeoutCeilingKey())
 	}
 	if !strings.Contains(strings.Join(p.Warnings, "\n"), "shell timeouts above 30s are unavailable on this system; the ceiling is 30s") {
 		t.Fatalf("warnings %v", p.Warnings)
@@ -225,8 +225,8 @@ func TestShellTimeoutWholeSecondsAndSignalCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	d, src = short.ShellTimeoutCeiling()
-	if d != 10*time.Second || src != "ollama.shell_timeout in policy.toml" {
-		t.Fatalf("short ceiling %s %q", d, src)
+	if d != 10*time.Second || src != "policy.toml" || short.ShellTimeoutCeilingKey() != "ollama.shell_timeout" {
+		t.Fatalf("short ceiling %s %q key %q", d, src, short.ShellTimeoutCeilingKey())
 	}
 	if !strings.Contains(strings.Join(short.Warnings, "\n"), "shell timeouts above 30s are unavailable on this system; the ceiling is 30s") {
 		t.Fatalf("short warnings %v", short.Warnings)
