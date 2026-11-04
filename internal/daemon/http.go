@@ -524,15 +524,11 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 		RunTimeout: runTO, ShellTimeout: shellTO, ToolRounds: rounds,
 	}, "user")
 	if err != nil {
-		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
-			writeErr(w, err)
-			return
-		}
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeSaveErr(w, err)
 		return
 	}
 	a.notePermCallback()
-	a.auditLimitChanges(store.Bot{}, b)
+	a.auditLimitChanges(store.Bot{}, b, "user")
 	writeJSON(w, http.StatusCreated, a.decorateBot(b))
 }
 
@@ -720,9 +716,23 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 		}
 		archived = &on
 	}
-	if patch.RunTimeoutSet || patch.ShellTimeoutSet || patch.ToolRoundsSet {
+	runSet, shellSet, roundsSet := patch.RunTimeoutSet, patch.ShellTimeoutSet, patch.ToolRoundsSet
+	if runSet || shellSet || roundsSet {
+		if cur, err := a.st.GetBot(id); err == nil {
+			if runSet && patch.RunTimeout == cur.RunTimeout.Duration() {
+				runSet = false
+			}
+			if shellSet && patch.ShellTimeout == cur.ShellTimeout.Duration() {
+				shellSet = false
+			}
+			if roundsSet && patch.ToolRounds == cur.ToolRounds {
+				roundsSet = false
+			}
+		}
+	}
+	if runSet || shellSet || roundsSet {
 		pol := a.effPol(id)
-		if err := a.checkBotLimitCeilings(pol, patch.RunTimeout, patch.ShellTimeout, patch.ToolRounds, patch.RunTimeoutSet, patch.ShellTimeoutSet, patch.ToolRoundsSet); err != nil {
+		if err := a.checkBotLimitCeilings(pol, patch.RunTimeout, patch.ShellTimeout, patch.ToolRounds, runSet, shellSet, roundsSet); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
@@ -745,17 +755,12 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	old, _ := a.st.GetBot(id)
-	b, err := a.st.UpdateBot(id, patch)
+	b, old, err := a.st.UpdateBot(id, patch)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConflict) {
-			writeErr(w, err)
-			return
-		}
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeSaveErr(w, err)
 		return
 	}
-	a.auditLimitChanges(old, b)
+	a.auditLimitChanges(old, b, patch.By)
 	if archived != nil {
 		if _, err := a.st.SetArchived(id, *archived, "user"); err != nil {
 			writeErr(w, err)
@@ -1288,6 +1293,21 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	_ = enc.Encode(v)
+}
+
+// writeSaveErr maps a bot insert or update error. Storage failures are 500.
+// Validation errors stay 400. A missing bot is 404 and a name clash is 409.
+func writeSaveErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConflict) {
+		writeErr(w, err)
+		return
+	}
+	var se *store.StorageError
+	if errors.As(err, &se) {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "could not save the bot"})
+		return
+	}
+	writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 }
 
 func writeErr(w http.ResponseWriter, err error) {

@@ -26,6 +26,29 @@ var ErrNotFound = errors.New("not found")
 // ErrConflict is returned when a bot name collides case-insensitively.
 var ErrConflict = errors.New("name already exists")
 
+// StorageError is a database write that was rolled back.
+type StorageError struct{ Err error }
+
+func (e *StorageError) Error() string {
+	if e == nil || e.Err == nil {
+		return "storage"
+	}
+	return e.Err.Error()
+}
+
+func (e *StorageError) Unwrap() error { return e.Err }
+
+func storageErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	var se *StorageError
+	if errors.As(err, &se) {
+		return err
+	}
+	return &StorageError{Err: err}
+}
+
 var (
 	clockMu sync.Mutex
 	lastNS  int64
@@ -291,7 +314,7 @@ type Bot struct {
 // source is "bot" only when the stored bot value is set and in force.
 // Otherwise it is "policy" (including the built-in default). If policy
 // later drops below a stored bot value, value is the policy value and
-// source is "policy".
+// source is "policy". ceiling_source names where the ceiling came from.
 type BotLimits struct {
 	RunTimeout   LimitDuration `json:"run_timeout"`
 	ToolRounds   LimitInt      `json:"tool_rounds"`
@@ -300,16 +323,18 @@ type BotLimits struct {
 
 // LimitDuration is one effective duration limit.
 type LimitDuration struct {
-	Value   string `json:"value"`
-	Source  string `json:"source"`
-	Ceiling string `json:"ceiling"`
+	Value         string `json:"value"`
+	Source        string `json:"source"`
+	Ceiling       string `json:"ceiling"`
+	CeilingSource string `json:"ceiling_source"`
 }
 
 // LimitInt is one effective integer limit.
 type LimitInt struct {
-	Value   int    `json:"value"`
-	Source  string `json:"source"`
-	Ceiling int    `json:"ceiling"`
+	Value         int    `json:"value"`
+	Source        string `json:"source"`
+	Ceiling       int    `json:"ceiling"`
+	CeilingSource string `json:"ceiling_source"`
 }
 
 type Memory struct {
@@ -908,14 +933,19 @@ func (s *Store) InsertBot(d BotDraft, by string) (Bot, error) {
 		Status: "idle", Model: d.Model, CreatedAt: now, UpdatedAt: now,
 		RunTimeout: DurationMS(d.RunTimeout), ShellTimeout: DurationMS(d.ShellTimeout), ToolRounds: d.ToolRounds,
 	}
-	_, err = s.db.Exec(`INSERT INTO bots(id, name, name_lower, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, github_allow, server_tools, status, model, created_at, updated_at, run_timeout_ms, shell_timeout_ms, tool_rounds)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return Bot{}, storageErr(err)
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`INSERT INTO bots(id, name, name_lower, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, github_allow, server_tools, status, model, created_at, updated_at, run_timeout_ms, shell_timeout_ms, tool_rounds)
 		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		b.ID, b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, 0, 0, encodeList(grants), encodeList(netAllow), encodeList(sshAllow), encodeList(ghAllow), encodeOptList(tools), b.Status, nullStr(d.Model), b.CreatedAt, b.UpdatedAt, durationToMS(d.RunTimeout), durationToMS(d.ShellTimeout), d.ToolRounds)
 	if err != nil {
 		if isUnique(err) {
 			return Bot{}, ErrConflict
 		}
-		return Bot{}, err
+		return Bot{}, storageErr(err)
 	}
 	fields := []string{"name", "description"}
 	if d.Label != "" {
@@ -927,13 +957,16 @@ func (s *Store) InsertBot(d BotDraft, by string) (Bot, error) {
 	if d.ServerTools != nil {
 		fields = append(fields, "server_tools")
 	}
-	if err := s.logUnlocked(b.ID, "bot_created", map[string]any{
+	if err := s.addLogTx(tx, b.ID, "bot_created", map[string]any{
 		"fields": fields, "by": by, "bot_id": b.ID, "name": b.Name,
 	}); err != nil {
-		return Bot{}, err
+		return Bot{}, storageErr(err)
 	}
-	if err := s.logLimitChanges(b.ID, by, 0, d.RunTimeout, 0, d.ShellTimeout, 0, d.ToolRounds); err != nil {
-		return Bot{}, err
+	if err := s.logLimitChangesTx(tx, b.ID, by, 0, d.RunTimeout, 0, d.ShellTimeout, 0, d.ToolRounds); err != nil {
+		return Bot{}, storageErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Bot{}, storageErr(err)
 	}
 	return b, nil
 }
@@ -1126,13 +1159,22 @@ type BotPatch struct {
 	By              string
 }
 
-func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
+// UpdateBot writes the bot row and its log rows in one transaction.
+// The first bot is the saved row. The second is the row read in that
+// transaction before the update. On a storage error nothing is saved.
+func (s *Store) UpdateBot(id string, p BotPatch) (Bot, Bot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	b, err := s.getBot(id, false)
+	tx, err := s.db.Begin()
 	if err != nil {
-		return Bot{}, err
+		return Bot{}, Bot{}, storageErr(err)
 	}
+	defer tx.Rollback()
+	b, err := s.getBotTx(tx, id)
+	if err != nil {
+		return Bot{}, Bot{}, err
+	}
+	old := b
 	fields := []string{}
 	if p.Name != nil && *p.Name != b.Name {
 		b.Name = *p.Name
@@ -1149,7 +1191,7 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 	if p.Mark != nil {
 		mark, err := NormalizeMark(*p.Mark)
 		if err != nil {
-			return Bot{}, err
+			return Bot{}, Bot{}, err
 		}
 		if mark != b.Mark {
 			b.Mark = mark
@@ -1175,7 +1217,7 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 	if p.GrantsSet {
 		g, err := NormalizeGrants(p.Grants)
 		if err != nil {
-			return Bot{}, err
+			return Bot{}, Bot{}, err
 		}
 		if !slices.Equal(g, b.Grants) {
 			b.Grants = g
@@ -1185,7 +1227,7 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 	if p.NetSet {
 		hosts, err := NormalizeAllow(p.NetAllow)
 		if err != nil {
-			return Bot{}, err
+			return Bot{}, Bot{}, err
 		}
 		if !slices.Equal(hosts, b.NetAllow) {
 			b.NetAllow = hosts
@@ -1195,7 +1237,7 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 	if p.SSHSet {
 		hosts, err := NormalizeAllow(p.SSHAllow)
 		if err != nil {
-			return Bot{}, err
+			return Bot{}, Bot{}, err
 		}
 		if !slices.Equal(hosts, b.SSHAllow) {
 			b.SSHAllow = hosts
@@ -1205,7 +1247,7 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 	if p.GitHubSet {
 		repos, err := NormalizeGitHubAllow(p.GitHubAllow)
 		if err != nil {
-			return Bot{}, err
+			return Bot{}, Bot{}, err
 		}
 		if !slices.Equal(repos, b.GitHubAllow) {
 			b.GitHubAllow = repos
@@ -1217,7 +1259,7 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 		if p.ServerTools != nil {
 			names, err := NormalizeServerTools(*p.ServerTools)
 			if err != nil {
-				return Bot{}, err
+				return Bot{}, Bot{}, err
 			}
 			next = &names
 		}
@@ -1238,8 +1280,11 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 	}
 	limitsChanged := b.RunTimeout.Duration() != oldRun || b.ShellTimeout.Duration() != oldShell || b.ToolRounds != oldRounds
 	if len(fields) == 0 && !limitsChanged {
+		if err := tx.Rollback(); err != nil {
+			return Bot{}, Bot{}, storageErr(err)
+		}
 		s.attachRun(&b)
-		return b, nil
+		return b, old, nil
 	}
 	b.UpdatedAt = FormatTime(Now())
 	pin, hide := 0, 0
@@ -1249,27 +1294,34 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 	if b.Hidden {
 		hide = 1
 	}
-	_, err = s.db.Exec(`UPDATE bots SET name=?, name_lower=?, label=?, description=?, mark_shape=?, mark_color=?, pinned=?, hidden=?, grants=?, net_allow=?, ssh_allow=?, github_allow=?, server_tools=?, model=?, status=?, updated_at=?, run_timeout_ms=?, shell_timeout_ms=?, tool_rounds=? WHERE id=?`,
+	_, err = tx.Exec(`UPDATE bots SET name=?, name_lower=?, label=?, description=?, mark_shape=?, mark_color=?, pinned=?, hidden=?, grants=?, net_allow=?, ssh_allow=?, github_allow=?, server_tools=?, model=?, status=?, updated_at=?, run_timeout_ms=?, shell_timeout_ms=?, tool_rounds=? WHERE id=?`,
 		b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, pin, hide, encodeList(b.Grants), encodeList(b.NetAllow), encodeList(b.SSHAllow), encodeList(b.GitHubAllow), encodeOptList(b.ServerTools), nullStr(b.Model), b.Status, b.UpdatedAt, durationToMS(b.RunTimeout.Duration()), durationToMS(b.ShellTimeout.Duration()), b.ToolRounds, b.ID)
 	if err != nil {
 		if isUnique(err) {
-			return Bot{}, ErrConflict
+			return Bot{}, Bot{}, ErrConflict
 		}
-		return Bot{}, err
+		return Bot{}, Bot{}, storageErr(err)
 	}
 	if len(fields) > 0 {
-		if err := s.logUnlocked(b.ID, "bot_updated", map[string]any{"fields": fields, "by": p.By, "bot_id": b.ID, "name": b.Name}); err != nil {
-			return Bot{}, err
+		if err := s.addLogTx(tx, b.ID, "bot_updated", map[string]any{"fields": fields, "by": p.By, "bot_id": b.ID, "name": b.Name}); err != nil {
+			return Bot{}, Bot{}, storageErr(err)
 		}
 	}
-	if err := s.logLimitChanges(b.ID, p.By, oldRun, b.RunTimeout.Duration(), oldShell, b.ShellTimeout.Duration(), oldRounds, b.ToolRounds); err != nil {
-		return Bot{}, err
+	if err := s.logLimitChangesTx(tx, b.ID, p.By, oldRun, b.RunTimeout.Duration(), oldShell, b.ShellTimeout.Duration(), oldRounds, b.ToolRounds); err != nil {
+		return Bot{}, Bot{}, storageErr(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Bot{}, Bot{}, storageErr(err)
 	}
 	s.attachRun(&b)
-	return b, nil
+	return b, old, nil
 }
 
-func (s *Store) logLimitChanges(botID, by string, oldRun, newRun, oldShell, newShell time.Duration, oldRounds, newRounds int) error {
+func (s *Store) getBotTx(tx *sql.Tx, id string) (Bot, error) {
+	return scanBot(tx.QueryRow(botSelect+` WHERE id=?`, id), true)
+}
+
+func (s *Store) logLimitChangesTx(tx *sql.Tx, botID, by string, oldRun, newRun, oldShell, newShell time.Duration, oldRounds, newRounds int) error {
 	type change struct {
 		field string
 		old   any
@@ -1286,7 +1338,7 @@ func (s *Store) logLimitChanges(botID, by string, oldRun, newRun, oldShell, newS
 		changes = append(changes, change{"tool_rounds", oldRounds, newRounds})
 	}
 	for _, c := range changes {
-		if err := s.logUnlocked(botID, "bot_limits_changed", map[string]any{
+		if err := s.addLogTx(tx, botID, "bot_limits_changed", map[string]any{
 			"bot_id": botID, "field": c.field, "old": c.old, "new": c.new, "by": by,
 		}); err != nil {
 			return err

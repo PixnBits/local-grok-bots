@@ -44,14 +44,14 @@ func TestServerToolsRoundTrip(t *testing.T) {
 		t.Fatalf("log %#v %v", events, err)
 	}
 	label := "kept"
-	updated, err := st.UpdateBot(named.ID, BotPatch{Label: &label})
+	updated, _, err := st.UpdateBot(named.ID, BotPatch{Label: &label})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if updated.Label != "kept" || updated.ServerTools == nil || strings.Join(*updated.ServerTools, ",") != "web_search,x_search" {
 		t.Fatalf("label patch %#v", updated)
 	}
-	cleared, err := st.UpdateBot(named.ID, BotPatch{ServerToolsSet: true})
+	cleared, _, err := st.UpdateBot(named.ID, BotPatch{ServerToolsSet: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestServerToolsRoundTrip(t *testing.T) {
 		t.Fatalf("clear %#v", cleared.ServerTools)
 	}
 	none := []string{}
-	setEmpty, err := st.UpdateBot(named.ID, BotPatch{ServerToolsSet: true, ServerTools: &none})
+	setEmpty, _, err := st.UpdateBot(named.ID, BotPatch{ServerToolsSet: true, ServerTools: &none})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestServerToolsRoundTrip(t *testing.T) {
 		t.Fatalf("set empty %#v", setEmpty.ServerTools)
 	}
 	bad := []string{"bad name"}
-	if _, err := st.UpdateBot(named.ID, BotPatch{ServerToolsSet: true, ServerTools: &bad}); err == nil || !strings.Contains(err.Error(), "invalid server_tools") || strings.Contains(err.Error(), "bad name") {
+	if _, _, err := st.UpdateBot(named.ID, BotPatch{ServerToolsSet: true, ServerTools: &bad}); err == nil || !strings.Contains(err.Error(), "invalid server_tools") || strings.Contains(err.Error(), "bad name") {
 		t.Fatalf("invalid err %v", err)
 	}
 	got, err := st.GetBot(named.ID)

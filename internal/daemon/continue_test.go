@@ -162,7 +162,7 @@ func TestContinueCappedRun(t *testing.T) {
 		return b.Status != "running" && b.ContinueRunID != ""
 	})
 	waitRunReleased(t, app, bot.ID)
-	wantErr := toolRoundLimitBody(maxToolRounds, false, maxToolRounds)
+	wantErr := toolRoundLimitBody(maxToolRounds, 0, maxToolRounds, "the built-in default")
 	if got.ContinueRunID != capped || got.LastRunStatus != "error" || got.LastRunError != wantErr {
 		t.Fatalf("offer = %+v want %q", got, wantErr)
 	}

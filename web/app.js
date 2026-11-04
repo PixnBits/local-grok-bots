@@ -2723,12 +2723,64 @@ function dirtyFieldLabels(base, cur) {
   if ((b.shell_timeout || "") !== (c.shell_timeout || "")) out.push("Shell timeout");
   return out;
 }
-function limitHelpText(value, source, ceiling) {
+function limitHelpText(value, source, ceiling, ceilingSource) {
   const shown = value == null ? "" : String(value);
-  if (source === "bot") {
-    return "In force: " + shown + " (this bot). Policy limit: " + ceiling + ".";
+  let text = source === "bot"
+    ? "In force: " + shown + " (this bot). Policy limit: " + ceiling + "."
+    : "In force: " + shown + " (policy)";
+  if (ceilingSource) {
+    if (text.charAt(text.length - 1) !== ".") text += ".";
+    text += " Set by " + ceilingSource + ".";
   }
-  return "In force: " + shown + " (policy)";
+  return text;
+}
+function changedLimitPayload(base, cur) {
+  const b = base || {};
+  const c = cur || {};
+  const out = {};
+  if (String(b.run_timeout || "") !== String(c.run_timeout || "")) out.run_timeout = c.run_timeout || "";
+  if (String(b.shell_timeout || "") !== String(c.shell_timeout || "")) out.shell_timeout = c.shell_timeout || "";
+  if (String(b.tool_rounds || "") !== String(c.tool_rounds || "")) {
+    const raw = String(c.tool_rounds == null ? "" : c.tool_rounds);
+    out.tool_rounds = raw === "" ? 0 : Number(raw);
+  }
+  return out;
+}
+function limitPrecheckError(field, raw, limits) {
+  const v = String(raw == null ? "" : raw).trim();
+  if (!v) return "";
+  const lim = limits && limits[field];
+  const ceiling = lim && lim.ceiling;
+  const src = (lim && lim.ceiling_source) ? lim.ceiling_source : "the built-in default";
+  if (field === "tool_rounds") {
+    if (!/^\d+$/.test(v) || Number(v) <= 0) return "tool_rounds must be positive";
+    const n = Number(v);
+    if (ceiling != null && n > Number(ceiling)) {
+      return "tool_rounds " + n + " is above the limit of " + ceiling + " set by " + src;
+    }
+    return "";
+  }
+  const ms = parseGoDurationMs(v);
+  if (!(ms > 0)) return "invalid " + field;
+  if (ms < 1000 || ms % 1000 !== 0) return field + " must be a whole number of seconds, at least 1s";
+  if (ceiling) {
+    const ceilMs = parseGoDurationMs(ceiling);
+    if (ceilMs > 0 && ms > ceilMs) {
+      return field + " " + v + " is above the limit of " + ceiling + " set by " + src;
+    }
+  }
+  return "";
+}
+function firstChangedLimitError(base, cur, limits, checkAll) {
+  const changed = checkAll ? { run_timeout: true, shell_timeout: true, tool_rounds: true } : changedLimitPayload(base, cur);
+  const fields = ["run_timeout", "shell_timeout", "tool_rounds"];
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i];
+    if (!checkAll && !Object.prototype.hasOwnProperty.call(changed, field)) continue;
+    const msg = limitPrecheckError(field, cur ? cur[field] : "", limits);
+    if (msg) return { field: field, message: msg };
+  }
+  return null;
 }
 function parseGoDurationMs(s) {
   const raw = String(s == null ? "" : s).trim();
@@ -3048,7 +3100,7 @@ function readProfile() {
 function profilePayload() {
   const cur = readProfile();
   const model = cur.model;
-  return {
+  const body = {
     name: cur.name,
     label: cur.label,
     description: cur.description,
@@ -3058,11 +3110,19 @@ function profilePayload() {
     net_allow: cur.net,
     ssh_allow: cur.ssh,
     github_allow: cur.github,
-    server_tools: cur.server_tools,
-    run_timeout: cur.run_timeout || "",
-    shell_timeout: cur.shell_timeout || "",
-    tool_rounds: cur.tool_rounds === "" ? 0 : Number(cur.tool_rounds)
+    server_tools: cur.server_tools
   };
+  if (state.draft) {
+    body.run_timeout = cur.run_timeout || "";
+    body.shell_timeout = cur.shell_timeout || "";
+    body.tool_rounds = cur.tool_rounds === "" ? 0 : Number(cur.tool_rounds);
+  } else {
+    const limits = changedLimitPayload(state.profileBase, cur);
+    if (Object.prototype.hasOwnProperty.call(limits, "run_timeout")) body.run_timeout = limits.run_timeout;
+    if (Object.prototype.hasOwnProperty.call(limits, "shell_timeout")) body.shell_timeout = limits.shell_timeout;
+    if (Object.prototype.hasOwnProperty.call(limits, "tool_rounds")) body.tool_rounds = limits.tool_rounds;
+  }
+  return body;
 }
 function profileDirty() {
   if (navBypass) return false;
@@ -3612,7 +3672,7 @@ function paintLimitHelp() {
       help.textContent = "";
       continue;
     }
-    help.textContent = limitHelpText(lim.value, lim.source, lim.ceiling);
+    help.textContent = limitHelpText(lim.value, lim.source, lim.ceiling, lim.ceiling_source);
   }
 }
 function setLimitError(field, message) {
@@ -3635,29 +3695,6 @@ function setLimitError(field, message) {
 }
 function clearLimitErrors() {
   for (const f of LIMIT_FIELDS) setLimitError(f.key, "");
-}
-function limitPrecheckError(field, raw, limits) {
-  const v = String(raw == null ? "" : raw).trim();
-  if (!v) return "";
-  const lim = limits && limits[field];
-  const ceiling = lim && lim.ceiling;
-  if (field === "tool_rounds") {
-    if (!/^\d+$/.test(v) || Number(v) <= 0) return "tool_rounds must be positive";
-    const n = Number(v);
-    if (ceiling != null && n > Number(ceiling)) {
-      return "tool_rounds " + n + " is above the limit of " + ceiling;
-    }
-    return "";
-  }
-  const ms = parseGoDurationMs(v);
-  if (!(ms > 0)) return "invalid " + field;
-  if (ceiling) {
-    const ceilMs = parseGoDurationMs(ceiling);
-    if (ceilMs > 0 && ms > ceilMs) {
-      return field + " " + v + " is above the limit of " + ceiling;
-    }
-  }
-  return "";
 }
 function applySnapshot(snap) {
   const s = snap || {};
@@ -3719,6 +3756,14 @@ function rescueFocus(fallback) {
   const a = document.activeElement;
   if (!a || a === document.body || !document.contains(a) || (a.closest && a.closest("[hidden]"))) (fallback || focusProfileHeading)();
 }
+function revealLimitFailure(inputId, message) {
+  const access = $("#profile-access");
+  if (access && access.hidden) setProfilePane("access");
+  const live = $("#limit-announce");
+  if (live) live.textContent = message || "";
+  const n = inputId ? $("#" + inputId) : null;
+  if (n && typeof n.focus === "function") n.focus();
+}
 function setSaving(on) {
   state.saving = !!on;
   const btn = $("#save-go");
@@ -3743,21 +3788,12 @@ async function saveProfile() {
   clearLimitErrors();
   const cur = readProfile();
   const limits = state.botLimits || {};
-  let limitErr = "";
-  let limitField = "";
-  for (const f of LIMIT_FIELDS) {
-    const msg = limitPrecheckError(f.key, cur[f.key], limits);
-    if (msg) {
-      setLimitError(f.key, msg);
-      limitErr = msg;
-      limitField = f.input;
-      break;
-    }
-  }
-  if (limitErr) {
-    state.saveError = limitErr;
+  const limitPlan = firstChangedLimitError(state.profileBase, cur, limits, !!state.draft);
+  if (limitPlan) {
+    setLimitError(limitPlan.field, limitPlan.message);
+    state.saveError = limitPlan.message;
     paintSaveBar();
-    rescueFocus(() => { const n = $("#" + limitField); if (n) n.focus(); });
+    revealLimitFailure("profile-" + limitPlan.field.replace(/_/g, "-"), limitPlan.message);
     return;
   }
   state.saveError = "";
@@ -3796,13 +3832,8 @@ async function saveProfile() {
     state.saveError = (state.draft ? "Couldn't create the bot. The daemon said: " : "Couldn't save. The daemon said: ") + msg;
     paintSaveBar();
     setSaving(false);
-    if (field) {
-      const n = $("#profile-" + field.replace(/_/g, "-"));
-      if (n) rescueFocus(() => n.focus());
-      else rescueFocus(() => $("#save-go").focus());
-    } else {
-      rescueFocus(() => $("#save-go").focus());
-    }
+    if (field) revealLimitFailure("profile-" + field.replace(/_/g, "-"), msg);
+    else rescueFocus(() => $("#save-go").focus());
   } finally {
     setSaving(false);
   }

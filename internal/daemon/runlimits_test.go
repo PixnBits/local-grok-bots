@@ -93,7 +93,7 @@ func TestBotLimitsAPIAcceptRejectAndJSON(t *testing.T) {
 		t.Fatalf("above ceiling %d %s", res.StatusCode, b)
 	}
 	errText := apiError(t, b)
-	if !strings.Contains(errText, "shell_timeout 20m is above the limit of 30s set by the default") {
+	if !strings.Contains(errText, "shell_timeout 20m is above the limit of 30s set by the built-in default") {
 		t.Fatalf("reject message %q", errText)
 	}
 	got := fetchBot(t, srv.URL, bot.ID)
@@ -114,7 +114,7 @@ func TestBotLimitsAPIAcceptRejectAndJSON(t *testing.T) {
 		t.Fatalf("neg rounds %d %s", res.StatusCode, b)
 	}
 	res, b = do(t, "PATCH", srv.URL+"/api/bots/"+bot.ID, map[string]any{"tool_rounds": 20}, "")
-	if res.StatusCode != 400 || !strings.Contains(apiError(t, b), "tool_rounds 20 is above the limit of 8 set by the default") {
+	if res.StatusCode != 400 || !strings.Contains(apiError(t, b), "tool_rounds 20 is above the limit of 8 set by the built-in default") {
 		t.Fatalf("rounds ceiling %d %s", res.StatusCode, b)
 	}
 
@@ -241,7 +241,7 @@ func TestBotLimitsAuditSetAndClear(t *testing.T) {
 	if strings.Count(text, `"action":"bot_limits_changed"`) != 2 {
 		t.Fatalf("audit lines %s", text)
 	}
-	if !strings.Contains(text, `"field":"run_timeout"`) || !strings.Contains(text, `"new":"5m"`) {
+	if !strings.Contains(text, `"field":"run_timeout"`) || !strings.Contains(text, `"new":"5m"`) || !strings.Contains(text, `"by":"user"`) {
 		t.Fatalf("audit body %s", text)
 	}
 }
@@ -260,7 +260,7 @@ func TestBotToolRoundsStopAtThree(t *testing.T) {
 	decodeJSON(t, b, &bot)
 	postUser(t, srv.URL, bot.ID, "look around")
 	got := waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool { return b.Status != "running" })
-	want := toolRoundLimitBody(3, true, 8)
+	want := toolRoundLimitBody(3, 3, 8, "the built-in default")
 	if got.LastRunStatus != "error" || got.LastRunError != want {
 		t.Fatalf("status %s %q want %q", got.LastRunStatus, got.LastRunError, want)
 	}
@@ -271,7 +271,7 @@ func TestBotToolRoundsStopAtThree(t *testing.T) {
 		t.Fatalf("calls %d", len(calls))
 	}
 	page := readThread(t, srv.URL, bot.ID)
-	if threadNotice(page) != "Notice: Run failed (tool round limit)." {
+	if threadNotice(page) != "Notice: Stopped: used all 3 tool rounds." {
 		t.Fatalf("notice %q", threadNotice(page))
 	}
 }
@@ -284,7 +284,7 @@ func TestPolicyToolRoundsRespected(t *testing.T) {
 	bot := createBot(t, srv.URL, "Pol")
 	postUser(t, srv.URL, bot.ID, "go")
 	got := waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool { return b.Status != "running" })
-	want := toolRoundLimitBody(2, false, 2)
+	want := toolRoundLimitBody(2, 0, 2, "the built-in default")
 	if got.LastRunStatus != "error" || got.LastRunError != want {
 		t.Fatalf("status %s %q want %q", got.LastRunStatus, got.LastRunError, want)
 	}
@@ -318,7 +318,7 @@ func TestRunShellUsesBotShellTimeout(t *testing.T) {
 	defer cancel()
 	out, runErr := app.dispatchTool(ctx, bot, "run_shell", map[string]any{"command": "sleep 5"})
 	elapsed := time.Since(start)
-	if runErr == nil || !strings.Contains(runErr.Error(), "stopped after 1s (shell_timeout set on this bot)") {
+	if runErr == nil || !strings.Contains(runErr.Error(), "stopped after 1s (shell_timeout, set on this bot)") {
 		t.Fatalf("err=%v out=%s", runErr, out)
 	}
 	if elapsed >= 4*time.Second {
@@ -330,7 +330,7 @@ func TestRunTimeoutBodyNamesBotSource(t *testing.T) {
 	if timeoutBody("run_timeout", 5*time.Minute, 0, "", "run_timeout, set on this bot") != "The run hit its 5m limit (run_timeout, set on this bot)." {
 		t.Fatal("bot origin")
 	}
-	if timeoutBody("run_timeout", 10*time.Minute, 0, "", "") != "The run hit its 10m limit (ollama.run_timeout in policy.toml)." {
+	if timeoutBody("run_timeout", 10*time.Minute, 0, "", "") != "The run hit its 10m limit (the built-in default)." {
 		t.Fatal("policy origin")
 	}
 }
@@ -374,10 +374,10 @@ func TestRunTimeoutOriginNamesSource(t *testing.T) {
 	if got := a.runTimeoutOrigin(store.Bot{RunTimeout: store.DurationMS(5 * time.Minute)}, pol); got != "run_timeout, set on this bot" {
 		t.Fatalf("bot value: %q", got)
 	}
-	if got := a.runTimeoutOrigin(store.Bot{}, pol); got != "ollama.run_timeout in policy.toml" {
+	if got := a.runTimeoutOrigin(store.Bot{}, pol); got != "the built-in default" {
 		t.Fatalf("inherited: %q", got)
 	}
-	if got := a.runTimeoutOrigin(store.Bot{RunTimeout: store.DurationMS(time.Hour)}, pol); got != "ollama.run_timeout in policy.toml" {
+	if got := a.runTimeoutOrigin(store.Bot{RunTimeout: store.DurationMS(time.Hour)}, pol); got != "the built-in default" {
 		t.Fatalf("above the policy value: %q", got)
 	}
 }

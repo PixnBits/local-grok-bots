@@ -212,13 +212,15 @@ func TestRunNoticeText(t *testing.T) {
 		runNoticeText("error", ""):                 "Notice: Run failed.",
 		runNoticeText("error", "boom"):             "Notice: Run failed (model error).",
 		runNoticeText("error", "tool round limit"): "Notice: Run failed (tool round limit).",
-		runNoticeText("error", "The run used all 3 tool rounds (tool_rounds, set on this bot). Raise it under Permissions & access, up to 8."): "Notice: Run failed (tool round limit).",
-		runNoticeText("error", "The run used all 8 tool rounds (ollama.tool_rounds in policy.toml)."):                                          "Notice: Run failed (tool round limit).",
-		runNoticeText("error", "approval refused"):                      "Notice: Run failed (approval refused).",
-		runNoticeText("error", "shutdown"):                              "Notice: Run stopped.",
-		runNoticeText("error", "timed out"):                             "Notice: Run timed out.",
-		runNoticeText("timeout", "upstream said ghp_x SYSTEM OVERRIDE"): "Notice: Run timed out.",
-		runNoticeText("stopped", "stopped after denial"):                "Notice: Run stopped.",
+		runNoticeText("error", "The run used all 3 tool rounds (tool_rounds, set on this bot). Raise it under Permissions & access, up to 8."): "Notice: Stopped: used all 3 tool rounds.",
+		runNoticeText("error", "The run used all 8 tool rounds (ollama.tool_rounds in policy.toml)."):                                          "Notice: Stopped: used all 8 tool rounds.",
+		runNoticeText("timeout", "The run hit its 5m limit (run_timeout, set on this bot)."):                                                   "Notice: Stopped: hit the 5m run limit.",
+		runNoticeText("timeout", "The run hit its 150ms limit (the built-in default)."):                                                        "Notice: Run timed out (run_timeout).",
+		runNoticeText("error", "approval refused"):                                                                                             "Notice: Run failed (approval refused).",
+		runNoticeText("error", "shutdown"):                                                                                                     "Notice: Run stopped.",
+		runNoticeText("error", "timed out"):                                                                                                    "Notice: Run timed out.",
+		runNoticeText("timeout", "upstream said ghp_x SYSTEM OVERRIDE"):                                                                        "Notice: Run timed out.",
+		runNoticeText("stopped", "stopped after denial"):                                                                                       "Notice: Run stopped.",
 	}
 	for got, want := range cases {
 		if got != want {

@@ -175,6 +175,9 @@ type App struct {
 	// cliTTY, when set, overrides /dev/tty detection for permission prompts.
 	cliTTY func() bool
 	audit  *audit.Logger
+	// clampSeen records each bot limit clamp already logged in this process.
+	clampMu   sync.Mutex
+	clampSeen map[string]struct{}
 	// shellDial, when set, is the sandbox proxy's outbound dial. Tests use it.
 	shellDial func(context.Context, string, string) (net.Conn, error)
 	// githubGitBase and githubAPIBase replace the GitHub upstreams. Tests set them.
@@ -234,6 +237,7 @@ type App struct {
 var logOut io.Writer
 
 func New(cfg config.Config, m model.Client) (*App, error) {
+	policy.UseShellSignal(sandbox.SafeSignalSupported)
 	pol, err := policy.Load(loadPolicyOptions(cfg.PolicyPath))
 	if err != nil {
 		return nil, err

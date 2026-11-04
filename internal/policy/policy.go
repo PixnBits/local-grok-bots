@@ -666,8 +666,10 @@ func (p Policy) EffectiveToolRounds() int {
 }
 
 // EffectiveShellTimeout bounds one run_shell call.
+// Without pidfd signalling the result is at most 30s.
 func (p Policy) EffectiveShellTimeout() time.Duration {
-	return capped(p.OllamaShellTimeout, DefaultOllamaShellTimeout, p.MaxOllamaShellTimeout)
+	d, _ := p.ShellTimeoutCeiling()
+	return d
 }
 
 // RunTimeoutCeiling is the highest run_timeout a bot may set, and a phrase
@@ -699,13 +701,19 @@ func (p Policy) ToolRoundsCeiling() (int, string) {
 }
 
 // ShellTimeoutCeiling is the highest shell_timeout a bot may set, and a phrase
-// naming where that ceiling came from.
+// naming where that ceiling came from. Without pidfd signalling, a higher
+// configured ceiling becomes 30s and the phrase names that system limit.
 func (p Policy) ShellTimeoutCeiling() (time.Duration, string) {
-	return p.EffectiveShellTimeout(), durationCeilingSource(
+	uncapped := capped(p.OllamaShellTimeout, DefaultOllamaShellTimeout, p.MaxOllamaShellTimeout)
+	src := durationCeilingSource(
 		p.OllamaShellTimeout, p.localShellSet || p.managedShellSet,
 		DefaultOllamaShellTimeout, p.MaxOllamaShellTimeout,
 		"ollama.shell_timeout in policy.toml", "the managed ollama.max_shell_timeout",
 	)
+	if !shellSignalSupported() && uncapped > shellSignalCeiling {
+		return shellSignalCeiling, shellSignalSource
+	}
+	return uncapped, src
 }
 
 func durationCeilingSource(raw time.Duration, set bool, def, max time.Duration, keySrc, maxSrc string) string {
@@ -719,7 +727,7 @@ func durationCeilingSource(raw time.Duration, set bool, def, max time.Duration, 
 	if set && raw > 0 {
 		return keySrc
 	}
-	return "the default"
+	return "the built-in default"
 }
 
 func intCeilingSource(raw int, set bool, def, max int, keySrc, maxSrc string) string {
@@ -733,7 +741,7 @@ func intCeilingSource(raw int, set bool, def, max int, keySrc, maxSrc string) st
 	if set && raw > 0 {
 		return keySrc
 	}
-	return "the default"
+	return "the built-in default"
 }
 
 // EffectiveOllamaModelTimeout is the optional hard cap on one model call.
@@ -2143,6 +2151,9 @@ func parseShellTimeout(key, s string) (time.Duration, error) {
 	if d > 0 && d < minShellTimeout {
 		return 0, fmt.Errorf("%s must be at least 1s", key)
 	}
+	if d >= minShellTimeout && d%time.Second != 0 {
+		return 0, fmt.Errorf("%s must be a whole number of seconds, at least 1s", key)
+	}
 	return d, nil
 }
 
@@ -2293,6 +2304,7 @@ func (p *Policy) warnClampedCeilings() {
 	if p.localToolRoundsSet && !p.managedToolRoundsSet && p.MaxOllamaToolRounds > 0 && p.localToolRounds > p.MaxOllamaToolRounds {
 		p.Warnings = append(p.Warnings, fmt.Sprintf("ollama.tool_rounds %d lowered to managed max_tool_rounds %d", p.localToolRounds, p.MaxOllamaToolRounds))
 	}
+	p.NoteShellSignalWarning()
 	p.warnVoiceCeilings()
 }
 

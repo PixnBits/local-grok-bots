@@ -386,7 +386,7 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			patch.ServerToolsSet = true
 			patch.ServerTools = tools
 		}
-		updated, err := a.st.UpdateBot(target.ID, patch)
+		updated, _, err := a.st.UpdateBot(target.ID, patch)
 		if err != nil {
 			return "", err
 		}
@@ -462,6 +462,10 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 		shellCtx, shellCancel := context.WithCancel(ctx)
 		defer shellCancel()
 		guard := &sandbox.ShellGuard{}
+		guard.OnRefused = func(pid int, reason string) {
+			a.noteShellSignalRefused(current, pid, reason)
+		}
+		defer guard.Close()
 		var timerMu sync.Mutex
 		var shellTimer *time.Timer
 		var pushTimer *time.Timer

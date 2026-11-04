@@ -37,9 +37,11 @@ func (a *App) setPol(p policy.Policy) {
 		a.broker.SetApprovalTTL(p.EffectiveApprovalTTL())
 		a.seedStartupCriticalPaths(p)
 	}
+	p.NoteShellSignalWarning()
 	a.pinBrokerHook(p)
 	cp := p
 	a.polCur.Store(&cp)
+	a.noteClampedLimits(cp)
 }
 
 // editPol copies the snapshot, applies fn, and publishes the copy.

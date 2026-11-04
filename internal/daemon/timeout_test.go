@@ -153,12 +153,22 @@ func TestCompactDurationAndTimeoutBody(t *testing.T) {
 		{timeoutBody("stall_timeout", 2*time.Minute, 2, "", ""), "No output from the model for 2m (stall_timeout). Retried 2 times."},
 		{timeoutBody("first_output_timeout", 5*time.Minute, 1, "", ""), "The model sent no output within 5m (first_output_timeout). Retried once."},
 		{timeoutBody("model_timeout", 10*time.Minute, 0, "Hello", ""), "The model call hit its 10m limit (model_timeout). The partial reply is kept above."},
-		{timeoutBody("run_timeout", 150*time.Millisecond, 0, "", ""), "The run hit its 150ms limit (ollama.run_timeout in policy.toml)."},
+		{timeoutBody("run_timeout", 150*time.Millisecond, 0, "", ""), "The run hit its 150ms limit (the built-in default)."},
 		{timeoutBody("run_timeout", 5*time.Minute, 0, "", "run_timeout, set on this bot"), "The run hit its 5m limit (run_timeout, set on this bot)."},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
 			t.Fatalf("got %q want %q", c.got, c.want)
+		}
+		if strings.HasPrefix(c.got, "The run hit its ") {
+			wantNotice := "Notice: Run timed out (run_timeout)."
+			if strings.Contains(c.got, "hit its 5m limit") {
+				wantNotice = "Notice: Stopped: hit the 5m run limit."
+			}
+			if runNoticeText("timeout", c.got) != wantNotice {
+				t.Fatalf("notice %q want %q", runNoticeText("timeout", c.got), wantNotice)
+			}
+			continue
 		}
 		code := timeoutLimitCode(c.got)
 		if code == "" || runNoticeText("timeout", c.got) != fixedTimeoutNotice(code) {
@@ -360,7 +370,7 @@ func TestNoRetryOnStopOrRunTimeout(t *testing.T) {
 		bot := createBot(t, srv.URL, "Bea")
 		postUser(t, srv.URL, bot.ID, "hi")
 		bot = waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool { return b.Status != "running" })
-		const body = "The run hit its 150ms limit (ollama.run_timeout in policy.toml)."
+		const body = "The run hit its 150ms limit (the built-in default)."
 		if bot.LastRunStatus != "timeout" || bot.LastRunError != body {
 			t.Fatalf("status %s %s", bot.LastRunStatus, bot.LastRunError)
 		}

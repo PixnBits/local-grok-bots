@@ -49,6 +49,10 @@ func TestProfileStatic(t *testing.T) {
 		`id="err-run-timeout"`,
 		`id="err-shell-timeout"`,
 		`id="err-tool-rounds"`,
+		`id="limit-announce"`,
+		`aria-live="polite"`,
+		`if (access && access.hidden) setProfilePane("access");`,
+		`$("#limit-announce")`,
 		`aria-describedby="help-run-timeout"`,
 		`aria-describedby="help-tool-rounds"`,
 		`aria-describedby="help-shell-timeout"`,
@@ -205,7 +209,7 @@ func TestProfileLogic(t *testing.T) {
 	}
 	names := []string{
 		"splitChipTokens", "hostEntryValid", "repoEntryValid", "chipInvalidMessage",
-		"dirtyFieldLabels", "limitHelpText", "parseGoDurationMs", "scheduleFromBuilder", "scheduleLabel", "builderFromSchedule",
+		"dirtyFieldLabels", "limitHelpText", "changedLimitPayload", "limitPrecheckError", "firstChangedLimitError", "parseGoDurationMs", "scheduleFromBuilder", "scheduleLabel", "builderFromSchedule",
 		"routineWhen", "routineRelative", "routineMeta", "routinePreview",
 	}
 	assign := ""
@@ -271,6 +275,20 @@ check("dirty-tools-null", JSON.stringify(ctx.dirtyFieldLabels(base, cur({server_
 check("dirty-run-timeout", JSON.stringify(ctx.dirtyFieldLabels(base, cur({run_timeout: "5m"}))), JSON.stringify(["Run timeout"]));
 check("help-policy", ctx.limitHelpText("10m", "policy", "10m"), "In force: 10m (policy)");
 check("help-bot", ctx.limitHelpText("5m", "bot", "10m"), "In force: 5m (this bot). Policy limit: 10m.");
+check("help-source", ctx.limitHelpText("10m", "policy", "10m", "the built-in default"), "In force: 10m (policy). Set by the built-in default.");
+const limits = {
+  run_timeout: { value: "10m", source: "policy", ceiling: "10m", ceiling_source: "the built-in default" },
+  shell_timeout: { value: "30s", source: "policy", ceiling: "10s", ceiling_source: "ollama.shell_timeout in policy.toml" },
+  tool_rounds: { value: 8, source: "policy", ceiling: 8, ceiling_source: "the built-in default" }
+};
+const stored = { run_timeout: "20s", shell_timeout: "20s", tool_rounds: "6" };
+check("payload-unchanged", JSON.stringify(ctx.changedLimitPayload(stored, stored)), "{}");
+check("payload-shell", JSON.stringify(ctx.changedLimitPayload(stored, { run_timeout: "20s", shell_timeout: "15s", tool_rounds: "6" })), JSON.stringify({ shell_timeout: "15s" }));
+check("payload-clear-rounds", JSON.stringify(ctx.changedLimitPayload(stored, { run_timeout: "20s", shell_timeout: "20s", tool_rounds: "" })), JSON.stringify({ tool_rounds: 0 }));
+check("precheck-skip-unchanged", ctx.firstChangedLimitError(stored, stored, limits, false), null);
+check("precheck-changed-shell", ctx.firstChangedLimitError(stored, { run_timeout: "20s", shell_timeout: "15s", tool_rounds: "6" }, limits, false).message, "shell_timeout 15s is above the limit of 10s set by ollama.shell_timeout in policy.toml");
+check("precheck-rounds", ctx.firstChangedLimitError({ tool_rounds: "3" }, { tool_rounds: "9" }, limits, false).message, "tool_rounds 9 is above the limit of 8 set by the built-in default");
+check("precheck-fraction", ctx.limitPrecheckError("run_timeout", "1.5s", limits), "run_timeout must be a whole number of seconds, at least 1s");
 check("dur-10m", ctx.parseGoDurationMs("10m"), 600000);
 check("dur-1s", ctx.parseGoDurationMs("1s"), 1000);
 check("sched-min", ctx.scheduleFromBuilder("every", 30, "minutes"), "every 30m");
@@ -414,6 +432,46 @@ function toolState(){
   ];
   console.log(JSON.stringify(cases));
 })().catch(e=>{console.error(e&&e.stack||String(e)); process.exit(1);});
+`
+	raw := runNode(t, node, script)
+	assertCases(t, raw)
+}
+
+func TestRevealLimitFailure(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Fatal("node not installed")
+	}
+	fn := sliceFrom(t, ClientSource(), "function revealLimitFailure", "function setSaving")
+	script := `const fn = ` + jsonString(fn) + `;
+const access = { hidden: true };
+const live = { textContent: "" };
+const field = { focused: false, focus() { this.focused = true; } };
+function $(sel) {
+  if (sel === "#profile-access") return access;
+  if (sel === "#limit-announce") return live;
+  if (sel === "#profile-shell-timeout") return field;
+  return null;
+}
+let pane = "";
+function setProfilePane(name) { pane = name; access.hidden = false; }
+eval(fn);
+const msg = "shell_timeout 15s is above the limit of 10s set by ollama.shell_timeout in policy.toml";
+revealLimitFailure("profile-shell-timeout", msg);
+const cases = [];
+function check(name, got, want) { cases.push({name: name, ok: got === want, got: got, want: want}); }
+check("opened", pane, "access");
+check("visible", access.hidden, false);
+check("focused", field.focused, true);
+check("announced", live.textContent, msg);
+pane = "chat";
+field.focused = false;
+access.hidden = false;
+revealLimitFailure("profile-shell-timeout", "again");
+check("stays", pane, "chat");
+check("refocus", field.focused, true);
+check("again", live.textContent, "again");
+console.log(JSON.stringify(cases));
 `
 	raw := runNode(t, node, script)
 	assertCases(t, raw)

@@ -12,19 +12,19 @@ func TestRunLimitDefaultsAndCeilings(t *testing.T) {
 		t.Fatalf("defaults rounds=%d shell=%s", p.EffectiveToolRounds(), p.EffectiveShellTimeout())
 	}
 	n, src := p.ToolRoundsCeiling()
-	if n != 8 || src != "the default" {
+	if n != 8 || src != "the built-in default" {
 		t.Fatalf("rounds ceiling %d %q", n, src)
 	}
 	d, src := p.ShellTimeoutCeiling()
-	if d != 30*time.Second || src != "the default" {
+	if d != 30*time.Second || src != "the built-in default" {
 		t.Fatalf("shell ceiling %s %q", d, src)
 	}
 	d, src = p.RunTimeoutCeiling(false)
-	if d != 10*time.Minute || src != "the default" {
+	if d != 10*time.Minute || src != "the built-in default" {
 		t.Fatalf("ollama run ceiling %s %q", d, src)
 	}
 	d, src = p.RunTimeoutCeiling(true)
-	if d != 2*time.Hour || src != "the default" {
+	if d != 2*time.Hour || src != "the built-in default" {
 		t.Fatalf("cli run ceiling %s %q", d, src)
 	}
 }
@@ -106,6 +106,9 @@ func TestBadRunLimitsFailClosed(t *testing.T) {
 		{"[backend]\nbackend = \"claude\"\n[ollama]\ntool_rounds = \"soon\"\n", "ollama.tool_rounds must be an integer from 1 to 100"},
 		{"[backend]\nbackend = \"claude\"\n[ollama]\nshell_timeout = \"soon\"\n", "ollama.shell_timeout must be seconds or a Go duration"},
 		{"[backend]\nbackend = \"claude\"\n[ollama]\nshell_timeout = \"500ms\"\n", "ollama.shell_timeout must be at least 1s"},
+		{"[backend]\nbackend = \"claude\"\n[ollama]\nshell_timeout = \"1.5s\"\n", "ollama.shell_timeout must be a whole number of seconds, at least 1s"},
+		{"[backend]\nbackend = \"claude\"\n[ollama]\nshell_timeout = \"90.001s\"\n", "ollama.shell_timeout must be a whole number of seconds, at least 1s"},
+		{"[backend]\nbackend = \"claude\"\n[ollama]\nmax_shell_timeout = \"1.5s\"\n", "ollama.max_shell_timeout must be a whole number of seconds, at least 1s"},
 		{"[backend]\nbackend = \"claude\"\n[ollama]\nshell_timeout = \"25h\"\n", "ollama.shell_timeout exceeds 24h"},
 		{"[backend]\nbackend = \"claude\"\n[ollama]\nmax_tool_rounds = 0\n", "ollama.max_tool_rounds must be an integer from 1 to 100"},
 		{"[backend]\nbackend = \"claude\"\n[ollama]\nmax_shell_timeout = \"0s\"\n", "ollama.max_shell_timeout must be positive"},
@@ -190,5 +193,42 @@ func TestLocalRunLimitWithinCeilingIsNotWarned(t *testing.T) {
 	n, src := p.ToolRoundsCeiling()
 	if n != 3 || src != "ollama.tool_rounds in policy.toml" {
 		t.Fatalf("within rounds ceiling %d %q", n, src)
+	}
+}
+
+func TestShellTimeoutWholeSecondsAndSignalCap(t *testing.T) {
+	ok, err := Load(Options{Path: writePol(t, "whole.toml", "[ollama]\nshell_timeout = \"1m30s\"\nmax_shell_timeout = \"2h\"\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok.OllamaShellTimeout != 90*time.Second {
+		t.Fatalf("stored %s", ok.OllamaShellTimeout)
+	}
+	UseShellSignal(func() bool { return false })
+	t.Cleanup(func() { UseShellSignal(nil) })
+	p, err := Load(Options{Path: writePol(t, "long.toml", "[ollama]\nshell_timeout = \"2m\"\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.EffectiveShellTimeout() != 30*time.Second {
+		t.Fatalf("effective %s", p.EffectiveShellTimeout())
+	}
+	d, src := p.ShellTimeoutCeiling()
+	if d != 30*time.Second || src != "the 30s limit on this system" {
+		t.Fatalf("ceiling %s %q", d, src)
+	}
+	if !strings.Contains(strings.Join(p.Warnings, "\n"), "shell timeouts above 30s are unavailable on this system; the ceiling is 30s") {
+		t.Fatalf("warnings %v", p.Warnings)
+	}
+	short, err := Load(Options{Path: writePol(t, "short.toml", "[ollama]\nshell_timeout = \"10s\"\n")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, src = short.ShellTimeoutCeiling()
+	if d != 10*time.Second || src != "ollama.shell_timeout in policy.toml" {
+		t.Fatalf("short ceiling %s %q", d, src)
+	}
+	if !strings.Contains(strings.Join(short.Warnings, "\n"), "shell timeouts above 30s are unavailable on this system; the ceiling is 30s") {
+		t.Fatalf("short warnings %v", short.Warnings)
 	}
 }

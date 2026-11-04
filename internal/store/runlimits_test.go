@@ -50,7 +50,7 @@ func TestBotLimitsRoundTripAndClear(t *testing.T) {
 		t.Fatalf("reread %#v", got)
 	}
 
-	cleared, err := st.UpdateBot(bot.ID, BotPatch{
+	cleared, _, err := st.UpdateBot(bot.ID, BotPatch{
 		RunTimeoutSet: true, ShellTimeoutSet: true, ToolRoundsSet: true, By: "user",
 	})
 	if err != nil {
@@ -74,7 +74,7 @@ func TestBotLimitsRoundTripAndClear(t *testing.T) {
 		t.Fatalf("inherited json %#v", body)
 	}
 
-	unchanged, err := st.UpdateBot(bot.ID, BotPatch{
+	unchanged, _, err := st.UpdateBot(bot.ID, BotPatch{
 		RunTimeoutSet: true, ShellTimeoutSet: true, ToolRoundsSet: true, By: "user",
 	})
 	if err != nil {

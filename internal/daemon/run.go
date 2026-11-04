@@ -305,9 +305,8 @@ func (a *App) execute(botID, runID string) {
 			_ = a.st.AddRunTool(runID, bot.ID, callRecord(tc.Name, argJSON, body, terr))
 		}
 	}
-	ceil := turnPol.EffectiveToolRounds()
-	botSet := bot.ToolRounds > 0 && bot.ToolRounds <= ceil
-	msg := toolRoundLimitBody(rounds, botSet, ceil)
+	ceil, src := turnPol.ToolRoundsCeiling()
+	msg := toolRoundLimitBody(rounds, bot.ToolRounds, ceil, src)
 	a.holdResume(bot.ID, runID, msgs)
 	_, _ = a.finishRun(runID, "error", msg)
 	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": msg})
@@ -354,6 +353,12 @@ func runNoticeText(status, errText string) string {
 }
 
 func runNoticeSentence(status, errText string) string {
+	if n, ok := noticedToolRounds(errText); ok {
+		return fmt.Sprintf("Stopped: used all %d tool rounds.", n)
+	}
+	if d := noticedRunLimit(errText); d != "" {
+		return "Stopped: hit the " + d + " run limit."
+	}
 	switch status {
 	case "cancelled":
 		return "Run cancelled."
@@ -395,6 +400,9 @@ func runNoticeSentence(status, errText string) string {
 // timeoutLimitCode reads a limit token that timeoutBody writes in parentheses.
 // The returned code is one of the fixed list, never a slice of errText.
 func timeoutLimitCode(errText string) string {
+	if strings.HasPrefix(errText, "The run hit its ") {
+		return "run_timeout"
+	}
 	for _, code := range []string{"first_output_timeout", "stall_timeout", "model_timeout", "run_timeout", "turn_timeout"} {
 		if strings.Contains(errText, "("+code+")") ||
 			strings.Contains(errText, "("+code+",") ||
@@ -404,6 +412,82 @@ func timeoutLimitCode(errText string) string {
 		}
 	}
 	return ""
+}
+
+// noticedToolRounds reads the count from a tool-round limit body.
+// Anything that is not that body returns false, so errText is not copied.
+func noticedToolRounds(errText string) (int, bool) {
+	const prefix = "The run used all "
+	if !strings.HasPrefix(errText, prefix) {
+		return 0, false
+	}
+	rest := errText[len(prefix):]
+	if rest == "" || rest[0] < '1' || rest[0] > '9' {
+		return 0, false
+	}
+	n := 0
+	i := 0
+	for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
+		n = n*10 + int(rest[i]-'0')
+		i++
+		if n > 100 {
+			return 0, false
+		}
+	}
+	if !strings.HasPrefix(rest[i:], " tool rounds (") {
+		return 0, false
+	}
+	return n, true
+}
+
+// noticedRunLimit reads a whole-second compact duration from a run_timeout body.
+// Milliseconds and any other text are ignored.
+func noticedRunLimit(errText string) string {
+	const prefix = "The run hit its "
+	if !strings.HasPrefix(errText, prefix) {
+		return ""
+	}
+	rest := errText[len(prefix):]
+	i := strings.Index(rest, " limit (")
+	if i <= 0 {
+		return ""
+	}
+	token := rest[:i]
+	if !wholeCompactDuration(token) {
+		return ""
+	}
+	return token
+}
+
+func wholeCompactDuration(s string) bool {
+	if s == "" {
+		return false
+	}
+	order := "hms"
+	expect := 0
+	i := 0
+	for i < len(s) {
+		if s[i] < '1' || s[i] > '9' {
+			return false
+		}
+		i++
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		if i >= len(s) {
+			return false
+		}
+		pos := strings.IndexByte(order[expect:], s[i])
+		if pos < 0 {
+			return false
+		}
+		expect += pos + 1
+		i++
+		if expect > len(order) {
+			return false
+		}
+	}
+	return true
 }
 
 // shouldSchemaRetry is the only gate for the attached-tool claim retry.
@@ -610,7 +694,7 @@ func timeoutBody(limit string, d time.Duration, retried int, partial, origin str
 		fmt.Fprintf(&b, "The model call hit its %s limit (model_timeout).", shown)
 	case "run_timeout":
 		if origin == "" {
-			origin = "ollama.run_timeout in policy.toml"
+			origin = "the built-in default"
 		}
 		fmt.Fprintf(&b, "The run hit its %s limit (%s).", shown, origin)
 	default:
