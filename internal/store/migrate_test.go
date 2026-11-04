@@ -134,3 +134,49 @@ func TestCLIProcKeptUntilCleared(t *testing.T) {
 		t.Fatalf("clear left %+v", cleared)
 	}
 }
+
+func TestMigrateRunsErrorCode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+CREATE TABLE bots (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  name_lower TEXT NOT NULL UNIQUE,
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'idle',
+  model TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE runs (
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  error TEXT
+);
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ok, err := st.hasColumn("runs", "error_code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("migrate did not add error_code")
+	}
+}

@@ -60,6 +60,8 @@ func TestProfileStatic(t *testing.T) {
 		`<label for="profile-tool-rounds">Tool rounds</label>`,
 		`<label for="profile-shell-timeout">Shell timeout</label>`,
 		`function limitHelpText`,
+		`Whole seconds only when you change it.`,
+		`input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }`,
 		`Using `,
 		`["profile-name", "profile-label", "profile-model"].forEach`,
 		`.toggle::before { content: ""; position: absolute; inset: -10px -2px; }`,
@@ -209,7 +211,7 @@ func TestProfileLogic(t *testing.T) {
 	}
 	names := []string{
 		"splitChipTokens", "hostEntryValid", "repoEntryValid", "chipInvalidMessage",
-		"dirtyFieldLabels", "limitLabel", "aboveCeilingMessage", "toolRoundsRangeMessage", "durationPlaceholder", "limitPlaceholder", "storedAbove", "limitHelpText", "changedLimitPayload", "limitPrecheckError", "firstChangedLimitError", "limitFieldForMessage", "parseGoDurationMs", "scheduleFromBuilder", "scheduleLabel", "builderFromSchedule",
+		"dirtyFieldLabels", "limitLabel", "aboveCeilingMessage", "toolRoundsRangeMessage", "durationPlaceholder", "limitPlaceholder", "storedAbove", "durationHasFraction", "limitHelpText", "changedLimitPayload", "limitPrecheckError", "firstChangedLimitError", "limitFieldForMessage", "parseGoDurationMs", "scheduleFromBuilder", "scheduleLabel", "builderFromSchedule",
 		"routineWhen", "routineRelative", "routineMeta", "routinePreview",
 	}
 	assign := ""
@@ -281,6 +283,9 @@ check("help-system", ctx.limitHelpText("30s", "policy", "30s", "this system"), "
 check("help-clamp", ctx.limitHelpText("2m", "policy", "2m", "policy.toml", "5m"), "Using 2m, from policy.toml. This bot asks for 5m, but only 2m is allowed now, so 2m is used.");
 check("help-clamp-rounds", ctx.limitHelpText(3, "policy", 3, "policy.toml", "5"), "Using 3, from policy.toml. This bot asks for 5, but only 3 is allowed now, so 3 is used.");
 check("help-no-clamp", ctx.limitHelpText("5m", "bot", "10m", "policy.toml", "5m"), "Using 5m, set on this bot. Up to 10m allowed.");
+check("help-fraction-legacy", ctx.limitHelpText("1.5s", "bot", "10m", "policy.toml", "1.5s"), "Using 1.5s, set on this bot. Up to 10m allowed. Whole seconds only when you change it.");
+check("help-fraction-shell", ctx.limitHelpText("1.5s", "bot", "30s", "the built-in default", "1.5s"), "Using 1.5s, set on this bot. Up to 30s allowed. Whole seconds only when you change it.");
+check("help-whole-no-fraction", ctx.limitHelpText("2s", "bot", "30s", "the built-in default", "2s").indexOf("Whole seconds") < 0, true);
 const limits = {
   run_timeout: { value: "10m", source: "policy", ceiling: "10m", ceiling_source: "the built-in default" },
   shell_timeout: { value: "30s", source: "policy", ceiling: "10s", ceiling_source: "policy.toml" },

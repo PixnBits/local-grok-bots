@@ -183,6 +183,7 @@
     border-radius: 10px;
     padding: 10px 12px;
   }
+  input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
   textarea { resize: vertical; min-height: 72px; }
   /* One viewport. The document does not scroll; paging stays on the message list. */
   .app { height: 100vh; height: 100dvh; overflow: hidden; display: flex; flex-direction: column; }

@@ -308,8 +308,8 @@ func (a *App) execute(botID, runID string) {
 	ceil, src := turnPol.ToolRoundsCeiling()
 	msg := toolRoundLimitBody(rounds, bot.ToolRounds, ceil, src)
 	a.holdResume(bot.ID, runID, msgs)
-	_, _ = a.finishRun(runID, "error", msg)
-	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": msg})
+	_, _ = a.finishRunCode(runID, "error", msg, store.ErrorToolRounds)
+	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": msg, "code": store.ErrorToolRounds})
 }
 
 func (a *App) finishInterrupted(botID, runID string, ctx context.Context) {
@@ -336,6 +336,10 @@ func (a *App) finishInterrupted(botID, runID string, ctx context.Context) {
 // message of the run) after a failure, the same as after a reply. Notices are
 // not turn input, so they do not start another run.
 func (a *App) finishRun(runID, status, errText string) (bool, error) {
+	return a.finishRunCode(runID, status, errText, "")
+}
+
+func (a *App) finishRunCode(runID, status, errText, errCode string) (bool, error) {
 	// Redact before the notice and the row. quoteRunError truncates later.
 	errText = audit.RedactText(errText)
 	if status != "done" {
@@ -343,7 +347,7 @@ func (a *App) finishRun(runID, status, errText string) (bool, error) {
 			a.persistRunNotice(run.BotID, runID, status, errText)
 		}
 	}
-	return a.st.FinishRun(runID, status, errText)
+	return a.st.FinishRunCode(runID, status, errText, errCode)
 }
 
 // runNoticeText is the thread line for a run that did not finish done.

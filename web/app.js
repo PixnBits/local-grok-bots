@@ -669,17 +669,17 @@ function paintHeader(b) {
     paintNote("attention", timeoutOffer.text, actions);
     return;
   }
-  const offer = !state.streaming && b.status !== "running" && b.last_run_error === "tool round limit" && b.continue_run_id;
-  if (offer) {
+  const endNote = (typeof runEndNote === "function") ? runEndNote(b, !!state.streaming) : null;
+  if (endNote && endNote.kind === "continue") {
     const btn = el("button", "primary small", "Continue");
     btn.type = "button";
     const runId = b.continue_run_id;
     btn.addEventListener("click", () => continueRun(runId));
-    paintNote("continue", "Stopped after the tool round limit. Continue picks up the same work for more rounds.", [btn]);
+    paintNote("continue", endNote.text, [btn]);
     return;
   }
-  if (!state.streaming && b.status !== "running" && b.last_run_status === "error" && b.last_run_error) {
-    paintFailedNote("Run failed: " + b.last_run_error);
+  if (endNote && endNote.kind === "failed") {
+    paintFailedNote(endNote.text);
   } else if (!state.streaming && state.stopNote !== "failed") {
     note.hidden = true;
     note.replaceChildren();
@@ -2464,7 +2464,7 @@ async function follow(runId) {
           }
           setWorking(false);
           if (state.stop.phase !== "stopped") {
-            if (event === "error" && payload.error !== "tool round limit") showRunError("Run failed: " + (payload.error || "unknown error"));
+            if (event === "error" && !(typeof isToolRoundLimitError === "function" && isToolRoundLimitError(payload.error, payload.code))) showRunError("Run failed: " + (payload.error || "unknown error"));
           }
           stopStream();
           if (state.stop && state.stop.phase === "stopped") {
@@ -2476,7 +2476,7 @@ async function follow(runId) {
           await loadThread();
           await refreshBot();
           loadState().catch(() => {});
-          if (event === "error" && payload.error === "tool round limit" && currentBot() && currentBot().status === "running") {
+          if (event === "error" && typeof isToolRoundLimitError === "function" && isToolRoundLimitError(payload.error, payload.code) && currentBot() && currentBot().status === "running") {
             await refreshBot();
           }
           if (event === "done") pollActive();
@@ -2769,6 +2769,10 @@ function storedAbove(stored, effective) {
   const en = Number(e);
   return Number.isFinite(sn) && Number.isFinite(en) && sn > en;
 }
+function durationHasFraction(raw) {
+  const ms = parseGoDurationMs(raw);
+  return Number.isFinite(ms) && ms > 0 && ms % 1000 !== 0;
+}
 function limitHelpText(value, source, ceiling, ceilingSource, stored) {
   const shown = value == null ? "" : String(value);
   let text;
@@ -2786,6 +2790,9 @@ function limitHelpText(value, source, ceiling, ceilingSource, stored) {
   if (storedAbove(stored, shown)) {
     const asked = String(stored).trim();
     text += " This bot asks for " + asked + ", but only " + shown + " is allowed now, so " + shown + " is used.";
+  }
+  if (durationHasFraction(shown) || durationHasFraction(stored)) {
+    text += " Whole seconds only when you change it.";
   }
   return text;
 }
@@ -5548,6 +5555,42 @@ function themeRadioKey(key, index, count) {
 function retryTrigger(kind, unreachable, busy) {
   if (!unreachable || busy) return false;
   return kind === "visible" || kind === "focus" || kind === "online" || kind === "click";
+}
+
+// Stable tool-round stop. last_run_code wins; old stored rows match text.
+function isToolRoundLimitError(err, code) {
+  if (code === "tool_rounds") return true;
+  const t = err == null ? "" : String(err);
+  if (t === "tool round limit") return true;
+  return /^The run used all \d+ tool rounds? \(/.test(t);
+}
+
+// Continue after a tool-round stop. Same idle/continue_run_id rules as before.
+function toolRoundsContinueOffer(bot, streaming) {
+  if (streaming || !bot || bot.status === "running" || !bot.continue_run_id) return false;
+  if (bot.last_run_code === "tool_rounds") return true;
+  return isToolRoundLimitError(bot.last_run_error, bot.last_run_code);
+}
+
+// No Continue button here, so drop the "Press Continue" hint from the stop text.
+function dropContinueHint(t) {
+  return String(t).replace(/ Press Continue, or (\w)/, (m, c) => " " + c.toUpperCase()).replace(/ Press Continue\./, "");
+}
+
+// One thread note: Continue replaces Run failed; they are never both shown.
+function runEndNote(bot, streaming) {
+  if (toolRoundsContinueOffer(bot, streaming)) {
+    return {
+      kind: "continue",
+      text: "Stopped after the tool round limit. Continue picks up the same work for more rounds.",
+      actions: ["Continue"]
+    };
+  }
+  if (!streaming && bot && bot.status !== "running" && bot.last_run_status === "error" && bot.last_run_error) {
+    const err = isToolRoundLimitError(bot.last_run_error, bot.last_run_code) ? dropContinueHint(bot.last_run_error) : bot.last_run_error;
+    return { kind: "failed", text: "Run failed: " + err, actions: [] };
+  }
+  return null;
 }
 
 // Timeout note actions. Null hides the note. Continue is only offered

@@ -171,6 +171,67 @@ func TestBotLimitsMigrateExistingDB(t *testing.T) {
 	}
 }
 
+func TestRunErrorCode(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ok, err := st.hasColumn("runs", "error_code")
+	if err != nil || !ok {
+		t.Fatalf("missing error_code %v", err)
+	}
+	bot, err := st.CreateBot("Ada", "stay", nil, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := st.CreateRun(bot.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err = st.FinishRunCode(run.ID, "error", "The run used all 3 tool rounds (set on this bot).", ErrorToolRounds)
+	if err != nil || !ok {
+		t.Fatalf("finish %v %v", ok, err)
+	}
+	got, err := st.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ErrorCode != ErrorToolRounds {
+		t.Fatalf("stored %q", got.ErrorCode)
+	}
+	botGot, err := st.GetBot(bot.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if botGot.LastRunCode != ErrorToolRounds {
+		t.Fatalf("bot last_run_code %q", botGot.LastRunCode)
+	}
+
+	other, err := st.CreateRun(bot.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err = st.FinishRun(other.ID, "error", "boom")
+	if err != nil || !ok {
+		t.Fatalf("other finish %v %v", ok, err)
+	}
+	gotOther, err := st.GetRun(other.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotOther.ErrorCode != "" {
+		t.Fatalf("other stored %q", gotOther.ErrorCode)
+	}
+	botOther, err := st.GetBot(bot.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if botOther.LastRunCode != "" {
+		t.Fatalf("other bot last_run_code %q", botOther.LastRunCode)
+	}
+}
+
 func TestBotLimitsJSONRoundTrip(t *testing.T) {
 	in := Bot{Name: "Ada", RunTimeout: DurationMS(5 * time.Minute), ToolRounds: 2}
 	raw, err := json.Marshal(in)

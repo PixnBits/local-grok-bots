@@ -292,6 +292,10 @@ type Bot struct {
 	ActiveRunID   *string `json:"active_run_id,omitempty"`
 	LastRunStatus string  `json:"last_run_status,omitempty"`
 	LastRunError  string  `json:"last_run_error,omitempty"`
+	// LastRunCode is a machine-readable reason from runs.error_code.
+	// "tool_rounds" means the run used all its tool rounds. Other failures
+	// leave it empty.
+	LastRunCode string `json:"last_run_code,omitempty"`
 	// ContinueRunID is not a column. The daemon fills it from the in-memory offer.
 	ContinueRunID string `json:"continue_run_id,omitempty"`
 	// WaitingTool is not a column. The daemon fills it from an open checkpoint.
@@ -393,6 +397,9 @@ type Timer struct {
 	Source string `json:"source,omitempty"`
 }
 
+// ErrorToolRounds is stored on a run that stopped because it used all tool rounds.
+const ErrorToolRounds = "tool_rounds"
+
 type Run struct {
 	ID         string  `json:"id"`
 	BotID      string  `json:"bot_id"`
@@ -400,6 +407,8 @@ type Run struct {
 	StartedAt  string  `json:"started_at"`
 	FinishedAt *string `json:"finished_at"`
 	Error      *string `json:"error"`
+	// ErrorCode is a stable reason, not a copy of Error. Empty for other failures.
+	ErrorCode string `json:"error_code,omitempty"`
 	// WaitingPendingID is the pending id this run is suspended on.
 	// WaitingSeq is the monotonic per-run sequence of that wait.
 	// A checkpoint restores only when both match.
@@ -532,6 +541,7 @@ CREATE TABLE IF NOT EXISTS runs (
   started_at TEXT NOT NULL,
   finished_at TEXT,
   error TEXT,
+  error_code TEXT NOT NULL DEFAULT '',
   waiting_pending_id TEXT NOT NULL DEFAULT '',
   waiting_seq INTEGER NOT NULL DEFAULT 0
 );
@@ -646,6 +656,7 @@ func (s *Store) evolve() error {
 		{"bots", "run_timeout_ms", "INTEGER NOT NULL DEFAULT 0"},
 		{"bots", "shell_timeout_ms", "INTEGER NOT NULL DEFAULT 0"},
 		{"bots", "tool_rounds", "INTEGER NOT NULL DEFAULT 0"},
+		{"runs", "error_code", "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, a := range adds {
 		ok, err := s.hasColumn(a.table, a.col)
@@ -1020,9 +1031,9 @@ func (s *Store) getBot(id string, withRun bool) (Bot, error) {
 }
 
 func (s *Store) attachRun(b *Bot) {
-	var runID, status string
+	var runID, status, errCode string
 	var errText sql.NullString
-	err := s.db.QueryRow(`SELECT id, status, error FROM runs WHERE bot_id=? ORDER BY started_at DESC LIMIT 1`, b.ID).Scan(&runID, &status, &errText)
+	err := s.db.QueryRow(`SELECT id, status, error, error_code FROM runs WHERE bot_id=? ORDER BY started_at DESC LIMIT 1`, b.ID).Scan(&runID, &status, &errText, &errCode)
 	if err == sql.ErrNoRows {
 		return
 	}
@@ -1033,6 +1044,7 @@ func (s *Store) attachRun(b *Bot) {
 	if errText.Valid {
 		b.LastRunError = errText.String
 	}
+	b.LastRunCode = errCode
 	if status == "running" {
 		b.ActiveRunID = &runID
 	}
@@ -1847,6 +1859,11 @@ func (s *Store) CreateRun(botID string) (Run, error) {
 
 // FinishRun moves a running run to a terminal status. False means it was already finished.
 func (s *Store) FinishRun(id, status, errText string) (bool, error) {
+	return s.FinishRunCode(id, status, errText, "")
+}
+
+// FinishRunCode is FinishRun with a stable error_code. Other failures pass "".
+func (s *Store) FinishRunCode(id, status, errText, errCode string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var botID string
@@ -1862,7 +1879,7 @@ func (s *Store) FinishRun(id, status, errText string) (bool, error) {
 	if errText != "" {
 		e = errText
 	}
-	if _, err := s.db.Exec(`UPDATE runs SET status=?, finished_at=?, error=? WHERE id=? AND status='running'`, status, now, e, id); err != nil {
+	if _, err := s.db.Exec(`UPDATE runs SET status=?, finished_at=?, error=?, error_code=? WHERE id=? AND status='running'`, status, now, e, errCode, id); err != nil {
 		return false, err
 	}
 	detail := map[string]any{"run_id": id, "status": status}
@@ -1970,8 +1987,8 @@ func (s *Store) GetRun(id string) (Run, error) {
 	defer s.mu.Unlock()
 	var r Run
 	var fin, errText sql.NullString
-	err := s.db.QueryRow(`SELECT id, bot_id, status, started_at, finished_at, error, waiting_pending_id, waiting_seq FROM runs WHERE id=?`, id).
-		Scan(&r.ID, &r.BotID, &r.Status, &r.StartedAt, &fin, &errText, &r.WaitingPendingID, &r.WaitingSeq)
+	err := s.db.QueryRow(`SELECT id, bot_id, status, started_at, finished_at, error, error_code, waiting_pending_id, waiting_seq FROM runs WHERE id=?`, id).
+		Scan(&r.ID, &r.BotID, &r.Status, &r.StartedAt, &fin, &errText, &r.ErrorCode, &r.WaitingPendingID, &r.WaitingSeq)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Run{}, ErrNotFound
 	}

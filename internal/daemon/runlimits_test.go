@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/config"
+	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
@@ -293,6 +295,53 @@ func TestPolicyToolRoundsRespected(t *testing.T) {
 	}
 	if calls := mdl.snapshot(); len(calls) != 2 {
 		t.Fatalf("calls %d", len(calls))
+	}
+}
+
+func TestToolRoundsErrorCode(t *testing.T) {
+	mdl := &scriptModel{toolRounds: 20}
+	app := newApp(t, "", mdl)
+	srv := serve(t, app)
+	res, b := do(t, "POST", srv.URL+"/api/bots", map[string]any{
+		"name": "Ada", "description": "stay", "tool_rounds": 3,
+	}, "")
+	if res.StatusCode != 201 {
+		t.Fatalf("create %d %s", res.StatusCode, b)
+	}
+	var bot store.Bot
+	decodeJSON(t, b, &bot)
+	runID := postUser(t, srv.URL, bot.ID, "look around")
+	got := waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool { return b.Status != "running" })
+	if got.LastRunCode != store.ErrorToolRounds {
+		t.Fatalf("last_run_code %q", got.LastRunCode)
+	}
+	run, err := app.st.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.ErrorCode != store.ErrorToolRounds {
+		t.Fatalf("error_code %q", run.ErrorCode)
+	}
+
+	failApp := newApp(t, "", fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
+		return model.ChatResponse{}, errors.New("boom")
+	}})
+	failSrv := serve(t, failApp)
+	failBot := createBot(t, failSrv.URL, "Bea")
+	failRun := postUser(t, failSrv.URL, failBot.ID, "hi")
+	failed := waitBot(t, failSrv.URL, failBot.ID, func(b store.Bot) bool { return b.Status != "running" })
+	if failed.LastRunStatus != "error" {
+		t.Fatalf("status %s", failed.LastRunStatus)
+	}
+	if failed.LastRunCode != "" {
+		t.Fatalf("other last_run_code %q", failed.LastRunCode)
+	}
+	failStored, err := failApp.st.GetRun(failRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failStored.ErrorCode != "" {
+		t.Fatalf("other error_code %q", failStored.ErrorCode)
 	}
 }
 

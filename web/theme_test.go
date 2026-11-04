@@ -3,10 +3,12 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -91,6 +93,9 @@ func TestThemeStatic(t *testing.T) {
 	}
 	if !strings.Contains(src, "--mark-fallback: #787B8A;") {
 		t.Error("missing --mark-fallback: #787B8A")
+	}
+	if !strings.Contains(src, "input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }") {
+		t.Error("missing placeholder color")
 	}
 	if !strings.Contains(media, "--code-inline: rgba(255,255,255,.10);") || !strings.Contains(dark, "--code-inline: rgba(255,255,255,.10);") {
 		t.Error("dark code-inline must be rgba(255,255,255,.10)")
@@ -218,6 +223,64 @@ func cssBlock(t *testing.T, src, start string) string {
 	}
 	t.Fatalf("unbalanced brace after %s", start)
 	return ""
+}
+
+func TestPlaceholderContrast(t *testing.T) {
+	src := ClientSource()
+	rule := "input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }"
+	if !strings.Contains(src, rule) {
+		t.Fatalf("missing %q", rule)
+	}
+	dark := cssBlock(t, src, ":root[data-theme=dark]")
+	muted := cssTokenValue(dark, "muted")
+	surface := cssTokenValue(dark, "surface")
+	ratio := contrastRatioHex(muted, surface)
+	if ratio < 4.5 {
+		t.Fatalf("dark placeholder contrast %.2f:1 (%s on %s), want >= 4.5", ratio, muted, surface)
+	}
+}
+
+func cssTokenValue(block, name string) string {
+	re := regexp.MustCompile(`(?m)(?:^|[^-])--` + regexp.QuoteMeta(name) + `\s*:\s*([^;]+)`)
+	m := re.FindStringSubmatch(block)
+	if m == nil {
+		return ""
+	}
+	return strings.TrimSpace(m[1])
+}
+
+func lin8(c float64) float64 {
+	c = c / 255
+	if c <= 0.04045 {
+		return c / 12.92
+	}
+	return math.Pow((c+0.055)/1.055, 2.4)
+}
+
+func hexLum(hex string) float64 {
+	hex = strings.TrimPrefix(strings.TrimSpace(hex), "#")
+	if len(hex) != 6 {
+		return -1
+	}
+	n, err := strconv.ParseUint(hex, 16, 32)
+	if err != nil {
+		return -1
+	}
+	r := float64((n >> 16) & 0xff)
+	g := float64((n >> 8) & 0xff)
+	b := float64(n & 0xff)
+	return 0.2126*lin8(r) + 0.7152*lin8(g) + 0.0722*lin8(b)
+}
+
+func contrastRatioHex(a, b string) float64 {
+	l1, l2 := hexLum(a), hexLum(b)
+	if l1 < 0 || l2 < 0 {
+		return 0
+	}
+	if l1 < l2 {
+		l1, l2 = l2, l1
+	}
+	return (l1 + 0.05) / (l2 + 0.05)
 }
 
 func between(t *testing.T, src, begin, end string) string {

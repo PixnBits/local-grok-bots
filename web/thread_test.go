@@ -65,6 +65,10 @@ func TestThreadStatic(t *testing.T) {
 		"function themeRadioKey",
 		"function retryTrigger",
 		"function stoppedNoticeText(",
+		"function runEndNote(",
+		"function isToolRoundLimitError(",
+		"function toolRoundsContinueOffer(",
+		`last_run_code === "tool_rounds"`,
 		"function renderPendingRunRecords(",
 		"Run stopped · ",
 		"// thread-logic:begin",
@@ -122,6 +126,9 @@ func TestThreadPolish(t *testing.T) {
 		`el("span", "timed-out", "Timed out")`,
 		`el("button", b.continue_run_id ? "secondary small" : "primary small", "Retry")`,
 		`paintNote("attention", timeoutOffer.text, actions)`,
+		`runEndNote(b, !!state.streaming)`,
+		`endNote.kind === "continue"`,
+		`paintFailedNote(endNote.text)`,
 		`.note.attention { color: var(--text); background: var(--attention-soft); }`,
 		"if (b.continue_run_id) {\n      cont = el(\"button\", \"primary small\", \"Continue\");",
 		"retryTimeout(runId || timeoutRunId(b, state.messages, state.timeoutRunId))",
@@ -232,7 +239,7 @@ vm.runInContext(snippet + "\n" + [
   "cardEyebrow", "cardTitle", "cardRecordText", "recordKind", "countdownAnnounce",
   "archiveFocusTarget", "themeRadioKey", "retryTrigger", "toolCallLabel", "liveToolLine",
   "partialsToShow", "mergeRunRecords", "runRecordKey", "stoppedNoticeText",
-  "timeoutNoteActions", "streamResetApplies", "timedOutTag", "timeoutRunId", "focusTargetAfterNote", "timeoutAnnouncement",
+  "timeoutNoteActions", "runEndNote", "isToolRoundLimitError", "toolRoundsContinueOffer", "streamResetApplies", "timedOutTag", "timeoutRunId", "focusTargetAfterNote", "timeoutAnnouncement",
   "headerPhaseWord", "hookNoteBody", "applyStreamStatus", "hookRunWaiting", "decidedConflictCopy",
   "STOP_TIMEOUT_MS", "QUEUED_CAPTION", "STOP_FAILED_NOTE", "HINT_IDLE", "HINT_RUNNING"
 ].map(function (n) { return "this." + n + "=" + n + ";"; }).join("\n"), ctx);
@@ -508,6 +515,23 @@ check("timeout-note-no-continue", !!noContinue && noContinue.actions.join(",") =
 check("timeout-note-running", ctx.timeoutNoteActions({last_run_status:"timeout", status:"running"}, false) === null);
 check("timeout-note-streaming", ctx.timeoutNoteActions({last_run_status:"timeout", status:"idle"}, true) === null);
 check("timeout-note-other", ctx.timeoutNoteActions({last_run_status:"error", last_run_error:"x", status:"idle"}, false) === null);
+const contCode = ctx.runEndNote({last_run_code:"tool_rounds", continue_run_id:"r1", last_run_error:"The run used all 1 tool round (set on this bot). Press Continue.", last_run_status:"error", status:"idle"}, false);
+check("continue-code", !!contCode && contCode.kind === "continue" && contCode.actions.join(",") === "Continue" && contCode.text === "Stopped after the tool round limit. Continue picks up the same work for more rounds." && contCode.text.indexOf("Run failed") < 0);
+const contOld = ctx.runEndNote({last_run_error:"tool round limit", continue_run_id:"r1", last_run_status:"error", status:"idle"}, false);
+check("continue-old-text", !!contOld && contOld.kind === "continue" && contOld.actions.join(",") === "Continue");
+const contNew = ctx.runEndNote({last_run_error:"The run used all 3 tool rounds (set on this bot). Press Continue, or raise the limit under Permissions & access, up to 8.", continue_run_id:"r1", last_run_status:"error", status:"idle"}, false);
+check("continue-new-text", !!contNew && contNew.kind === "continue" && contNew.actions.join(",") === "Continue");
+const contOne = ctx.runEndNote({last_run_error:"The run used all 1 tool round (set on this bot). Press Continue, or raise the limit under Permissions & access, up to 8.", continue_run_id:"r1", status:"idle"}, false);
+check("continue-new-one", !!contOne && contOne.kind === "continue");
+const failNote = ctx.runEndNote({last_run_status:"error", last_run_error:"boom", status:"idle"}, false);
+check("run-failed", !!failNote && failNote.kind === "failed" && failNote.text === "Run failed: boom" && failNote.actions.indexOf("Continue") < 0);
+check("continue-no-id", ctx.runEndNote({last_run_code:"tool_rounds", last_run_error:"The run used all 3 tool rounds (set on this bot).", last_run_status:"error", status:"idle"}, false).kind === "failed");
+check("no-hint-without-button", ctx.runEndNote({last_run_code:"tool_rounds", last_run_error:"The run used all 3 tool rounds (set on this bot). Press Continue, or raise the limit under Permissions & access, up to 8.", last_run_status:"error", status:"idle"}, false).text === "Run failed: The run used all 3 tool rounds (set on this bot). Raise the limit under Permissions & access, up to 8.");
+check("continue-running", ctx.runEndNote({last_run_code:"tool_rounds", continue_run_id:"r1", status:"running"}, false) === null);
+check("continue-streaming", ctx.runEndNote({last_run_code:"tool_rounds", continue_run_id:"r1", status:"idle"}, true) === null);
+check("tool-round-code", ctx.isToolRoundLimitError("other", "tool_rounds") === true);
+check("tool-round-old", ctx.isToolRoundLimitError("tool round limit", "") === true);
+check("tool-round-other", ctx.isToolRoundLimitError("boom", "") === false);
 check("stream-reset-same", ctx.streamResetApplies("r1", "r1") === true);
 check("stream-reset-empty", ctx.streamResetApplies("", "r1") === true && ctx.streamResetApplies(null, "") === true);
 check("stream-reset-other", ctx.streamResetApplies("r2", "r1") === false);
