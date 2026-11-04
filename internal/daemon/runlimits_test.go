@@ -367,3 +367,17 @@ func TestPolicyNamedCeilingInRejectMessage(t *testing.T) {
 		t.Fatalf("got %q want %q", errText, want)
 	}
 }
+
+func TestRunTimeoutOriginNamesSource(t *testing.T) {
+	var a *App
+	pol := policy.Policy{}
+	if got := a.runTimeoutOrigin(store.Bot{RunTimeout: store.DurationMS(5 * time.Minute)}, pol); got != "run_timeout, set on this bot" {
+		t.Fatalf("bot value: %q", got)
+	}
+	if got := a.runTimeoutOrigin(store.Bot{}, pol); got != "ollama.run_timeout in policy.toml" {
+		t.Fatalf("inherited: %q", got)
+	}
+	if got := a.runTimeoutOrigin(store.Bot{RunTimeout: store.DurationMS(time.Hour)}, pol); got != "ollama.run_timeout in policy.toml" {
+		t.Fatalf("above the policy value: %q", got)
+	}
+}
