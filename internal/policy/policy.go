@@ -74,6 +74,11 @@ type Policy struct {
 	OllamaModelTimeout       time.Duration
 	OllamaFirstOutputTimeout time.Duration
 	OllamaStallTimeout       time.Duration
+	// OllamaToolRounds is how many model rounds one Ollama run may use.
+	// Zero means DefaultOllamaToolRounds.
+	OllamaToolRounds int
+	// OllamaShellTimeout bounds one run_shell call. Zero means the default.
+	OllamaShellTimeout time.Duration
 	// OllamaStallRetriesSet is false when stall_retries was not set. Zero
 	// retries is a real setting and is distinct from the default.
 	OllamaStallRetries    int
@@ -82,16 +87,18 @@ type Policy struct {
 	// policy replaced that key. A ceiling warns only for a local value
 	// managed policy did not replace. Silence defaults use either set flag.
 	localRun, localModel, localFirst, localStall time.Duration
-	localTurn, localPrompt                       time.Duration
-	localRetries                                 int
+	localTurn, localPrompt, localShell           time.Duration
+	localRetries, localToolRounds                int
 	localRunSet, localModelSet                   bool
 	localFirstSet, localStallSet                 bool
 	localTurnSet, localPromptSet                 bool
-	localRetriesSet                              bool
+	localRetriesSet, localToolRoundsSet          bool
+	localShellSet                                bool
 	managedRunSet, managedModelSet               bool
 	managedFirstSet, managedStallSet             bool
 	managedTurnSet, managedPromptSet             bool
-	managedRetriesSet                            bool
+	managedRetriesSet, managedToolRoundsSet      bool
+	managedShellSet                              bool
 	// OllamaKeepAlive is a duration string or an integer number of seconds.
 	// Unset means DefaultOllamaKeepAlive.
 	OllamaKeepAlive    any
@@ -106,6 +113,8 @@ type Policy struct {
 	MaxOllamaStallTimeout       time.Duration
 	MaxOllamaStallRetries       int
 	MaxOllamaStallRetriesSet    bool
+	MaxOllamaToolRounds         int
+	MaxOllamaShellTimeout       time.Duration
 	// AllowSessionGrants is true only when managed policy set it.
 	AllowSessionGrants bool
 	// ClaudeTransport is how Claude asks this daemon about a tool.
@@ -606,11 +615,26 @@ const (
 	DefaultOllamaStallTimeout       = 2 * time.Minute
 	DefaultOllamaStallRetries       = 1
 	DefaultOllamaKeepAlive          = "30m"
+	DefaultOllamaToolRounds         = 8
+	DefaultOllamaShellTimeout       = 30 * time.Second
 	// maxStallRetries is the fail-closed upper bound for stall_retries.
 	maxStallRetries = 5
+	minToolRounds   = 1
+	maxToolRounds   = 100
+	minShellTimeout = time.Second
 )
 
 func capped(v, def, ceiling time.Duration) time.Duration {
+	if v <= 0 {
+		v = def
+	}
+	if ceiling > 0 && v > ceiling {
+		v = ceiling
+	}
+	return v
+}
+
+func cappedInt(v, def, ceiling int) int {
 	if v <= 0 {
 		v = def
 	}
@@ -634,6 +658,82 @@ func (p Policy) EffectivePromptTimeout() time.Duration {
 // EffectiveOllamaRunTimeout bounds a whole Ollama run.
 func (p Policy) EffectiveOllamaRunTimeout() time.Duration {
 	return capped(p.OllamaRunTimeout, DefaultOllamaRunTimeout, p.MaxOllamaRunTimeout)
+}
+
+// EffectiveToolRounds is how many model rounds one Ollama run may use.
+func (p Policy) EffectiveToolRounds() int {
+	return cappedInt(p.OllamaToolRounds, DefaultOllamaToolRounds, p.MaxOllamaToolRounds)
+}
+
+// EffectiveShellTimeout bounds one run_shell call.
+func (p Policy) EffectiveShellTimeout() time.Duration {
+	return capped(p.OllamaShellTimeout, DefaultOllamaShellTimeout, p.MaxOllamaShellTimeout)
+}
+
+// RunTimeoutCeiling is the highest run_timeout a bot may set, and a phrase
+// naming where that ceiling came from. A CLI bot is capped by the effective
+// turn timeout; an Ollama bot by the effective Ollama run timeout.
+func (p Policy) RunTimeoutCeiling(cli bool) (time.Duration, string) {
+	if cli {
+		return p.EffectiveTurnTimeout(), durationCeilingSource(
+			p.TurnTimeout, p.localTurnSet || p.managedTurnSet,
+			DefaultTurnTimeout, p.MaxTurnTimeout,
+			"cli.turn_timeout in policy.toml", "the managed cli.max_turn_timeout",
+		)
+	}
+	return p.EffectiveOllamaRunTimeout(), durationCeilingSource(
+		p.OllamaRunTimeout, p.localRunSet || p.managedRunSet,
+		DefaultOllamaRunTimeout, p.MaxOllamaRunTimeout,
+		"ollama.run_timeout in policy.toml", "the managed ollama.max_run_timeout",
+	)
+}
+
+// ToolRoundsCeiling is the highest tool_rounds a bot may set, and a phrase
+// naming where that ceiling came from.
+func (p Policy) ToolRoundsCeiling() (int, string) {
+	return p.EffectiveToolRounds(), intCeilingSource(
+		p.OllamaToolRounds, p.localToolRoundsSet || p.managedToolRoundsSet,
+		DefaultOllamaToolRounds, p.MaxOllamaToolRounds,
+		"ollama.tool_rounds in policy.toml", "the managed ollama.max_tool_rounds",
+	)
+}
+
+// ShellTimeoutCeiling is the highest shell_timeout a bot may set, and a phrase
+// naming where that ceiling came from.
+func (p Policy) ShellTimeoutCeiling() (time.Duration, string) {
+	return p.EffectiveShellTimeout(), durationCeilingSource(
+		p.OllamaShellTimeout, p.localShellSet || p.managedShellSet,
+		DefaultOllamaShellTimeout, p.MaxOllamaShellTimeout,
+		"ollama.shell_timeout in policy.toml", "the managed ollama.max_shell_timeout",
+	)
+}
+
+func durationCeilingSource(raw time.Duration, set bool, def, max time.Duration, keySrc, maxSrc string) string {
+	v := raw
+	if !set || v <= 0 {
+		v = def
+	}
+	if max > 0 && v > max {
+		return maxSrc
+	}
+	if set && raw > 0 {
+		return keySrc
+	}
+	return "the default"
+}
+
+func intCeilingSource(raw int, set bool, def, max int, keySrc, maxSrc string) string {
+	v := raw
+	if !set || v <= 0 {
+		v = def
+	}
+	if max > 0 && v > max {
+		return maxSrc
+	}
+	if set && raw > 0 {
+		return keySrc
+	}
+	return "the default"
 }
 
 // EffectiveOllamaModelTimeout is the optional hard cap on one model call.
@@ -1428,6 +1528,10 @@ type ollamaDoc struct {
 	MaxFirstOutputTimeout flexText  `toml:"max_first_output_timeout" json:"max_first_output_timeout"`
 	MaxStallTimeout       flexText  `toml:"max_stall_timeout" json:"max_stall_timeout"`
 	MaxStallRetries       flexText  `toml:"max_stall_retries" json:"max_stall_retries"`
+	ToolRounds            flexText  `toml:"tool_rounds" json:"tool_rounds"`
+	MaxToolRounds         flexText  `toml:"max_tool_rounds" json:"max_tool_rounds"`
+	ShellTimeout          flexText  `toml:"shell_timeout" json:"shell_timeout"`
+	MaxShellTimeout       flexText  `toml:"max_shell_timeout" json:"max_shell_timeout"`
 }
 
 type cliDoc struct {
@@ -1646,6 +1750,8 @@ func (p *Policy) apply(doc document, trusted bool) error {
 		{"ollama.max_first_output_timeout", doc.Ollama.MaxFirstOutputTimeout, &p.MaxOllamaFirstOutputTimeout, true},
 		{"ollama.max_stall_timeout", doc.Ollama.MaxStallTimeout, &p.MaxOllamaStallTimeout, true},
 		{"cli.max_turn_timeout", doc.CLI.MaxTurnTimeout, &p.MaxTurnTimeout, true},
+		{"ollama.shell_timeout", doc.Ollama.ShellTimeout, &p.OllamaShellTimeout, false},
+		{"ollama.max_shell_timeout", doc.Ollama.MaxShellTimeout, &p.MaxOllamaShellTimeout, true},
 	}
 	if doc.CLI.Permission != nil {
 		timeouts = append(timeouts, struct {
@@ -1659,7 +1765,13 @@ func (p *Policy) apply(doc document, trusted bool) error {
 		if !t.f.Set {
 			continue
 		}
-		d, err := parseTurnTimeout(t.key, t.f.Value)
+		var d time.Duration
+		var err error
+		if t.key == "ollama.shell_timeout" || t.key == "ollama.max_shell_timeout" {
+			d, err = parseShellTimeout(t.key, t.f.Value)
+		} else {
+			d, err = parseTurnTimeout(t.key, t.f.Value)
+		}
 		if err != nil {
 			return err
 		}
@@ -1691,6 +1803,25 @@ func (p *Policy) apply(doc document, trusted bool) error {
 		} else {
 			p.MaxOllamaStallRetries = n
 			p.MaxOllamaStallRetriesSet = true
+		}
+	}
+	if doc.Ollama.ToolRounds.Set {
+		n, err := parseToolRounds("ollama.tool_rounds", doc.Ollama.ToolRounds.Value)
+		if err != nil {
+			return err
+		}
+		p.OllamaToolRounds = n
+		p.recordToolRounds(n, trusted)
+	}
+	if doc.Ollama.MaxToolRounds.Set {
+		n, err := parseToolRounds("ollama.max_tool_rounds", doc.Ollama.MaxToolRounds.Value)
+		if err != nil {
+			return err
+		}
+		if !trusted {
+			p.Warnings = append(p.Warnings, "ollama.max_tool_rounds is ignored; only managed policy can set a timeout ceiling")
+		} else {
+			p.MaxOllamaToolRounds = n
 		}
 	}
 	if doc.Ollama.KeepAlive.Set {
@@ -1992,6 +2123,29 @@ func hex64(s string) bool {
 	return true
 }
 
+func parseToolRounds(key, s string) (int, error) {
+	s = strings.TrimSpace(s)
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || strconv.FormatInt(n, 10) != s {
+		return 0, fmt.Errorf("%s must be an integer from %d to %d", key, minToolRounds, maxToolRounds)
+	}
+	if n < int64(minToolRounds) || n > int64(maxToolRounds) {
+		return 0, fmt.Errorf("%s must be an integer from %d to %d", key, minToolRounds, maxToolRounds)
+	}
+	return int(n), nil
+}
+
+func parseShellTimeout(key, s string) (time.Duration, error) {
+	d, err := parseTurnTimeout(key, s)
+	if err != nil {
+		return 0, err
+	}
+	if d > 0 && d < minShellTimeout {
+		return 0, fmt.Errorf("%s must be at least 1s", key)
+	}
+	return d, nil
+}
+
 func parseStallRetries(s string) (int, error) {
 	s = strings.TrimSpace(s)
 	n, err := strconv.ParseInt(s, 10, 64)
@@ -2068,6 +2222,8 @@ func (p *Policy) recordTimeout(key string, d time.Duration, trusted bool) {
 			p.managedTurnSet = true
 		case "cli.permission.prompt_timeout":
 			p.managedPromptSet = true
+		case "ollama.shell_timeout":
+			p.managedShellSet = true
 		}
 		return
 	}
@@ -2084,6 +2240,8 @@ func (p *Policy) recordTimeout(key string, d time.Duration, trusted bool) {
 		p.localTurn, p.localTurnSet = d, true
 	case "cli.permission.prompt_timeout":
 		p.localPrompt, p.localPromptSet = d, true
+	case "ollama.shell_timeout":
+		p.localShell, p.localShellSet = d, true
 	}
 }
 
@@ -2094,6 +2252,15 @@ func (p *Policy) recordRetries(n int, trusted bool) {
 	}
 	p.localRetries = n
 	p.localRetriesSet = true
+}
+
+func (p *Policy) recordToolRounds(n int, trusted bool) {
+	if trusted {
+		p.managedToolRoundsSet = true
+		return
+	}
+	p.localToolRounds = n
+	p.localToolRoundsSet = true
 }
 
 // warnClampedCeilings warns when a value set in policy.toml is above a
@@ -2112,6 +2279,7 @@ func (p *Policy) warnClampedCeilings() {
 		{p.localStallSet, p.managedStallSet, p.localStall, p.MaxOllamaStallTimeout, "ollama.stall_timeout", "max_stall_timeout"},
 		{p.localTurnSet, p.managedTurnSet, p.localTurn, p.MaxTurnTimeout, "cli.turn_timeout", "max_turn_timeout"},
 		{p.localPromptSet, p.managedPromptSet, p.localPrompt, p.MaxPromptTimeout, "cli.permission.prompt_timeout", "max_prompt_timeout"},
+		{p.localShellSet, p.managedShellSet, p.localShell, p.MaxOllamaShellTimeout, "ollama.shell_timeout", "max_shell_timeout"},
 	}
 	for _, it := range items {
 		if !it.localSet || it.managedSet || it.ceiling <= 0 || it.v <= it.ceiling {
@@ -2121,6 +2289,9 @@ func (p *Policy) warnClampedCeilings() {
 	}
 	if p.localRetriesSet && !p.managedRetriesSet && p.MaxOllamaStallRetriesSet && p.localRetries > p.MaxOllamaStallRetries {
 		p.Warnings = append(p.Warnings, fmt.Sprintf("ollama.stall_retries %d lowered to managed max_stall_retries %d", p.localRetries, p.MaxOllamaStallRetries))
+	}
+	if p.localToolRoundsSet && !p.managedToolRoundsSet && p.MaxOllamaToolRounds > 0 && p.localToolRounds > p.MaxOllamaToolRounds {
+		p.Warnings = append(p.Warnings, fmt.Sprintf("ollama.tool_rounds %d lowered to managed max_tool_rounds %d", p.localToolRounds, p.MaxOllamaToolRounds))
 	}
 	p.warnVoiceCeilings()
 }

@@ -147,24 +147,20 @@ func TestCompactDurationAndTimeoutBody(t *testing.T) {
 			compactDuration(2*time.Minute), compactDuration(90*time.Minute), compactDuration(time.Hour+30*time.Second))
 	}
 	cases := []struct{ got, want string }{
-		{timeoutBody("stall_timeout", 2*time.Minute, 1, "Hello"), "No output from the model for 2m (stall_timeout). Retried once. The partial reply is kept above."},
-		{timeoutBody("stall_timeout", 2*time.Minute, 0, "Hello"), "No output from the model for 2m (stall_timeout). The partial reply is kept above."},
-		{timeoutBody("stall_timeout", 2*time.Minute, 0, "  "), "No output from the model for 2m (stall_timeout)."},
-		{timeoutBody("stall_timeout", 2*time.Minute, 2, ""), "No output from the model for 2m (stall_timeout). Retried 2 times."},
-		{timeoutBody("first_output_timeout", 5*time.Minute, 1, ""), "The model sent no output within 5m (first_output_timeout). Retried once."},
-		{timeoutBody("model_timeout", 10*time.Minute, 0, "Hello"), "The model call hit its 10m limit (model_timeout). The partial reply is kept above."},
-		{timeoutBody("run_timeout", 150*time.Millisecond, 0, ""), "The run hit its 150ms limit (run_timeout)."},
+		{timeoutBody("stall_timeout", 2*time.Minute, 1, "Hello", ""), "No output from the model for 2m (stall_timeout). Retried once. The partial reply is kept above."},
+		{timeoutBody("stall_timeout", 2*time.Minute, 0, "Hello", ""), "No output from the model for 2m (stall_timeout). The partial reply is kept above."},
+		{timeoutBody("stall_timeout", 2*time.Minute, 0, "  ", ""), "No output from the model for 2m (stall_timeout)."},
+		{timeoutBody("stall_timeout", 2*time.Minute, 2, "", ""), "No output from the model for 2m (stall_timeout). Retried 2 times."},
+		{timeoutBody("first_output_timeout", 5*time.Minute, 1, "", ""), "The model sent no output within 5m (first_output_timeout). Retried once."},
+		{timeoutBody("model_timeout", 10*time.Minute, 0, "Hello", ""), "The model call hit its 10m limit (model_timeout). The partial reply is kept above."},
+		{timeoutBody("run_timeout", 150*time.Millisecond, 0, "", ""), "The run hit its 150ms limit (ollama.run_timeout in policy.toml)."},
+		{timeoutBody("run_timeout", 5*time.Minute, 0, "", "run_timeout, set on this bot"), "The run hit its 5m limit (run_timeout, set on this bot)."},
 	}
 	for _, c := range cases {
 		if c.got != c.want {
 			t.Fatalf("got %q want %q", c.got, c.want)
 		}
-		code := ""
-		for _, limit := range []string{"first_output_timeout", "stall_timeout", "model_timeout", "run_timeout", "turn_timeout"} {
-			if strings.Contains(c.want, "("+limit+")") {
-				code = limit
-			}
-		}
+		code := timeoutLimitCode(c.got)
 		if code == "" || runNoticeText("timeout", c.got) != fixedTimeoutNotice(code) {
 			t.Fatalf("notice %q", runNoticeText("timeout", c.got))
 		}
@@ -364,7 +360,7 @@ func TestNoRetryOnStopOrRunTimeout(t *testing.T) {
 		bot := createBot(t, srv.URL, "Bea")
 		postUser(t, srv.URL, bot.ID, "hi")
 		bot = waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool { return b.Status != "running" })
-		const body = "The run hit its 150ms limit (run_timeout)."
+		const body = "The run hit its 150ms limit (ollama.run_timeout in policy.toml)."
 		if bot.LastRunStatus != "timeout" || bot.LastRunError != body {
 			t.Fatalf("status %s %s", bot.LastRunStatus, bot.LastRunError)
 		}

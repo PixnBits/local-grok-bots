@@ -87,7 +87,16 @@ prompt_timeout = "10m"
 
 [ollama]
 # Whole Ollama run, all tool rounds. Default 10m. This is the backstop.
+# A per-bot run_timeout may only narrow this (or, for a CLI bot, the
+# effective cli.turn_timeout).
 run_timeout = "10m"
+# Model rounds one Ollama run may use. Default 8. Range 1..100.
+# A per-bot tool_rounds may only narrow this.
+tool_rounds = 8
+# Cap on one run_shell call. Default 30s. Range 1s..24h.
+# A per-bot shell_timeout may only narrow this. Git push may still
+# extend the command as described in the run_shell notes.
+shell_timeout = "30s"
 # Optional hard cap on one model call. Unset means the effective run
 # timeout, so only run_timeout bounds the call. An explicit value stays a
 # hard per-call cap (and is not retried). Configs that set the old 3m
@@ -114,7 +123,18 @@ keep_alive = "30m"
 # max_first_output_timeout = "15m" # managed only
 # max_stall_timeout = "5m"         # managed only
 # max_stall_retries = 1            # managed only
+# max_tool_rounds = 8              # managed only
+# max_shell_timeout = "1m"         # managed only
 ```
+
+`run_timeout` bounds the whole run. `tool_rounds` bounds how many
+model rounds that run may use (default 8). `shell_timeout` bounds one
+`run_shell` call (default 30s). A bot may set `run_timeout`,
+`tool_rounds`, and `shell_timeout` below these effective values;
+it cannot raise them. For a CLI bot, `run_timeout` also narrows
+`cli.turn_timeout`. Empty bot values inherit the policy (or the
+built-in default). Managed `max_tool_rounds` and `max_shell_timeout`
+are ceilings only managed policy can set.
 
 `run_timeout` bounds the whole run. `first_output_timeout` and
 `stall_timeout` bound one call by silence, not by wall clock: output is any

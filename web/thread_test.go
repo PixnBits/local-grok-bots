@@ -41,7 +41,7 @@ func TestThreadStatic(t *testing.T) {
 		"Couldn't send your answer. The daemon didn't respond. Try again.",
 		"Open in Log",
 		"Try again",
-		"Stopped after 8 tool rounds. Continue picks up the same work for 8 more.",
+		"Stopped after the tool round limit. Continue picks up the same work for more rounds.",
 		"Archived. Routines are paused and new messages wait until it is restored.",
 		"Enter to send · Shift+Enter for a new line · the bot reads follow-ups while it works",
 		"Enter to send · Esc to stop · the bot reads follow-ups while it works",

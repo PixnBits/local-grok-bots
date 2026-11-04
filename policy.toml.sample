@@ -65,8 +65,12 @@ model = "llama3.1"
 # hard cap on one call; unset means the effective run timeout, and the 5m / 2m
 # silence defaults stay. A file that still sets the old 3m default keeps that
 # cap and can drop the key. keep_alive (default "30m") is sent on every chat:
-# a Go duration, seconds, or -1. See docs/cli-isolation.md.
+# a Go duration, seconds, or -1. tool_rounds (default 8, 1..100) is how
+# many model rounds one run may use. shell_timeout (default 30s, 1s..24h)
+# bounds one run_shell call. A bot may only narrow these. See docs/cli-isolation.md.
 # run_timeout = "10m"
+# tool_rounds = 8
+# shell_timeout = "30s"
 # first_output_timeout = "5m"
 # stall_timeout = "2m"
 # stall_retries = 1

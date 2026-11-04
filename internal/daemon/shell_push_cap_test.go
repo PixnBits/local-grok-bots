@@ -72,7 +72,7 @@ func TestShellPushThenSleepIsCapped(t *testing.T) {
 		if hits.Load() != 1 {
 			t.Fatalf("push hook calls=%d elapsed=%s\n%s", hits.Load(), elapsed, got)
 		}
-		if runErr == nil || !strings.Contains(runErr.Error(), "shell timed out") {
+		if runErr == nil || !(strings.Contains(runErr.Error(), "shell timed out") || strings.Contains(runErr.Error(), "stopped after")) {
 			t.Fatalf("err=%v elapsed=%s\n%s", runErr, elapsed, got)
 		}
 		if strings.Contains(got, "SLEPT") || strings.Contains(runErr.Error(), "SLEPT") {
@@ -95,7 +95,7 @@ func TestShellPushThenSleepIsCapped(t *testing.T) {
 		if hits.Load() != 1 {
 			t.Fatalf("push hook calls=%d elapsed=%s\n%s", hits.Load(), elapsed, got)
 		}
-		if runErr == nil || !strings.Contains(runErr.Error(), "shell timed out") {
+		if runErr == nil || !(strings.Contains(runErr.Error(), "shell timed out") || strings.Contains(runErr.Error(), "stopped after")) {
 			t.Fatalf("err=%v elapsed=%s\n%s", runErr, elapsed, got)
 		}
 		if strings.Contains(got, "SLEPT") || !strings.Contains(got, "git push denied: no") {
@@ -123,7 +123,7 @@ func TestShellPushThenSleepIsCapped(t *testing.T) {
 		if cancelled.Load() || hits.Load() != 1 {
 			t.Fatalf("push cancelled=%v hits=%d elapsed=%s\n%s", cancelled.Load(), hits.Load(), elapsed, got)
 		}
-		if runErr != nil || strings.Contains(got, "shell timed out") || strings.Contains(got, "cancelled") {
+		if runErr != nil || strings.Contains(got, "shell timed out") || strings.Contains(got, "stopped after") || strings.Contains(got, "cancelled") {
 			t.Fatalf("err=%v elapsed=%s\n%s", runErr, elapsed, got)
 		}
 		if !strings.Contains(got, "git push sent") || !strings.Contains(got, "AFTER_PUSH") {
@@ -151,7 +151,7 @@ func TestShellPushThenSleepIsCapped(t *testing.T) {
 		if hits.Load() != 1 || cancelled.Load() {
 			t.Fatalf("push cancelled=%v hits=%d elapsed=%s\n%s", cancelled.Load(), hits.Load(), elapsed, got)
 		}
-		if runErr == nil || !strings.Contains(runErr.Error(), "shell timed out") {
+		if runErr == nil || !(strings.Contains(runErr.Error(), "shell timed out") || strings.Contains(runErr.Error(), "stopped after")) {
 			t.Fatalf("err=%v elapsed=%s\n%s", runErr, elapsed, got)
 		}
 		if !strings.Contains(got, "git push sent") {

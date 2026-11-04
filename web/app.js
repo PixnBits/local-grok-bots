@@ -675,7 +675,7 @@ function paintHeader(b) {
     btn.type = "button";
     const runId = b.continue_run_id;
     btn.addEventListener("click", () => continueRun(runId));
-    paintNote("continue", "Stopped after 8 tool rounds. Continue picks up the same work for 8 more.", [btn]);
+    paintNote("continue", "Stopped after the tool round limit. Continue picks up the same work for more rounds.", [btn]);
     return;
   }
   if (!state.streaming && b.status !== "running" && b.last_run_status === "error" && b.last_run_error) {
@@ -2718,7 +2718,39 @@ function dirtyFieldLabels(base, cur) {
   if (!sameList(b.ssh, c.ssh)) out.push("SSH allowlist");
   if (!sameList(b.github, c.github)) out.push("GitHub repositories");
   if (!sameTools(b.server_tools, c.server_tools)) out.push("Server tools");
+  if ((b.run_timeout || "") !== (c.run_timeout || "")) out.push("Run timeout");
+  if ((b.tool_rounds || "") !== (c.tool_rounds || "")) out.push("Tool rounds");
+  if ((b.shell_timeout || "") !== (c.shell_timeout || "")) out.push("Shell timeout");
   return out;
+}
+function limitHelpText(value, source, ceiling) {
+  const shown = value == null ? "" : String(value);
+  if (source === "bot") {
+    return "In force: " + shown + " (this bot). Policy limit: " + ceiling + ".";
+  }
+  return "In force: " + shown + " (policy)";
+}
+function parseGoDurationMs(s) {
+  const raw = String(s == null ? "" : s).trim();
+  if (!raw) return 0;
+  const re = /(-?\d+(?:\.\d+)?)(ns|us|µs|μs|ms|s|m|h)/g;
+  let total = 0;
+  let matched = 0;
+  let m;
+  while ((m = re.exec(raw))) {
+    matched += m[0].length;
+    const n = Number(m[1]);
+    let mul = 0;
+    if (m[2] === "h") mul = 3600000;
+    else if (m[2] === "m") mul = 60000;
+    else if (m[2] === "s") mul = 1000;
+    else if (m[2] === "ms") mul = 1;
+    else if (m[2] === "us" || m[2] === "µs" || m[2] === "μs") mul = 0.001;
+    else if (m[2] === "ns") mul = 1e-6;
+    total += n * mul;
+  }
+  if (!matched || raw.replace(/\s+/g, "").length !== matched) return NaN;
+  return total;
 }
 function scheduleFromBuilder(mode, n, unit) {
   if (mode !== "every") return "";
@@ -2848,7 +2880,10 @@ const DIRTY_FIELDS = [
   ["Network allowlist", "fld-net"],
   ["SSH allowlist", "fld-ssh"],
   ["GitHub repositories", "fld-github"],
-  ["Server tools", "fld-tools"]
+  ["Server tools", "fld-tools"],
+  ["Run timeout", "fld-run-timeout"],
+  ["Tool rounds", "fld-tool-rounds"],
+  ["Shell timeout", "fld-shell-timeout"]
 ];
 let navBypass = false;
 
@@ -3004,7 +3039,10 @@ function readProfile() {
     net: chipValues("net"),
     ssh: chipValues("ssh"),
     github: chipValues("github"),
-    server_tools: serverToolsPayload()
+    server_tools: serverToolsPayload(),
+    run_timeout: $("#profile-run-timeout") ? $("#profile-run-timeout").value.trim() : "",
+    tool_rounds: $("#profile-tool-rounds") ? $("#profile-tool-rounds").value.trim() : "",
+    shell_timeout: $("#profile-shell-timeout") ? $("#profile-shell-timeout").value.trim() : ""
   };
 }
 function profilePayload() {
@@ -3020,7 +3058,10 @@ function profilePayload() {
     net_allow: cur.net,
     ssh_allow: cur.ssh,
     github_allow: cur.github,
-    server_tools: cur.server_tools
+    server_tools: cur.server_tools,
+    run_timeout: cur.run_timeout || "",
+    shell_timeout: cur.shell_timeout || "",
+    tool_rounds: cur.tool_rounds === "" ? 0 : Number(cur.tool_rounds)
   };
 }
 function profileDirty() {
@@ -3040,7 +3081,10 @@ const DIRTY_CONTROLS = {
   "Network allowlist": "chips-net",
   "SSH allowlist": "chips-ssh",
   "GitHub repositories": "chips-github",
-  "Server tools": "server-tools"
+  "Server tools": "server-tools",
+  "Run timeout": "profile-run-timeout",
+  "Tool rounds": "profile-tool-rounds",
+  "Shell timeout": "profile-shell-timeout"
 };
 function changedNote(node) {
   if (!node) return null;
@@ -3494,6 +3538,7 @@ function scrollProfileTo(id) {
 function applyBotFields(b) {
   const bot = b || {};
   state.mark = { shape: (bot.mark && bot.mark.shape) || "circle", color: (bot.mark && bot.mark.color) || COLORS[0] };
+  state.botLimits = bot.limits || null;
   $("#profile-name").value = bot.name || "";
   $("#profile-label").value = bot.label || "";
   $("#profile-description").value = bot.description || "";
@@ -3506,11 +3551,15 @@ function applyBotFields(b) {
   setServerMode(tools != null);
   paintServerTools(Array.isArray(tools) ? tools : []);
   paintWarnings(bot.warnings || []);
+  fillLimitInputs(bot);
+  paintLimitHelp();
+  clearLimitErrors();
   paintMarkPicker();
   syncProfileHeadingName();
 }
 function blankDraftFields() {
   state.mark = { shape: "circle", color: COLORS[0] };
+  state.botLimits = null;
   $("#profile-name").value = "";
   $("#profile-label").value = "";
   $("#profile-description").value = "";
@@ -3522,10 +3571,93 @@ function blankDraftFields() {
   setServerMode(false);
   paintServerTools([]);
   paintWarnings([]);
+  fillLimitInputs({});
+  paintLimitHelp();
+  clearLimitErrors();
   const err = $("#profile-err");
   if (err) { err.style.color = ""; err.textContent = ""; }
   paintMarkPicker();
   syncProfileHeadingName();
+}
+const LIMIT_FIELDS = [
+  { key: "run_timeout", input: "profile-run-timeout", help: "help-run-timeout", err: "err-run-timeout", fld: "fld-run-timeout" },
+  { key: "tool_rounds", input: "profile-tool-rounds", help: "help-tool-rounds", err: "err-tool-rounds", fld: "fld-tool-rounds" },
+  { key: "shell_timeout", input: "profile-shell-timeout", help: "help-shell-timeout", err: "err-shell-timeout", fld: "fld-shell-timeout" }
+];
+function storedLimitValue(bot, key) {
+  if (key === "tool_rounds") {
+    const n = bot && bot.tool_rounds;
+    return n ? String(n) : "";
+  }
+  return (bot && bot[key]) ? String(bot[key]) : "";
+}
+function fillLimitInputs(bot) {
+  const limits = (bot && bot.limits) || state.botLimits || {};
+  for (const f of LIMIT_FIELDS) {
+    const input = $("#" + f.input);
+    if (!input) continue;
+    const stored = storedLimitValue(bot, f.key);
+    input.value = stored;
+    const lim = limits[f.key] || {};
+    input.placeholder = stored ? "" : String(lim.value || lim.ceiling || "");
+  }
+}
+function paintLimitHelp() {
+  const limits = state.botLimits || {};
+  for (const f of LIMIT_FIELDS) {
+    const help = $("#" + f.help);
+    if (!help) continue;
+    const lim = limits[f.key];
+    if (!lim || lim.value == null || lim.value === "") {
+      help.textContent = "";
+      continue;
+    }
+    help.textContent = limitHelpText(lim.value, lim.source, lim.ceiling);
+  }
+}
+function setLimitError(field, message) {
+  const f = LIMIT_FIELDS.find(x => x.key === field);
+  if (!f) return;
+  const input = $("#" + f.input);
+  const err = $("#" + f.err);
+  const fld = $("#" + f.fld);
+  if (fld) fld.classList.toggle("is-error", !!message);
+  if (input) {
+    input.setAttribute("aria-invalid", message ? "true" : "false");
+    const ids = [f.help];
+    if (message) ids.push(f.err);
+    input.setAttribute("aria-describedby", ids.join(" "));
+  }
+  if (err) {
+    err.hidden = !message;
+    err.textContent = message || "";
+  }
+}
+function clearLimitErrors() {
+  for (const f of LIMIT_FIELDS) setLimitError(f.key, "");
+}
+function limitPrecheckError(field, raw, limits) {
+  const v = String(raw == null ? "" : raw).trim();
+  if (!v) return "";
+  const lim = limits && limits[field];
+  const ceiling = lim && lim.ceiling;
+  if (field === "tool_rounds") {
+    if (!/^\d+$/.test(v) || Number(v) <= 0) return "tool_rounds must be positive";
+    const n = Number(v);
+    if (ceiling != null && n > Number(ceiling)) {
+      return "tool_rounds " + n + " is above the limit of " + ceiling;
+    }
+    return "";
+  }
+  const ms = parseGoDurationMs(v);
+  if (!(ms > 0)) return "invalid " + field;
+  if (ceiling) {
+    const ceilMs = parseGoDurationMs(ceiling);
+    if (ceilMs > 0 && ms > ceilMs) {
+      return field + " " + v + " is above the limit of " + ceiling;
+    }
+  }
+  return "";
 }
 function applySnapshot(snap) {
   const s = snap || {};
@@ -3540,6 +3672,11 @@ function applySnapshot(snap) {
   setChipList("github", s.github || []);
   setServerMode(s.server_tools != null);
   paintServerTools(Array.isArray(s.server_tools) ? s.server_tools : []);
+  if ($("#profile-run-timeout")) $("#profile-run-timeout").value = s.run_timeout || "";
+  if ($("#profile-tool-rounds")) $("#profile-tool-rounds").value = s.tool_rounds || "";
+  if ($("#profile-shell-timeout")) $("#profile-shell-timeout").value = s.shell_timeout || "";
+  paintLimitHelp();
+  clearLimitErrors();
   paintMarkPicker();
   syncProfileHeadingName();
   state.saveError = "";
@@ -3603,6 +3740,26 @@ async function saveProfile() {
     paintSaveBar();
     return;
   }
+  clearLimitErrors();
+  const cur = readProfile();
+  const limits = state.botLimits || {};
+  let limitErr = "";
+  let limitField = "";
+  for (const f of LIMIT_FIELDS) {
+    const msg = limitPrecheckError(f.key, cur[f.key], limits);
+    if (msg) {
+      setLimitError(f.key, msg);
+      limitErr = msg;
+      limitField = f.input;
+      break;
+    }
+  }
+  if (limitErr) {
+    state.saveError = limitErr;
+    paintSaveBar();
+    rescueFocus(() => { const n = $("#" + limitField); if (n) n.focus(); });
+    return;
+  }
   state.saveError = "";
   state.saveErrorChip = false;
   paintSaveBar();
@@ -3630,10 +3787,22 @@ async function saveProfile() {
     rescueFocus();
     await loadBots();
   } catch (err) {
-    state.saveError = (state.draft ? "Couldn't create the bot. The daemon said: " : "Couldn't save. The daemon said: ") + (err && err.message ? err.message : String(err || ""));
+    const msg = err && err.message ? err.message : String(err || "");
+    let field = "";
+    for (const f of LIMIT_FIELDS) {
+      if (msg.indexOf(f.key) === 0 || msg.indexOf(f.key + " ") === 0) { field = f.key; break; }
+    }
+    if (field) setLimitError(field, msg);
+    state.saveError = (state.draft ? "Couldn't create the bot. The daemon said: " : "Couldn't save. The daemon said: ") + msg;
     paintSaveBar();
     setSaving(false);
-    rescueFocus(() => $("#save-go").focus());
+    if (field) {
+      const n = $("#profile-" + field.replace(/_/g, "-"));
+      if (n) rescueFocus(() => n.focus());
+      else rescueFocus(() => $("#save-go").focus());
+    } else {
+      rescueFocus(() => $("#save-go").focus());
+    }
   } finally {
     setSaving(false);
   }
@@ -3997,6 +4166,10 @@ $("#profile-name").addEventListener("input", paintDirty);
 $("#profile-label").addEventListener("input", paintDirty);
 $("#profile-description").addEventListener("input", paintDirty);
 $("#profile-model").addEventListener("input", paintDirty);
+["profile-run-timeout", "profile-tool-rounds", "profile-shell-timeout"].forEach(id => {
+  const n = $("#" + id);
+  if (n) n.addEventListener("input", () => { paintDirty(); });
+});
 ["profile-name", "profile-label", "profile-model"].forEach(id => {
   $("#" + id).addEventListener("keydown", (e) => {
     if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;

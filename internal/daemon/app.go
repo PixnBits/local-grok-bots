@@ -896,6 +896,7 @@ func cloneMsgs(in []model.Message) []model.Message {
 func (a *App) decorateBot(b store.Bot) store.Bot {
 	b.PendingPermissions = a.perm.PendingCounts()[b.ID]
 	b.Warnings = a.botWarnings(b)
+	b.Limits = a.botLimits(b)
 	a.rtMu.Lock()
 	defer a.rtMu.Unlock()
 	if h, ok := a.resume[b.ID]; ok {
@@ -910,6 +911,7 @@ func (a *App) decorateBot(b store.Bot) store.Bot {
 func (a *App) decorateBots(bots []store.Bot) []store.Bot {
 	counts := a.perm.PendingCounts()
 	warnings := make([][]store.Warning, len(bots))
+	limits := make([]*store.BotLimits, len(bots))
 	for i := range bots {
 		// ListBots omits the standing prompt. Warnings are computed from it
 		// anyway, matching GET /api/bots/{id}, and the list body still omits it.
@@ -920,12 +922,14 @@ func (a *App) decorateBots(bots []store.Bot) []store.Bot {
 			}
 		}
 		warnings[i] = a.botWarnings(src)
+		limits[i] = a.botLimits(bots[i])
 	}
 	a.rtMu.Lock()
 	defer a.rtMu.Unlock()
 	for i := range bots {
 		bots[i].PendingPermissions = counts[bots[i].ID]
 		bots[i].Warnings = warnings[i]
+		bots[i].Limits = limits[i]
 		if h, ok := a.resume[bots[i].ID]; ok {
 			bots[i].ContinueRunID = h.runID
 		}

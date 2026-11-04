@@ -500,19 +500,19 @@ func TestSchemaRetryClaimOnLastRoundDoesNotRetry(t *testing.T) {
 	tools := []model.Tool{{Name: "run_shell"}}
 	claim := "run_shell is not available"
 	a := &App{}
-	if !a.shouldSchemaRetry("", maxToolRounds-2, false, false, claim, tools) {
+	if !a.shouldSchemaRetry("", maxToolRounds-2, maxToolRounds, false, false, claim, tools) {
 		t.Fatal("claim before the last round did not retry")
 	}
-	if a.shouldSchemaRetry("", maxToolRounds-1, false, false, claim, tools) {
+	if a.shouldSchemaRetry("", maxToolRounds-1, maxToolRounds, false, false, claim, tools) {
 		t.Fatal("claim on the last round retried")
 	}
-	if a.shouldSchemaRetry("", maxToolRounds-2, false, true, claim, tools) {
+	if a.shouldSchemaRetry("", maxToolRounds-2, maxToolRounds, false, true, claim, tools) {
 		t.Fatal("retried after a tool call in this execute")
 	}
-	if a.shouldSchemaRetry("", maxToolRounds-2, true, false, claim, tools) {
+	if a.shouldSchemaRetry("", maxToolRounds-2, maxToolRounds, true, false, claim, tools) {
 		t.Fatal("retried a second time")
 	}
-	if a.shouldSchemaRetry("", maxToolRounds-2, false, false, "web_fetch isn't available", tools) {
+	if a.shouldSchemaRetry("", maxToolRounds-2, maxToolRounds, false, false, "web_fetch isn't available", tools) {
 		t.Fatal("unattached tool retried")
 	}
 }

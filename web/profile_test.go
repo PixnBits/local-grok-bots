@@ -39,6 +39,24 @@ func TestProfileStatic(t *testing.T) {
 		`.chips { gap: 16px 8px; }`,
 		`rescueFocus(() => $("#save-go").focus());`,
 		`state.saveErrorChip && !badChipMessage()`,
+		`id="sec-limits"`,
+		`id="profile-run-timeout"`,
+		`id="profile-tool-rounds"`,
+		`id="profile-shell-timeout"`,
+		`id="help-run-timeout"`,
+		`id="help-tool-rounds"`,
+		`id="help-shell-timeout"`,
+		`id="err-run-timeout"`,
+		`id="err-shell-timeout"`,
+		`id="err-tool-rounds"`,
+		`aria-describedby="help-run-timeout"`,
+		`aria-describedby="help-tool-rounds"`,
+		`aria-describedby="help-shell-timeout"`,
+		`<span class="lbl">Run timeout</span>`,
+		`<span class="lbl">Tool rounds</span>`,
+		`<span class="lbl">Shell timeout</span>`,
+		`function limitHelpText`,
+		`In force: `,
 		`["profile-name", "profile-label", "profile-model"].forEach`,
 		`.toggle::before { content: ""; position: absolute; inset: -10px -2px; }`,
 	} {
@@ -60,6 +78,7 @@ func TestProfileStatic(t *testing.T) {
 	for _, id := range []string{
 		"fld-mark", "fld-name", "fld-label", "fld-description", "fld-model",
 		"fld-grants", "fld-net", "fld-ssh", "fld-github", "fld-tools",
+		"fld-run-timeout", "fld-tool-rounds", "fld-shell-timeout",
 	} {
 		if !fieldHasChangedNote(page, id) {
 			t.Errorf("missing Changed note for %s", id)
@@ -186,7 +205,7 @@ func TestProfileLogic(t *testing.T) {
 	}
 	names := []string{
 		"splitChipTokens", "hostEntryValid", "repoEntryValid", "chipInvalidMessage",
-		"dirtyFieldLabels", "scheduleFromBuilder", "scheduleLabel", "builderFromSchedule",
+		"dirtyFieldLabels", "limitHelpText", "parseGoDurationMs", "scheduleFromBuilder", "scheduleLabel", "builderFromSchedule",
 		"routineWhen", "routineRelative", "routineMeta", "routinePreview",
 	}
 	assign := ""
@@ -229,7 +248,8 @@ check("msg-repo", ctx.chipInvalidMessage("github", "x"), '"x" is not owner/repo.
 const base = {
   name: "Ada", label: "", description: "", model: "",
   mark: {shape: "circle", color: "#4C77DD"},
-  grants: ["net"], net: ["docs.example.org"], ssh: [], github: [], server_tools: null
+  grants: ["net"], net: ["docs.example.org"], ssh: [], github: [], server_tools: null,
+  run_timeout: "", tool_rounds: "", shell_timeout: ""
 };
 function cur(over) {
   const o = JSON.parse(JSON.stringify(base));
@@ -248,6 +268,11 @@ check("dirty-tools-order", JSON.stringify(ctx.dirtyFieldLabels(
   cur({server_tools: ["web_search", "x_search"]})
 )), "[]");
 check("dirty-tools-null", JSON.stringify(ctx.dirtyFieldLabels(base, cur({server_tools: []}))), JSON.stringify(["Server tools"]));
+check("dirty-run-timeout", JSON.stringify(ctx.dirtyFieldLabels(base, cur({run_timeout: "5m"}))), JSON.stringify(["Run timeout"]));
+check("help-policy", ctx.limitHelpText("10m", "policy", "10m"), "In force: 10m (policy)");
+check("help-bot", ctx.limitHelpText("5m", "bot", "10m"), "In force: 5m (this bot). Policy limit: 10m.");
+check("dur-10m", ctx.parseGoDurationMs("10m"), 600000);
+check("dur-1s", ctx.parseGoDurationMs("1s"), 1000);
 check("sched-min", ctx.scheduleFromBuilder("every", 30, "minutes"), "every 30m");
 check("sched-hour", ctx.scheduleFromBuilder("every", "2", "hours"), "every 2h");
 check("sched-day", ctx.scheduleFromBuilder("every", 1, "days"), "every 1d");
@@ -349,6 +374,7 @@ let navBypass=false;
 const state={view:"bots",draft:false,botId:null,bots:[],profileBase:null,profileLoad:0,saveError:"",mark:{shape:"circle",color:"#4C77DD"}};
 function noop(){}
 const setGrants=noop, setChipList=noop, setServerMode=noop, paintWarnings=noop, paintMarkPicker=noop, syncProfileHeadingName=noop, syncServerToolsMode=noop, paintDirty=noop;
+const fillLimitInputs=noop, paintLimitHelp=noop, clearLimitErrors=noop;
 const setProfilePane=noop, profileDirty=()=>false, confirmLeave=noop, closeMenu=noop, closeState=noop, closeRoutineForm=noop;
 const readProfile=()=>({name:field("name").value});
 const loadRoutines=async()=>{};

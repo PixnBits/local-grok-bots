@@ -276,6 +276,40 @@ type Bot struct {
 	// PendingPermissions is not a column: open permission or question
 	// requests for this bot, from the daemon's broker.
 	PendingPermissions int `json:"pending_permissions,omitempty"`
+	// RunTimeout, ShellTimeout, and ToolRounds are optional per-bot
+	// limits. Zero inherits the policy (or built-in) value. JSON:
+	// run_timeout and shell_timeout are compact duration strings
+	// ("10m"); "" means inherit. tool_rounds is an integer; 0 means
+	// inherit. limits is filled by the daemon, not stored.
+	RunTimeout   DurationMS `json:"run_timeout"`
+	ShellTimeout DurationMS `json:"shell_timeout"`
+	ToolRounds   int        `json:"tool_rounds"`
+	Limits       *BotLimits `json:"limits,omitempty"`
+}
+
+// BotLimits is the effective run limit view the API returns.
+// source is "bot" only when the stored bot value is set and in force.
+// Otherwise it is "policy" (including the built-in default). If policy
+// later drops below a stored bot value, value is the policy value and
+// source is "policy".
+type BotLimits struct {
+	RunTimeout   LimitDuration `json:"run_timeout"`
+	ToolRounds   LimitInt      `json:"tool_rounds"`
+	ShellTimeout LimitDuration `json:"shell_timeout"`
+}
+
+// LimitDuration is one effective duration limit.
+type LimitDuration struct {
+	Value   string `json:"value"`
+	Source  string `json:"source"`
+	Ceiling string `json:"ceiling"`
+}
+
+// LimitInt is one effective integer limit.
+type LimitInt struct {
+	Value   int    `json:"value"`
+	Source  string `json:"source"`
+	Ceiling int    `json:"ceiling"`
 }
 
 type Memory struct {
@@ -580,6 +614,9 @@ func (s *Store) evolve() error {
 		{"messages", "kind", "TEXT NOT NULL DEFAULT ''"},
 		{"runs", "waiting_pending_id", "TEXT NOT NULL DEFAULT ''"},
 		{"runs", "waiting_seq", "INTEGER NOT NULL DEFAULT 0"},
+		{"bots", "run_timeout_ms", "INTEGER NOT NULL DEFAULT 0"},
+		{"bots", "shell_timeout_ms", "INTEGER NOT NULL DEFAULT 0"},
+		{"bots", "tool_rounds", "INTEGER NOT NULL DEFAULT 0"},
 	}
 	for _, a := range adds {
 		ok, err := s.hasColumn(a.table, a.col)
@@ -812,16 +849,19 @@ func (s *Store) AddLog(botID, kind string, detail any) error {
 
 // BotDraft is the input for creating a bot. Empty mark fields use DefaultMark.
 type BotDraft struct {
-	Name        string
-	Label       string
-	Description string
-	Mark        Mark
-	Model       *string
-	Grants      []string
-	NetAllow    []string
-	SSHAllow    []string
-	GitHubAllow []string
-	ServerTools *[]string
+	Name         string
+	Label        string
+	Description  string
+	Mark         Mark
+	Model        *string
+	Grants       []string
+	NetAllow     []string
+	SSHAllow     []string
+	GitHubAllow  []string
+	ServerTools  *[]string
+	RunTimeout   time.Duration
+	ShellTimeout time.Duration
+	ToolRounds   int
 }
 
 // CreateBot inserts a bot with a default mark and no label.
@@ -866,10 +906,11 @@ func (s *Store) InsertBot(d BotDraft, by string) (Bot, error) {
 		ID: id.New(), Name: d.Name, Label: d.Label, Description: d.Description,
 		Mark: mark, Grants: grants, NetAllow: netAllow, SSHAllow: sshAllow, GitHubAllow: ghAllow, ServerTools: tools,
 		Status: "idle", Model: d.Model, CreatedAt: now, UpdatedAt: now,
+		RunTimeout: DurationMS(d.RunTimeout), ShellTimeout: DurationMS(d.ShellTimeout), ToolRounds: d.ToolRounds,
 	}
-	_, err = s.db.Exec(`INSERT INTO bots(id, name, name_lower, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, github_allow, server_tools, status, model, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		b.ID, b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, 0, 0, encodeList(grants), encodeList(netAllow), encodeList(sshAllow), encodeList(ghAllow), encodeOptList(tools), b.Status, nullStr(d.Model), b.CreatedAt, b.UpdatedAt)
+	_, err = s.db.Exec(`INSERT INTO bots(id, name, name_lower, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, github_allow, server_tools, status, model, created_at, updated_at, run_timeout_ms, shell_timeout_ms, tool_rounds)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		b.ID, b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, 0, 0, encodeList(grants), encodeList(netAllow), encodeList(sshAllow), encodeList(ghAllow), encodeOptList(tools), b.Status, nullStr(d.Model), b.CreatedAt, b.UpdatedAt, durationToMS(d.RunTimeout), durationToMS(d.ShellTimeout), d.ToolRounds)
 	if err != nil {
 		if isUnique(err) {
 			return Bot{}, ErrConflict
@@ -889,6 +930,9 @@ func (s *Store) InsertBot(d BotDraft, by string) (Bot, error) {
 	if err := s.logUnlocked(b.ID, "bot_created", map[string]any{
 		"fields": fields, "by": by, "bot_id": b.ID, "name": b.Name,
 	}); err != nil {
+		return Bot{}, err
+	}
+	if err := s.logLimitChanges(b.ID, by, 0, d.RunTimeout, 0, d.ShellTimeout, 0, d.ToolRounds); err != nil {
 		return Bot{}, err
 	}
 	return b, nil
@@ -957,7 +1001,7 @@ func (s *Store) attachRun(b *Bot) {
 	}
 }
 
-const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, github_allow, server_tools, status, model, session_id, created_at, updated_at, archived_at FROM bots`
+const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, github_allow, server_tools, status, model, session_id, created_at, updated_at, archived_at, run_timeout_ms, shell_timeout_ms, tool_rounds FROM bots`
 
 func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	var b Bot
@@ -966,7 +1010,8 @@ func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	var serverTools sql.NullString
 	var pinned, hidden int
 	var archived sql.NullString
-	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &githubAllow, &serverTools, &b.Status, &model, &b.SessionID, &b.CreatedAt, &b.UpdatedAt, &archived)
+	var runMS, shellMS, toolRounds int64
+	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &githubAllow, &serverTools, &b.Status, &model, &b.SessionID, &b.CreatedAt, &b.UpdatedAt, &archived, &runMS, &shellMS, &toolRounds)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Bot{}, ErrNotFound
 	}
@@ -1011,6 +1056,9 @@ func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 		s := model.String
 		b.Model = &s
 	}
+	b.RunTimeout = DurationMS(msToDuration(runMS))
+	b.ShellTimeout = DurationMS(msToDuration(shellMS))
+	b.ToolRounds = int(toolRounds)
 	if !full {
 		b.Description = ""
 	}
@@ -1050,26 +1098,32 @@ func (s *Store) ListBots() ([]Bot, error) {
 }
 
 type BotPatch struct {
-	Name           *string
-	Label          *string
-	Description    *string
-	Mark           *Mark
-	Model          *string
-	ModelSet       bool
-	Status         *string
-	Pinned         *bool
-	Hidden         *bool
-	GrantsSet      bool
-	Grants         []string
-	NetSet         bool
-	NetAllow       []string
-	SSHSet         bool
-	SSHAllow       []string
-	GitHubSet      bool
-	GitHubAllow    []string
-	ServerToolsSet bool
-	ServerTools    *[]string
-	By             string
+	Name            *string
+	Label           *string
+	Description     *string
+	Mark            *Mark
+	Model           *string
+	ModelSet        bool
+	Status          *string
+	Pinned          *bool
+	Hidden          *bool
+	GrantsSet       bool
+	Grants          []string
+	NetSet          bool
+	NetAllow        []string
+	SSHSet          bool
+	SSHAllow        []string
+	GitHubSet       bool
+	GitHubAllow     []string
+	ServerToolsSet  bool
+	ServerTools     *[]string
+	RunTimeoutSet   bool
+	RunTimeout      time.Duration
+	ShellTimeoutSet bool
+	ShellTimeout    time.Duration
+	ToolRoundsSet   bool
+	ToolRounds      int
+	By              string
 }
 
 func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
@@ -1172,7 +1226,18 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 			fields = append(fields, "server_tools")
 		}
 	}
-	if len(fields) == 0 {
+	oldRun, oldShell, oldRounds := b.RunTimeout.Duration(), b.ShellTimeout.Duration(), b.ToolRounds
+	if p.RunTimeoutSet && p.RunTimeout != oldRun {
+		b.RunTimeout = DurationMS(p.RunTimeout)
+	}
+	if p.ShellTimeoutSet && p.ShellTimeout != oldShell {
+		b.ShellTimeout = DurationMS(p.ShellTimeout)
+	}
+	if p.ToolRoundsSet && p.ToolRounds != oldRounds {
+		b.ToolRounds = p.ToolRounds
+	}
+	limitsChanged := b.RunTimeout.Duration() != oldRun || b.ShellTimeout.Duration() != oldShell || b.ToolRounds != oldRounds
+	if len(fields) == 0 && !limitsChanged {
 		s.attachRun(&b)
 		return b, nil
 	}
@@ -1184,19 +1249,50 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, error) {
 	if b.Hidden {
 		hide = 1
 	}
-	_, err = s.db.Exec(`UPDATE bots SET name=?, name_lower=?, label=?, description=?, mark_shape=?, mark_color=?, pinned=?, hidden=?, grants=?, net_allow=?, ssh_allow=?, github_allow=?, server_tools=?, model=?, status=?, updated_at=? WHERE id=?`,
-		b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, pin, hide, encodeList(b.Grants), encodeList(b.NetAllow), encodeList(b.SSHAllow), encodeList(b.GitHubAllow), encodeOptList(b.ServerTools), nullStr(b.Model), b.Status, b.UpdatedAt, b.ID)
+	_, err = s.db.Exec(`UPDATE bots SET name=?, name_lower=?, label=?, description=?, mark_shape=?, mark_color=?, pinned=?, hidden=?, grants=?, net_allow=?, ssh_allow=?, github_allow=?, server_tools=?, model=?, status=?, updated_at=?, run_timeout_ms=?, shell_timeout_ms=?, tool_rounds=? WHERE id=?`,
+		b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, pin, hide, encodeList(b.Grants), encodeList(b.NetAllow), encodeList(b.SSHAllow), encodeList(b.GitHubAllow), encodeOptList(b.ServerTools), nullStr(b.Model), b.Status, b.UpdatedAt, durationToMS(b.RunTimeout.Duration()), durationToMS(b.ShellTimeout.Duration()), b.ToolRounds, b.ID)
 	if err != nil {
 		if isUnique(err) {
 			return Bot{}, ErrConflict
 		}
 		return Bot{}, err
 	}
-	if err := s.logUnlocked(b.ID, "bot_updated", map[string]any{"fields": fields, "by": p.By, "bot_id": b.ID, "name": b.Name}); err != nil {
+	if len(fields) > 0 {
+		if err := s.logUnlocked(b.ID, "bot_updated", map[string]any{"fields": fields, "by": p.By, "bot_id": b.ID, "name": b.Name}); err != nil {
+			return Bot{}, err
+		}
+	}
+	if err := s.logLimitChanges(b.ID, p.By, oldRun, b.RunTimeout.Duration(), oldShell, b.ShellTimeout.Duration(), oldRounds, b.ToolRounds); err != nil {
 		return Bot{}, err
 	}
 	s.attachRun(&b)
 	return b, nil
+}
+
+func (s *Store) logLimitChanges(botID, by string, oldRun, newRun, oldShell, newShell time.Duration, oldRounds, newRounds int) error {
+	type change struct {
+		field string
+		old   any
+		new   any
+	}
+	var changes []change
+	if oldRun != newRun {
+		changes = append(changes, change{"run_timeout", CompactDuration(oldRun), CompactDuration(newRun)})
+	}
+	if oldShell != newShell {
+		changes = append(changes, change{"shell_timeout", CompactDuration(oldShell), CompactDuration(newShell)})
+	}
+	if oldRounds != newRounds {
+		changes = append(changes, change{"tool_rounds", oldRounds, newRounds})
+	}
+	for _, c := range changes {
+		if err := s.logUnlocked(botID, "bot_limits_changed", map[string]any{
+			"bot_id": botID, "field": c.field, "old": c.old, "new": c.new, "by": by,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // CLIProc is the CLI process identity stored for one bot.

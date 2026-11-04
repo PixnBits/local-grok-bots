@@ -28,10 +28,12 @@ func TestTimeoutDefaults(t *testing.T) {
 		p.EffectiveOllamaFirstOutputTimeout() != 5*time.Minute ||
 		p.EffectiveOllamaStallTimeout() != 2*time.Minute ||
 		p.EffectiveOllamaStallRetries() != 1 ||
-		p.EffectiveOllamaKeepAlive() != "30m" {
-		t.Fatalf("ollama defaults model=%s first=%s stall=%s retries=%d keep=%v",
+		p.EffectiveOllamaKeepAlive() != "30m" ||
+		p.EffectiveToolRounds() != 8 ||
+		p.EffectiveShellTimeout() != 30*time.Second {
+		t.Fatalf("ollama defaults model=%s first=%s stall=%s retries=%d keep=%v rounds=%d shell=%s",
 			p.EffectiveOllamaModelTimeout(), p.EffectiveOllamaFirstOutputTimeout(), p.EffectiveOllamaStallTimeout(),
-			p.EffectiveOllamaStallRetries(), p.EffectiveOllamaKeepAlive())
+			p.EffectiveOllamaStallRetries(), p.EffectiveOllamaKeepAlive(), p.EffectiveToolRounds(), p.EffectiveShellTimeout())
 	}
 }
 

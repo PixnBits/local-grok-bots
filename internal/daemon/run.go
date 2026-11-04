@@ -29,15 +29,24 @@ func (a *App) execute(botID, runID string) {
 	defer endTurn()
 	turnPol := a.effPol(botID)
 
-	// A CLI turn gets its deadline (cli.turn_timeout) in executeCLI so a
-	// timeout is told apart from a cancel. An Ollama run uses
-	// ollama.run_timeout.
+	bot, err := a.st.GetBot(botID)
+	if err != nil {
+		a.takePending(runID)
+		a.dropResume(botID)
+		_, _ = a.finishRun(runID, "error", err.Error())
+		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": audit.RedactText(err.Error())})
+		return
+	}
+
+	// A CLI turn gets its deadline (cli.turn_timeout, narrowed by a
+	// per-bot run_timeout) in executeCLI so a timeout is told apart
+	// from a cancel. An Ollama run uses the effective run_timeout.
 	var ctx context.Context
 	var cancel context.CancelFunc
 	if turnPol.UsesCLI() {
 		ctx, cancel = context.WithCancel(a.ctx)
 	} else {
-		ctx, cancel = context.WithTimeout(a.ctx, turnPol.EffectiveOllamaRunTimeout())
+		ctx, cancel = context.WithTimeout(a.ctx, a.effectiveRunTimeout(bot, turnPol))
 	}
 	ctx = withRunID(ctx, runID)
 	a.rtMu.Lock()
@@ -48,15 +57,6 @@ func (a *App) execute(botID, runID string) {
 	a.rtMu.Unlock()
 	defer cancel()
 	a.touchActivity(botID)
-
-	bot, err := a.st.GetBot(botID)
-	if err != nil {
-		a.takePending(runID)
-		a.dropResume(botID)
-		_, _ = a.finishRun(runID, "error", err.Error())
-		a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": audit.RedactText(err.Error())})
-		return
-	}
 	modelName := a.cfg.Model
 	if bot.Model != nil && *bot.Model != "" {
 		modelName = *bot.Model
@@ -116,7 +116,8 @@ func (a *App) execute(botID, runID string) {
 	retriesLeft := turnPol.EffectiveOllamaStallRetries()
 	retried := 0
 	var lastFirst time.Duration
-	for round := 0; round < maxToolRounds; round++ {
+	rounds := a.effectiveToolRounds(bot, turnPol)
+	for round := 0; round < rounds; round++ {
 		if a.finishOllamaCtx(bot, runID, ctx, msgs, "", retried, lastFirst) {
 			return
 		}
@@ -185,7 +186,7 @@ func (a *App) execute(botID, runID string) {
 				shown := partial
 				if a.ctx.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
 					limit = "run_timeout"
-					limitValue = compactDuration(turnPol.EffectiveOllamaRunTimeout())
+					limitValue = compactDuration(a.effectiveRunTimeout(bot, turnPol))
 					shown = bestPartial
 				}
 				errLogged := err
@@ -198,7 +199,7 @@ func (a *App) execute(botID, runID string) {
 			}
 			if te != nil && (te.Limit == "first_output_timeout" || te.Limit == "stall_timeout") {
 				willRetry := retriesLeft > 0
-				a.logOllamaCall(bot.ID, modelName, false, attempt, willRetry, first, te, 0, te.Limit, compactDuration(a.limitDuration(bot.ID, te.Limit)), tools)
+				a.logOllamaCall(bot.ID, modelName, false, attempt, willRetry, first, te, 0, te.Limit, compactDuration(a.limitDuration(bot, te.Limit)), tools)
 				if willRetry {
 					retriesLeft--
 					retried++
@@ -217,7 +218,7 @@ func (a *App) execute(botID, runID string) {
 			if err != nil {
 				var parseErr *model.ToolCallParseError
 				// One more call, and only when a round remains. The failed call still counts toward the cap.
-				if errors.As(err, &parseErr) && !parseRetried && round+1 < maxToolRounds {
+				if errors.As(err, &parseErr) && !parseRetried && round+1 < rounds {
 					parseRetried = true
 					a.logOllamaCall(bot.ID, modelName, false, attempt, true, first, err, 0, "", "", tools)
 					a.bus.Publish(runID, "status", map[string]any{"state": "working", "text": "retrying"})
@@ -245,7 +246,7 @@ func (a *App) execute(botID, runID string) {
 		if len(resp.ToolCalls) == 0 {
 			// One automatic retry when the reply denies an attached tool
 			// and this execute has not called a tool yet.
-			if a.shouldSchemaRetry(runID, round, schemaRetried, sawToolCall, resp.Content, tools) {
+			if a.shouldSchemaRetry(runID, round, rounds, schemaRetried, sawToolCall, resp.Content, tools) {
 				schemaRetried = true
 				joined, n := attachedToolLog(tools)
 				a.log(bot.ID, "tool_schema_retry", map[string]any{"tools": joined, "tool_count": n})
@@ -304,7 +305,9 @@ func (a *App) execute(botID, runID string) {
 			_ = a.st.AddRunTool(runID, bot.ID, callRecord(tc.Name, argJSON, body, terr))
 		}
 	}
-	msg := "tool round limit"
+	ceil := turnPol.EffectiveToolRounds()
+	botSet := bot.ToolRounds > 0 && bot.ToolRounds <= ceil
+	msg := toolRoundLimitBody(rounds, botSet, ceil)
 	a.holdResume(bot.ID, runID, msgs)
 	_, _ = a.finishRun(runID, "error", msg)
 	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": msg})
@@ -382,6 +385,9 @@ func runNoticeSentence(status, errText string) string {
 	case "stall_timeout", "first_output_timeout", "model_timeout", "run_timeout":
 		return "Run timed out (" + errText + ")."
 	default:
+		if strings.Contains(errText, "tool_rounds") || strings.Contains(errText, "tool round") {
+			return "Run failed (tool round limit)."
+		}
 		return "Run failed (model error)."
 	}
 }
@@ -390,7 +396,10 @@ func runNoticeSentence(status, errText string) string {
 // The returned code is one of the fixed list, never a slice of errText.
 func timeoutLimitCode(errText string) string {
 	for _, code := range []string{"first_output_timeout", "stall_timeout", "model_timeout", "run_timeout", "turn_timeout"} {
-		if strings.Contains(errText, "("+code+")") {
+		if strings.Contains(errText, "("+code+")") ||
+			strings.Contains(errText, "("+code+",") ||
+			strings.Contains(errText, "ollama."+code) ||
+			strings.Contains(errText, "cli."+code) {
 			return code
 		}
 	}
@@ -400,8 +409,11 @@ func timeoutLimitCode(errText string) string {
 // shouldSchemaRetry is the only gate for the attached-tool claim retry.
 // sawToolCall covers this execute. runHasToolCall covers a call already
 // stored on the run, including one resumed after approval.
-func (a *App) shouldSchemaRetry(runID string, round int, schemaRetried, sawToolCall bool, content string, tools []model.Tool) bool {
-	if a == nil || schemaRetried || sawToolCall || round+1 >= maxToolRounds || a.runHasToolCall(runID) {
+func (a *App) shouldSchemaRetry(runID string, round, maxRounds int, schemaRetried, sawToolCall bool, content string, tools []model.Tool) bool {
+	if maxRounds <= 0 {
+		maxRounds = maxToolRounds
+	}
+	if a == nil || schemaRetried || sawToolCall || round+1 >= maxRounds || a.runHasToolCall(runID) {
 		return false
 	}
 	return claimsAttachedToolUnavailable(content, tools)
@@ -498,7 +510,7 @@ func (a *App) finishOllamaCtx(bot store.Bot, runID string, ctx context.Context, 
 // timeout. Continue is offered only when some text was kept. errText on the
 // run is the notice without "Notice: ".
 func (a *App) finishOllamaTimeout(bot store.Bot, runID string, msgs []model.Message, limit, partial string, retried int, first time.Duration) {
-	dur := a.limitDuration(bot.ID, limit)
+	dur := a.limitDuration(bot, limit)
 	kept := ""
 	if t := strings.TrimSpace(partial); t != "" {
 		kept = clip(stripToolTrailers(t), maxReplyBytes)
@@ -508,7 +520,11 @@ func (a *App) finishOllamaTimeout(bot store.Bot, runID string, msgs []model.Mess
 		resume = append(resume, model.Message{Role: "user", Content: "Continue from where you stopped."})
 		a.holdResume(bot.ID, runID, resume)
 	}
-	body := timeoutBody(limit, dur, retried, kept)
+	origin := ""
+	if limit == "run_timeout" {
+		origin = a.runTimeoutOrigin(bot, a.effPol(bot.ID))
+	}
+	body := timeoutBody(limit, dur, retried, kept, origin)
 	_, _ = a.finishRun(runID, "timeout", body)
 	a.bus.Publish(runID, "timeout", map[string]any{"run_id": runID, "error": audit.RedactText(body), "limit": limit})
 	a.log(bot.ID, "run_timed_out", map[string]any{
@@ -542,8 +558,8 @@ func (a *App) modelCallContext(parent context.Context, d time.Duration) (context
 	return context.WithTimeout(parent, d)
 }
 
-func (a *App) limitDuration(botID, limit string) time.Duration {
-	turnPol := a.effPol(botID)
+func (a *App) limitDuration(bot store.Bot, limit string) time.Duration {
+	turnPol := a.effPol(bot.ID)
 	switch limit {
 	case "first_output_timeout":
 		return turnPol.EffectiveOllamaFirstOutputTimeout()
@@ -552,7 +568,7 @@ func (a *App) limitDuration(botID, limit string) time.Duration {
 	case "model_timeout":
 		return turnPol.EffectiveOllamaModelTimeout()
 	default:
-		return turnPol.EffectiveOllamaRunTimeout()
+		return a.effectiveRunTimeout(bot, turnPol)
 	}
 }
 
@@ -582,7 +598,7 @@ func (a *App) logOllamaCall(botID, modelName string, ok bool, attempt int, retry
 
 // timeoutBody is the run error text stored on the run. The thread notice is a
 // fixed sentence from runNoticeText, not a copy of this body.
-func timeoutBody(limit string, d time.Duration, retried int, partial string) string {
+func timeoutBody(limit string, d time.Duration, retried int, partial, origin string) string {
 	shown := compactDuration(d)
 	var b strings.Builder
 	switch limit {
@@ -593,7 +609,10 @@ func timeoutBody(limit string, d time.Duration, retried int, partial string) str
 	case "model_timeout":
 		fmt.Fprintf(&b, "The model call hit its %s limit (model_timeout).", shown)
 	case "run_timeout":
-		fmt.Fprintf(&b, "The run hit its %s limit (run_timeout).", shown)
+		if origin == "" {
+			origin = "ollama.run_timeout in policy.toml"
+		}
+		fmt.Fprintf(&b, "The run hit its %s limit (%s).", shown, origin)
 	default:
 		fmt.Fprintf(&b, "The run hit its %s limit (%s).", shown, limit)
 	}
