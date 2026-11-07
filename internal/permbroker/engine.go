@@ -275,6 +275,10 @@ type Engine struct {
 	brokerMode string
 	// ceilings maps a bot id to its auto-approval ceiling.
 	ceilings map[string]Level
+	// policyPaths are policy files a ceiling auto-approval must not touch.
+	// Critical paths raise the level. These also refuse the call when the
+	// ceiling is critical.
+	policyPaths []string
 	// approvals are human approvals in memory, for the suggest-always hint.
 	approvals []approvalStamp
 	reqRing   map[string][]ringReq
@@ -622,17 +626,43 @@ func (e *Engine) SetApprovalTTL(d time.Duration) {
 // SetAllowCeilings installs the per-bot auto-approval ceilings.
 // broker is the policy broker value. Only "hook" uses the map.
 // A nil or empty map clears every ceiling.
+// Level names are the lowercase words low, medium, high, and critical.
+// Empty, unclassified, padded, and any other name are dropped.
+// Two ids that normalize to the same bot id are both dropped.
 func (e *Engine) SetAllowCeilings(broker string, ceilings map[string]Level) {
 	if e == nil {
 		return
 	}
-	next := map[string]Level{}
+	type pair struct {
+		id  string
+		lvl Level
+	}
+	items := make([]pair, 0, len(ceilings))
+	counts := map[string]int{}
 	for id, lvl := range ceilings {
 		id = strings.ToLower(strings.TrimSpace(id))
-		if id == "" || lvl == "" {
+		items = append(items, pair{id: id, lvl: lvl})
+		if id != "" {
+			counts[id]++
+		}
+	}
+	next := map[string]Level{}
+	var dropped []string
+	for _, it := range items {
+		if it.id == "" || counts[it.id] != 1 {
+			dropped = append(dropped, it.id)
 			continue
 		}
-		next[id] = lvl
+		parsed, ok := AllowCeilingLevel(string(it.lvl))
+		if !ok {
+			dropped = append(dropped, it.id)
+			continue
+		}
+		next[it.id] = parsed
+	}
+	if len(dropped) > 0 {
+		sort.Strings(dropped)
+		log.Printf("permbroker: dropped allow ceiling for %s", strings.Join(dropped, ","))
 	}
 	e.mu.Lock()
 	e.brokerMode = strings.TrimSpace(broker)
@@ -641,6 +671,17 @@ func (e *Engine) SetAllowCeilings(broker string, ceilings map[string]Level) {
 	} else {
 		e.ceilings = next
 	}
+	e.mu.Unlock()
+}
+
+// SetPolicyPaths replaces the paths a ceiling auto-approval must not touch.
+func (e *Engine) SetPolicyPaths(paths ...string) {
+	if e == nil {
+		return
+	}
+	next := mergeCritical(nil, paths)
+	e.mu.Lock()
+	e.policyPaths = next
 	e.mu.Unlock()
 }
 
@@ -1421,6 +1462,12 @@ func (e *Engine) Evaluate(ctx context.Context, req Request) Decision {
 		e.touch(rule)
 		return e.finish(req, in, VerdictDeny, "denied by rule "+rule.ID, "", rule.ID, rule.ID)
 	}
+	if rule := e.matchAskRule(req.BotID, in); rule != nil {
+		if d, stop := e.cancelled(ctx, req, in); stop {
+			return d
+		}
+		return e.applyRule(req, in, rule)
+	}
 	if ceiling, ok := e.ceilingMatch(req, in); ok {
 		return e.allowByCeiling(req, in, ceiling)
 	}
@@ -2192,6 +2239,18 @@ func (e *Engine) matchScoped(bot string, in inspected, scope string) *Rule {
 	}
 }
 
+// matchAskRule is an ask rule for this bot, then a global ask rule.
+// An allow rule does not match. Ask runs before a ceiling auto-approval.
+func (e *Engine) matchAskRule(bot string, in inspected) *Rule {
+	for _, scope := range []string{ScopeBot, ScopeGlobal} {
+		rule := e.matchScoped(bot, in, scope)
+		if rule != nil && rule.Effect == EffectAsk {
+			return rule
+		}
+	}
+	return e.matchFlexAsk(bot, in)
+}
+
 func (e *Engine) matchFlexAsk(bot string, in inspected) *Rule {
 	var found *Rule
 	for _, scope := range []string{ScopeBot, ScopeGlobal} {
@@ -2334,11 +2393,23 @@ func toolPaths(raw json.RawMessage) []string {
 }
 
 // allowByCeiling records one auto-approval. The audit row carries the
-// source, the final level, and the ceiling.
+// source, the final level, and the ceiling. A missing or failed audit
+// write denies. The human ask path does not use this function.
 func (e *Engine) allowByCeiling(req Request, in inspected, ceiling Level) Decision {
 	in.AuditSource = AllowThroughSource
 	in.AuditCeiling = ceiling
-	return e.finish(req, in, VerdictAllow, "allowed", "", AllowThroughSource, "")
+	if err := e.auditDecision(req, in, VerdictAllow, "allowed", "", AllowThroughSource, "", ""); err != nil {
+		in.AuditSource = ""
+		in.AuditCeiling = ""
+		return e.finish(req, in, VerdictDeny, "denied", "", "fail-closed", "")
+	}
+	e.noteRequest(req, in)
+	e.noteOutcome(req, in, VerdictAllow, "allowed", "", "")
+	return Decision{
+		Verdict: VerdictAllow, Reason: "allowed",
+		Level: in.Level, Actor: AllowThroughSource, InputHash: in.Hash,
+		Eligible: in.Eligible, Compound: in.Compound,
+	}
 }
 
 func (e *Engine) finish(req Request, in inspected, verdict, reason, pendingID, actor, ruleID string) Decision {
@@ -2374,7 +2445,7 @@ func (e *Engine) auditRule(rule Rule, level Level) {
 	}, rule.Effect, "rule", "", "human", rule.ID, rule.Scope)
 }
 
-func (e *Engine) auditDecision(req Request, in inspected, verdict, reason, pendingID, actor, ruleID, scope string) {
+func (e *Engine) auditDecision(req Request, in inspected, verdict, reason, pendingID, actor, ruleID, scope string) error {
 	note := in.ClassNote
 	if note == "" {
 		note = "none"
@@ -2387,11 +2458,12 @@ func (e *Engine) auditDecision(req Request, in inspected, verdict, reason, pendi
 		TableVersion:   TableVersion,
 		RulesetVersion: e.rules.Version, Classifier: note, PeerUID: req.PeerUID, PeerPID: req.PeerPID,
 	}
-	row = e.audit.append(row)
+	row, err := e.audit.append(row)
 	if e.auditor != nil {
 		e.auditor.Record(row)
 	}
 	_ = reason
+	return err
 }
 
 func commandOf(raw json.RawMessage) (string, bool) {

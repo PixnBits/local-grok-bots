@@ -20,9 +20,11 @@ The stock page subscribes to the run stream with `?prompts=1` and renders `permi
 | `claude_transport` | `mcp` (default), `stream_control`, or `none`. Empty is `mcp`. Any other value is a config error, and load uses the existing fail-closed fallback (daemon jail on, CLI backends off). |
 | `dangerouslyAllowAllPermissionRequestsUpThrough` | Per-bot ceiling for the permission broker. See below. It is not the profile `AutoAllow` list. |
 
-`dangerouslyAllowAllPermissionRequestsUpThrough` auto-approves one hook-broker request when that request's final level is at or below the bot's ceiling. The ceiling is `low`, `medium`, `high`, or `critical`. The bot id is a UUID that must also appear in `broker_bots`. The setting does nothing unless `broker` is `hook`. A critical request auto-approves only when the ceiling is exactly `critical`. Deny rules, unclassified commands, parse errors, malformed or ambiguous commands, and broker errors are not auto-approved. The decision rules are in `docs/permission-broker.md`.
+`dangerouslyAllowAllPermissionRequestsUpThrough` auto-approves one hook-broker request when that request's final level is at or below the bot's ceiling. The ceiling is the lowercase word `low`, `medium`, `high`, or `critical`. There is no case folding and no trimming. The bot id is a UUID that must also appear in `broker_bots`. Only the managed policy file may set the key. The same key in the local policy file is a startup error. The setting does nothing unless `broker` is `hook`. A critical request auto-approves only when the ceiling is exactly `critical`.
 
-Write the map as a subtable. A multi-line inline table is not valid TOML 1.0.
+Deny rules and ask rules win. Unclassified commands, parse errors, malformed or ambiguous commands, broker errors, a hard ask or ineligible request whose level is not critical, a compound part with no known level, a git-risk, baseline drift, and a call that names a policy file are not auto-approved. A failed audit write denies the auto-approval. The ceiling is not limited to Linux. The decision rules are in `docs/permission-broker.md`.
+
+Write the map as a subtable in the managed policy file. A multi-line inline table is not valid TOML 1.0.
 
 ```toml
 [cli.permission]

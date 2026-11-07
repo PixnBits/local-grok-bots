@@ -64,7 +64,8 @@ func classifierRaises(table, got Level) bool {
 }
 
 // AllowCeilingLevel parses a per-bot auto-approval ceiling.
-// The names are low, medium, high, and critical. Unclassified is not a ceiling.
+// The names are the lowercase words low, medium, high, and critical.
+// There is no case folding and no trimming. Unclassified is not a ceiling.
 func AllowCeilingLevel(s string) (Level, bool) {
 	switch Level(s) {
 	case LevelLow, LevelMedium, LevelHigh, LevelCritical:
@@ -75,37 +76,45 @@ func AllowCeilingLevel(s string) (Level, bool) {
 }
 
 // ceilingCovers reports whether a final level may be auto-approved at ceiling.
-// Unclassified is refused here, not by the band below. Critical is refused
-// unless the ceiling is exactly critical. That equality is the whole check:
-// orderedCeiling puts critical in the same band as high, so a high ceiling
-// would cover a critical request if this assignment were absent.
+// Unclassified, empty, and any unknown name are refused before the rank
+// compare. Critical is refused unless the ceiling is exactly critical.
+// That equality is the whole check for a critical level: the rank compare
+// below does not run for it, and only accepts low, medium, and high.
 func ceilingCovers(level, ceiling Level) bool {
 	if level == "" || level == LevelUnclassified {
 		return false
 	}
-	ok := orderedCeiling(level) <= orderedCeiling(ceiling)
 	if level == LevelCritical {
-		ok = ceiling == LevelCritical
+		return ceiling == LevelCritical
 	}
-	return ok
+	switch level {
+	case LevelLow, LevelMedium, LevelHigh:
+	default:
+		return false
+	}
+	lr, lok := ceilingRank(level)
+	cr, cok := ceilingRank(ceiling)
+	if !lok || !cok {
+		return false
+	}
+	return lr <= cr
 }
 
-// orderedCeiling bands a level for the non-critical compare.
-// Unclassified shares low's band so the early return in ceilingCovers is
-// what refuses it. Critical shares high's band so the equality in
-// ceilingCovers is what refuses it under a high ceiling.
-func orderedCeiling(l Level) int {
+// ceilingRank is the strict order for a ceiling compare.
+// low is 1, medium is 2, high is 3, and critical is 4.
+// Unclassified, empty, and any other name have no rank.
+func ceilingRank(l Level) (int, bool) {
 	switch l {
-	case LevelUnclassified:
-		return 1
 	case LevelLow:
-		return 1
+		return 1, true
 	case LevelMedium:
-		return 2
-	case LevelHigh, LevelCritical:
-		return 3
+		return 2, true
+	case LevelHigh:
+		return 3, true
+	case LevelCritical:
+		return 4, true
 	default:
-		return 100
+		return 0, false
 	}
 }
 

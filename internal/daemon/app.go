@@ -523,6 +523,9 @@ func (a *App) logAllowCeilings(p policy.Policy) {
 	for _, id := range ids {
 		a.writeStartup("local-grok-bots: dangerouslyAllowAllPermissionRequestsUpThrough %s %s\n", id, p.AllowCeilings[id])
 	}
+	if p.Broker != "hook" {
+		a.writeStartup("local-grok-bots: dangerouslyAllowAllPermissionRequestsUpThrough ignored; broker is not hook\n")
+	}
 }
 
 func (a *App) writeStartup(format string, args ...any) {

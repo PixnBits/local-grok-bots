@@ -15,6 +15,7 @@ import (
 
 	"github.com/PixnBits/local-grok-bots/internal/config"
 	"github.com/PixnBits/local-grok-bots/internal/model"
+	"github.com/PixnBits/local-grok-bots/internal/permbroker"
 )
 
 type safeBuf struct {
@@ -43,18 +44,29 @@ func captureStartup(t *testing.T) *safeBuf {
 	return buf
 }
 
+func writeCeilingPolicy(t *testing.T, dir, bot, broker, level string) (local, managed string) {
+	t.Helper()
+	local = filepath.Join(dir, "policy.toml")
+	managed = filepath.Join(dir, "managed.toml")
+	body := "[backend]\nbackend = \"ollama\"\n[cli.permission]\nbroker = \"" + broker + "\"\nbroker_bots = [\"" + bot + "\"]\n"
+	ceil := "[cli.permission.dangerouslyAllowAllPermissionRequestsUpThrough]\n" + bot + " = \"" + level + "\"\n"
+	if err := os.WriteFile(local, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(managed, []byte(ceil), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return local, managed
+}
+
 func TestStartupLogsAllowCeilings(t *testing.T) {
 	const bot = "11111111-1111-4111-8111-111111111111"
 	dir := t.TempDir()
 	if err := chmodDataDir(dir); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(dir, "policy.toml")
-	body := "[backend]\nbackend = \"ollama\"\n[cli.permission]\nbroker = \"hook\"\nbroker_bots = [\"" + bot + "\"]\n\n[cli.permission.dangerouslyAllowAllPermissionRequestsUpThrough]\n" + bot + " = \"medium\"\n"
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("MANAGED_POLICY", "")
+	path, managed := writeCeilingPolicy(t, dir, bot, "hook", "medium")
+	t.Setenv("MANAGED_POLICY", managed)
 	buf := captureStartup(t)
 	app, err := New(config.Config{
 		DataDir: dir, PolicyPath: path, BindAddr: "127.0.0.1:0",
@@ -67,6 +79,95 @@ func TestStartupLogsAllowCeilings(t *testing.T) {
 	want := "dangerouslyAllowAllPermissionRequestsUpThrough " + bot + " medium"
 	if !strings.Contains(buf.String(), want) {
 		t.Fatalf("startup log:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "ignored; broker is not hook") {
+		t.Fatalf("hook broker was logged as ignored:\n%s", buf.String())
+	}
+}
+
+func TestStartupLogsCeilingIgnoredWhenBrokerOff(t *testing.T) {
+	const bot = "11111111-1111-4111-8111-111111111111"
+	dir := t.TempDir()
+	if err := chmodDataDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	path, managed := writeCeilingPolicy(t, dir, bot, "off", "low")
+	t.Setenv("MANAGED_POLICY", managed)
+	buf := captureStartup(t)
+	app, err := New(config.Config{
+		DataDir: dir, PolicyPath: path, BindAddr: "127.0.0.1:0",
+		OllamaURL: "http://127.0.0.1:9", Model: "test-model", Version: "0.1.0",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Shutdown)
+	log := buf.String()
+	if !strings.Contains(log, "dangerouslyAllowAllPermissionRequestsUpThrough "+bot+" low") || !strings.Contains(log, "ignored; broker is not hook") {
+		t.Fatalf("startup log:\n%s", log)
+	}
+}
+
+func TestManagedCeilingAutoApproves(t *testing.T) {
+	const bot = "11111111-1111-4111-8111-111111111111"
+	dir := t.TempDir()
+	if err := chmodDataDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	path, managed := writeCeilingPolicy(t, dir, bot, "hook", "low")
+	t.Setenv("MANAGED_POLICY", managed)
+	app, err := New(config.Config{
+		DataDir: dir, PolicyPath: path, BindAddr: "127.0.0.1:0",
+		OllamaURL: "http://127.0.0.1:9", Model: "test-model", Version: "0.1.0",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Shutdown)
+	raw, _ := json.Marshal(map[string]string{"command": "git status"})
+	d := app.broker.Evaluate(context.Background(), permbroker.Request{
+		BotID: bot, SessionID: "sess", RunID: "run", TaskID: "task",
+		Cwd: "/work", ToolName: "run_shell", ToolInput: raw,
+	})
+	if d.Verdict != permbroker.VerdictAllow || d.PendingID != "" || d.Actor != permbroker.AllowThroughSource || d.Level != permbroker.LevelLow {
+		t.Fatalf("%+v", d)
+	}
+	touched := app.broker.Evaluate(context.Background(), permbroker.Request{
+		BotID: bot, SessionID: "sess", RunID: "run", TaskID: "task",
+		Cwd: "/work", ToolName: "run_shell",
+		ToolInput: func() json.RawMessage {
+			b, _ := json.Marshal(map[string]string{"command": "git status " + managed})
+			return b
+		}(),
+	})
+	if touched.Verdict == permbroker.VerdictAllow || touched.PendingID == "" || touched.Level != permbroker.LevelCritical {
+		t.Fatalf("policy path %+v", touched)
+	}
+}
+
+func TestPolicyPathRefusedAtCriticalCeiling(t *testing.T) {
+	const bot = "11111111-1111-4111-8111-111111111111"
+	dir := t.TempDir()
+	if err := chmodDataDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	path, managed := writeCeilingPolicy(t, dir, bot, "hook", "critical")
+	t.Setenv("MANAGED_POLICY", managed)
+	app, err := New(config.Config{
+		DataDir: dir, PolicyPath: path, BindAddr: "127.0.0.1:0",
+		OllamaURL: "http://127.0.0.1:9", Model: "test-model", Version: "0.1.0",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Shutdown)
+	raw, _ := json.Marshal(map[string]string{"command": "git status " + path})
+	d := app.broker.Evaluate(context.Background(), permbroker.Request{
+		BotID: bot, SessionID: "sess", RunID: "run", TaskID: "task",
+		Cwd: "/work", ToolName: "run_shell", ToolInput: raw,
+	})
+	if d.Verdict == permbroker.VerdictAllow || d.PendingID == "" {
+		t.Fatalf("%+v", d)
 	}
 }
 

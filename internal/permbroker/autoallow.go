@@ -1,6 +1,7 @@
 package permbroker
 
 import (
+	"path/filepath"
 	"runtime"
 	"strings"
 	"unicode"
@@ -31,6 +32,10 @@ func autoAllowOK(in inspected) bool {
 // the classifier, and critical paths. A shipped-table level is not enough.
 // The broker must be hook. A bot with no ceiling still asks.
 // Parse errors, malformed commands, and ambiguous commands do not match.
+// A hard ask or an ineligible request does not match unless the final
+// level is critical, and then only an exact critical ceiling can match.
+// A compound part with no known level, a git-risk, and a policy path
+// do not match at any ceiling.
 func (e *Engine) ceilingMatch(req Request, in inspected) (Level, bool) {
 	if e == nil || e.brokerMode != "hook" {
 		return "", false
@@ -42,11 +47,83 @@ func (e *Engine) ceilingMatch(req Request, in inspected) (Level, bool) {
 	if ceilingParseBlock(in.ParseReason) {
 		return "", false
 	}
+	if in.Level != LevelCritical {
+		if in.HardAsk {
+			return "", false
+		}
+		if !in.Eligible {
+			return "", false
+		}
+	}
+	if ceilingCompoundUnclassified(in) {
+		return "", false
+	}
+	if in.GitRisk != "" || in.GitReason != "" {
+		return "", false
+	}
+	if e.policyPathBlocked(req, in) {
+		return "", false
+	}
 	level := in.Level
 	if !ceilingCovers(level, ceiling) {
 		return "", false
 	}
 	return ceiling, true
+}
+
+// ceilingCompoundUnclassified refuses a compound whose parts are not all
+// a known level. The joining operators are ; && || | and a newline.
+// A classified part does not hide an unclassified one.
+func ceilingCompoundUnclassified(in inspected) bool {
+	if !ceilingCompoundShape(in) {
+		return false
+	}
+	if len(in.Parts) == 0 {
+		return false
+	}
+	for _, p := range in.Parts {
+		switch p.Level {
+		case LevelLow, LevelMedium, LevelHigh, LevelCritical:
+		default:
+			return true
+		}
+	}
+	return false
+}
+
+func ceilingCompoundShape(in inspected) bool {
+	if in.Compound {
+		return true
+	}
+	for _, op := range in.Operators {
+		switch op {
+		case ";", "&&", "||", "|", "|&":
+			return true
+		}
+	}
+	return strings.Contains(in.Raw, "\n")
+}
+
+// policyPathBlocked refuses a call that names a policy file.
+// Critical paths already raise the level. This also refuses the call
+// when the ceiling is critical.
+func (e *Engine) policyPathBlocked(req Request, in inspected) bool {
+	if e == nil || len(e.policyPaths) == 0 {
+		return false
+	}
+	cwd := ""
+	if filepath.IsAbs(req.Cwd) {
+		cwd = filepath.Clean(req.Cwd)
+	}
+	texts := []string{in.Raw, req.Cwd, req.Workspace}
+	texts = append(texts, in.Argv...)
+	texts = append(texts, toolPaths(req.ToolInput)...)
+	for _, text := range texts {
+		if pathTouches(text, cwd, e.policyPaths) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) lookupCeiling(bot string) (Level, bool) {

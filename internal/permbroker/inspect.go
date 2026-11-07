@@ -160,6 +160,7 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 			if Rank(lvl) > Rank(max) {
 				max = lvl
 			}
+			p.Level = lvl
 			p.Hash = hashParts(ToolShell, p.Argv)
 			in.Parts = append(in.Parts, p)
 			if cls.Hard || !cls.Eligible || lvl == LevelCritical {
@@ -426,13 +427,16 @@ func homesOf(b botCtx) []string {
 }
 
 // BrokerCriticalPaths is the set the daemon marks critical: the hook
-// binary, DATA_DIR/permbroker, the settings file, and its directory.
-func BrokerCriticalPaths(dataDir, hook, settings, settingsDir string) []string {
+// binary, DATA_DIR/permbroker, the settings file, its directory, and
+// any extra paths (the local policy file and the managed policy file).
+func BrokerCriticalPaths(dataDir, hook, settings, settingsDir string, extra ...string) []string {
 	dir := ""
 	if strings.TrimSpace(dataDir) != "" {
 		dir = filepath.Join(dataDir, "permbroker")
 	}
-	return mergeCritical(nil, []string{hook, dir, settings, settingsDir})
+	paths := []string{hook, dir, settings, settingsDir}
+	paths = append(paths, extra...)
+	return mergeCritical(nil, paths)
 }
 
 func normalizeCritical(in []string) []string {

@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -96,10 +98,14 @@ func lastAuditHash(path string) (string, error) {
 	return "", nil
 }
 
-func (a *fileAudit) append(row AuditRow) AuditRow {
+// errAuditWrite is a failed or missing audit append. A ceiling
+// auto-approval denies when this happens. Other decisions ignore it.
+var errAuditWrite = errors.New("permission broker audit write failed")
+
+func (a *fileAudit) append(row AuditRow) (AuditRow, error) {
 	if a == nil || a.f == nil {
 		row.TableVersion = TableVersion
-		return row
+		return row, errAuditWrite
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -107,17 +113,26 @@ func (a *fileAudit) append(row AuditRow) AuditRow {
 	row.Hash = ""
 	body, err := json.Marshal(row)
 	if err != nil {
-		return row
+		return row, err
 	}
 	sum := sha256.Sum256(append([]byte(a.prev), body...))
 	row.Hash = hex.EncodeToString(sum[:])
 	body, err = json.Marshal(row)
 	if err != nil {
-		return row
+		row.Hash = ""
+		return row, err
 	}
-	_, _ = a.f.Write(append(body, '\n'))
+	line := append(body, '\n')
+	n, err := a.f.Write(line)
+	if err != nil || n != len(line) {
+		row.Hash = ""
+		if err == nil {
+			err = io.ErrShortWrite
+		}
+		return row, err
+	}
 	a.prev = row.Hash
-	return row
+	return row, nil
 }
 
 func (a *fileAudit) close() {

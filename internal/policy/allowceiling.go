@@ -27,17 +27,60 @@ func parseAllowThrough(raw any) (map[string]permbroker.Level, error) {
 		if !ok {
 			return nil, fmt.Errorf("%w: bot id %q is not a UUID", errAllowCeiling, key)
 		}
+		if _, dup := out[id]; dup {
+			return nil, fmt.Errorf("%w: duplicate bot id %s", errAllowCeiling, id)
+		}
 		s, ok := val.(string)
 		if !ok || strings.TrimSpace(s) == "" {
 			return nil, fmt.Errorf("%w: missing or empty value for %s", errAllowCeiling, id)
 		}
-		lvl, ok := permbroker.AllowCeilingLevel(strings.TrimSpace(s))
+		// No trim and no case folding. " low " and "HIGH" are unknown.
+		lvl, ok := permbroker.AllowCeilingLevel(s)
 		if !ok {
-			return nil, fmt.Errorf("%w: unknown level %q", errAllowCeiling, strings.TrimSpace(s))
+			return nil, fmt.Errorf("%w: unknown level %q", errAllowCeiling, s)
 		}
 		out[id] = lvl
 	}
 	return out, nil
+}
+
+// allowCeilingKey is the only accepted spelling of the ceiling table.
+const allowCeilingKey = "dangerouslyAllowAllPermissionRequestsUpThrough"
+
+// ceilingKeyPresent reports the exact ceiling key outside a comment.
+func ceilingKeyPresent(body []byte) bool {
+	for _, line := range strings.Split(string(body), "\n") {
+		trim := strings.TrimSpace(line)
+		if trim == "" || strings.HasPrefix(trim, "#") {
+			continue
+		}
+		if i := strings.Index(trim, " #"); i >= 0 {
+			trim = strings.TrimSpace(trim[:i])
+		}
+		if strings.Contains(trim, allowCeilingKey) {
+			return true
+		}
+	}
+	return false
+}
+
+// ceilingKeySpelling rejects a folded spelling of the ceiling key.
+// Comments are skipped. The letters must match exactly.
+func ceilingKeySpelling(body []byte) error {
+	folded := strings.ToLower(allowCeilingKey)
+	for _, line := range strings.Split(string(body), "\n") {
+		trim := strings.TrimSpace(line)
+		if trim == "" || strings.HasPrefix(trim, "#") {
+			continue
+		}
+		if i := strings.Index(trim, " #"); i >= 0 {
+			trim = strings.TrimSpace(trim[:i])
+		}
+		if strings.Contains(strings.ToLower(trim), folded) && !strings.Contains(trim, allowCeilingKey) {
+			return fmt.Errorf("%w: key must be spelled %s", errAllowCeiling, allowCeilingKey)
+		}
+	}
+	return nil
 }
 
 func ceilingMap(raw any) (map[string]any, error) {

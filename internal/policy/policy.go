@@ -128,9 +128,10 @@ type Policy struct {
 	// BrokerBots, when non-empty, limits Broker == hook to those bots.
 	BrokerBots []string
 	// AllowCeilings is dangerouslyAllowAllPermissionRequestsUpThrough.
-	// Each key is a bot UUID that must also be listed in BrokerBots.
-	// The value is the highest final level that bot may auto-approve
-	// while Broker is hook. Nil means the key was unset.
+	// Only managed policy may set it. A local file that contains the key
+	// is a startup error. Each key is a bot UUID that must also be listed
+	// in BrokerBots. The value is the highest final level that bot may
+	// auto-approve while Broker is hook. Nil means the key was unset.
 	AllowCeilings map[string]permbroker.Level
 	// HookPath is the lgb-permhook binary. Empty uses the binary next
 	// to this daemon.
@@ -349,8 +350,14 @@ func Load(opts Options) (Policy, error) {
 		}
 		return overlayManaged(fallback(msg), opts, false)
 	}
+	if ceilingKeyPresent(body) {
+		return Policy{}, fmt.Errorf("%w: only managed policy can set it", errAllowCeiling)
+	}
 	doc, err := decode(body, path)
 	if err != nil {
+		if hardBrokerErr(err) {
+			return Policy{}, err
+		}
 		p := fallback(fmt.Sprintf("policy file %s is unparseable (%s); fail-closed: daemon jail ON, CLI backends OFF", path, err.Error()))
 		return overlayManaged(p, opts, false)
 	}
@@ -392,6 +399,9 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 	}
 	doc, err := decode(body, path)
 	if err != nil {
+		if hardBrokerErr(err) {
+			return Policy{}, err
+		}
 		fb := Defaults()
 		fb.CLIPermitted = false
 		fb.DaemonJail = true
@@ -1369,7 +1379,7 @@ func (p Policy) BrokerHook(botID string) bool {
 	return false
 }
 
-func (p *Policy) applyBroker(perm *cliPermDoc) error {
+func (p *Policy) applyBroker(perm *cliPermDoc, trusted bool) error {
 	if perm.Broker != nil {
 		switch strings.ToLower(strings.TrimSpace(*perm.Broker)) {
 		case "", "off":
@@ -1423,6 +1433,9 @@ func (p *Policy) applyBroker(perm *cliPermDoc) error {
 		}
 	}
 	if perm.AllowThrough != nil {
+		if !trusted {
+			return fmt.Errorf("%w: only managed policy can set it", errAllowCeiling)
+		}
 		ceilings, err := parseAllowThrough(perm.AllowThrough)
 		if err != nil {
 			return err
@@ -1531,6 +1544,9 @@ func readPolicy(path string) ([]byte, error) {
 }
 
 func decode(body []byte, path string) (document, error) {
+	if err := ceilingKeySpelling(body); err != nil {
+		return document{}, err
+	}
 	var doc document
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == ".json" {
@@ -1953,7 +1969,7 @@ func (p *Policy) apply(doc document, trusted bool) error {
 			}
 			p.ClaudeTransport = v
 		}
-		if err := p.applyBroker(perm); err != nil {
+		if err := p.applyBroker(perm, trusted); err != nil {
 			return err
 		}
 	}

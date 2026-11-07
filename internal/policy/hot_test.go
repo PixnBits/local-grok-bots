@@ -74,8 +74,15 @@ func TestAllowCeilingStaysOnStartupSnapshot(t *testing.T) {
 	if got.ClaudeTransport != TransportStreamControl {
 		t.Fatal("claude_transport did not hot reload")
 	}
-	if keys := RestartKeys(start, fresh); len(keys) != 0 {
-		t.Fatalf("broker settings listed for restart: %v", keys)
+	keys := RestartKeys(start, fresh)
+	if len(keys) != 1 || keys[0] != "dangerouslyAllowAllPermissionRequestsUpThrough" {
+		t.Fatalf("restart keys %v", keys)
+	}
+	same := start
+	same.Broker = "off"
+	same.BrokerBots = nil
+	if got := RestartKeys(start, same); len(got) != 0 {
+		t.Fatalf("broker settings listed for restart: %v", got)
 	}
 }
 
