@@ -350,7 +350,7 @@ func Load(opts Options) (Policy, error) {
 		}
 		return overlayManaged(fallback(msg), opts, false)
 	}
-	if ceilingKeyPresent(body) {
+	if ceilingKeyPresent(body, path) {
 		return Policy{}, fmt.Errorf("%w: only managed policy can set it", errAllowCeiling)
 	}
 	doc, err := decode(body, path)
@@ -1544,7 +1544,7 @@ func readPolicy(path string) ([]byte, error) {
 }
 
 func decode(body []byte, path string) (document, error) {
-	if err := ceilingKeySpelling(body); err != nil {
+	if err := ceilingKeySpelling(body, path); err != nil {
 		return document{}, err
 	}
 	var doc document

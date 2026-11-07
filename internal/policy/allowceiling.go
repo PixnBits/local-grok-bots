@@ -1,9 +1,13 @@
 package policy
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
+
+	"github.com/pelletier/go-toml/v2"
 
 	"github.com/PixnBits/local-grok-bots/internal/permbroker"
 )
@@ -47,40 +51,71 @@ func parseAllowThrough(raw any) (map[string]permbroker.Level, error) {
 // allowCeilingKey is the only accepted spelling of the ceiling table.
 const allowCeilingKey = "dangerouslyAllowAllPermissionRequestsUpThrough"
 
-// ceilingKeyPresent reports the exact ceiling key outside a comment.
-func ceilingKeyPresent(body []byte) bool {
-	for _, line := range strings.Split(string(body), "\n") {
-		trim := strings.TrimSpace(line)
-		if trim == "" || strings.HasPrefix(trim, "#") {
-			continue
-		}
-		if i := strings.Index(trim, " #"); i >= 0 {
-			trim = strings.TrimSpace(trim[:i])
-		}
-		if strings.Contains(trim, allowCeilingKey) {
+// ceilingKeyPresent reports the exact ceiling key among decoded map keys.
+// A decode failure reports the key as absent so the caller can use its
+// own parse error. Text inside a string value is not a key.
+func ceilingKeyPresent(body []byte, path string) bool {
+	keys, ok := decodedMapKeys(body, path)
+	if !ok {
+		return false
+	}
+	for _, key := range keys {
+		if key == allowCeilingKey {
 			return true
 		}
 	}
 	return false
 }
 
-// ceilingKeySpelling rejects a folded spelling of the ceiling key.
-// Comments are skipped. The letters must match exactly.
-func ceilingKeySpelling(body []byte) error {
+// ceilingKeySpelling rejects a folded spelling of a decoded key.
+// The check uses the key after escapes are decoded. A decode failure
+// returns nil so the real parser reports that error.
+func ceilingKeySpelling(body []byte, path string) error {
+	keys, ok := decodedMapKeys(body, path)
+	if !ok {
+		return nil
+	}
 	folded := strings.ToLower(allowCeilingKey)
-	for _, line := range strings.Split(string(body), "\n") {
-		trim := strings.TrimSpace(line)
-		if trim == "" || strings.HasPrefix(trim, "#") {
-			continue
-		}
-		if i := strings.Index(trim, " #"); i >= 0 {
-			trim = strings.TrimSpace(trim[:i])
-		}
-		if strings.Contains(strings.ToLower(trim), folded) && !strings.Contains(trim, allowCeilingKey) {
+	for _, key := range keys {
+		if strings.ToLower(key) == folded && key != allowCeilingKey {
 			return fmt.Errorf("%w: key must be spelled %s", errAllowCeiling, allowCeilingKey)
 		}
 	}
 	return nil
+}
+
+func decodedMapKeys(body []byte, path string) ([]string, bool) {
+	var v any
+	var err error
+	if strings.ToLower(filepath.Ext(path)) == ".json" {
+		err = json.Unmarshal(body, &v)
+	} else {
+		err = toml.Unmarshal(body, &v)
+	}
+	if err != nil {
+		return nil, false
+	}
+	return collectMapKeys(v), true
+}
+
+func collectMapKeys(v any) []string {
+	var keys []string
+	var walk func(any)
+	walk = func(n any) {
+		switch x := n.(type) {
+		case map[string]any:
+			for k, child := range x {
+				keys = append(keys, k)
+				walk(child)
+			}
+		case []any:
+			for _, child := range x {
+				walk(child)
+			}
+		}
+	}
+	walk(v)
+	return keys
 }
 
 func ceilingMap(raw any) (map[string]any, error) {

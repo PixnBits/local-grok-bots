@@ -119,6 +119,66 @@ func TestAllowCeilingLoad(t *testing.T) {
 	}
 }
 
+func TestAllowCeilingDecodedKey(t *testing.T) {
+	const bot = "11111111-1111-4111-8111-111111111111"
+	head := "[backend]\nbackend = \"ollama\"\n[cli.permission]\nbroker = \"hook\"\nbroker_bots = [\"" + bot + "\"]\n"
+	folded := "dangerouslyallowallpermission\\u0072equestsupthrough"
+	exact := "dangerouslyAllowAllPermission\\u0052equestsUpThrough"
+	cases := []struct {
+		name    string
+		local   string
+		managed string
+		ok      bool
+	}{
+		{
+			name:  "local-string-value",
+			local: "[backend]\nbackend = \"ollama\"\n[ollama]\nmodel = \"dangerouslyAllowAllPermissionRequestsUpThrough\"\n",
+			ok:    true,
+		},
+		{
+			name:    "managed-escaped-folded",
+			local:   head,
+			managed: "\n[cli.permission.\"" + folded + "\"]\n" + bot + " = \"low\"\n",
+		},
+		{
+			name:    "managed-escaped-exact",
+			local:   head,
+			managed: "\n[cli.permission.\"" + exact + "\"]\n" + bot + " = \"low\"\n",
+			ok:      true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "policy.toml")
+			if err := os.WriteFile(path, []byte(tc.local), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			opts := Options{Path: path}
+			if tc.managed != "" {
+				mp := filepath.Join(dir, "managed.toml")
+				if err := os.WriteFile(mp, []byte(tc.managed), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				opts.ManagedPath = mp
+			}
+			p, err := Load(opts)
+			if tc.ok {
+				if err != nil || !p.Loaded {
+					t.Fatalf("err=%v loaded=%v warnings=%v ceilings=%v", err, p.Loaded, p.Warnings, p.AllowCeilings)
+				}
+				if tc.managed != "" && p.AllowCeilings[bot] != permbroker.LevelLow {
+					t.Fatalf("ceilings %v", p.AllowCeilings)
+				}
+				return
+			}
+			if err == nil || !errors.Is(err, errAllowCeiling) {
+				t.Fatalf("err=%v loaded=%v warnings=%v ceilings=%v", err, p.Loaded, p.Warnings, p.AllowCeilings)
+			}
+		})
+	}
+}
+
 func TestAllowCeilingUntrustedApply(t *testing.T) {
 	const bot = "11111111-1111-4111-8111-111111111111"
 	broker := "hook"

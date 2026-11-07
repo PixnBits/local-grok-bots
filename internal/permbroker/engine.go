@@ -1462,15 +1462,8 @@ func (e *Engine) Evaluate(ctx context.Context, req Request) Decision {
 		e.touch(rule)
 		return e.finish(req, in, VerdictDeny, "denied by rule "+rule.ID, "", rule.ID, rule.ID)
 	}
-	if rule := e.matchAskRule(req.BotID, in); rule != nil {
-		if d, stop := e.cancelled(ctx, req, in); stop {
-			return d
-		}
-		return e.applyRule(req, in, rule)
-	}
-	if ceiling, ok := e.ceilingMatch(req, in); ok {
-		return e.allowByCeiling(req, in, ceiling)
-	}
+	// One-time approval is consumed before an ask rule. An ask rule still
+	// runs before the ceiling, so the next try asks again.
 	if tok, ok := e.takeToken(ctx, req, in); ok {
 		if e.afterEval != nil {
 			e.afterEval()
@@ -1480,6 +1473,15 @@ func (e *Engine) Evaluate(ctx context.Context, req Request) Decision {
 			return e.finish(req, in, VerdictDeny, "denied", "", "fail-closed", "")
 		}
 		return e.finish(req, in, VerdictAllow, "approved", "", "human", "")
+	}
+	if rule := e.matchAskRule(req.BotID, in); rule != nil {
+		if d, stop := e.cancelled(ctx, req, in); stop {
+			return d
+		}
+		return e.applyRule(req, in, rule)
+	}
+	if ceiling, ok := e.ceilingMatch(req, in); ok {
+		return e.allowByCeiling(req, in, ceiling)
 	}
 	if d, stop := e.cancelled(ctx, req, in); stop {
 		return d
@@ -2459,11 +2461,15 @@ func (e *Engine) auditDecision(req Request, in inspected, verdict, reason, pendi
 		RulesetVersion: e.rules.Version, Classifier: note, PeerUID: req.PeerUID, PeerPID: req.PeerPID,
 	}
 	row, err := e.audit.append(row)
+	if err != nil {
+		log.Printf("permbroker: audit write failed: %v", err)
+		return err
+	}
 	if e.auditor != nil {
 		e.auditor.Record(row)
 	}
 	_ = reason
-	return err
+	return nil
 }
 
 func commandOf(raw json.RawMessage) (string, bool) {
