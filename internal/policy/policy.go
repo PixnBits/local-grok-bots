@@ -127,6 +127,12 @@ type Policy struct {
 	Broker string
 	// BrokerBots, when non-empty, limits Broker == hook to those bots.
 	BrokerBots []string
+	// AllowCeilings is dangerouslyAllowAllPermissionRequestsUpThrough.
+	// Only managed policy may set it. A local file that contains the key
+	// is a startup error. Each key is a bot UUID that must also be listed
+	// in BrokerBots. The value is the highest final level that bot may
+	// auto-approve while Broker is hook. Nil means the key was unset.
+	AllowCeilings map[string]permbroker.Level
 	// HookPath is the lgb-permhook binary. Empty uses the binary next
 	// to this daemon.
 	HookPath string
@@ -344,8 +350,14 @@ func Load(opts Options) (Policy, error) {
 		}
 		return overlayManaged(fallback(msg), opts, false)
 	}
+	if ceilingKeyPresent(body, path) {
+		return Policy{}, fmt.Errorf("%w: only managed policy can set it", errAllowCeiling)
+	}
 	doc, err := decode(body, path)
 	if err != nil {
+		if hardBrokerErr(err) {
+			return Policy{}, err
+		}
 		p := fallback(fmt.Sprintf("policy file %s is unparseable (%s); fail-closed: daemon jail ON, CLI backends OFF", path, err.Error()))
 		return overlayManaged(p, opts, false)
 	}
@@ -387,6 +399,9 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 	}
 	doc, err := decode(body, path)
 	if err != nil {
+		if hardBrokerErr(err) {
+			return Policy{}, err
+		}
 		fb := Defaults()
 		fb.CLIPermitted = false
 		fb.DaemonJail = true
@@ -1344,7 +1359,7 @@ func NormClaudeTransport(v string) (string, error) {
 var errBrokerConfig = errors.New("cli.permission.broker must be off or hook")
 
 func hardBrokerErr(err error) bool {
-	return errors.Is(err, errBrokerConfig) || errors.Is(err, permbroker.ErrClassifierEndpoint) || errors.Is(err, permbroker.ErrLevelLowered) || errors.Is(err, permbroker.ErrBadLevel)
+	return errors.Is(err, errBrokerConfig) || errors.Is(err, errAllowCeiling) || errors.Is(err, permbroker.ErrClassifierEndpoint) || errors.Is(err, permbroker.ErrLevelLowered) || errors.Is(err, permbroker.ErrBadLevel)
 }
 
 // BrokerHook reports that this bot should use the permission broker.
@@ -1364,7 +1379,7 @@ func (p Policy) BrokerHook(botID string) bool {
 	return false
 }
 
-func (p *Policy) applyBroker(perm *cliPermDoc) error {
+func (p *Policy) applyBroker(perm *cliPermDoc, trusted bool) error {
 	if perm.Broker != nil {
 		switch strings.ToLower(strings.TrimSpace(*perm.Broker)) {
 		case "", "off":
@@ -1417,7 +1432,17 @@ func (p *Policy) applyBroker(perm *cliPermDoc) error {
 			return err
 		}
 	}
-	return nil
+	if perm.AllowThrough != nil {
+		if !trusted {
+			return fmt.Errorf("%w: only managed policy can set it", errAllowCeiling)
+		}
+		ceilings, err := parseAllowThrough(perm.AllowThrough)
+		if err != nil {
+			return err
+		}
+		p.AllowCeilings = ceilings
+	}
+	return checkCeilingBots(p.BrokerBots, p.AllowCeilings)
 }
 
 func (p *Policy) applyClassifier(doc *classifierDoc) error {
@@ -1519,6 +1544,9 @@ func readPolicy(path string) ([]byte, error) {
 }
 
 func decode(body []byte, path string) (document, error) {
+	if err := ceilingKeySpelling(body, path); err != nil {
+		return document{}, err
+	}
 	var doc document
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == ".json" {
@@ -1635,6 +1663,10 @@ type cliPermDoc struct {
 	Risk               *[]riskDoc     `toml:"risk" json:"risk"`
 	ApprovalTTL        flexText       `toml:"approval_ttl" json:"approval_ttl"`
 	Classifier         *classifierDoc `toml:"classifier" json:"classifier"`
+	// AllowThrough is dangerouslyAllowAllPermissionRequestsUpThrough.
+	// any keeps a non-map value reachable so load can reject it.
+	// A map[string]string would fail the whole file at decode time.
+	AllowThrough any `toml:"dangerouslyAllowAllPermissionRequestsUpThrough" json:"dangerouslyAllowAllPermissionRequestsUpThrough"`
 }
 
 type classifierDoc struct {
@@ -1937,7 +1969,7 @@ func (p *Policy) apply(doc document, trusted bool) error {
 			}
 			p.ClaudeTransport = v
 		}
-		if err := p.applyBroker(perm); err != nil {
+		if err := p.applyBroker(perm, trusted); err != nil {
 			return err
 		}
 	}

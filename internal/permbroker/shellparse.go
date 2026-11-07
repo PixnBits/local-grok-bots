@@ -14,10 +14,13 @@ import (
 )
 
 // Part is one simple command inside a compound.
+// Level is the classified level of that part. The ceiling refuses a
+// compound when any part has no known level.
 type Part struct {
-	Argv []string
-	Hash string
-	Raw  string
+	Argv  []string
+	Hash  string
+	Raw   string
+	Level Level
 }
 
 // Parse is the normalized shape of one shell string.

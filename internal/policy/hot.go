@@ -163,6 +163,9 @@ func RestartKeys(start, fresh Policy) []string {
 	if start.AllowInsecureLAN != fresh.AllowInsecureLAN {
 		keys = append(keys, "allow_insecure_lan")
 	}
+	if !reflect.DeepEqual(start.AllowCeilings, fresh.AllowCeilings) {
+		keys = append(keys, "dangerouslyAllowAllPermissionRequestsUpThrough")
+	}
 	sort.Strings(keys)
 	if keys == nil {
 		keys = []string{}

@@ -455,10 +455,37 @@ func (a *App) refuseBrokerCLI(botID string, err error) error {
 
 func (a *App) brokerCriticalPaths(bin, settings, settingsDir string) []string {
 	data := ""
+	local := ""
+	managed := ""
 	if a != nil {
 		data = a.cfg.DataDir
+		local = a.cfg.PolicyPath
+		managed = a.pol().ManagedPath
 	}
-	return permbroker.BrokerCriticalPaths(data, bin, settings, settingsDir)
+	return permbroker.BrokerCriticalPaths(data, bin, settings, settingsDir, policyCriticalPaths(local, managed)...)
+}
+
+// policyCriticalPaths is the local policy file and the managed policy file.
+// Writes that name either file are critical, and a ceiling does not
+// auto-approve them.
+func policyCriticalPaths(local, managed string) []string {
+	var out []string
+	add := func(p string) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return
+		}
+		for _, have := range out {
+			if have == p {
+				return
+			}
+		}
+		out = append(out, p)
+	}
+	add(local)
+	add(os.Getenv("MANAGED_POLICY"))
+	add(managed)
+	return out
 }
 
 // seedStartupCriticalPaths marks broker files before any Claude launch so
@@ -468,7 +495,9 @@ func (a *App) seedStartupCriticalPaths(p policy.Policy) {
 		return
 	}
 	bin, _ := brokerHookBinary(p)
+	files := policyCriticalPaths(a.cfg.PolicyPath, p.ManagedPath)
 	paths := a.brokerCriticalPaths(bin, "", "")
+	paths = append(paths, files...)
 	if data := strings.TrimSpace(a.cfg.DataDir); data != "" {
 		paths = append(paths,
 			filepath.Join(data, adminTokenFile),
@@ -480,6 +509,7 @@ func (a *App) seedStartupCriticalPaths(p policy.Policy) {
 		paths = append(paths, tok)
 	}
 	a.broker.AddCriticalPaths(paths...)
+	a.broker.SetPolicyPaths(files...)
 }
 
 // brokerHookBinary is the configured hook, or lgb-permhook next to this

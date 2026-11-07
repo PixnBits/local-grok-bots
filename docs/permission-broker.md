@@ -15,6 +15,13 @@ the run.
 broker = "hook"   # off (default) or hook
 # broker_bots = ["bot-id"]   # optional; empty means every bot
 # hook_path = "/usr/local/bin/lgb-permhook"  # optional absolute path
+
+# Per-bot auto-approval ceiling. Put it in the managed policy file only.
+# A copy in this file is a startup error. The bot id must be a UUID listed
+# in broker_bots. Level names are lowercase: low, medium, high, critical.
+# A critical level auto-approves only when the ceiling is exactly critical
+# and that level or a critical path is the only reason. See the ceiling
+# section below. A multi-line inline table is not valid TOML 1.0.
 ```
 
 `hook` arms two paths: Claude Code, through `cmd/lgb-permhook`, and the
@@ -365,6 +372,97 @@ startup error. A command the table does not list is `unclassified`.
 only. They are not task-grantable and not eligible for a bot or global
 allow. The profile auto-allow list in `docs/cli-permissions.md` is a
 different classifier.
+
+## Auto-approval ceiling
+
+`dangerouslyAllowAllPermissionRequestsUpThrough` maps a bot id to a
+ceiling: `low`, `medium`, `high`, or `critical`. Only the managed policy
+file may set it. The same key in the local policy file is a startup
+error. It does nothing unless `broker` is `hook`. It does not add a bot
+to `broker_bots`. A ceiling for a bot that is not listed there is a
+startup error, including when `broker_bots` is empty.
+
+Level names are lowercase only. There is no case folding and no
+trimming. `HIGH`, `Low`, and a padded name are startup errors.
+`unclassified` is not a ceiling. Bot ids are stored lowercase. Two keys
+that are the same id after that are a startup error.
+
+The comparison is a strict rank: low is 1, medium is 2, high is 3, and
+critical is 4. A lower rank does not cover a higher one. Unclassified,
+an empty name, and any unknown name have no rank and are never covered.
+The comparison uses the final level. That level is the shipped table,
+then a policy raise, then a classifier raise, then a critical-path
+check. A ceiling cannot skip one of those. A request at or below the
+bot's ceiling is auto-approved with no card. A request above the
+ceiling still asks. A critical request auto-approves only when the
+ceiling is exactly `critical` and that level or a critical path is the
+only reason, as below.
+
+Evaluate order for this check is deny, then a one-time human approval,
+then an ask rule, then the ceiling. A one-time approval is consumed
+before the ask rule, so the next identical call asks again. An ask rule
+still wins over the ceiling, including a pattern or legacy ask.
+
+These are never auto-approved: a deny rule, an ask rule, an unclassified
+command, a parse error, a malformed or ambiguous command, a broker
+error, a compound command with a part that has no known level, a
+git-risk or a baseline drift, and a call that names the local or managed
+policy file. The policy-file check resolves the path and its parent
+directories the same way a critical path is resolved, including a link
+whose target is a policy file. That refusal holds at a critical ceiling.
+
+A hard ask or a request that is not eligible does not auto-approve,
+including at a critical ceiling, unless the only reason is the critical
+level or a critical path. These still ask when the ceiling is critical:
+an unresolved or unknown program, a wrapper, a leading `cd`, a void
+command, a read of a protected path, a git form that runs a command, a
+non-shell path outside the workspace, and any other ineligible reason.
+A credential command whose only reason is the critical level can
+auto-approve when the ceiling is exactly critical. Combined with another
+reason, it asks. The git forms that run a command are refused on the
+ceiling side. The classifier is unchanged, so a rule or a task grant
+keeps its current eligibility when no ceiling applies. The ceiling does
+not use the Linux-only allow choke that saved rules and task grants use.
+
+Non-shell tools use this table. A path is `file_path`, `path`, or
+`notebook_path`. Every path must be inside the workspace. No path,
+a protected path, or a policy path does not auto-approve. A write of a
+critical path does not auto-approve at any ceiling. Anything not in the
+table does not auto-approve.
+
+| Tool | Level | Auto-approves when |
+| --- | --- | --- |
+| `Read`, `Glob`, `Grep` | low | every path is inside the workspace and is not protected or a policy file. A path on the critical list is critical and needs an exact critical ceiling |
+| `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | medium | every path is inside the workspace and is not protected, a policy file, or a critical path |
+| `WebFetch`, `WebSearch`, `Task`, `mcp__*`, any other tool | none | never |
+
+A wildcard key such as `*`, a key that is not a UUID, an empty value,
+an unknown level, and a value that is not a map are startup errors.
+
+Write the map as a subtable in the managed policy file. A multi-line
+inline table is not valid TOML 1.0.
+
+```toml
+[cli.permission]
+broker = "hook"
+broker_bots = ["00000000-0000-4000-8000-000000000000"]
+
+[cli.permission.dangerouslyAllowAllPermissionRequestsUpThrough]
+00000000-0000-4000-8000-000000000000 = "low"
+```
+
+Each auto-approval appends an audit row whose `source` is
+`dangerously_allow_all_up_through`. The row's `level` is the final
+level. `ceiling` is the bot's cap. The in-memory audit mirror records
+the row only after that append succeeds. If the append fails, the
+failure is written to the daemon log and the auto-approval is a deny.
+The mirror does not keep the allow. A human ask does not depend on that
+write.
+Startup logs each configured bot id and its ceiling, and logs that the
+ceiling is ignored when `broker` is not `hook`. A running daemon keeps
+the ceilings from process start. Editing the file does not change them
+until restart. A change to this key is reported as a restart key. `broker`
+and `broker_bots` stay on the startup snapshot and are not restart keys.
 
 A stricter row is:
 

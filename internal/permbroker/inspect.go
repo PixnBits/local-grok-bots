@@ -127,6 +127,7 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 		raw, _ := commandOf(req.ToolInput)
 		in.Raw = raw
 		parsed := ParseCommand(raw)
+		in.ParseReason = parsed.Reason
 		if parsed.Reason == "not a literal" {
 			if sp, ops, ok := surfaceParse(raw); ok {
 				parsed = sp
@@ -159,6 +160,7 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 			if Rank(lvl) > Rank(max) {
 				max = lvl
 			}
+			p.Level = lvl
 			p.Hash = hashParts(ToolShell, p.Argv)
 			in.Parts = append(in.Parts, p)
 			if cls.Hard || !cls.Eligible || lvl == LevelCritical {
@@ -235,6 +237,7 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 			in.HardAsk = true
 		}
 	}
+	in.Shipped = shippedLevel(req, in)
 	if ctx.Err() != nil {
 		return in
 	}
@@ -300,6 +303,23 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 	}
 	in.CriticalReason = criticalReason(in.Level, in.Argv, in.Raw)
 	return in
+}
+
+// shippedLevel is the builtin table level. Policy raises, the classifier,
+// and critical paths are not included. The ceiling compares in.Level, which
+// is the level after those steps, including raiseToCurrent.
+func shippedLevel(req Request, in inspected) Level {
+	if isShellTool(req.ToolName) {
+		if len(in.Argv) > 0 {
+			return builtinLevel(ToolShell, in.Argv)
+		}
+		max := LevelUnclassified
+		for _, p := range in.Parts {
+			max = maxLevel(max, builtinLevel(ToolShell, p.Argv))
+		}
+		return max
+	}
+	return builtinLevel(req.ToolName, toolPaths(req.ToolInput))
 }
 
 // finalAdvisorySource keeps a model-raise line only when it names the
@@ -407,13 +427,16 @@ func homesOf(b botCtx) []string {
 }
 
 // BrokerCriticalPaths is the set the daemon marks critical: the hook
-// binary, DATA_DIR/permbroker, the settings file, and its directory.
-func BrokerCriticalPaths(dataDir, hook, settings, settingsDir string) []string {
+// binary, DATA_DIR/permbroker, the settings file, its directory, and
+// any extra paths (the local policy file and the managed policy file).
+func BrokerCriticalPaths(dataDir, hook, settings, settingsDir string, extra ...string) []string {
 	dir := ""
 	if strings.TrimSpace(dataDir) != "" {
 		dir = filepath.Join(dataDir, "permbroker")
 	}
-	return mergeCritical(nil, []string{hook, dir, settings, settingsDir})
+	paths := []string{hook, dir, settings, settingsDir}
+	paths = append(paths, extra...)
+	return mergeCritical(nil, paths)
 }
 
 func normalizeCritical(in []string) []string {

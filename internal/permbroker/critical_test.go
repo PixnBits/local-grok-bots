@@ -28,6 +28,28 @@ func criticalEngine(t *testing.T) (*Engine, critSet) {
 	return e, critSet{data: data, settings: settings, paths: paths}
 }
 
+func TestBrokerCriticalPathsIncludesExtra(t *testing.T) {
+	data := t.TempDir()
+	extra := filepath.Join(data, "policy.toml")
+	paths := BrokerCriticalPaths(data, filepath.Join(data, "hook"), filepath.Join(data, "settings"), data, extra)
+	if len(paths) < 5 {
+		t.Fatalf("paths %v", paths)
+	}
+	found := false
+	for _, p := range paths {
+		if p == extra {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("extra missing from %v", paths)
+	}
+	base := BrokerCriticalPaths(data, filepath.Join(data, "hook"), filepath.Join(data, "settings"), data)
+	if len(base) != 4 {
+		t.Fatalf("base %v", base)
+	}
+}
+
 func TestGolden_CriticalPathsApproveOnceRetry(t *testing.T) {
 	e, _ := criticalEngine(t)
 	ctx := context.Background()

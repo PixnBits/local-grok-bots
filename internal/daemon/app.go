@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -389,6 +390,7 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		return a.verifyLaunchHook(bot)
 	})
 	a.setPol(pol)
+	a.logAllowCeilings(pol)
 	if len(fileTokens) > 0 {
 		a.authTokens.Store(&authTokenSet{toks: fileTokens})
 	}
@@ -504,6 +506,25 @@ func (a *App) Run(ctx context.Context) error {
 	case err := <-errCh:
 		a.Shutdown()
 		return err
+	}
+}
+
+// logAllowCeilings prints each configured bot id and its ceiling.
+// It is a startup log only. The page does not show it.
+func (a *App) logAllowCeilings(p policy.Policy) {
+	if a == nil || len(p.AllowCeilings) == 0 {
+		return
+	}
+	ids := make([]string, 0, len(p.AllowCeilings))
+	for id := range p.AllowCeilings {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		a.writeStartup("local-grok-bots: dangerouslyAllowAllPermissionRequestsUpThrough %s %s\n", id, p.AllowCeilings[id])
+	}
+	if p.Broker != "hook" {
+		a.writeStartup("local-grok-bots: dangerouslyAllowAllPermissionRequestsUpThrough ignored; broker is not hook\n")
 	}
 }
 

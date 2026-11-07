@@ -63,6 +63,61 @@ func classifierRaises(table, got Level) bool {
 	return g > t
 }
 
+// AllowCeilingLevel parses a per-bot auto-approval ceiling.
+// The names are the lowercase words low, medium, high, and critical.
+// There is no case folding and no trimming. Unclassified is not a ceiling.
+func AllowCeilingLevel(s string) (Level, bool) {
+	switch Level(s) {
+	case LevelLow, LevelMedium, LevelHigh, LevelCritical:
+		return Level(s), true
+	default:
+		return "", false
+	}
+}
+
+// ceilingCovers reports whether a final level may be auto-approved at ceiling.
+// Unclassified, empty, and any unknown name are refused before the rank
+// compare. Critical is refused unless the ceiling is exactly critical.
+// That equality is the whole check for a critical level: the rank compare
+// below does not run for it, and only accepts low, medium, and high.
+func ceilingCovers(level, ceiling Level) bool {
+	if level == "" || level == LevelUnclassified {
+		return false
+	}
+	if level == LevelCritical {
+		return ceiling == LevelCritical
+	}
+	switch level {
+	case LevelLow, LevelMedium, LevelHigh:
+	default:
+		return false
+	}
+	lr, lok := ceilingRank(level)
+	cr, cok := ceilingRank(ceiling)
+	if !lok || !cok {
+		return false
+	}
+	return lr <= cr
+}
+
+// ceilingRank is the strict order for a ceiling compare.
+// low is 1, medium is 2, high is 3, and critical is 4.
+// Unclassified, empty, and any other name have no rank.
+func ceilingRank(l Level) (int, bool) {
+	switch l {
+	case LevelLow:
+		return 1, true
+	case LevelMedium:
+		return 2, true
+	case LevelHigh:
+		return 3, true
+	case LevelCritical:
+		return 4, true
+	default:
+		return 0, false
+	}
+}
+
 // frictionRank is the order a classifier may raise. It is not Rank:
 // unclassified sits with medium, so a "safer" model reply cannot lower it.
 func frictionRank(l Level) int {
