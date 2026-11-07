@@ -79,6 +79,9 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("GET /app.js", a.handleAppJS)
 	mux.HandleFunc("GET /app.css", a.handleAppCSS)
 	mux.HandleFunc("GET /theme.js", a.handleThemeJS)
+	mux.HandleFunc("GET /favicon.svg", a.handleFaviconSVG)
+	mux.HandleFunc("GET /favicon.ico", a.handleFaviconICO)
+	mux.HandleFunc("GET /apple-touch-icon.png", a.handleAppleTouchIcon)
 	mux.HandleFunc("GET /", a.handleIndex)
 	mux.HandleFunc("GET /index.html", a.handleIndex)
 	// Approval rules. The client reads ?bot= from the query.
@@ -112,6 +115,18 @@ func (a *App) handleAppCSS(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleThemeJS(w http.ResponseWriter, r *http.Request) {
 	writeStatic(w, "text/javascript; charset=utf-8", web.ThemeJS)
+}
+
+func (a *App) handleFaviconSVG(w http.ResponseWriter, r *http.Request) {
+	writeStatic(w, "image/svg+xml", web.FaviconSVG)
+}
+
+func (a *App) handleFaviconICO(w http.ResponseWriter, r *http.Request) {
+	writeStatic(w, "image/x-icon", web.FaviconICO)
+}
+
+func (a *App) handleAppleTouchIcon(w http.ResponseWriter, r *http.Request) {
+	writeStatic(w, "image/png", web.AppleTouchIcon)
 }
 
 func writeStatic(w http.ResponseWriter, contentType string, body []byte) {
@@ -177,7 +192,7 @@ func (a *App) remoteHostDenied(r *http.Request) bool {
 
 func publicAsset(path string) bool {
 	switch path {
-	case "/app.js", "/app.css", "/theme.js":
+	case "/app.js", "/app.css", "/theme.js", "/favicon.svg", "/favicon.ico", "/apple-touch-icon.png":
 		return true
 	default:
 		return false
