@@ -19,18 +19,16 @@ Only managed policy may set the key. A local file that contains it is
 a load error. The spelling check and the local-file check use decoded
 key names, so an escaped folded key is the same error and a string
 value that merely contains the name is not. The local policy path and
-the managed policy path are critical, and a ceiling match also refuses
-a call that resolves to either file. Resolution follows the path and
-its parent directories the same way a critical path does.
+the managed policy path are critical. How a ceiling match refuses them
+is in [Critical ceiling](../permission-broker.md#critical-ceiling).
 
 Evaluate order is deny, then a one-time human approval, then an ask
 rule, then the ceiling. The one-time approval is consumed first, so the
 next try asks again. Pattern and legacy ask rules are included.
 
-A critical request is auto-approved only when the ceiling is exactly
-`critical` and the critical level or a critical path is the only reason.
-A critical ceiling auto-approves hook-path git operations and credential
-printing (for example `gh auth token`).
+What a critical ceiling auto-approves, and how the path resolver fails
+closed, is in
+[Critical ceiling](../permission-broker.md#critical-ceiling).
 An unresolved program, a wrapper, a leading `cd`, a void command, a
 protected-path read, a git form that runs a command, a non-shell path
 outside the workspace, and any other ineligible reason still ask. The
@@ -42,11 +40,7 @@ and a broker other than `hook` do not auto-approve.
 Non-shell auto-approval is a fixed table: in-workspace `Read`, `Glob`,
 and `Grep` are low; in-workspace `Write`, `Edit`, `MultiEdit`, and
 `NotebookEdit` are medium. Other tools, including `WebFetch`,
-`WebSearch`, `Task`, and `mcp__*`, do not auto-approve. A write of a
-critical path, a policy path, a git directory, or client config that
-can run commands does not auto-approve at any ceiling. Path resolution
-follows dangling links with a depth cap; a loop or ambiguous target
-refuses auto-approval.
+`WebSearch`, `Task`, and `mcp__*`, do not auto-approve.
 
 A ceiling auto-approval whose audit row cannot be written is a deny.
 The in-memory mirror records the row only after the append succeeds,

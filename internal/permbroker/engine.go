@@ -2394,25 +2394,6 @@ func toolPaths(raw json.RawMessage) []string {
 	return out
 }
 
-func globPatternPath(raw json.RawMessage) string {
-	if len(bytes.TrimSpace(raw)) == 0 {
-		return ""
-	}
-	var obj map[string]any
-	if err := json.Unmarshal(raw, &obj); err != nil {
-		return ""
-	}
-	s, _ := obj["pattern"].(string)
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return ""
-	}
-	if filepath.IsAbs(s) || strings.Contains(s, "..") {
-		return s
-	}
-	return ""
-}
-
 // allowByCeiling records one auto-approval. The audit row carries the
 // source, the final level, and the ceiling. A missing or failed audit
 // write denies. The human ask path does not use this function.

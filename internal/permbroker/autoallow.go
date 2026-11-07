@@ -37,7 +37,8 @@ func autoAllowOK(in inspected) bool {
 // including at a critical ceiling. A git form that runs a command, a
 // compound part with no known level, a git-risk, a policy path, an
 // unresolved path, a git-directory write, and a client-config write do
-// not match at any ceiling.
+// not match at any ceiling. Path classes, glob escapes, and git place
+// checks are ceilingPathsRefuse. That is the only path decision.
 func (e *Engine) ceilingMatch(req Request, in inspected) (Level, bool) {
 	if e == nil || e.brokerMode != "hook" {
 		return "", false
@@ -58,19 +59,7 @@ func (e *Engine) ceilingMatch(req Request, in inspected) (Level, bool) {
 	if in.GitRisk != "" || in.GitReason != "" {
 		return "", false
 	}
-	if e.policyPathBlocked(req, in) {
-		return "", false
-	}
-	if ceilingProtectedRead(in) {
-		return "", false
-	}
-	if ceilingPathUnresolved(req, in) {
-		return "", false
-	}
-	if ceilingGitSensitiveWrite(req, in) {
-		return "", false
-	}
-	if ceilingClientConfigWrite(req, in) {
+	if e.ceilingPathsRefuse(req, in) {
 		return "", false
 	}
 	if !e.ceilingRequestEligible(req, in) {
@@ -266,27 +255,6 @@ func (e *Engine) ceilingToolEligible(req Request, in inspected) bool {
 	if !ok {
 		return false
 	}
-	if e.policyPathBlocked(req, in) {
-		return false
-	}
-	paths := toolPaths(req.ToolInput)
-	if normTool(req.ToolName) == "glob" {
-		if p := globPatternPath(req.ToolInput); p != "" {
-			paths = append(paths, p)
-		}
-	}
-	ws := req.Workspace
-	if ws == "" {
-		ws = req.Cwd
-	}
-	if !ceilingPathsInside(paths, req.Cwd, ws) {
-		return false
-	}
-	for _, p := range paths {
-		if protectedPath(p) {
-			return false
-		}
-	}
 	switch rule.level {
 	case LevelLow, LevelMedium:
 	default:
@@ -294,38 +262,6 @@ func (e *Engine) ceilingToolEligible(req Request, in inspected) bool {
 	}
 	if rule.write && (in.Level == LevelCritical || e.criticalTouched(req, in)) {
 		return false
-	}
-	return true
-}
-
-// ceilingProtectedRead refuses an allowlisted read of a protected path.
-// A protected write is the critical-path case and is left to the sole-reason
-// check. A read is not that case.
-func ceilingProtectedRead(in inspected) bool {
-	lists := [][]string{in.Argv}
-	for _, p := range in.Parts {
-		lists = append(lists, p.Argv)
-	}
-	if len(lists) == 1 && len(lists[0]) == 0 {
-		lists[0] = strings.Fields(in.Raw)
-	}
-	for _, argv := range lists {
-		if len(argv) == 0 || !mentionsProtected(argv) || protectedWrite(argv) {
-			continue
-		}
-		return true
-	}
-	return false
-}
-
-func ceilingPathsInside(paths []string, cwd, ws string) bool {
-	if strings.TrimSpace(ws) == "" || len(paths) == 0 {
-		return false
-	}
-	for _, p := range paths {
-		if strings.TrimSpace(p) == "" || !resolvesInside(p, cwd, ws) {
-			return false
-		}
 	}
 	return true
 }
@@ -368,18 +304,6 @@ func ceilingCompoundShape(in inspected) bool {
 		}
 	}
 	return strings.Contains(in.Raw, "\n")
-}
-
-// policyPathBlocked refuses a call that names a policy file.
-// The path and its parent directories are resolved the same way a
-// critical path is resolved, so a link to a policy file is refused.
-// Critical paths already raise the level. This also refuses the call
-// when the ceiling is critical.
-func (e *Engine) policyPathBlocked(req Request, in inspected) bool {
-	if e == nil || len(e.policyPaths) == 0 {
-		return false
-	}
-	return hitsCriticalWith(req, in, e.policyPaths, e.critEnvLocked(req.BotID))
 }
 
 // ceilingGitExecutes refuses git argv that takes or runs a command.

@@ -407,22 +407,42 @@ These are never auto-approved: a deny rule, an ask rule, an unclassified
 command, a parse error, a malformed or ambiguous command, a broker
 error, a compound command with a part that has no known level, a
 git-risk or a baseline drift, and a call that names the local or managed
-policy file. The policy-file check resolves the path and its parent
-directories the same way a critical path is resolved, including a link
-whose target is a policy file. That refusal holds at a critical ceiling.
-Path resolution follows dangling links with a depth-capped readlink
-loop on the path and each parent. Hitting the cap, a loop, or an
-ambiguous target refuses auto-approval.
+policy file. See [Critical ceiling](#critical-ceiling) for the path
+resolver and for what a critical ceiling still auto-approves.
 
-Writes to a git directory (a `.git` path component, a file named `.git`,
-or a gitdir lookalike) are not auto-approved at any ceiling. Hook-path
-git operations stay on the critical sole-reason path.
+## Critical ceiling
 
-Writes to client config that can run commands are not auto-approved at
-any ceiling: `.grok/` (including `settings.json`), `.claude/`,
-`.vscode/tasks.json`, `.vscode/settings.json`, `.vscode/launch.json`,
-`.idea/runConfigurations/`, `.idea/workspace.xml`, `.envrc` and `.env`
-loader files, and `.devcontainer/`.
+One resolver walks every ceiling path. It starts at the real workspace
+root, or at the resolved working directory, and resolves each symlink
+target against the parent it has already resolved. The hop cap is 40.
+A seen-set refuses a loop. A dangling symlink is an error. A missing
+final component that is not a symlink is a new file and stays eligible
+when the rest of the checks pass. Any walk error means the request is
+not eligible for ceiling auto-approval.
+
+The spelled path and the resolved target are both checked. If either
+one matches, the ceiling does not auto-approve at any level, including
+critical:
+
+- outside the workspace
+- a protected path, compared case-insensitively
+- a write of a path on the critical list
+- the local or managed policy file, including a link to that file
+- a git-sensitive path: any `.git` component (case-folded), a
+  `objects`, `refs`, `hooks`, or `modules` component, or a final name
+  of `HEAD`, `config`, `packed-refs`, `commondir`, `config.worktree`,
+  `gitdir`, or `attributes` (case-folded). This does not wait until the
+  directory already contains `HEAD`, `objects`, or `refs`
+- client config that can run commands (case-folded): `.grok/`,
+  `.claude/`, `.vscode/tasks.json`, `.vscode/settings.json`,
+  `.vscode/launch.json`, `.idea/runConfigurations/`,
+  `.idea/workspace.xml`, `.envrc` and `.env` loader files, and
+  `.devcontainer/`
+
+A Glob `pattern` that contains `..` or `{`, starts with `~`, or is an
+absolute path is refused before that walk. `git -C`, `--git-dir`, and
+git whose working directory is not the workspace root are not
+auto-approved. `>/dev/null` and `2>&1` stay eligible.
 
 A hard ask or a request that is not eligible does not auto-approve,
 including at a critical ceiling, unless the only reason is the critical
@@ -433,11 +453,13 @@ non-shell path outside the workspace, and any other ineligible reason.
 A credential command whose only reason is the critical level can
 auto-approve when the ceiling is exactly critical. Combined with another
 reason, it asks. A critical ceiling auto-approves hook-path git
-operations and credential printing (for example `gh auth token`). The
-git forms that run a command are refused on the ceiling side. The
-classifier is unchanged, so a rule or a task grant
-keeps its current eligibility when no ceiling applies. The ceiling does
-not use the Linux-only allow choke that saved rules and task grants use.
+operations (a git write whose spelled path and resolved target are both
+under `.git/hooks`) and credential printing (for example `gh auth token`).
+A tool write of a hook still asks. The git forms that run a command are
+refused on the ceiling side. The classifier is unchanged, so a rule or
+a task grant keeps its current eligibility when no ceiling applies. The
+ceiling does not use the Linux-only allow choke that saved rules and
+task grants use.
 
 Non-shell tools use this table. A path is `file_path`, `path`, or
 `notebook_path`. Every path must be inside the workspace. No path,
@@ -447,8 +469,8 @@ table does not auto-approve.
 
 | Tool | Level | Auto-approves when |
 | --- | --- | --- |
-| `Read`, `Glob`, `Grep` | low | every path is inside the workspace and is not protected or a policy file. A path on the critical list is critical and needs an exact critical ceiling. An absolute Glob `pattern`, or one containing `..`, is checked the same way |
-| `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | medium | every path is inside the workspace and is not protected, a policy file, a critical path, a git directory, or client config that can run commands |
+| `Read`, `Glob`, `Grep` | low | every path is inside the workspace and is not protected or a policy file. A path on the critical list is critical and needs an exact critical ceiling. A Glob `pattern` that contains `..` or `{`, starts with `~`, or is absolute does not auto-approve |
+| `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | medium | every path is inside the workspace and is not protected, a policy file, a critical path, git-sensitive, or client config that can run commands. The spelled path and the resolved target are both checked |
 | `WebFetch`, `WebSearch`, `Task`, `mcp__*`, any other tool | none | never |
 
 A wildcard key such as `*`, a key that is not a UUID, an empty value,

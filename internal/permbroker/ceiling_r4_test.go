@@ -45,9 +45,7 @@ func TestCeilingDanglingLinkAsks(t *testing.T) {
 		wantAsk(t, evalWrite(e, ceiling, ws, ws, "Edit", link))
 		wantAsk(t, evalWrite(e, ceiling, ws, ws, "Write", filepath.Join(dirlink, "f")))
 		wantCeilingAllow(t, evalWrite(e, ceiling, ws, ws, "Write", inside))
-		if ceiling != LevelLow {
-			wantCeilingAllow(t, evalWrite(e, ceiling, ws, ws, "Write", insideLink))
-		}
+		wantAsk(t, evalWrite(e, ceiling, ws, ws, "Write", insideLink))
 	}
 }
 

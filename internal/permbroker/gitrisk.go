@@ -222,7 +222,73 @@ func scanNestedGitDirs(ws string, seen map[string]bool, homes []string) string {
 			return why
 		}
 	}
+	if why := scanLooseGitDirs(ws, seen, homes); why != "" {
+		return why
+	}
 	return ""
+}
+
+// scanLooseGitDirs scans a nested git dir or gitfile that is not the
+// workspace root and is not listed in .gitmodules. The walk does not
+// enter a .git directory. The file cap is gitAttrMaxFiles.
+func scanLooseGitDirs(ws string, seen map[string]bool, homes []string) string {
+	ws = filepath.Clean(strings.TrimSpace(ws))
+	if ws == "" {
+		return ""
+	}
+	st, err := os.Stat(ws)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ""
+		}
+		return "cap"
+	}
+	if !st.IsDir() {
+		return ""
+	}
+	n := 0
+	var why string
+	_ = filepath.WalkDir(ws, func(path string, d iofs.DirEntry, err error) error {
+		if err != nil || why != "" {
+			why = "cap"
+			return iofs.SkipAll
+		}
+		rel, relErr := filepath.Rel(ws, path)
+		if relErr != nil {
+			why = "cap"
+			return iofs.SkipAll
+		}
+		depth := 0
+		if rel != "." {
+			depth = strings.Count(rel, string(os.PathSeparator))
+		}
+		if d.Name() == ".git" && rel != ".git" {
+			n++
+			if n > gitAttrMaxFiles {
+				why = "cap"
+				return iofs.SkipAll
+			}
+			if w := scanWorkTreeGit(filepath.Dir(path), seen, homes); w != "" {
+				why = w
+				return iofs.SkipAll
+			}
+			if d.IsDir() {
+				return iofs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return iofs.SkipDir
+			}
+			if depth > gitAttrMaxDepth {
+				why = "cap"
+				return iofs.SkipDir
+			}
+		}
+		return nil
+	})
+	return why
 }
 
 func scanGitdirPointer(path, base string, seen map[string]bool, homes []string) string {
