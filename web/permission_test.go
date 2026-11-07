@@ -147,6 +147,19 @@ if (walk(q5,[]).some(n=>n.tag==="img"||n.tag==="script"||n.tag==="html")) throw 
 if (!textOf(q5).includes("<img src=x>") || !textOf(q5).includes("<script>") || !textOf(q5).includes("<i>d</i>")) throw new Error("question text dropped");
 if (!textOf(cardOf("p1")).includes("ship the plan")) throw new Error("plan dropped");
 if (buttons(cardOf("p1")).map(b=>b.textContent).join(",")!=="Allow once,Deny") throw new Error("plan buttons");
+const tail = "TAIL-" + String.fromCharCode(0xe9) + "-END";
+const longBody = "x".repeat(2100) + tail;
+showPermissionRequest({id:"ci1", run_id:"run-1", tool:"create_issue", arguments:{repo:"acme/widgets", title:"Empty", title_len:5, body:longBody, body_len:longBody.length}, deadline:future, session_allowed:false}, "run-1");
+showPermissionRequest({id:"cc1", run_id:"run-1", tool:"create_comment", arguments:{repo:"acme/widgets", number:7, target_kind:"issue", target_title:"Empty state", body:longBody, body_len:longBody.length}, deadline:future, session_allowed:false}, "run-1");
+showPermissionRequest({id:"cp1", run_id:"run-1", tool:"create_pr", arguments:{repo:"acme/widgets", head:"feature", base:"main", title:"Add", draft:true, body:longBody, body_len:longBody.length}, deadline:future, session_allowed:false}, "run-1");
+const ci = cardOf("ci1");
+const cc = cardOf("cc1");
+const cp = cardOf("cp1");
+if (!textOf(ci).includes(tail) || !textOf(ci).includes("acme/widgets") || !textOf(ci).includes("Empty")) throw new Error("issue card hid the body");
+if (textOf(ci).includes("clipped at")) throw new Error("issue card clipped the body");
+if (!textOf(cc).includes(tail) || !textOf(cc).includes("Empty state") || !textOf(cc).includes("7")) throw new Error("comment card hid the body");
+if (!textOf(cp).includes(tail) || !textOf(cp).includes("feature")) throw new Error("pull request card hid the body");
+if (textOf(ci).includes("<script>") && walk(ci, []).some(n => n.tag === "script")) throw new Error("issue card became markup");
 showPermissionDecision({id:"q1", decision:"answer", source:"ui", tool:"AskUserQuestion", kind:"question"});
 setTimeout(()=>{
   let code = 0;

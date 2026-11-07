@@ -66,6 +66,9 @@ type Config struct {
 	// Window scopes an AccessWrite proxy to one approved route. An empty
 	// window refuses every request. AccessRead ignores it.
 	Window Window
+	// GitOnly limits a read proxy to git upload-pack and GET /repos/{owner}/{repo}.
+	// The zero value forwards the read API routes as well. The jail socket sets it.
+	GitOnly bool
 }
 
 // Window is the single owner and repository a write proxy may use.
@@ -118,6 +121,7 @@ type Proxy struct {
 	run     string
 	gate    string
 	window  Window
+	gitOnly bool
 	dir     string
 	sock    string
 	unixLn  net.Listener
@@ -164,6 +168,7 @@ func New(cfg Config) (*Proxy, error) {
 		audit:   cfg.Audit,
 		gate:    gate,
 		window:  cfg.Window,
+		gitOnly: cfg.GitOnly,
 		client: &http.Client{
 			Transport: lockedTransport(gitBase, apiBase),
 			CheckRedirect: func(*http.Request, []*http.Request) error {
@@ -442,7 +447,7 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, requireGate bool) 
 		return
 	}
 	write := isGenuineWrite(route, method)
-	if !accessOK(p.access, route, r.Method, p.window) {
+	if !accessOK(p.access, route, r.Method, p.window, p.gitOnly) {
 		reason := "method"
 		if r.Method == http.MethodGet || r.Method == http.MethodHead {
 			reason = "route"
@@ -652,14 +657,14 @@ func upstreamAuth(service, tok string) string {
 	return "Basic " + base64.StdEncoding.EncodeToString([]byte(raw))
 }
 
-func accessOK(access Access, route Route, method string, win Window) bool {
+func accessOK(access Access, route Route, method string, win Window, gitOnly bool) bool {
 	if access == AccessWrite {
 		return writeAccess(route, method, win)
 	}
-	return readAccess(route, method)
+	return readAccess(route, method, gitOnly)
 }
 
-func readAccess(route Route, method string) bool {
+func readAccess(route Route, method string, gitOnly bool) bool {
 	if route.Service == "github" {
 		switch gitTail(route.Path) {
 		case "info/refs":
@@ -673,7 +678,15 @@ func readAccess(route Route, method string) bool {
 	if route.Service != "api" || method != http.MethodGet {
 		return false
 	}
+	if gitOnly {
+		return repoRootPath(route.Path)
+	}
 	return apiReadPath(route.Path)
+}
+
+func repoRootPath(path string) bool {
+	parts := splitParts(path)
+	return len(parts) == 3 && parts[0] == "repos"
 }
 
 func writeAccess(route Route, method string, win Window) bool {

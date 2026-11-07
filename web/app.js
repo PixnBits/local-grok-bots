@@ -1795,26 +1795,40 @@ function fillCardBody(body, payload) {
     pre.textContent = commits;
     body.append(pre);
     body.append(el("div", "card-note", "Every push asks. Session approval does not apply. Default branch, force and tags are refused before this card."));
-  } else if (tool === "create_pr") {
-    const head = args.head == null ? "" : String(args.head);
-    const baseName = args.base == null ? "" : String(args.base);
-    addKV(body, "Branches", head + " → " + baseName);
-    addKV(body, "Title", args.title == null ? "" : String(args.title));
-    addKV(body, "Draft", args.draft ? "yes" : "no");
-    let bodyText = args.body == null ? "" : String(args.body);
-    const clipped = bodyText.length > 2000;
-    if (clipped) bodyText = bodyText.slice(0, 2000);
+  } else if (tool === "create_pr" || tool === "create_issue" || tool === "create_comment") {
+    addKV(body, "Repository", args.repo == null ? "" : String(args.repo));
+    if (tool === "create_pr") {
+      const head = args.head == null ? "" : String(args.head);
+      const baseName = args.base == null ? "" : String(args.base);
+      addKV(body, "Branches", head + " → " + baseName);
+      addKV(body, "Draft", args.draft ? "yes" : "no");
+    }
+    if (tool === "create_comment") {
+      addKV(body, "Number", args.number == null ? "" : String(args.number));
+      const kind = args.target_kind == null ? "" : String(args.target_kind);
+      const target = args.target_title == null ? "" : String(args.target_title);
+      addKV(body, "Target", (kind ? kind + " · " : "") + target);
+      if (args.target_title_clipped) {
+        addKV(body, "Target title length", args.target_title_len == null ? "" : String(args.target_title_len));
+        body.append(el("div", "card-note", "Target title clipped. The comment body below is complete."));
+      }
+    }
+    if (tool !== "create_comment") addKV(body, "Title", args.title == null ? "" : String(args.title));
+    const bodyText = args.body == null ? "" : String(args.body);
+    const bodyLen = args.body_len == null ? bodyText.length : args.body_len;
+    addKV(body, "Body length", String(bodyLen));
     const pre = el("pre", "card-pre");
     pre.textContent = bodyText;
     body.append(pre);
-    if (clipped) body.append(el("div", "card-note", "Body preview · clipped at 2,000 characters"));
-    body.append(el("div", "card-note", "Every pull request asks. Nothing is sent to GitHub until you allow it."));
+    if (tool === "create_issue") body.append(el("div", "card-note", "Every issue asks. Nothing is sent to GitHub until you allow it."));
+    else if (tool === "create_comment") body.append(el("div", "card-note", "Every comment asks. Nothing is sent to GitHub until you allow it."));
+    else body.append(el("div", "card-note", "Every pull request asks. Nothing is sent to GitHub until you allow it."));
   } else if (tool === "Bash") {
     body.append(el("div", "card-note", "Denied automatically when the timer runs out."));
   }
   const argsPre = el("pre", "perm-args");
   argsPre.textContent = permissionArgsText(payload ? payload.arguments : "");
-  if (tool === "git_push" || tool === "create_pr") argsPre.className = "perm-args sr";
+  if (tool === "git_push" || tool === "create_pr" || tool === "create_issue" || tool === "create_comment") argsPre.className = "perm-args sr";
   body.append(argsPre);
 }
 function showPermissionRequest(payload, runId) {
@@ -5344,7 +5358,7 @@ function toolCallLabel(tool, args) {
   else if (typeof a.path === "string" && a.path) arg = a.path;
   else if (typeof a.url === "string" && a.url) arg = a.url;
   if (arg.length > 80) arg = arg.slice(0, 77) + "…";
-  if (name === "git_push" || name === "create_pr") return arg ? name + " " + arg : name;
+  if (name === "git_push" || name === "create_pr" || name === "create_issue" || name === "create_comment") return arg ? name + " " + arg : name;
   return arg ? name + "(" + arg + ")" : name;
 }
 
@@ -5354,6 +5368,8 @@ function cardEyebrow(payload, botName) {
   if (p.kind === "question") return "QUESTION FROM " + (botName ? String(botName) : "BOT");
   if (tool === "git_push") return "APPROVAL REQUIRED · GIT_PUSH";
   if (tool === "create_pr") return "APPROVAL REQUIRED · CREATE_PR";
+  if (tool === "create_issue") return "APPROVAL REQUIRED · CREATE_ISSUE";
+  if (tool === "create_comment") return "APPROVAL REQUIRED · CREATE_COMMENT";
   if (tool === "ExitPlanMode") return "PERMISSION NEEDED · EXITPLANMODE";
   return "PERMISSION NEEDED";
 }
@@ -5369,6 +5385,12 @@ function cardTitle(payload) {
     return "Push commits to " + repo;
   }
   if (tool === "create_pr") return "Open a pull request" + (args.title ? ": " + String(args.title) : "");
+  if (tool === "create_issue") return "Open an issue" + (args.title ? ": " + String(args.title) : "");
+  if (tool === "create_comment") {
+    const n = args.number == null || args.number === "" ? "" : "#" + String(args.number);
+    const title = args.target_title ? ": " + String(args.target_title) : "";
+    return "Comment on " + (n || "an issue") + title;
+  }
   if (tool === "ExitPlanMode") return "Approve the plan (ExitPlanMode)";
   return "Allow " + tool;
 }

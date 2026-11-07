@@ -428,6 +428,33 @@ func (b *Broker) Record(req Request, decision, source, rule string) {
 	b.emit(req, decision, source, rule)
 }
 
+// cardArguments is what the approval card shows. Issue, comment, and pull
+// request cards clone the raw arguments so the body is not clipped. The
+// audit log still redacts. Any other tool keeps the redacted value. A clone
+// failure falls back to that redacted value.
+func cardArguments(tool string, args map[string]any) any {
+	shown := audit.RedactValue(args)
+	switch tool {
+	case "create_issue", "create_comment", "create_pr":
+		if cloned, err := cloneJSONMap(args); err == nil {
+			return cloned
+		}
+	}
+	return shown
+}
+
+func cloneJSONMap(args map[string]any) (map[string]any, error) {
+	b, err := json.Marshal(args)
+	if err != nil {
+		return nil, err
+	}
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil || out == nil {
+		return nil, errors.New("clone")
+	}
+	return out, nil
+}
+
 func (b *Broker) canUseTool(ctx context.Context, pol policy.Permission, req Request, rule string, qs []Question) Outcome {
 	question := qs != nil
 	if question {
@@ -463,7 +490,7 @@ func (b *Broker) canUseTool(ctx context.Context, pol policy.Permission, req Requ
 		"run_id":          req.RunID,
 		"bot_id":          req.BotID,
 		"tool":            req.Tool,
-		"arguments":       audit.RedactValue(req.Args),
+		"arguments":       cardArguments(req.Tool, req.Args),
 		"deadline":        deadline.UTC().Format(time.RFC3339Nano),
 		"session_allowed": sessionOK,
 	}

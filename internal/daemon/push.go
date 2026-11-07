@@ -176,7 +176,16 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 		Kind: github.WindowPush, Owner: owner, Repo: repo, Branch: branch, Default: def, Old: old,
 	})
 	if err != nil {
-		return a.pushDenied(bot, owner, repo, claimedFrom, "proxy unavailable")
+		switch err.Error() {
+		case "missing grant":
+			return a.pushDenied(bot, owner, repo, claimedFrom, "github grant off")
+		case "allowlist":
+			return a.pushDenied(bot, owner, repo, claimedFrom, "allowlist")
+		case "root requires bwrap":
+			return a.pushDenied(bot, owner, repo, claimedFrom, "root requires bwrap")
+		default:
+			return a.pushDenied(bot, owner, repo, claimedFrom, "proxy unavailable")
+		}
 	}
 	defer closeWrite()
 	remote, err := proxyGitURL(base, owner, repo)

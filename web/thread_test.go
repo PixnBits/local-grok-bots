@@ -28,6 +28,8 @@ func TestThreadStatic(t *testing.T) {
 		"QUESTION FROM ",
 		"APPROVAL REQUIRED · GIT_PUSH",
 		"APPROVAL REQUIRED · CREATE_PR",
+		"APPROVAL REQUIRED · CREATE_ISSUE",
+		"APPROVAL REQUIRED · CREATE_COMMENT",
 		"PERMISSION NEEDED · EXITPLANMODE",
 		"Cancelled · run stopped by you",
 		"Allowed once · `",
@@ -35,9 +37,11 @@ func TestThreadStatic(t *testing.T) {
 		"Denied · `",
 		"Expired · denied after ",
 		"Denied automatically when the timer runs out.",
-		"Body preview · clipped at 2,000 characters",
 		"Every push asks. Session approval does not apply.",
 		"Every pull request asks. Nothing is sent to GitHub until you allow it.",
+		"Every issue asks. Nothing is sent to GitHub until you allow it.",
+		"Every comment asks. Nothing is sent to GitHub until you allow it.",
+		"Target title clipped. The comment body below is complete.",
 		"Couldn't send your answer. The daemon didn't respond. Try again.",
 		"Open in Log",
 		"Try again",
@@ -340,6 +344,12 @@ check("live-blank-cmd", ctx.liveToolLine("Bash", {command: "   ", cmd: "pwd"}, t
 check("eye-q", ctx.cardEyebrow({kind: "question", tool: "AskUserQuestion"}, "Recipe Helper") === "QUESTION FROM Recipe Helper");
 check("eye-push", ctx.cardEyebrow({tool: "git_push"}, "") === "APPROVAL REQUIRED · GIT_PUSH");
 check("eye-pr", ctx.cardEyebrow({tool: "create_pr"}, "") === "APPROVAL REQUIRED · CREATE_PR");
+check("eye-issue", ctx.cardEyebrow({tool: "create_issue"}, "") === "APPROVAL REQUIRED · CREATE_ISSUE");
+check("eye-comment", ctx.cardEyebrow({tool: "create_comment"}, "") === "APPROVAL REQUIRED · CREATE_COMMENT");
+check("title-issue", ctx.cardTitle({tool: "create_issue", arguments: {title: "Empty"}}) === "Open an issue: Empty");
+check("title-comment", ctx.cardTitle({tool: "create_comment", arguments: {number: 7, target_title: "Empty state"}}) === "Comment on #7: Empty state");
+check("label-issue", ctx.toolCallLabel("create_issue", {repo: "acme/widgets"}) === "create_issue acme/widgets");
+check("label-comment", ctx.toolCallLabel("create_comment", {repo: "acme/widgets"}) === "create_comment acme/widgets");
 check("eye-plan", ctx.cardEyebrow({tool: "ExitPlanMode"}, "") === "PERMISSION NEEDED · EXITPLANMODE");
 check("eye-bash", ctx.cardEyebrow({tool: "Bash"}, "") === "PERMISSION NEEDED");
 function rec(kind, tool, time, dur) { return ctx.cardRecordText({kind: kind, toolLabel: tool, timeLabel: time, duration: dur}); }

@@ -66,7 +66,7 @@ func TestGitHubIssueAndPRTools(t *testing.T) {
 				return
 			}
 			if mode.Load() == "huge" {
-				fmt.Fprintf(w, `[{"number":1,"title":"Huge body","state":"open","body":%q,"html_url":"https://github.com/acme/widgets/issues/1","user":{"login":"ada"}}]`, strings.Repeat("B", 3000))
+				fmt.Fprintf(w, `[{"number":1,"title":"Huge body","state":"open","body":%q,"html_url":"https://github.com/acme/widgets/issues/1","user":{"login":"ada"}}]`, strings.Repeat("B", 5000))
 				return
 			}
 			if mode.Load() == "wide" {
@@ -81,7 +81,7 @@ func TestGitHubIssueAndPRTools(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/7":
 			body := "the list is blank"
 			if mode.Load() == "huge" {
-				body = strings.Repeat("B", 3000)
+				body = strings.Repeat("B", 5000)
 			}
 			fmt.Fprintf(w, `{"number":7,"title":"Empty state","state":"open","body":%q,"html_url":"https://github.com/acme/widgets/issues/7","user":{"login":"ada"}}`, body)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/7/comments":
@@ -103,9 +103,13 @@ func TestGitHubIssueAndPRTools(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/pulls/7/comments":
 			fmt.Fprintf(w, `[{"user":{"login":"bea"},"path":"a.go","line":3,"body":"nit","diff_hunk":"@@ context"}]`)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/check-runs"):
+			if page >= 2 {
+				fmt.Fprintf(w, `{"total_count":12,"check_runs":[{"name":"lint-page-2","status":"completed","conclusion":"failure"}]}`)
+				return
+			}
 			fmt.Fprintf(w, `{"total_count":1,"check_runs":[{"name":"ci","status":"completed","conclusion":"success"}]}`)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/status"):
-			fmt.Fprintf(w, `{"state":"success","statuses":[{"context":"ci","state":"success"}]}`)
+			fmt.Fprintf(w, `{"state":"failure","statuses":[{"context":"ci/legacy-required","state":"failure"}]}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/repos/acme/widgets/issues":
 			w.WriteHeader(http.StatusCreated)
 			fmt.Fprintf(w, `{"number":4,"html_url":"https://github.com/acme/widgets/issues/4"}`)
@@ -188,6 +192,17 @@ func TestGitHubIssueAndPRTools(t *testing.T) {
 			t.Fatalf("audit %s %s missing\n%s", action, decision, raw)
 		}
 	}
+	countMethod := func(method string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		n := 0
+		for _, h := range seen {
+			if h.method == method {
+				n++
+			}
+		}
+		return n
+	}
 
 	t.Run("list allowed", func(t *testing.T) {
 		mode.Store("ok")
@@ -245,7 +260,7 @@ func TestGitHubIssueAndPRTools(t *testing.T) {
 			t.Fatal("read_pr opened a card")
 		}
 		mark(t, out)
-		for _, want := range []string{"Fixes the empty state.", "a.go", "+new", "CHANGES_REQUESTED", "rename the helper", "nit", `"conclusion":"success"`} {
+		for _, want := range []string{"Fixes the empty state.", "a.go", "+new", "CHANGES_REQUESTED", "rename the helper", "nit", `"conclusion":"success"`, "please fix", "ci/legacy-required", `"combined_state":"failure"`, `"source":"status"`} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("missing %q in %s", want, out)
 			}
@@ -298,7 +313,7 @@ func TestGitHubIssueAndPRTools(t *testing.T) {
 				Number int `json:"number"`
 			} `json:"issues"`
 		}
-		if json.Unmarshal([]byte(out), &got) != nil || !got.Truncated || len(got.Issues) != 20 {
+		if json.Unmarshal([]byte(out), &got) != nil || !got.Truncated || len(got.Issues) != 10 || !strings.Contains(out, `"next_page":2`) {
 			t.Fatalf("capped list %d truncated %v %s", len(got.Issues), got.Truncated, out)
 		}
 		mu.Lock()
@@ -309,7 +324,7 @@ func TestGitHubIssueAndPRTools(t *testing.T) {
 			}
 		}
 		mu.Unlock()
-		if pages != 2 {
+		if pages != 1 {
 			t.Fatalf("pages %d", pages)
 		}
 		mark(t, out)
@@ -330,7 +345,7 @@ func TestGitHubIssueAndPRTools(t *testing.T) {
 			Truncated bool  `json:"truncated"`
 			Comments  []any `json:"comments"`
 		}
-		if json.Unmarshal([]byte(out), &got) != nil || !got.Truncated || len(got.Comments) != 20 {
+		if json.Unmarshal([]byte(out), &got) != nil || !got.Truncated || len(got.Comments) != 10 || !strings.Contains(out, `"next_page":2`) {
 			t.Fatalf("comments %d %v %s", len(got.Comments), got.Truncated, out)
 		}
 		mu.Lock()
@@ -341,7 +356,7 @@ func TestGitHubIssueAndPRTools(t *testing.T) {
 			}
 		}
 		mu.Unlock()
-		if pages != 2 {
+		if pages != 1 {
 			t.Fatalf("comment pages %d", pages)
 		}
 	})
@@ -354,7 +369,7 @@ func TestGitHubIssueAndPRTools(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(out, "Huge body") || strings.Contains(out, strings.Repeat("B", 1025)) || len(out) > 8192 || !strings.Contains(out, `"truncated":true`) {
+		if !strings.Contains(out, "Huge body") || strings.Contains(out, strings.Repeat("B", 4097)) || !strings.Contains(out, `"body_total":5000`) || len(out) > githubSizeCapBytes || !strings.Contains(out, `"truncated":true`) {
 			t.Fatalf("len %d truncated missing or oversized", len(out))
 		}
 		mark(t, out)
@@ -368,7 +383,7 @@ func TestGitHubIssueAndPRTools(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(out, "Issue 1") || len(out) > 8192 || !strings.Contains(out, `"truncated":true`) {
+		if !strings.Contains(out, "Issue 1") || strings.Contains(out, "Issue 25") || len(out) > githubSizeCapBytes || !strings.Contains(out, `"truncated":true`) || !strings.Contains(out, `"next_page":2`) {
 			t.Fatalf("byte cap len %d", len(out))
 		}
 		mark(t, out)
@@ -445,7 +460,7 @@ func TestGitHubIssueAndPRTools(t *testing.T) {
 	t.Run("create comment denied", func(t *testing.T) {
 		mode.Store("ok")
 		e := newEnv(t, []string{"acme/widgets"})
-		before := hits.Load()
+		beforePosts := countMethod(http.MethodPost)
 		done := denyCard(e.app, e.bot.ID, "create_comment")
 		_, err := e.app.dispatchTool(t.Context(), e.bot, "create_comment", map[string]any{
 			"repo": "acme/widgets", "number": float64(7), "body": "no",
@@ -453,8 +468,9 @@ func TestGitHubIssueAndPRTools(t *testing.T) {
 		if aerr := <-done; aerr != nil {
 			t.Fatal(aerr)
 		}
-		if err == nil || !strings.Contains(err.Error(), "not approved") || hits.Load() != before {
-			t.Fatalf("deny comment %v hits %d", err, hits.Load()-before)
+		// The title lookup is a read. A denial must not POST.
+		if err == nil || !strings.Contains(err.Error(), "not approved") || countMethod(http.MethodPost) != beforePosts {
+			t.Fatalf("deny comment %v posts %d", err, countMethod(http.MethodPost)-beforePosts)
 		}
 		auditOK(t, e.audit, "github_comment_denied", "deny")
 	})
@@ -502,12 +518,12 @@ func TestGitHubIssueAndPRTools(t *testing.T) {
 		mode.Store("ok")
 		e := newEnv(t, []string{"acme/widgets"})
 		e.app.editPol(func(p *policy.Policy) { p.PromptTimeout = 200 * time.Millisecond })
-		before := hits.Load()
+		beforePosts := countMethod(http.MethodPost)
 		out, err := e.app.dispatchTool(t.Context(), e.bot, "create_comment", map[string]any{
 			"repo": "acme/widgets", "number": float64(7), "body": "too slow",
 		})
-		if err == nil || !strings.Contains(err.Error(), "approval unavailable") || hits.Load() != before {
-			t.Fatalf("timeout %v hits %d %s", err, hits.Load()-before, out)
+		if err == nil || !strings.Contains(err.Error(), "approval unavailable") || countMethod(http.MethodPost) != beforePosts {
+			t.Fatalf("timeout %v posts %d %s", err, countMethod(http.MethodPost)-beforePosts, out)
 		}
 	})
 

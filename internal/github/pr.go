@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -27,10 +29,21 @@ func (e *APIError) Error() string {
 	if e.kind == "status" && e.Status >= 100 && e.Status <= 599 {
 		return fmt.Sprintf("github status %d", e.Status)
 	}
-	if e.kind == "response" {
+	switch e.kind {
+	case "response":
 		return "github response"
+	case "unverified":
+		return "github unverified"
+	case "moved":
+		return "github moved or renamed"
+	default:
+		return "github unavailable"
 	}
-	return "github unavailable"
+}
+
+// Unverified reports that a write was sent and the response could not be checked.
+func (e *APIError) Unverified() bool {
+	return e != nil && e.kind == "unverified"
 }
 
 // PullRequest is the projection returned to the model.
@@ -130,7 +143,11 @@ func CreatePull(ctx context.Context, client *http.Client, rawURL, owner, repo st
 	if err != nil {
 		return PullRequest{}, err
 	}
-	return projectPull(owner, repo, buf, false)
+	got, err := projectPull(owner, repo, buf, false)
+	if err != nil {
+		return PullRequest{}, &APIError{kind: "unverified"}
+	}
+	return got, nil
 }
 
 // GetPull reads one pull request and projects the fields the model may see.
@@ -210,15 +227,31 @@ func doGitHub(ctx context.Context, client *http.Client, method, rawURL string, p
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		if payload != nil && sentUnverified(err) {
+			return nil, &APIError{kind: "unverified"}
+		}
 		return nil, &APIError{kind: "transport"}
 	}
 	defer resp.Body.Close()
 	buf, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
+		if payload != nil {
+			return nil, &APIError{kind: "unverified"}
+		}
 		return nil, &APIError{kind: "transport"}
 	}
 	if resp.StatusCode != want {
 		return nil, &APIError{Status: resp.StatusCode, kind: "status"}
 	}
 	return buf, nil
+}
+
+// sentUnverified is a timeout after the client started the request.
+// A refused connection is not a timeout and stays unavailable.
+func sentUnverified(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
 }

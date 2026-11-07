@@ -13,14 +13,24 @@ import (
 
 // Limits bounds one paged GitHub read. The caller sets every field.
 // PerPage is 1..100 because that is the query the proxy forwards.
+// Page is the first page to request. Zero means page 1.
+// MaxPages is how many pages this call may request, starting at Page.
 type Limits struct {
 	PerPage  int
 	MaxItems int
 	MaxPages int
+	Page     int
 }
 
 func (l Limits) ok() bool {
 	return l.PerPage >= 1 && l.PerPage <= 100 && l.MaxItems >= 1 && l.MaxPages >= 1
+}
+
+func (l Limits) startPage() int {
+	if l.Page < 1 {
+		return 1
+	}
+	return l.Page
 }
 
 // Issue is one open issue. Pull requests are not included.
@@ -67,24 +77,37 @@ type ReviewComment struct {
 }
 
 // Check is one check run or commit status conclusion.
+// Source is check_run or status.
 type Check struct {
 	Name       string
 	Conclusion string
+	Source     string
 }
 
 // PullDetail is what read_pr shows the model.
 type PullDetail struct {
-	URL       string
-	Title     string
-	Body      string
-	State     string
-	Head      string
-	Base      string
-	Files     []PullFile
-	Reviews   []PullReview
-	Comments  []ReviewComment
-	Checks    []Check
-	Truncated bool
+	URL           string
+	Title         string
+	Body          string
+	State         string
+	Head          string
+	Base          string
+	Files         []PullFile
+	Reviews       []PullReview
+	Comments      []ReviewComment
+	Checks        []Check
+	Statuses      []Check
+	CombinedState string
+	Conversation  []IssueComment
+	Truncated     bool
+}
+
+// IssueTarget is the issue or pull request a comment would be attached to.
+type IssueTarget struct {
+	Kind  string
+	Title string
+	State string
+	URL   string
 }
 
 // CreatedIssue is the projection of a created issue.
@@ -222,7 +245,7 @@ func ListOpenIssues(ctx context.Context, client *http.Client, base, owner, repo 
 			}
 			got, n, ok := AcceptIssueURL(owner, repo, wire.HTMLURL)
 			if !ok || n != wire.Number {
-				return false, &APIError{kind: "response"}
+				return false, urlMiss(wire.HTMLURL)
 			}
 			if len(out) >= lim.MaxItems {
 				truncated = true
@@ -278,7 +301,7 @@ func GetIssue(ctx context.Context, client *http.Client, base, owner, repo string
 	}
 	got, n, ok := AcceptIssueURL(owner, repo, wire.HTMLURL)
 	if !ok || n != number {
-		return Issue{}, &APIError{kind: "response"}
+		return Issue{}, urlMiss(wire.HTMLURL)
 	}
 	return Issue{
 		Number: number, Title: wire.Title, State: wire.State, Body: wire.Body, URL: got, User: safeLogin(wire.User.Login),
@@ -333,7 +356,7 @@ func projectComment(owner, repo string, number int, raw []byte) (IssueComment, e
 	}
 	got, ok := AcceptCommentURL(owner, repo, number, wire.ID, wire.HTMLURL)
 	if !ok {
-		return IssueComment{}, &APIError{kind: "response"}
+		return IssueComment{}, urlMiss(wire.HTMLURL)
 	}
 	return IssueComment{ID: wire.ID, User: safeLogin(wire.User.Login), Body: wire.Body, URL: got}, nil
 }
@@ -369,11 +392,15 @@ func ReadPull(ctx context.Context, client *http.Client, base, owner, repo string
 	}
 	got, ok := AcceptPullURL(owner, repo, wire.HTMLURL)
 	if !ok || (wire.State != "open" && wire.State != "closed") || !PullBranch(wire.Head.Ref) || !PullBranch(wire.Base.Ref) || !commitSHA(wire.Head.SHA) {
+		if !ok {
+			return PullDetail{}, urlMiss(wire.HTMLURL)
+		}
 		return PullDetail{}, &APIError{kind: "response"}
 	}
 	out := PullDetail{
 		URL: got, Title: wire.Title, Body: wire.Body, State: wire.State, Head: wire.Head.Ref, Base: wire.Base.Ref,
 		Files: []PullFile{}, Reviews: []PullReview{}, Comments: []ReviewComment{}, Checks: []Check{},
+		Statuses: []Check{}, Conversation: []IssueComment{},
 	}
 	files, fileTrunc, err := listFiles(ctx, client, base, owner, repo, number, lim)
 	if err != nil {
@@ -387,12 +414,19 @@ func ReadPull(ctx context.Context, client *http.Client, base, owner, repo string
 	if err != nil {
 		return PullDetail{}, err
 	}
-	checks, checkTrunc, err := listChecks(ctx, client, base, owner, repo, wire.Head.SHA, lim)
+	checks, err := listChecks(ctx, client, base, owner, repo, wire.Head.SHA, lim)
 	if err != nil {
 		return PullDetail{}, err
 	}
-	out.Files, out.Reviews, out.Comments, out.Checks = files, reviews, comments, checks
-	out.Truncated = fileTrunc || reviewTrunc || commentTrunc || checkTrunc
+	conversation, convTrunc, err := ListIssueComments(ctx, client, base, owner, repo, number, lim)
+	if err != nil {
+		return PullDetail{}, err
+	}
+	out.Files, out.Reviews, out.Comments = files, reviews, comments
+	out.Checks, out.Statuses = checks.Runs, checks.Statuses
+	out.CombinedState = checks.Combined
+	out.Conversation = conversation
+	out.Truncated = fileTrunc || reviewTrunc || commentTrunc || checks.Truncated || convTrunc
 	return out, nil
 }
 
@@ -516,20 +550,31 @@ func listReviewComments(ctx context.Context, client *http.Client, base, owner, r
 	return out, truncated || pageTrunc, nil
 }
 
-func listChecks(ctx context.Context, client *http.Client, base, owner, repo, sha string, lim Limits) ([]Check, bool, error) {
+// checkPage is one page of check runs plus the combined commit statuses.
+// Statuses are always loaded so a legacy required status is not hidden
+// behind a check run.
+type checkPage struct {
+	Runs      []Check
+	Statuses  []Check
+	Combined  string
+	Truncated bool
+}
+
+func listChecks(ctx context.Context, client *http.Client, base, owner, repo, sha string, lim Limits) (checkPage, error) {
 	if !commitSHA(sha) {
-		return nil, false, &APIError{kind: "transport"}
+		return checkPage{}, &APIError{kind: "transport"}
 	}
-	var out []Check
-	truncated := false
-	for page := 1; page <= lim.MaxPages; page++ {
+	var out checkPage
+	start := lim.startPage()
+	for n := 0; n < lim.MaxPages; n++ {
+		page := start + n
 		rawURL, err := apiURL(base, owner, repo, "/commits/"+sha+"/check-runs", pageQuery(page, lim.PerPage, false))
 		if err != nil {
-			return nil, false, err
+			return checkPage{}, err
 		}
 		buf, err := doGitHub(ctx, client, http.MethodGet, rawURL, nil, http.StatusOK)
 		if err != nil {
-			return nil, false, err
+			return checkPage{}, err
 		}
 		var wire struct {
 			Total int `json:"total_count"`
@@ -540,11 +585,11 @@ func listChecks(ctx context.Context, client *http.Client, base, owner, repo, sha
 			} `json:"check_runs"`
 		}
 		if json.Unmarshal(buf, &wire) != nil || wire.Total < 0 {
-			return nil, false, &APIError{kind: "response"}
+			return checkPage{}, &APIError{kind: "response"}
 		}
 		for _, run := range wire.Runs {
-			if len(out) >= lim.MaxItems {
-				truncated = true
+			if len(out.Runs) >= lim.MaxItems {
+				out.Truncated = true
 				break
 			}
 			conclusion := ""
@@ -554,65 +599,64 @@ func listChecks(ctx context.Context, client *http.Client, base, owner, repo, sha
 			if conclusion == "" {
 				conclusion = run.Status
 			}
-			out = append(out, Check{Name: clipPlain(run.Name, 80), Conclusion: safeToken(conclusion)})
+			out.Runs = append(out.Runs, Check{Name: clipPlain(run.Name, 80), Conclusion: safeToken(conclusion), Source: "check_run"})
 		}
-		if len(out) >= lim.MaxItems {
-			truncated = true
+		full := len(wire.Runs) >= lim.PerPage
+		if full || page*lim.PerPage < wire.Total {
+			out.Truncated = true
+		}
+		if len(out.Runs) >= lim.MaxItems || !full {
 			break
 		}
-		if len(wire.Runs) < lim.PerPage || len(out) >= wire.Total {
-			if len(out) < wire.Total {
-				truncated = true
-			}
-			break
-		}
-		if page == lim.MaxPages {
-			truncated = true
-		}
 	}
-	if len(out) == 0 {
-		more, err := listStatuses(ctx, client, base, owner, repo, sha, lim)
-		if err != nil {
-			return nil, false, err
-		}
-		out = more
-		if len(out) >= lim.MaxItems {
-			truncated = true
-			out = out[:lim.MaxItems]
-		}
+	statuses, combined, statusTrunc, err := listStatuses(ctx, client, base, owner, repo, sha)
+	if err != nil {
+		return checkPage{}, err
 	}
-	if out == nil {
-		out = []Check{}
+	out.Statuses = statuses
+	out.Combined = combined
+	if statusTrunc {
+		out.Truncated = true
 	}
-	return out, truncated, nil
+	if out.Runs == nil {
+		out.Runs = []Check{}
+	}
+	return out, nil
 }
 
-func listStatuses(ctx context.Context, client *http.Client, base, owner, repo, sha string, lim Limits) ([]Check, error) {
+func listStatuses(ctx context.Context, client *http.Client, base, owner, repo, sha string) ([]Check, string, bool, error) {
 	rawURL, err := apiURL(base, owner, repo, "/commits/"+sha+"/status", "")
 	if err != nil {
-		return nil, err
+		return nil, "", false, err
 	}
 	buf, err := doGitHub(ctx, client, http.MethodGet, rawURL, nil, http.StatusOK)
 	if err != nil {
-		return nil, err
+		return nil, "", false, err
 	}
 	var wire struct {
+		State    string `json:"state"`
 		Statuses []struct {
 			Context string `json:"context"`
 			State   string `json:"state"`
 		} `json:"statuses"`
 	}
 	if json.Unmarshal(buf, &wire) != nil {
-		return nil, &APIError{kind: "response"}
+		return nil, "", false, &APIError{kind: "response"}
 	}
+	const statusCap = 100
+	truncated := false
 	out := make([]Check, 0, len(wire.Statuses))
 	for _, st := range wire.Statuses {
-		if len(out) >= lim.MaxItems {
+		if len(out) >= statusCap {
+			truncated = true
 			break
 		}
-		out = append(out, Check{Name: clipPlain(st.Context, 80), Conclusion: safeToken(st.State)})
+		out = append(out, Check{Name: clipPlain(st.Context, 80), Conclusion: safeToken(st.State), Source: "status"})
 	}
-	return out, nil
+	if out == nil {
+		out = []Check{}
+	}
+	return out, safeToken(wire.State), truncated, nil
 }
 
 // CreateIssue posts one issue. rawURL is the proxy URL.
@@ -633,11 +677,11 @@ func CreateIssue(ctx context.Context, client *http.Client, rawURL, owner, repo s
 		HTMLURL string `json:"html_url"`
 	}
 	if json.Unmarshal(buf, &wire) != nil {
-		return CreatedIssue{}, &APIError{kind: "response"}
+		return CreatedIssue{}, &APIError{kind: "unverified"}
 	}
 	got, n, ok := AcceptIssueURL(owner, repo, wire.HTMLURL)
 	if !ok || n != wire.Number {
-		return CreatedIssue{}, &APIError{kind: "response"}
+		return CreatedIssue{}, &APIError{kind: "unverified"}
 	}
 	return CreatedIssue{URL: got, Number: n}, nil
 }
@@ -656,11 +700,11 @@ func CreateComment(ctx context.Context, client *http.Client, rawURL, owner, repo
 		HTMLURL string `json:"html_url"`
 	}
 	if json.Unmarshal(buf, &wire) != nil || wire.ID < 1 {
-		return CreatedComment{}, &APIError{kind: "response"}
+		return CreatedComment{}, &APIError{kind: "unverified"}
 	}
 	got, ok := AcceptCommentURL(owner, repo, number, wire.ID, wire.HTMLURL)
 	if !ok {
-		return CreatedComment{}, &APIError{kind: "response"}
+		return CreatedComment{}, &APIError{kind: "unverified"}
 	}
 	return CreatedComment{URL: got, ID: wire.ID}, nil
 }
@@ -668,7 +712,9 @@ func CreateComment(ctx context.Context, client *http.Client, rawURL, owner, repo
 // forPages calls handle once per page. The bool is true when every page was
 // full, so the caller hit the page cap and more results may exist.
 func forPages(ctx context.Context, client *http.Client, lim Limits, rawURL func(page int) (string, error), handle func([]json.RawMessage) (bool, error)) (bool, error) {
-	for page := 1; page <= lim.MaxPages; page++ {
+	start := lim.startPage()
+	for n := 0; n < lim.MaxPages; n++ {
+		page := start + n
 		u, err := rawURL(page)
 		if err != nil {
 			return false, err
@@ -716,6 +762,59 @@ func apiURL(base, owner, repo, tail, query string) (string, error) {
 		u += "?" + query
 	}
 	return u, nil
+}
+
+// LookupTarget reads one issue record. A pull-request html_url is accepted
+// as kind pull so a comment card can name the pull request. GetIssue stays
+// strict and still requires an issue URL.
+func LookupTarget(ctx context.Context, client *http.Client, base, owner, repo string, number int) (IssueTarget, error) {
+	rawURL, err := apiURL(base, owner, repo, "/issues/"+strconv.Itoa(number), "")
+	if err != nil || number < 1 {
+		return IssueTarget{}, &APIError{kind: "transport"}
+	}
+	buf, err := doGitHub(ctx, client, http.MethodGet, rawURL, nil, http.StatusOK)
+	if err != nil {
+		return IssueTarget{}, err
+	}
+	var wire struct {
+		Number  int    `json:"number"`
+		Title   string `json:"title"`
+		State   string `json:"state"`
+		HTMLURL string `json:"html_url"`
+	}
+	if json.Unmarshal(buf, &wire) != nil || wire.Number != number {
+		return IssueTarget{}, &APIError{kind: "response"}
+	}
+	if wire.State != "open" && wire.State != "closed" {
+		return IssueTarget{}, &APIError{kind: "response"}
+	}
+	if got, n, ok := AcceptIssueURL(owner, repo, wire.HTMLURL); ok && n == number {
+		return IssueTarget{Kind: "issue", Title: wire.Title, State: wire.State, URL: got}, nil
+	}
+	if got, ok := AcceptPullURL(owner, repo, wire.HTMLURL); ok {
+		return IssueTarget{Kind: "pull", Title: wire.Title, State: wire.State, URL: got}, nil
+	}
+	return IssueTarget{}, urlMiss(wire.HTMLURL)
+}
+
+// urlMiss is a moved or renamed GitHub URL when the host is github.com,
+// and a response error otherwise.
+func urlMiss(raw string) error {
+	if githubHostURL(raw) {
+		return &APIError{kind: "moved"}
+	}
+	return &APIError{kind: "response"}
+}
+
+func githubHostURL(raw string) bool {
+	if raw == "" || strings.ContainsAny(raw, "\r\n\t\x00 ") || len(raw) > 300 {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || !strings.EqualFold(u.Host, "github.com") || u.User != nil {
+		return false
+	}
+	return true
 }
 
 func safeLogin(s string) string {

@@ -53,12 +53,14 @@ func (a *App) toolCreatePR(ctx context.Context, bot store.Bot, args map[string]a
 		ForceAsk:  true,
 		Workspace: a.ws,
 		Args: map[string]any{
-			"repo":  owner + "/" + repo,
-			"head":  in.Head,
-			"base":  in.Base,
-			"title": in.Title,
-			"draft": in.Draft,
-			"body":  clip(in.Body, 2000),
+			"repo":      owner + "/" + repo,
+			"head":      in.Head,
+			"base":      in.Base,
+			"title":     in.Title,
+			"title_len": len(in.Title),
+			"draft":     in.Draft,
+			"body":      in.Body,
+			"body_len":  len(in.Body),
 		},
 	}))
 	if out.Behavior != "allow" {
@@ -68,11 +70,19 @@ func (a *App) toolCreatePR(ctx context.Context, bot store.Bot, args map[string]a
 		}
 		return a.prDeny(bot, "github_pr_denied", owner, repo, reason)
 	}
+	bot, reason = a.githubLiveWrite(bot, owner, repo)
+	if reason != "" {
+		return a.prDeny(bot, "github_pr_denied", owner, repo, reason)
+	}
+	meta := githubWriteMeta(0, in.Title, in.Body)
+	if err := a.auditGitHubIntent(bot, "github_pr_denied", owner, repo, meta); err != nil {
+		return a.prDeny(bot, "github_pr_denied", owner, repo, "audit")
+	}
 	base, gateSecret, closeWrite, err := a.openGitHubWriteGate(bot, github.Window{
 		Kind: github.WindowPR, Owner: owner, Repo: repo, Branch: in.Head, Base: in.Base,
 	})
 	if err != nil {
-		return a.prDeny(bot, "github_pr_denied", owner, repo, "proxy")
+		return a.prDeny(bot, "github_pr_denied", owner, repo, githubGateReason(err))
 	}
 	defer closeWrite()
 	pctx, pcancel := context.WithTimeout(ctx, 20*time.Second)
@@ -85,15 +95,7 @@ func (a *App) toolCreatePR(ctx context.Context, bot store.Bot, args map[string]a
 		},
 	}
 	pr, err := github.CreatePull(pctx, client, base+"/api/repos/"+owner+"/"+repo+"/pulls", owner, repo, in)
-	if err != nil {
-		return a.prDeny(bot, "github_pr_denied", owner, repo, githubErrReason(err))
-	}
-	text := mustJSON(map[string]string{"html_url": pr.URL})
-	if strings.Contains(text, "\n") || strings.Contains(text, "\r") {
-		return a.prDeny(bot, "github_pr_denied", owner, repo, "github response")
-	}
-	a.auditGitHubDecision(bot, "github_pr_allowed", owner, repo, "allow", "sent")
-	return text, nil
+	return a.finishGitHubWrite(bot, "github_pr_denied", "github_pr_allowed", owner, repo, "", map[string]any{"html_url": pr.URL}, err, meta)
 }
 
 func (a *App) toolPRStatus(ctx context.Context, bot store.Bot, args map[string]any) (string, error) {
@@ -244,11 +246,29 @@ func prDenyText(reason string) string {
 		return "not approved"
 	case "broker":
 		return "approval unavailable"
+	case "audit":
+		return "audit log unavailable"
+	case "github unverified":
+		return "github unverified"
+	case "github moved or renamed":
+		return "github moved or renamed"
 	default:
 		if reason == "github unavailable" || reason == "github response" || strings.HasPrefix(reason, "github status ") {
 			return reason
 		}
 		return "not approved"
+	}
+}
+
+func githubGateReason(err error) string {
+	if err == nil {
+		return "proxy"
+	}
+	switch err.Error() {
+	case "missing grant", "allowlist", "root requires bwrap":
+		return err.Error()
+	default:
+		return "proxy"
 	}
 }
 
@@ -261,25 +281,58 @@ func githubErrReason(err error) string {
 }
 
 func (a *App) auditGitHubDecision(bot store.Bot, action, owner, repo, decision, reason string) {
+	a.auditGitHubExtra(bot, action, owner, repo, decision, reason, nil)
+}
+
+func (a *App) auditGitHubExtra(bot store.Bot, action, owner, repo, decision, reason string, extra map[string]any) {
 	if a == nil {
 		return
 	}
 	if a.audit != nil {
-		a.audit.Write(map[string]any{
-			"bot":      safeAuditID(bot.ID),
-			"run":      safeAuditID(a.loopRunID(bot.ID)),
-			"action":   action,
-			"owner":    owner,
-			"repo":     repo,
-			"decision": decision,
-			"reason":   reason,
-		})
+		a.audit.Write(githubAuditRec(a, bot, action, owner, repo, decision, reason, extra))
 	}
+	a.logGitHub(bot.ID, decision, reason)
+}
+
+// auditGitHubIntent writes the row that must land before a write is sent.
+// A nil or disabled audit log is a no-op. A closed sink returns an error.
+func (a *App) auditGitHubIntent(bot store.Bot, denyAction, owner, repo string, extra map[string]any) error {
+	if a == nil || a.audit == nil || !a.audit.Enabled() {
+		return nil
+	}
+	action := strings.TrimSuffix(denyAction, "_denied") + "_intent"
+	err := a.audit.WriteErr(githubAuditRec(a, bot, action, owner, repo, "intent", "pending", extra))
+	a.logGitHub(bot.ID, "intent", "pending")
+	return err
+}
+
+func (a *App) logGitHub(botID, decision, reason string) {
 	kind := "grant_denied"
-	if decision == "allow" {
+	if decision == "allow" || decision == "unknown" || decision == "intent" {
 		kind = "grant_use"
 	}
-	a.log(bot.ID, kind, map[string]any{"grant": "github", "detail": reason})
+	a.log(botID, kind, map[string]any{"grant": "github", "detail": reason})
+}
+
+func githubAuditRec(a *App, bot store.Bot, action, owner, repo, decision, reason string, extra map[string]any) map[string]any {
+	rec := map[string]any{
+		"bot":      safeAuditID(bot.ID),
+		"run":      safeAuditID(a.loopRunID(bot.ID)),
+		"action":   action,
+		"owner":    owner,
+		"repo":     repo,
+		"decision": decision,
+		"reason":   reason,
+	}
+	for k, v := range extra {
+		switch k {
+		case "body", "title", "patch", "diff_hunk", "message":
+			continue
+		default:
+			rec[k] = v
+		}
+	}
+	return rec
 }
 
 func (a *App) freshBot(bot store.Bot) store.Bot {
