@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net"
@@ -613,6 +615,9 @@ func TestGitHubRound2(t *testing.T) {
 			t.Fatal(err)
 		}
 		raw := readAudit(t, e.audit)
+		sum := sha256.Sum256([]byte(body))
+		wantHash := `"body_sha256":"` + hex.EncodeToString(sum[:]) + `"`
+		wantLen := `"body_len":` + strconv.Itoa(len(body))
 		sawIntent := false
 		sawSent := false
 		for _, line := range strings.Split(raw, "\n") {
@@ -622,7 +627,7 @@ func TestGitHubRound2(t *testing.T) {
 			if strings.Contains(line, body) {
 				t.Fatalf("audit copied the body: %s", line)
 			}
-			if strings.Contains(line, "github_issue_intent") && strings.Contains(line, `"body_sha256":`) && strings.Contains(line, `"body_len":`) {
+			if strings.Contains(line, "github_issue_intent") && strings.Contains(line, wantHash) && strings.Contains(line, wantLen) {
 				sawIntent = true
 			}
 			if strings.Contains(line, "github_issue_allowed") && strings.Contains(line, "https://github.com/acme/widgets/issues/4") && strings.Contains(line, `"number":`) {

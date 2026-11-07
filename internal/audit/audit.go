@@ -327,6 +327,13 @@ func (w *walker) field(key string, val any) any {
 			return s
 		}
 	}
+	// A body digest is 64 hex characters, which is also the shape of an
+	// admin token. Keep that one field when the value is exactly that shape.
+	if key == "body_sha256" {
+		if s, ok := val.(string); ok && sha256Hex(s) {
+			return s
+		}
+	}
 	if secretKeyRe.MatchString(key) {
 		if w.opts.detail && scalarSecretValue(val) {
 			return val
@@ -444,6 +451,21 @@ func scalarSecretValue(v any) bool {
 	default:
 		return false
 	}
+}
+
+func sha256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func finishString(s string, clip bool) string {
