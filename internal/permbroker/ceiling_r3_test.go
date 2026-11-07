@@ -117,6 +117,10 @@ func TestCriticalCeilingSoleReason(t *testing.T) {
 			t.Fatal(err)
 		}
 		wantAsk(t, evalShell(e, LevelCritical, ws, ws, "head "+inKey))
+		for _, c := range []string{"git diff " + inKey, "git log -- " + inKey, "git show HEAD:" + inKey, "git diff " + filepath.Join(ws, ".git", "hooks", "pre-commit")} {
+			wantAsk(t, evalShell(testEngine(t), LevelCritical, ws, ws, c))
+			wantAsk(t, evalShell(testEngine(t), LevelLow, ws, ws, c))
+		}
 	})
 	t.Run("write-outside", func(t *testing.T) {
 		e := testEngine(t)
