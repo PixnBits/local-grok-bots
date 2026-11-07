@@ -163,6 +163,15 @@ imminent_timer_minutes = 2
 # broker = "off"
 # broker_bots = ["bot-id"]
 # hook_path = "/usr/local/bin/lgb-permhook"
+# dangerouslyAllowAllPermissionRequestsUpThrough auto-approves a hook-broker
+# request when its final level is at or below that bot's ceiling. The final
+# level is after the shipped table, policy raises, the classifier, and
+# critical paths. The value is low, medium, high, or critical. Critical
+# auto-approves only when the ceiling is critical. The bot id must be a UUID
+# listed in broker_bots. The setting does nothing unless broker = "hook".
+# A multi-line inline table is not valid TOML 1.0. Use the subtable.
+# [cli.permission.dangerouslyAllowAllPermissionRequestsUpThrough]
+# 00000000-0000-4000-8000-000000000000 = "low"
 # approval_ttl is how long a once-token stays usable, and the cap on a
 # task grant along with the 4h task cap. Default 15m. Bounds are 1m..24h.
 # Pending items do not expire.

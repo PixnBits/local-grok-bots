@@ -14,29 +14,34 @@ import (
 // AuditRow is one daemon decision. The hook does not write this file.
 // Argv and Input are redacted before they are stored.
 type AuditRow struct {
-	Time           time.Time `json:"time"`
-	BotID          string    `json:"bot_id"`
-	SessionID      string    `json:"session_id"`
-	RunID          string    `json:"run_id"`
-	TaskID         string    `json:"task_id"`
-	Tool           string    `json:"tool"`
-	Argv           []string  `json:"argv,omitempty"`
-	Input          string    `json:"input,omitempty"`
-	InputHash      string    `json:"input_hash"`
-	Cwd            string    `json:"cwd"`
-	Decision       string    `json:"decision"`
-	Scope          string    `json:"scope,omitempty"`
-	PendingID      string    `json:"pending_id,omitempty"`
-	Actor          string    `json:"actor"`
-	RuleID         string    `json:"rule_id,omitempty"`
-	Level          Level     `json:"level"`
-	TableVersion   string    `json:"table_version"`
-	RulesetVersion int       `json:"ruleset_version"`
-	Classifier     string    `json:"classifier"`
-	PeerUID        int       `json:"peer_uid,omitempty"`
-	PeerPID        int       `json:"peer_pid,omitempty"`
-	PrevHash       string    `json:"prev_hash"`
-	Hash           string    `json:"hash"`
+	Time      time.Time `json:"time"`
+	BotID     string    `json:"bot_id"`
+	SessionID string    `json:"session_id"`
+	RunID     string    `json:"run_id"`
+	TaskID    string    `json:"task_id"`
+	Tool      string    `json:"tool"`
+	Argv      []string  `json:"argv,omitempty"`
+	Input     string    `json:"input,omitempty"`
+	InputHash string    `json:"input_hash"`
+	Cwd       string    `json:"cwd"`
+	Decision  string    `json:"decision"`
+	Scope     string    `json:"scope,omitempty"`
+	PendingID string    `json:"pending_id,omitempty"`
+	Actor     string    `json:"actor"`
+	RuleID    string    `json:"rule_id,omitempty"`
+	Level     Level     `json:"level"`
+	// Source and Ceiling are set on a ceiling auto-approval.
+	// Source is dangerously_allow_all_up_through. Level is the final
+	// effective level. Ceiling is the bot's configured cap.
+	Source         string `json:"source,omitempty"`
+	Ceiling        Level  `json:"ceiling,omitempty"`
+	TableVersion   string `json:"table_version"`
+	RulesetVersion int    `json:"ruleset_version"`
+	Classifier     string `json:"classifier"`
+	PeerUID        int    `json:"peer_uid,omitempty"`
+	PeerPID        int    `json:"peer_pid,omitempty"`
+	PrevHash       string `json:"prev_hash"`
+	Hash           string `json:"hash"`
 }
 
 // Auditor receives a copy of each row after it is appended. The daemon
@@ -136,6 +141,9 @@ var redactRes = []*regexp.Regexp{
 	regexp.MustCompile(`lgbr_[A-Za-z0-9_\-]+`),
 	regexp.MustCompile(`\b[0-9a-fA-F]{64}\b`),
 }
+
+// AllowThroughSource is the audit source for a ceiling auto-approval.
+const AllowThroughSource = "dangerously_allow_all_up_through"
 
 // Redact hides credentials in text the audit file would otherwise keep.
 // password= and --token= keep the key and replace the value.

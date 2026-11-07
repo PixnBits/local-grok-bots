@@ -15,6 +15,11 @@ the run.
 broker = "hook"   # off (default) or hook
 # broker_bots = ["bot-id"]   # optional; empty means every bot
 # hook_path = "/usr/local/bin/lgb-permhook"  # optional absolute path
+
+# Per-bot auto-approval ceiling. The bot id must be a UUID listed in
+# broker_bots. A multi-line inline table is not valid TOML 1.0.
+# [cli.permission.dangerouslyAllowAllPermissionRequestsUpThrough]
+# 00000000-0000-4000-8000-000000000000 = "low"
 ```
 
 `hook` arms two paths: Claude Code, through `cmd/lgb-permhook`, and the
@@ -365,6 +370,48 @@ startup error. A command the table does not list is `unclassified`.
 only. They are not task-grantable and not eligible for a bot or global
 allow. The profile auto-allow list in `docs/cli-permissions.md` is a
 different classifier.
+
+## Auto-approval ceiling
+
+`dangerouslyAllowAllPermissionRequestsUpThrough` maps a bot id to a
+ceiling: `low`, `medium`, `high`, or `critical`. It does nothing unless
+`broker` is `hook`. It does not add a bot to `broker_bots`. A ceiling
+for a bot that is not listed there is a startup error, including when
+`broker_bots` is empty.
+
+The comparison uses the final level. That level is the shipped table,
+then a policy raise, then a classifier raise, then a critical-path
+check. A ceiling cannot skip one of those. A request at or below the
+bot's ceiling is auto-approved with no card. A request above the
+ceiling still asks. A critical request auto-approves only when the
+ceiling is exactly `critical`.
+
+These keep today's behaviour and are never auto-approved: a deny rule,
+an unclassified command, a parse error, a malformed or ambiguous
+command, and a broker error.
+
+A wildcard key such as `*`, a key that is not a UUID, an empty value,
+an unknown level, and a value that is not a map are startup errors.
+`unclassified` is not a ceiling.
+
+Write the map as a subtable. A multi-line inline table is not valid
+TOML 1.0.
+
+```toml
+[cli.permission]
+broker = "hook"
+broker_bots = ["00000000-0000-4000-8000-000000000000"]
+
+[cli.permission.dangerouslyAllowAllPermissionRequestsUpThrough]
+00000000-0000-4000-8000-000000000000 = "low"
+```
+
+Each auto-approval appends an audit row whose `source` is
+`dangerously_allow_all_up_through`. The row's `level` is the final
+level. `ceiling` is the bot's cap. Startup logs each configured bot id
+and its ceiling. A running daemon keeps the ceilings from process
+start. Editing the file does not change them until restart, the same
+way `broker` and `broker_bots` stay on the startup snapshot.
 
 A stricter row is:
 

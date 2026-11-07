@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/PixnBits/local-grok-bots/internal/permbroker"
 )
 
 func TestHotReloadFields(t *testing.T) {
@@ -51,6 +53,29 @@ func TestHotReloadFields(t *testing.T) {
 	kept := plain.WithHot(opt)
 	if kept.AllowInsecureLAN {
 		t.Fatal("allow_insecure_lan changed on a hot copy")
+	}
+}
+
+func TestAllowCeilingStaysOnStartupSnapshot(t *testing.T) {
+	const id = "11111111-1111-4111-8111-111111111111"
+	start := Policy{
+		Broker: "hook", BrokerBots: []string{id},
+		AllowCeilings: map[string]permbroker.Level{id: permbroker.LevelLow},
+	}
+	fresh := start
+	fresh.Broker = "off"
+	fresh.BrokerBots = nil
+	fresh.AllowCeilings = map[string]permbroker.Level{id: permbroker.LevelCritical}
+	fresh.ClaudeTransport = TransportStreamControl
+	got := start.WithHot(fresh)
+	if got.Broker != "hook" || len(got.BrokerBots) != 1 || got.AllowCeilings[id] != permbroker.LevelLow {
+		t.Fatalf("startup broker fields changed: broker %q bots %v ceilings %v", got.Broker, got.BrokerBots, got.AllowCeilings)
+	}
+	if got.ClaudeTransport != TransportStreamControl {
+		t.Fatal("claude_transport did not hot reload")
+	}
+	if keys := RestartKeys(start, fresh); len(keys) != 0 {
+		t.Fatalf("broker settings listed for restart: %v", keys)
 	}
 }
 

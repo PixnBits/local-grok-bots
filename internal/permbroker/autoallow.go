@@ -15,6 +15,7 @@ var autoAllowGOOS = runtime.GOOS
 // autoAllowOK is the choke for every allow that is not a human
 // one-time approval: a saved rule, a task grant, and a confirmed
 // legacy allow. Off Linux, or when any word is not literal, it is false.
+// A ceiling auto-approval does not use this choke.
 func autoAllowOK(in inspected) bool {
 	if autoAllowGOOS != "linux" {
 		return false
@@ -23,6 +24,52 @@ func autoAllowOK(in inspected) bool {
 		return false
 	}
 	return true
+}
+
+// ceilingMatch is the per-bot auto-approval. It compares the final
+// effective level. Callers pass the level from after policy raises,
+// the classifier, and critical paths. A shipped-table level is not enough.
+// The broker must be hook. A bot with no ceiling still asks.
+// Parse errors, malformed commands, and ambiguous commands do not match.
+func (e *Engine) ceilingMatch(req Request, in inspected) (Level, bool) {
+	if e == nil || e.brokerMode != "hook" {
+		return "", false
+	}
+	ceiling, ok := e.lookupCeiling(req.BotID)
+	if !ok || ceiling == "" {
+		return "", false
+	}
+	if ceilingParseBlock(in.ParseReason) {
+		return "", false
+	}
+	level := in.Level
+	if !ceilingCovers(level, ceiling) {
+		return "", false
+	}
+	return ceiling, true
+}
+
+func (e *Engine) lookupCeiling(bot string) (Level, bool) {
+	if len(e.ceilings) == 0 {
+		return "", false
+	}
+	if ceiling, ok := e.ceilings[bot]; ok {
+		return ceiling, true
+	}
+	ceiling, ok := e.ceilings[strings.ToLower(strings.TrimSpace(bot))]
+	return ceiling, ok
+}
+
+// ceilingParseBlock is a command the ceiling must not approve.
+// parse is a parse error. The other reasons are malformed or ambiguous.
+func ceilingParseBlock(reason string) bool {
+	switch reason {
+	case "parse", "unsupported syntax", "shell dialect", "comment", "empty",
+		"not a literal", "assignment", "redirect":
+		return true
+	default:
+		return false
+	}
 }
 
 // surfaceParse recovers argv text when ParseCommand stopped because a

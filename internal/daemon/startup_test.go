@@ -43,6 +43,33 @@ func captureStartup(t *testing.T) *safeBuf {
 	return buf
 }
 
+func TestStartupLogsAllowCeilings(t *testing.T) {
+	const bot = "11111111-1111-4111-8111-111111111111"
+	dir := t.TempDir()
+	if err := chmodDataDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "policy.toml")
+	body := "[backend]\nbackend = \"ollama\"\n[cli.permission]\nbroker = \"hook\"\nbroker_bots = [\"" + bot + "\"]\n\n[cli.permission.dangerouslyAllowAllPermissionRequestsUpThrough]\n" + bot + " = \"medium\"\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MANAGED_POLICY", "")
+	buf := captureStartup(t)
+	app, err := New(config.Config{
+		DataDir: dir, PolicyPath: path, BindAddr: "127.0.0.1:0",
+		OllamaURL: "http://127.0.0.1:9", Model: "test-model", Version: "0.1.0",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Shutdown)
+	want := "dangerouslyAllowAllPermissionRequestsUpThrough " + bot + " medium"
+	if !strings.Contains(buf.String(), want) {
+		t.Fatalf("startup log:\n%s", buf.String())
+	}
+}
+
 func TestLoopbackBind(t *testing.T) {
 	cases := []struct {
 		addr string

@@ -58,6 +58,48 @@ level = "high"
 	}
 }
 
+func TestAllowCeilingLoad(t *testing.T) {
+	const bot = "11111111-1111-4111-8111-111111111111"
+	const other = "22222222-2222-4222-8222-222222222222"
+	head := "[backend]\nbackend = \"ollama\"\n[cli.permission]\nbroker = \"hook\"\n"
+	listed := head + "broker_bots = [\"" + bot + "\"]\n"
+	sub := "\n[cli.permission.dangerouslyAllowAllPermissionRequestsUpThrough]\n"
+	cases := []struct {
+		name string
+		body string
+		ok   bool
+	}{
+		{name: "unknown_level", body: listed + sub + bot + " = \"severe\"\n"},
+		{name: "missing_or_empty_value", body: listed + sub + bot + " = \"\"\n"},
+		{name: "wildcard_key", body: listed + sub + "\"*\" = \"low\"\n"},
+		{name: "non_uuid_key", body: head + "broker_bots = [\"bot-id\"]\n" + sub + "bot-id = \"low\"\n"},
+		{name: "non_map_value", body: listed + "dangerouslyAllowAllPermissionRequestsUpThrough = \"low\"\n"},
+		{name: "bot_not_in_broker_bots", body: head + "broker_bots = [\"" + other + "\"]\n" + sub + bot + " = \"low\"\n"},
+		{name: "subtable", body: listed + sub + bot + " = \"medium\"\n", ok: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "policy.toml")
+			if err := os.WriteFile(path, []byte(tc.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			p, err := Load(Options{Path: path})
+			if tc.ok {
+				if err != nil || !p.Loaded || p.AllowCeilings[bot] != permbroker.LevelMedium {
+					t.Fatalf("err=%v loaded=%v ceilings=%v", err, p.Loaded, p.AllowCeilings)
+				}
+				if p.Broker != "hook" || len(p.BrokerBots) != 1 || p.BrokerBots[0] != bot {
+					t.Fatalf("broker %q bots %v", p.Broker, p.BrokerBots)
+				}
+				return
+			}
+			if err == nil || !errors.Is(err, errAllowCeiling) {
+				t.Fatalf("err=%v loaded=%v warnings=%v", err, p.Loaded, p.Warnings)
+			}
+		})
+	}
+}
+
 func TestMissingPolicyFailClosed(t *testing.T) {
 	p, err := Load(Options{Path: filepath.Join(t.TempDir(), "nope.toml")})
 	if err != nil {

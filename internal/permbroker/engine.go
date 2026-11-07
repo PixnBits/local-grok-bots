@@ -271,6 +271,10 @@ type Engine struct {
 	userTask map[string]string
 	userText map[string]string
 	ttl      time.Duration
+	// brokerMode is the policy broker value. Only "hook" may auto-approve.
+	brokerMode string
+	// ceilings maps a bot id to its auto-approval ceiling.
+	ceilings map[string]Level
 	// approvals are human approvals in memory, for the suggest-always hint.
 	approvals []approvalStamp
 	reqRing   map[string][]ringReq
@@ -612,6 +616,31 @@ func (e *Engine) SetApprovalTTL(d time.Duration) {
 	}
 	e.mu.Lock()
 	e.ttl = d
+	e.mu.Unlock()
+}
+
+// SetAllowCeilings installs the per-bot auto-approval ceilings.
+// broker is the policy broker value. Only "hook" uses the map.
+// A nil or empty map clears every ceiling.
+func (e *Engine) SetAllowCeilings(broker string, ceilings map[string]Level) {
+	if e == nil {
+		return
+	}
+	next := map[string]Level{}
+	for id, lvl := range ceilings {
+		id = strings.ToLower(strings.TrimSpace(id))
+		if id == "" || lvl == "" {
+			continue
+		}
+		next[id] = lvl
+	}
+	e.mu.Lock()
+	e.brokerMode = strings.TrimSpace(broker)
+	if len(next) == 0 {
+		e.ceilings = nil
+	} else {
+		e.ceilings = next
+	}
 	e.mu.Unlock()
 }
 
@@ -1391,6 +1420,9 @@ func (e *Engine) Evaluate(ctx context.Context, req Request) Decision {
 		}
 		e.touch(rule)
 		return e.finish(req, in, VerdictDeny, "denied by rule "+rule.ID, "", rule.ID, rule.ID)
+	}
+	if ceiling, ok := e.ceilingMatch(req, in); ok {
+		return e.allowByCeiling(req, in, ceiling)
 	}
 	if tok, ok := e.takeToken(ctx, req, in); ok {
 		if e.afterEval != nil {
@@ -2208,6 +2240,15 @@ type inspected struct {
 	AdvisorySource  string
 	AdvisoryChecked bool
 	CriticalReason  string
+	// Shipped is the builtin table level before policy raises, the
+	// classifier, and critical paths. The ceiling does not use it.
+	Shipped Level
+	// ParseReason is the shell parser reason. A blocked reason cannot
+	// be auto-approved.
+	ParseReason string
+	// AuditSource and AuditCeiling are copied onto the audit row.
+	AuditSource  string
+	AuditCeiling Level
 }
 
 func commandUsesGit(p Parse) bool {
@@ -2292,6 +2333,14 @@ func toolPaths(raw json.RawMessage) []string {
 	return out
 }
 
+// allowByCeiling records one auto-approval. The audit row carries the
+// source, the final level, and the ceiling.
+func (e *Engine) allowByCeiling(req Request, in inspected, ceiling Level) Decision {
+	in.AuditSource = AllowThroughSource
+	in.AuditCeiling = ceiling
+	return e.finish(req, in, VerdictAllow, "allowed", "", AllowThroughSource, "")
+}
+
 func (e *Engine) finish(req Request, in inspected, verdict, reason, pendingID, actor, ruleID string) Decision {
 	if reason == "" {
 		reason = "denied"
@@ -2334,7 +2383,8 @@ func (e *Engine) auditDecision(req Request, in inspected, verdict, reason, pendi
 		Time: e.now(), BotID: req.BotID, SessionID: req.SessionID, RunID: req.RunID, TaskID: req.TaskID,
 		Tool: normTool(req.ToolName), Argv: redactArgv(in.Argv), Input: clip(Redact(in.Raw), 500),
 		InputHash: in.Hash, Cwd: req.Cwd, Decision: verdict, Scope: scope, PendingID: pendingID,
-		Actor: actor, RuleID: ruleID, Level: in.Level, TableVersion: TableVersion,
+		Actor: actor, RuleID: ruleID, Level: in.Level, Source: in.AuditSource, Ceiling: in.AuditCeiling,
+		TableVersion:   TableVersion,
 		RulesetVersion: e.rules.Version, Classifier: note, PeerUID: req.PeerUID, PeerPID: req.PeerPID,
 	}
 	row = e.audit.append(row)

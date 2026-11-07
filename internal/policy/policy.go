@@ -127,6 +127,11 @@ type Policy struct {
 	Broker string
 	// BrokerBots, when non-empty, limits Broker == hook to those bots.
 	BrokerBots []string
+	// AllowCeilings is dangerouslyAllowAllPermissionRequestsUpThrough.
+	// Each key is a bot UUID that must also be listed in BrokerBots.
+	// The value is the highest final level that bot may auto-approve
+	// while Broker is hook. Nil means the key was unset.
+	AllowCeilings map[string]permbroker.Level
 	// HookPath is the lgb-permhook binary. Empty uses the binary next
 	// to this daemon.
 	HookPath string
@@ -1344,7 +1349,7 @@ func NormClaudeTransport(v string) (string, error) {
 var errBrokerConfig = errors.New("cli.permission.broker must be off or hook")
 
 func hardBrokerErr(err error) bool {
-	return errors.Is(err, errBrokerConfig) || errors.Is(err, permbroker.ErrClassifierEndpoint) || errors.Is(err, permbroker.ErrLevelLowered) || errors.Is(err, permbroker.ErrBadLevel)
+	return errors.Is(err, errBrokerConfig) || errors.Is(err, errAllowCeiling) || errors.Is(err, permbroker.ErrClassifierEndpoint) || errors.Is(err, permbroker.ErrLevelLowered) || errors.Is(err, permbroker.ErrBadLevel)
 }
 
 // BrokerHook reports that this bot should use the permission broker.
@@ -1417,7 +1422,14 @@ func (p *Policy) applyBroker(perm *cliPermDoc) error {
 			return err
 		}
 	}
-	return nil
+	if perm.AllowThrough != nil {
+		ceilings, err := parseAllowThrough(perm.AllowThrough)
+		if err != nil {
+			return err
+		}
+		p.AllowCeilings = ceilings
+	}
+	return checkCeilingBots(p.BrokerBots, p.AllowCeilings)
 }
 
 func (p *Policy) applyClassifier(doc *classifierDoc) error {
@@ -1635,6 +1647,10 @@ type cliPermDoc struct {
 	Risk               *[]riskDoc     `toml:"risk" json:"risk"`
 	ApprovalTTL        flexText       `toml:"approval_ttl" json:"approval_ttl"`
 	Classifier         *classifierDoc `toml:"classifier" json:"classifier"`
+	// AllowThrough is dangerouslyAllowAllPermissionRequestsUpThrough.
+	// any keeps a non-map value reachable so load can reject it.
+	// A map[string]string would fail the whole file at decode time.
+	AllowThrough any `toml:"dangerouslyAllowAllPermissionRequestsUpThrough" json:"dangerouslyAllowAllPermissionRequestsUpThrough"`
 }
 
 type classifierDoc struct {

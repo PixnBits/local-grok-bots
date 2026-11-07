@@ -18,6 +18,20 @@ The stock page subscribes to the run stream with `?prompts=1` and renders `permi
 | `prompt_timeout` | How long a permission or question card waits. Default 10m. A managed `max_prompt_timeout` caps it. See Timeouts in `docs/cli-isolation.md`. |
 | `allow_session_grants` | Lets a UI answer `allow_session`. Honored only from the managed policy file. |
 | `claude_transport` | `mcp` (default), `stream_control`, or `none`. Empty is `mcp`. Any other value is a config error, and load uses the existing fail-closed fallback (daemon jail on, CLI backends off). |
+| `dangerouslyAllowAllPermissionRequestsUpThrough` | Per-bot ceiling for the permission broker. See below. It is not the profile `AutoAllow` list. |
+
+`dangerouslyAllowAllPermissionRequestsUpThrough` auto-approves one hook-broker request when that request's final level is at or below the bot's ceiling. The ceiling is `low`, `medium`, `high`, or `critical`. The bot id is a UUID that must also appear in `broker_bots`. The setting does nothing unless `broker` is `hook`. A critical request auto-approves only when the ceiling is exactly `critical`. Deny rules, unclassified commands, parse errors, malformed or ambiguous commands, and broker errors are not auto-approved. The decision rules are in `docs/permission-broker.md`.
+
+Write the map as a subtable. A multi-line inline table is not valid TOML 1.0.
+
+```toml
+[cli.permission]
+broker = "hook"
+broker_bots = ["00000000-0000-4000-8000-000000000000"]
+
+[cli.permission.dangerouslyAllowAllPermissionRequestsUpThrough]
+00000000-0000-4000-8000-000000000000 = "low"
+```
 
 Precedence is unchanged: managed settings, then `policy.toml`, then defaults. A missing or unparseable file still fail-closes (daemon jail on, CLI backends off). Managed policy is read when the daemon starts. The permission broker, CLI turn flags, and permission mode use that snapshot. Editing the managed file does not change a running daemon; restart it.
 

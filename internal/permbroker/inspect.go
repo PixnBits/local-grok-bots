@@ -127,6 +127,7 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 		raw, _ := commandOf(req.ToolInput)
 		in.Raw = raw
 		parsed := ParseCommand(raw)
+		in.ParseReason = parsed.Reason
 		if parsed.Reason == "not a literal" {
 			if sp, ops, ok := surfaceParse(raw); ok {
 				parsed = sp
@@ -235,6 +236,7 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 			in.HardAsk = true
 		}
 	}
+	in.Shipped = shippedLevel(req, in)
 	if ctx.Err() != nil {
 		return in
 	}
@@ -300,6 +302,23 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 	}
 	in.CriticalReason = criticalReason(in.Level, in.Argv, in.Raw)
 	return in
+}
+
+// shippedLevel is the builtin table level. Policy raises, the classifier,
+// and critical paths are not included. The ceiling compares in.Level, which
+// is the level after those steps, including raiseToCurrent.
+func shippedLevel(req Request, in inspected) Level {
+	if isShellTool(req.ToolName) {
+		if len(in.Argv) > 0 {
+			return builtinLevel(ToolShell, in.Argv)
+		}
+		max := LevelUnclassified
+		for _, p := range in.Parts {
+			max = maxLevel(max, builtinLevel(ToolShell, p.Argv))
+		}
+		return max
+	}
+	return builtinLevel(req.ToolName, toolPaths(req.ToolInput))
 }
 
 // finalAdvisorySource keeps a model-raise line only when it names the
