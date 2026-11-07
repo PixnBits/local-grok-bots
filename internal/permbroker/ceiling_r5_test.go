@@ -347,6 +347,12 @@ func TestCeilingGitdirSignalOrder(t *testing.T) {
 }
 
 func TestCeilingHookExceptionBounds(t *testing.T) {
+	// A clean tree, so git-risk is not why this asks. The hook exception
+	// is only .git/hooks. A widened "any hooks/" match would allow this.
+	clean := t.TempDir()
+	wantAsk(t, evalShell(testEngine(t), LevelMedium, clean, clean, "git add evil/hooks/pre-commit"))
+	wantAsk(t, evalShell(testEngine(t), LevelCritical, clean, clean, "git add evil/hooks/pre-commit"))
+
 	ws := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(ws, ".git", "hooks"), 0o755); err != nil {
 		t.Fatal(err)
