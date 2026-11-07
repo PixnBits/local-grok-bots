@@ -26,11 +26,10 @@ func (a *App) openGitHubProxy(bot store.Bot) (*github.Proxy, error) {
 }
 
 func (a *App) openGitHubProxyCfg(bot store.Bot, gitOnly bool) (*github.Proxy, error) {
-	turnPol := a.effPol(bot.ID)
-
 	if a == nil || !granted(bot.Grants, "github") {
 		return nil, nil
 	}
+	turnPol := a.effPol(bot.ID)
 	repos := turnPol.EffectiveGitHubRepos(bot.GitHubAllow)
 	p, err := github.New(github.Config{
 		Repos:   repos,

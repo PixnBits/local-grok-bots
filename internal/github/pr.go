@@ -36,6 +36,8 @@ func (e *APIError) Error() string {
 		return "github unverified"
 	case "moved":
 		return "github moved or renamed"
+	case "pull":
+		return "this number is a pull request; use read_pr"
 	default:
 		return "github unavailable"
 	}
@@ -74,30 +76,12 @@ func PullBranch(s string) bool {
 
 // ValidPullTitle reports whether title can be sent as a pull request title.
 func ValidPullTitle(s string) bool {
-	if strings.TrimSpace(s) == "" {
-		return false
-	}
-	return pullText(s, 256, false)
+	return textIssue(s, "title") == ""
 }
 
 // ValidPullBody reports whether body can be sent. Empty is allowed.
 func ValidPullBody(s string) bool {
-	return pullText(s, 1<<16, true)
-}
-
-func pullText(s string, max int, allowNL bool) bool {
-	if len(s) > max || strings.ContainsRune(s, 0) {
-		return false
-	}
-	for _, r := range s {
-		if r == 0x7f || r < 0x20 {
-			if allowNL && (r == '\n' || r == '\t') {
-				continue
-			}
-			return false
-		}
-	}
-	return true
+	return textIssue(s, "body") == ""
 }
 
 // AcceptPullURL accepts https://github.com/owner/repo/pull/N for this repo.

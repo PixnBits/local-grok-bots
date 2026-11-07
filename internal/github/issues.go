@@ -136,7 +136,7 @@ func ValidIssueBody(s string) bool { return ValidPullBody(s) }
 
 // ValidCommentBody reports whether a comment body can be sent.
 func ValidCommentBody(s string) bool {
-	return strings.TrimSpace(s) != "" && ValidPullBody(s)
+	return textIssue(s, "comment") == ""
 }
 
 // AcceptIssueURL accepts https://github.com/owner/repo/issues/N for this repo.
@@ -300,12 +300,27 @@ func GetIssue(ctx context.Context, client *http.Client, base, owner, repo string
 		return Issue{}, &APIError{kind: "response"}
 	}
 	got, n, ok := AcceptIssueURL(owner, repo, wire.HTMLURL)
-	if !ok || n != number {
-		return Issue{}, urlMiss(wire.HTMLURL)
+	if ok && n == number {
+		return Issue{
+			Number: number, Title: wire.Title, State: wire.State, Body: wire.Body, URL: got, User: safeLogin(wire.User.Login),
+		}, nil
 	}
-	return Issue{
-		Number: number, Title: wire.Title, State: wire.State, Body: wire.Body, URL: got, User: safeLogin(wire.User.Login),
-	}, nil
+	if pull, pok := AcceptPullURL(owner, repo, wire.HTMLURL); pok && urlNumber(pull) == number {
+		return Issue{}, &APIError{kind: "pull"}
+	}
+	return Issue{}, urlMiss(wire.HTMLURL)
+}
+
+func urlNumber(raw string) int {
+	i := strings.LastIndex(raw, "/")
+	if i < 0 || i+1 >= len(raw) {
+		return 0
+	}
+	n, err := strconv.Atoi(raw[i+1:])
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // ListIssueComments pages conversation comments on an issue or pull request.
@@ -791,7 +806,7 @@ func LookupTarget(ctx context.Context, client *http.Client, base, owner, repo st
 	if got, n, ok := AcceptIssueURL(owner, repo, wire.HTMLURL); ok && n == number {
 		return IssueTarget{Kind: "issue", Title: wire.Title, State: wire.State, URL: got}, nil
 	}
-	if got, ok := AcceptPullURL(owner, repo, wire.HTMLURL); ok {
+	if got, ok := AcceptPullURL(owner, repo, wire.HTMLURL); ok && urlNumber(got) == number {
 		return IssueTarget{Kind: "pull", Title: wire.Title, State: wire.State, URL: got}, nil
 	}
 	return IssueTarget{}, urlMiss(wire.HTMLURL)

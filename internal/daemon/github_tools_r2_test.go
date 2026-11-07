@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -77,6 +78,9 @@ func TestGitHubRound2(t *testing.T) {
 			}
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if mode.Load() == "heavy" && r.Method == http.MethodGet && writeHeavyPage(w, r.URL.Path, sha) {
+			return
+		}
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets":
 			io.WriteString(w, `{"default_branch":"main"}`)
@@ -86,6 +90,12 @@ func TestGitHubRound2(t *testing.T) {
 			io.WriteString(w, `[{"number":1,"title":"Empty state","state":"open","body":"short","html_url":"https://github.com/acme/widgets/issues/1","user":{"login":"ada"}}]`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/7" && mode.Load() == "missing":
 			http.NotFound(w, r)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/7" && mode.Load() == "rtl-title":
+			io.WriteString(w, `{"number":7,"title":"ab`+"\u202E"+`cd","state":"open","body":"x","html_url":"https://github.com/acme/widgets/issues/7","user":{"login":"ada"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/7" && mode.Load() == "long-title":
+			io.WriteString(w, `{"number":7,"title":`+quoteJSON(strings.Repeat("A", 2001))+`,"state":"open","body":"x","html_url":"https://github.com/acme/widgets/issues/7","user":{"login":"ada"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/7" && mode.Load() == "pull-url":
+			io.WriteString(w, `{"number":7,"title":"A pull","state":"open","body":"x","html_url":"https://github.com/acme/widgets/pull/7","user":{"login":"ada"}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/7":
 			io.WriteString(w, `{"number":7,"title":"Empty state","state":"open","body":"the list is blank","html_url":"https://github.com/acme/widgets/issues/7","user":{"login":"ada"}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/7/comments":
@@ -572,18 +582,30 @@ func TestGitHubRound2(t *testing.T) {
 
 	t.Run("closed audit sink refuses the post", func(t *testing.T) {
 		mode.Store("ok")
-		e := newEnv(t, nil)
-		if err := e.lg.Close(); err != nil {
-			t.Fatal(err)
-		}
-		before := posts.Load()
-		done := approveCard(e.app, e.bot.ID, "create_issue")
-		_, err := e.app.dispatchTool(t.Context(), e.bot, "create_issue", map[string]any{"repo": "acme/widgets", "title": "Audited"})
-		if aerr := <-done; aerr != nil {
-			t.Fatal(aerr)
-		}
-		if err == nil || !strings.Contains(err.Error(), "audit log unavailable") || posts.Load() != before {
-			t.Fatalf("%v posts %d", err, posts.Load()-before)
+		for _, tool := range []string{"create_issue", "create_pr"} {
+			t.Run(tool, func(t *testing.T) {
+				e := newEnv(t, nil)
+				e.app.perm.AddHook(func(req permission.Request) permission.HookResult {
+					if req.Tool == tool {
+						_ = e.lg.Close()
+					}
+					return permission.HookResult{}
+				})
+				before := posts.Load()
+				done := approveCard(e.app, e.bot.ID, tool)
+				args := map[string]any{"repo": "acme/widgets", "title": "Audited"}
+				if tool == "create_pr" {
+					args["head"] = "feature"
+					args["base"] = "main"
+				}
+				_, err := e.app.dispatchTool(t.Context(), e.bot, tool, args)
+				if aerr := <-done; aerr != nil {
+					t.Fatal(aerr)
+				}
+				if err == nil || !strings.Contains(err.Error(), "audit log unavailable") || posts.Load() != before {
+					t.Fatalf("%v posts %d", err, posts.Load()-before)
+				}
+			})
 		}
 	})
 
@@ -684,6 +706,266 @@ func TestGitHubRound2(t *testing.T) {
 			t.Fatalf("%v hits %d", err, hits.Load()-before)
 		}
 	})
+
+	t.Run("hidden text", func(t *testing.T) {
+		mode.Store("ok")
+		e := newEnv(t, nil)
+		e.app.editPol(func(p *policy.Policy) { p.PromptTimeout = 200 * time.Millisecond })
+		classes := []struct{ name, sample string }{
+			{"bidi", "\u202E"},
+			{"zero-width", "\u200B"},
+			{"tag", "\U000E0053"},
+			{"c1", "\u0085"},
+			{"format", "\u2061"},
+			{"variation", "\uFE0F"},
+		}
+		type call struct {
+			tool string
+			args map[string]any
+		}
+		for _, c := range classes {
+			for _, where := range []string{"body", "title"} {
+				t.Run(where+"/"+c.name, func(t *testing.T) {
+					calls := []call{
+						{"create_issue", map[string]any{"repo": "acme/widgets", "title": "Fine", "body": "Fine"}},
+						{"create_pr", map[string]any{"repo": "acme/widgets", "head": "feature", "base": "main", "title": "Fine", "body": "Fine"}},
+					}
+					if where == "body" {
+						calls = append(calls, call{"create_comment", map[string]any{"repo": "acme/widgets", "number": float64(7), "body": "Fine"}})
+					}
+					for i := range calls {
+						if where == "title" {
+							calls[i].args["title"] = "Fine" + c.sample
+						} else {
+							calls[i].args["body"] = "Fine" + c.sample
+						}
+					}
+					beforeHits := hits.Load()
+					beforeEvals := e.evals.Load()
+					beforePosts := posts.Load()
+					for _, tc := range calls {
+						_, err := e.app.dispatchTool(t.Context(), e.bot, tc.tool, tc.args)
+						if err == nil || !strings.Contains(err.Error(), "text is not allowed") {
+							t.Fatalf("%s %v", tc.tool, err)
+						}
+					}
+					if e.evals.Load() != beforeEvals || posts.Load() != beforePosts || hits.Load() != beforeHits {
+						t.Fatalf("evals %d posts %d hits %d", e.evals.Load()-beforeEvals, posts.Load()-beforePosts, hits.Load()-beforeHits)
+					}
+				})
+			}
+		}
+	})
+
+	t.Run("too many lines", func(t *testing.T) {
+		mode.Store("ok")
+		e := newEnv(t, nil)
+		e.app.editPol(func(p *policy.Policy) { p.PromptTimeout = 200 * time.Millisecond })
+		body := strings.Repeat("a\n", 400)
+		before := e.evals.Load()
+		_, err := e.app.dispatchTool(t.Context(), e.bot, "create_issue", map[string]any{
+			"repo": "acme/widgets", "title": "Fine", "body": body,
+		})
+		if err == nil || !strings.Contains(err.Error(), "too many lines") || e.evals.Load() != before {
+			t.Fatalf("%v evals %d", err, e.evals.Load()-before)
+		}
+	})
+
+	t.Run("crlf is stored as lf", func(t *testing.T) {
+		mode.Store("ok")
+		e := newEnv(t, nil)
+		before := posts.Load()
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := e.app.dispatchTool(t.Context(), e.bot, "create_issue", map[string]any{
+				"repo": "acme/widgets", "title": "Fine", "body": "a\r\nb",
+			})
+			errCh <- err
+		}()
+		card := waitCardArgs(t, e.app, e.bot.ID, "create_issue")
+		if bodyOf(t, card) != "a\nb" {
+			t.Fatalf("card %q", bodyOf(t, card))
+		}
+		decideCard(t, e.app, e.bot.ID, "create_issue")
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+		posted, _ := lastPost.Load().(string)
+		if posts.Load() != before+1 || !strings.Contains(posted, `"body":"a\nb"`) || strings.Contains(posted, "\r") {
+			t.Fatalf("posted %s", posted)
+		}
+	})
+
+	t.Run("target title is escaped", func(t *testing.T) {
+		mode.Store("rtl-title")
+		t.Cleanup(func() { mode.Store("ok") })
+		e := newEnv(t, nil)
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := e.app.dispatchTool(t.Context(), e.bot, "create_comment", map[string]any{
+				"repo": "acme/widgets", "number": float64(7), "body": "hello",
+			})
+			errCh <- err
+		}()
+		card := waitCardArgs(t, e.app, e.bot.ID, "create_comment")
+		title, _ := card["target_title"].(string)
+		if title != "ab⟦U+202E⟧cd" || strings.ContainsRune(title, '\u202E') {
+			t.Fatalf("title %q", title)
+		}
+		decideCard(t, e.app, e.bot.ID, "create_comment")
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("long target title is marked", func(t *testing.T) {
+		mode.Store("long-title")
+		t.Cleanup(func() { mode.Store("ok") })
+		e := newEnv(t, nil)
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := e.app.dispatchTool(t.Context(), e.bot, "create_comment", map[string]any{
+				"repo": "acme/widgets", "number": float64(7), "body": "hello",
+			})
+			errCh <- err
+		}()
+		card := waitCardArgs(t, e.app, e.bot.ID, "create_comment")
+		title, _ := card["target_title"].(string)
+		if len(title) != 2000 || card["target_title_clipped"] != true {
+			t.Fatalf("len %d clipped %v", len(title), card["target_title_clipped"])
+		}
+		decideCard(t, e.app, e.bot.ID, "create_comment")
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("secret and links stay on the card", func(t *testing.T) {
+		mode.Store("ok")
+		e := newEnv(t, nil)
+		body := "see https://user-images.githubusercontent.com/1/x.png and https://github.com/acme/widgets and ghp_example"
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := e.app.dispatchTool(t.Context(), e.bot, "create_issue", map[string]any{
+				"repo": "acme/widgets", "title": "Fine", "body": body,
+			})
+			errCh <- err
+		}()
+		card := waitCardArgs(t, e.app, e.bot.ID, "create_issue")
+		if card["secret_warning"] != true || bodyOf(t, card) != body {
+			t.Fatalf("card %#v", card)
+		}
+		links, _ := card["links"].([]any)
+		joined := fmt.Sprint(links)
+		if !strings.Contains(joined, "https://user-images.githubusercontent.com/1/x.png") || strings.Contains(joined, "https://github.com/acme/widgets") {
+			t.Fatalf("links %v", links)
+		}
+		decideCard(t, e.app, e.bot.ID, "create_issue")
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("closed audit does not ask", func(t *testing.T) {
+		mode.Store("ok")
+		e := newEnv(t, nil)
+		e.app.editPol(func(p *policy.Policy) { p.PromptTimeout = 200 * time.Millisecond })
+		if err := e.lg.Close(); err != nil {
+			t.Fatal(err)
+		}
+		before := e.evals.Load()
+		for _, tc := range []struct {
+			tool string
+			args map[string]any
+		}{
+			{"create_issue", map[string]any{"repo": "acme/widgets", "title": "Fine"}},
+			{"create_comment", map[string]any{"repo": "acme/widgets", "number": float64(7), "body": "hello"}},
+			{"create_pr", map[string]any{"repo": "acme/widgets", "head": "feature", "base": "main", "title": "Fine"}},
+		} {
+			_, err := e.app.dispatchTool(t.Context(), e.bot, tc.tool, tc.args)
+			if err == nil || !strings.Contains(err.Error(), "audit log unavailable") {
+				t.Fatalf("%s %v", tc.tool, err)
+			}
+		}
+		if e.evals.Load() != before {
+			t.Fatalf("evals %d", e.evals.Load()-before)
+		}
+	})
+
+	t.Run("disabled audit does not ask", func(t *testing.T) {
+		mode.Store("ok")
+		for _, name := range []string{"empty", "nil"} {
+			t.Run(name, func(t *testing.T) {
+				e := newEnv(t, nil)
+				e.app.editPol(func(p *policy.Policy) { p.PromptTimeout = 200 * time.Millisecond })
+				if name == "nil" {
+					e.app.audit = nil
+				} else {
+					e.app.audit = &audit.Logger{}
+				}
+				before := e.evals.Load()
+				_, err := e.app.dispatchTool(t.Context(), e.bot, "create_issue", map[string]any{
+					"repo": "acme/widgets", "title": "Fine",
+				})
+				if err == nil || !strings.Contains(err.Error(), "audit log unavailable") || e.evals.Load() != before {
+					t.Fatalf("%v evals %d", err, e.evals.Load()-before)
+				}
+			})
+		}
+	})
+
+	t.Run("read issue points at a pull", func(t *testing.T) {
+		mode.Store("pull-url")
+		t.Cleanup(func() { mode.Store("ok") })
+		e := newEnv(t, nil)
+		_, err := e.app.dispatchTool(t.Context(), e.bot, "read_issue", map[string]any{
+			"repo": "acme/widgets", "number": float64(7),
+		})
+		if err == nil || !strings.Contains(err.Error(), "pull request") || strings.Contains(err.Error(), "moved") {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("escape heavy page keeps checks", func(t *testing.T) {
+		mode.Store("heavy")
+		t.Cleanup(func() { mode.Store("ok") })
+		e := newEnv(t, nil)
+		out, err := e.app.dispatchTool(t.Context(), e.bot, "read_pr", map[string]any{
+			"repo": "acme/widgets", "number": float64(7),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(out, `"omitted":true`) || !strings.Contains(out, "check-keep") || !strings.Contains(out, `"combined_state":"success"`) || !strings.Contains(out, `\u0001`) || len(out) > githubSizeCapBytes {
+			t.Fatalf("len %d heavy page dropped a field", len(out))
+		}
+	})
+
+	t.Run("escape heavy page names a continuation", func(t *testing.T) {
+		mode.Store("heavy")
+		t.Cleanup(func() { mode.Store("ok") })
+		e := newEnv(t, nil)
+		out, err := e.app.dispatchTool(t.Context(), e.bot, "read_pr", map[string]any{
+			"repo": "acme/widgets", "number": float64(7),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got map[string]any
+		if json.Unmarshal([]byte(out), &got) != nil {
+			t.Fatalf("json %s", out[:min(80, len(out))])
+		}
+		next, _ := got["next_offset"].(float64)
+		if next <= 0 || strings.Contains(out, `"omitted":true`) {
+			t.Fatalf("next %v", next)
+		}
+		again, err := e.app.dispatchTool(t.Context(), e.bot, "read_pr", map[string]any{
+			"repo": "acme/widgets", "number": float64(7), "offset": next,
+		})
+		if err != nil || strings.Contains(again, `"omitted":true`) || !strings.Contains(again, "check-keep") {
+			t.Fatalf("%v %s", err, again)
+		}
+	})
 }
 
 func waitCardArgs(t *testing.T, app *App, botID, tool string) map[string]any {
@@ -761,4 +1043,64 @@ func writeR2Files(w http.ResponseWriter, page, per int) {
 func quoteJSON(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
+}
+
+func writeHeavyPage(w http.ResponseWriter, path, sha string) bool {
+	fill := strings.Repeat("\x01", 4096)
+	enc := json.NewEncoder(w)
+	switch path {
+	case "/repos/acme/widgets/pulls/7":
+		return enc.Encode(map[string]any{
+			"html_url": "https://github.com/acme/widgets/pull/7",
+			"title":    "Heavy",
+			"body":     fill,
+			"state":    "open",
+			"head":     map[string]any{"ref": "feature", "sha": sha},
+			"base":     map[string]any{"ref": "main"},
+		}) == nil
+	case "/repos/acme/widgets/pulls/7/files":
+		files := make([]map[string]any, 9)
+		for i := range files {
+			files[i] = map[string]any{"filename": fmt.Sprintf("f%d.go", i), "status": "modified", "additions": 1, "deletions": 0, "patch": fill}
+		}
+		return enc.Encode(files) == nil
+	case "/repos/acme/widgets/pulls/7/reviews":
+		rows := make([]map[string]any, 9)
+		for i := range rows {
+			rows[i] = map[string]any{"user": map[string]any{"login": "bea"}, "state": "COMMENTED", "body": fill}
+		}
+		return enc.Encode(rows) == nil
+	case "/repos/acme/widgets/pulls/7/comments":
+		rows := make([]map[string]any, 9)
+		for i := range rows {
+			rows[i] = map[string]any{"user": map[string]any{"login": "bea"}, "path": "a.go", "line": 1, "body": fill, "diff_hunk": fill}
+		}
+		return enc.Encode(rows) == nil
+	case "/repos/acme/widgets/issues/7/comments":
+		rows := make([]map[string]any, 9)
+		for i := range rows {
+			id := i + 1
+			rows[i] = map[string]any{
+				"id": id, "body": fill,
+				"html_url": fmt.Sprintf("https://github.com/acme/widgets/issues/7#issuecomment-%d", id),
+				"user":     map[string]any{"login": "bea"},
+			}
+		}
+		return enc.Encode(rows) == nil
+	}
+	if strings.HasSuffix(path, "/check-runs") {
+		return enc.Encode(map[string]any{
+			"total_count": 1,
+			"check_runs": []map[string]any{{
+				"name": "check-keep", "status": "completed", "conclusion": "success",
+			}},
+		}) == nil
+	}
+	if strings.HasSuffix(path, "/status") {
+		return enc.Encode(map[string]any{
+			"state":    "success",
+			"statuses": []map[string]any{{"context": "legacy-keep", "state": "success"}},
+		}) == nil
+	}
+	return false
 }

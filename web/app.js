@@ -1773,6 +1773,27 @@ function addKV(parent, k, v) {
   row.append(el("span", "kv-k", k), el("span", "kv-v", v == null ? "" : String(v)));
   parent.append(row);
 }
+function markTallCard(card) {
+  if (!card || typeof card.querySelectorAll !== "function") return;
+  const nodes = card.querySelectorAll(".card-pre");
+  const list = nodes && typeof nodes.length === "number" ? nodes : [];
+  for (let i = 0; i < list.length; i++) {
+    const pre = list[i];
+    if (!pre || pre.scrollHeight == null || pre.clientHeight == null) continue;
+    if (pre.scrollHeight <= pre.clientHeight + 1) continue;
+    const name = pre.className == null ? "" : String(pre.className);
+    if (name.indexOf("card-pre-scroll") < 0) pre.className = (name ? name + " " : "") + "card-pre-scroll";
+    const parent = pre.parentNode;
+    if (!parent || typeof parent.append !== "function") continue;
+    const kids = parent.kids || parent.children || [];
+    let seen = false;
+    for (let k = 0; k < kids.length; k++) {
+      const cls = kids[k] && kids[k].className != null ? String(kids[k].className) : "";
+      if (cls.indexOf("card-scroll-cue") >= 0) seen = true;
+    }
+    if (!seen) parent.append(el("div", "card-scroll-cue", "More lines below. Scroll the body."));
+  }
+}
 function fillCardBody(body, payload) {
   const tool = payload && payload.tool ? String(payload.tool) : "";
   const args = payload && payload.arguments && typeof payload.arguments === "object" ? payload.arguments : {};
@@ -1817,9 +1838,21 @@ function fillCardBody(body, payload) {
     const bodyText = args.body == null ? "" : String(args.body);
     const bodyLen = args.body_len == null ? bodyText.length : args.body_len;
     addKV(body, "Body length", String(bodyLen));
+    const lineCount = bodyText === "" ? 0 : bodyText.split("\n").length;
+    addKV(body, "Lines", String(lineCount));
     const pre = el("pre", "card-pre");
     pre.textContent = bodyText;
+    if (lineCount > 8) pre.className = "card-pre card-pre-scroll";
     body.append(pre);
+    if (lineCount > 8) {
+      body.append(el("div", "card-scroll-cue", (lineCount - 8) + " more lines below. Scroll the body."));
+    }
+    if (args.secret_warning) {
+      body.append(el("div", "card-warn", "This text contains a secret-looking string."));
+    }
+    if (Array.isArray(args.links) && args.links.length) {
+      addKV(body, "Links", args.links.join(" "));
+    }
     if (tool === "create_issue") body.append(el("div", "card-note", "Every issue asks. Nothing is sent to GitHub until you allow it."));
     else if (tool === "create_comment") body.append(el("div", "card-note", "Every comment asks. Nothing is sent to GitHub until you allow it."));
     else body.append(el("div", "card-note", "Every pull request asks. Nothing is sent to GitHub until you allow it."));
@@ -1935,6 +1968,7 @@ function showPermissionRequest(payload, runId) {
   card.append(top, body, count, actions, outcome, errLine, record, announceEl);
   const live = $("#live");
   if (live) live.append(card);
+  markTallCard(card);
   if (typeof card.scrollIntoView === "function") {
     try { card.scrollIntoView({ block: "nearest" }); } catch (e) {}
   }

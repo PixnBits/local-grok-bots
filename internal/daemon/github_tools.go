@@ -171,20 +171,33 @@ func (a *App) toolCreateIssue(ctx context.Context, bot store.Bot, args map[strin
 		return msg, err
 	}
 	title, ok := plainString(args, "title")
-	if !ok || !github.ValidIssueTitle(title) {
+	if !ok {
 		return a.prDeny(ready.bot, "github_issue_denied", ready.owner, ready.repo, "arguments")
+	}
+	title, reason := github.CleanText(title, "title")
+	if reason != "" {
+		return a.prDeny(ready.bot, "github_issue_denied", ready.owner, ready.repo, reason)
 	}
 	body := ""
 	if _, present := args["body"]; present {
 		body, ok = plainString(args, "body")
-		if !ok || !github.ValidIssueBody(body) {
+		if !ok {
 			return a.prDeny(ready.bot, "github_issue_denied", ready.owner, ready.repo, "arguments")
 		}
+		body, reason = github.CleanText(body, "body")
+		if reason != "" {
+			return a.prDeny(ready.bot, "github_issue_denied", ready.owner, ready.repo, reason)
+		}
 	}
-	meta := githubWriteMeta(0, title, body)
-	if msg, err = a.approveGitHubWrite(ctx, ready, "create_issue", "github_issue_denied", map[string]any{
+	card := map[string]any{
 		"repo": ready.owner + "/" + ready.repo, "title": title, "title_len": len(title), "body": body, "body_len": len(body),
-	}); err != nil {
+	}
+	noteGitHubCard(card, title, body)
+	meta := githubWriteMeta(0, title, body)
+	if err := a.githubAuditFirst(ready.bot, "github_issue_denied", ready.owner, ready.repo, meta); err != nil {
+		return a.prDeny(ready.bot, "github_issue_denied", ready.owner, ready.repo, "audit")
+	}
+	if msg, err = a.approveGitHubWrite(ctx, ready, "create_issue", "github_issue_denied", card); err != nil {
 		return msg, err
 	}
 	return a.sendGitHubWrite(ctx, ready, "github_issue_denied", "github_issue_allowed", meta, github.Window{
@@ -204,8 +217,12 @@ func (a *App) toolCreateComment(ctx context.Context, bot store.Bot, args map[str
 		return msg, err
 	}
 	body, ok := plainString(args, "body")
-	if !ok || !github.ValidCommentBody(body) {
+	if !ok {
 		return a.prDeny(ready.bot, "github_comment_denied", ready.owner, ready.repo, "arguments")
+	}
+	body, reason := github.CleanText(body, "comment")
+	if reason != "" {
+		return a.prDeny(ready.bot, "github_comment_denied", ready.owner, ready.repo, reason)
 	}
 	px, msg, err := a.githubReadProxy(ready, "github_comment_denied")
 	if err != nil {
@@ -231,7 +248,14 @@ func (a *App) toolCreateComment(ctx context.Context, bot store.Bot, args map[str
 			card["target_title_clipped"] = true
 		}
 	}
+	if raw, ok := card["target_title"].(string); ok {
+		card["target_title"] = github.VisibleRunes(raw)
+	}
+	noteGitHubCard(card, target.Title, body)
 	meta := githubWriteMeta(ready.number, "", body)
+	if err := a.githubAuditFirst(ready.bot, "github_comment_denied", ready.owner, ready.repo, meta); err != nil {
+		return a.prDeny(ready.bot, "github_comment_denied", ready.owner, ready.repo, "audit")
+	}
 	if msg, err = a.approveGitHubWrite(ctx, ready, "create_comment", "github_comment_denied", card); err != nil {
 		return msg, err
 	}
@@ -427,8 +451,7 @@ func (a *App) finishGitHubWrite(bot store.Bot, denyAction, allowAction, owner, r
 }
 
 func (a *App) finishGitHubRead(ready ghReady, action string, payload map[string]any, page int, pageMore bool, offset int) (string, error) {
-	next, _ := windowGitHubFields(payload, offset, githubSizeCapField)
-	text := renderGitHub(payload, page, pageMore, next)
+	text := fitGitHubRead(payload, page, pageMore, offset)
 	text = redactToken(text, ready.token)
 	if strings.Contains(text, "\n") || strings.Contains(text, "\r") || (ready.token != "" && strings.Contains(text, ready.token)) {
 		return a.prDeny(ready.bot, action+"_denied", ready.owner, ready.repo, "github response")
@@ -478,16 +501,73 @@ func renderGitHub(payload map[string]any, page int, pageMore bool, nextOffset in
 	if nextOffset > 0 {
 		payload["next_offset"] = nextOffset
 	}
-	text := encodeGitHub(payload)
-	if len(text) > githubSizeCapBytes {
-		text = encodeGitHub(map[string]any{
-			"untrusted": githubUntrustedNote,
-			"truncated": true,
-			"omitted":   true,
-			"page":      page,
-		})
+	return encodeGitHub(payload)
+}
+
+// fitGitHubRead shortens long text fields until the encoded page fits.
+// checks, statuses, combined_state, and count are copied onto every try.
+// A field that was cut still names next_offset.
+func fitGitHubRead(payload map[string]any, page int, pageMore bool, offset int) string {
+	base := toGenericMap(payload)
+	summary := takeGitHubSummary(base)
+	field := githubSizeCapField
+	for {
+		view := toGenericMap(base)
+		next, _ := windowGitHubFields(view, offset, field)
+		putGitHubSummary(view, summary)
+		text := renderGitHub(view, page, pageMore, next)
+		if len(text) <= githubSizeCapBytes {
+			return text
+		}
+		if field <= 64 {
+			slim := map[string]any{}
+			putGitHubSummary(slim, summary)
+			cont := 0
+			if next > offset {
+				cont = next
+			}
+			return renderGitHub(slim, page, true, cont)
+		}
+		field /= 2
 	}
-	return text
+}
+
+func takeGitHubSummary(m map[string]any) map[string]any {
+	out := map[string]any{}
+	if m == nil {
+		return out
+	}
+	for _, key := range []string{"checks", "statuses", "combined_state", "count"} {
+		if v, ok := m[key]; ok {
+			out[key] = v
+			delete(m, key)
+		}
+	}
+	return out
+}
+
+func putGitHubSummary(m, summary map[string]any) {
+	if m == nil || summary == nil {
+		return
+	}
+	for key, v := range summary {
+		m[key] = v
+	}
+}
+
+// noteGitHubCard flags a secret-shaped string and lists external links.
+// The title and body on the card stay complete.
+func noteGitHubCard(card map[string]any, parts ...string) {
+	if card == nil {
+		return
+	}
+	joined := strings.Join(parts, "\n")
+	if github.LooksSecret(joined) {
+		card["secret_warning"] = true
+	}
+	if links := github.ExternalLinks(joined); len(links) > 0 {
+		card["links"] = links
+	}
 }
 
 func githubWriteNote(payload map[string]any) string {
@@ -533,7 +613,7 @@ func jsonRaw(v any) string {
 }
 
 // applyGitHubSizeCap drops extra list items and shortens any text field that
-// is still over the window. It does not shrink a result to a hidden stub.
+// is still over the window. The caller keeps structured fields and a continuation.
 func applyGitHubSizeCap(payload map[string]any) (map[string]any, bool) {
 	generic := toGenericMap(payload)
 	cut := trimGitHubItems(generic, githubPageSize)
@@ -541,7 +621,7 @@ func applyGitHubSizeCap(payload map[string]any) (map[string]any, bool) {
 		cut = true
 	}
 	if len(encodeGitHub(generic)) > githubSizeCapBytes {
-		return map[string]any{"omitted": true}, true
+		cut = true
 	}
 	return generic, cut
 }

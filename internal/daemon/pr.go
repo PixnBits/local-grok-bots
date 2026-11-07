@@ -46,22 +46,28 @@ func (a *App) toolCreatePR(ctx context.Context, bot store.Bot, args map[string]a
 	if strings.EqualFold(in.Head, def) {
 		return a.prDeny(bot, "github_pr_denied", owner, repo, "default branch")
 	}
+	card := map[string]any{
+		"repo":      owner + "/" + repo,
+		"head":      in.Head,
+		"base":      in.Base,
+		"title":     in.Title,
+		"title_len": len(in.Title),
+		"draft":     in.Draft,
+		"body":      in.Body,
+		"body_len":  len(in.Body),
+	}
+	noteGitHubCard(card, in.Title, in.Body)
+	meta := githubWriteMeta(0, in.Title, in.Body)
+	if err := a.githubAuditFirst(bot, "github_pr_denied", owner, repo, meta); err != nil {
+		return a.prDeny(bot, "github_pr_denied", owner, repo, "audit")
+	}
 	out := a.perm.Evaluate(ctx, turnPol.Permission(), a.withUserRules(bot.ID, permission.Request{
 		RunID:     a.loopRunID(bot.ID),
 		BotID:     bot.ID,
 		Tool:      "create_pr",
 		ForceAsk:  true,
 		Workspace: a.ws,
-		Args: map[string]any{
-			"repo":      owner + "/" + repo,
-			"head":      in.Head,
-			"base":      in.Base,
-			"title":     in.Title,
-			"title_len": len(in.Title),
-			"draft":     in.Draft,
-			"body":      in.Body,
-			"body_len":  len(in.Body),
-		},
+		Args:      card,
 	}))
 	if out.Behavior != "allow" {
 		reason := "not approved"
@@ -74,7 +80,7 @@ func (a *App) toolCreatePR(ctx context.Context, bot store.Bot, args map[string]a
 	if reason != "" {
 		return a.prDeny(bot, "github_pr_denied", owner, repo, reason)
 	}
-	meta := githubWriteMeta(0, in.Title, in.Body)
+	meta = githubWriteMeta(0, in.Title, in.Body)
 	if err := a.auditGitHubIntent(bot, "github_pr_denied", owner, repo, meta); err != nil {
 		return a.prDeny(bot, "github_pr_denied", owner, repo, "audit")
 	}
@@ -159,14 +165,22 @@ func parseCreatePR(args map[string]any) (github.NewPull, string, string, string)
 		return github.NewPull{}, owner, repo, "arguments"
 	}
 	title, ok := plainString(args, "title")
-	if !ok || !github.ValidPullTitle(title) {
+	if !ok {
 		return github.NewPull{}, owner, repo, "arguments"
+	}
+	title, reason := github.CleanText(title, "title")
+	if reason != "" {
+		return github.NewPull{}, owner, repo, reason
 	}
 	body := ""
 	if _, present := args["body"]; present {
 		body, ok = plainString(args, "body")
-		if !ok || !github.ValidPullBody(body) {
+		if !ok {
 			return github.NewPull{}, owner, repo, "arguments"
+		}
+		body, reason = github.CleanText(body, "body")
+		if reason != "" {
+			return github.NewPull{}, owner, repo, reason
 		}
 	}
 	draft := true
@@ -248,12 +262,16 @@ func prDenyText(reason string) string {
 		return "approval unavailable"
 	case "audit":
 		return "audit log unavailable"
+	case "text":
+		return "text is not allowed"
+	case "lines":
+		return "too many lines"
 	case "github unverified":
 		return "github unverified"
 	case "github moved or renamed":
 		return "github moved or renamed"
 	default:
-		if reason == "github unavailable" || reason == "github response" || strings.HasPrefix(reason, "github status ") {
+		if reason == "github unavailable" || reason == "github response" || reason == "this number is a pull request; use read_pr" || strings.HasPrefix(reason, "github status ") {
 			return reason
 		}
 		return "not approved"
@@ -294,11 +312,16 @@ func (a *App) auditGitHubExtra(bot store.Bot, action, owner, repo, decision, rea
 	a.logGitHub(bot.ID, decision, reason)
 }
 
+// githubAuditFirst records the intent before the approval card is shown.
+func (a *App) githubAuditFirst(bot store.Bot, denyAction, owner, repo string, extra map[string]any) error {
+	return a.auditGitHubIntent(bot, denyAction, owner, repo, extra)
+}
+
 // auditGitHubIntent writes the row that must land before a write is sent.
-// A nil or disabled audit log is a no-op. A closed sink returns an error.
+// A nil or disabled audit log refuses the write. A closed sink returns an error.
 func (a *App) auditGitHubIntent(bot store.Bot, denyAction, owner, repo string, extra map[string]any) error {
 	if a == nil || a.audit == nil || !a.audit.Enabled() {
-		return nil
+		return errors.New("audit disabled")
 	}
 	action := strings.TrimSuffix(denyAction, "_denied") + "_intent"
 	err := a.audit.WriteErr(githubAuditRec(a, bot, action, owner, repo, "intent", "pending", extra))

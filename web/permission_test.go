@@ -247,3 +247,100 @@ setTimeout(()=>{
 		}
 	}
 }
+
+func TestCommentCardShowsNumber(t *testing.T) {
+	runPermSnippet(t, `
+showPermissionRequest({id:"cc1", run_id:"run-1", tool:"create_comment", arguments:{repo:"acme/widgets", number:7, target_kind:"issue", target_title:"Empty state", body:"hi", body_len:2}, deadline:future, session_allowed:false}, "run-1");
+if (kvValue(cardOf("cc1"), "Number") !== "7") throw new Error("number " + kvValue(cardOf("cc1"), "Number"));
+`)
+}
+
+func TestCardShowsLineCue(t *testing.T) {
+	if !strings.Contains(ClientSource(), ".card-scroll-cue") {
+		t.Fatal("scroll cue style missing")
+	}
+	runPermSnippet(t, `
+const padded = "LGTM\n".repeat(40) + "PADDED-TAIL";
+showPermissionRequest({id:"pad", run_id:"run-1", tool:"create_issue", arguments:{repo:"acme/widgets", title:"T", body:padded, body_len:padded.length}, deadline:future, session_allowed:false}, "run-1");
+const card = cardOf("pad");
+if (kvValue(card, "Lines") !== "41") throw new Error("lines " + kvValue(card, "Lines"));
+if (!textOf(card).includes("more lines below")) throw new Error("cue missing " + textOf(card));
+if (!textOf(card).includes("PADDED-TAIL")) throw new Error("tail missing");
+const cue = walk(card, []).find(n => String(n.className || "").indexOf("card-scroll-cue") >= 0);
+if (!cue) throw new Error("cue class missing");
+showPermissionRequest({id:"one", run_id:"run-1", tool:"create_issue", arguments:{repo:"acme/widgets", title:"T", body:"single", body_len:6}, deadline:future, session_allowed:false}, "run-1");
+if (textOf(cardOf("one")).includes("more lines below")) throw new Error("short card cued");
+`)
+}
+
+func TestCardNotesSecretAndLinks(t *testing.T) {
+	runPermSnippet(t, `
+showPermissionRequest({id:"sec", run_id:"run-1", tool:"create_issue", arguments:{repo:"acme/widgets", title:"T", body:"ghp_example https://evil.example/a", body_len:32, secret_warning:true, links:["https://evil.example/a"]}, deadline:future, session_allowed:false}, "run-1");
+const card = cardOf("sec");
+if (!textOf(card).includes("secret-looking")) throw new Error("warning missing");
+if (!textOf(card).includes("ghp_example")) throw new Error("body redacted");
+if (kvValue(card, "Links") !== "https://evil.example/a") throw new Error("links " + kvValue(card, "Links"));
+`)
+}
+
+func runPermSnippet(t *testing.T, body string) {
+	t.Helper()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	src := ClientSource()
+	i := strings.Index(src, "// perm:begin")
+	j := strings.Index(src, "// perm:end")
+	if i < 0 || j < i {
+		t.Fatal("permission handler markers missing")
+	}
+	harness := permSnippetPrefix + src[i:j] + permSnippetSuffix + body + "\nclearPermissionCards();\nprocess.exit(0);\n"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "perm.js")
+	if err := os.WriteFile(path, []byte(harness), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, node, path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+}
+
+const permSnippetPrefix = `
+class N {
+  constructor(tag){this.tag=tag;this.kids=[];this.dataset={};this.attrs={};this.className="";this.disabled=false;this._text="";this.listeners={};
+    this.classList={add:(c)=>{this.className += " "+c;}};}
+  append(...k){this.kids.push(...k)}
+  querySelectorAll(sel){return sel==="button"?this.kids.filter(k=>k.tag==="button"):[]}
+  addEventListener(type,fn){(this.listeners[type]||=[]).push(fn)}
+  click(){(this.listeners.click||[]).forEach(fn=>fn())}
+  set textContent(v){this._text=v==null?"":String(v)}
+  get textContent(){return this._text}
+  set type(v){this.attrs.type=v}
+  set innerHTML(v){this.kids.push({tag:"html",_text:String(v),kids:[]})}
+}
+const el=(tag,cls,text)=>{const n=new N(tag); if(cls) n.className=cls; if(text!=null) n.textContent=text; return n};
+const live=new N("div");
+const $=(s)=>s==="#live"?live:null;
+const posts=[];
+const api=async(path,opts)=>{posts.push({path, body:opts&&opts.body});};
+const state={botId:"bot-1"};
+const future=new Date(Date.now()+5000).toISOString();
+`
+
+const permSnippetSuffix = `
+const walk=(n,acc)=>{acc.push(n); (n.kids||[]).forEach(k=>walk(k,acc)); return acc};
+const cardOf=id=>live.kids.find(c=>c.dataset&&c.dataset.id===id);
+const textOf=c=>walk(c,[]).map(n=>n._text||"").join("\n");
+const kvValue=(c,k)=>{
+  const rows=walk(c,[]).filter(n=>n.className==="kv");
+  for (const row of rows) {
+    const kids=row.kids||[];
+    if (kids[0] && kids[0]._text===k) return kids[1] ? String(kids[1]._text) : "";
+  }
+  return "";
+};
+`
