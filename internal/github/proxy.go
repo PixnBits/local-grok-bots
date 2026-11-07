@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -59,14 +60,17 @@ type Config struct {
 	APIBase string
 	Audit   func(Audit)
 	// Access defaults to AccessRead. AccessWrite is a second instance used
-	// only for a push or create_pr after the card is approved.
+	// only for a push, create_pr, create_issue, or create_comment after
+	// the card is approved.
 	Access Access
 	// Window scopes an AccessWrite proxy to one approved route. An empty
 	// window refuses every request. AccessRead ignores it.
 	Window Window
 }
 
-// Window is the single owner, repository, and branch a write proxy may use.
+// Window is the single owner and repository a write proxy may use.
+// Push and pull-request windows also name a branch. A comment window names
+// the issue or pull-request number.
 type Window struct {
 	Kind    string
 	Owner   string
@@ -79,6 +83,8 @@ type Window struct {
 	Old string
 	// Base is the approved pull-request base branch.
 	Base string
+	// Number is the approved issue or pull-request number for a comment.
+	Number int
 }
 
 const (
@@ -86,6 +92,10 @@ const (
 	WindowPush = "push"
 	// WindowPR allows POST /repos/{owner}/{repo}/pulls for one head.
 	WindowPR = "pr"
+	// WindowIssue allows POST /repos/{owner}/{repo}/issues.
+	WindowIssue = "issue"
+	// WindowComment allows POST /repos/{owner}/{repo}/issues/{n}/comments.
+	WindowComment = "comment"
 )
 
 // Proxy is a host-side reverse proxy. It adds Authorization only for an
@@ -475,6 +485,22 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, requireGate bool) 
 		}
 		r.Body = io.NopCloser(body)
 	}
+	if p.access == AccessWrite && p.window.Kind == WindowIssue && method == http.MethodPost && apiIssueCreate(route.Path) {
+		body, berr := checkIssueBody(r.Body)
+		if berr != nil {
+			p.finish(w, http.StatusForbidden, route.Path, route.Owner, route.Repo, "body", method, write)
+			return
+		}
+		r.Body = io.NopCloser(body)
+	}
+	if p.access == AccessWrite && p.window.Kind == WindowComment && method == http.MethodPost && apiIssueComment(route.Path, p.window.Number) {
+		body, berr := checkCommentBody(r.Body)
+		if berr != nil {
+			p.finish(w, http.StatusForbidden, route.Path, route.Owner, route.Repo, "body", method, write)
+			return
+		}
+		r.Body = io.NopCloser(body)
+	}
 	base := p.gitBase
 	if route.Service == "api" {
 		base = p.apiBase
@@ -651,12 +677,12 @@ func readAccess(route Route, method string) bool {
 }
 
 func writeAccess(route Route, method string, win Window) bool {
-	if !windowRepo(route, win) || win.Branch == "" {
+	if !windowRepo(route, win) {
 		return false
 	}
 	switch win.Kind {
 	case WindowPush:
-		if route.Service != "github" {
+		if win.Branch == "" || route.Service != "github" {
 			return false
 		}
 		switch gitTail(route.Path) {
@@ -668,7 +694,14 @@ func writeAccess(route Route, method string, win Window) bool {
 			return false
 		}
 	case WindowPR:
+		if win.Branch == "" {
+			return false
+		}
 		return route.Service == "api" && method == http.MethodPost && apiPullCreate(route.Path)
+	case WindowIssue:
+		return route.Service == "api" && method == http.MethodPost && apiIssueCreate(route.Path)
+	case WindowComment:
+		return route.Service == "api" && method == http.MethodPost && apiIssueComment(route.Path, win.Number)
 	default:
 		return false
 	}
@@ -696,12 +729,41 @@ func apiReadPath(path string) bool {
 	if len(parts) == 3 {
 		return true
 	}
-	return len(parts) == 5 && parts[3] == "pulls" && pullNumber(parts[4])
+	tail := parts[3:]
+	switch {
+	case len(tail) == 1 && tail[0] == "issues":
+		return true
+	case len(tail) == 2 && tail[0] == "issues" && pullNumber(tail[1]):
+		return true
+	case len(tail) == 2 && tail[0] == "pulls" && pullNumber(tail[1]):
+		return true
+	case len(tail) == 3 && tail[0] == "issues" && pullNumber(tail[1]) && tail[2] == "comments":
+		return true
+	case len(tail) == 3 && tail[0] == "pulls" && pullNumber(tail[1]) && (tail[2] == "files" || tail[2] == "comments" || tail[2] == "reviews"):
+		return true
+	case len(tail) == 3 && tail[0] == "commits" && commitSHA(tail[1]) && (tail[2] == "check-runs" || tail[2] == "status"):
+		return true
+	default:
+		return false
+	}
 }
 
 func apiPullCreate(path string) bool {
 	parts := splitParts(path)
 	return len(parts) == 4 && parts[0] == "repos" && parts[3] == "pulls"
+}
+
+func apiIssueCreate(path string) bool {
+	parts := splitParts(path)
+	return len(parts) == 4 && parts[0] == "repos" && parts[3] == "issues"
+}
+
+func apiIssueComment(path string, number int) bool {
+	if number < 1 || number > 1_000_000_000 {
+		return false
+	}
+	parts := splitParts(path)
+	return len(parts) == 6 && parts[0] == "repos" && parts[3] == "issues" && parts[5] == "comments" && parts[4] == strconv.Itoa(number)
 }
 
 func pullNumber(s string) bool {

@@ -242,6 +242,8 @@ func prDenyText(reason string) string {
 		return "root requires bwrap"
 	case "not approved":
 		return "not approved"
+	case "broker":
+		return "approval unavailable"
 	default:
 		if reason == "github unavailable" || reason == "github response" || strings.HasPrefix(reason, "github status ") {
 			return reason

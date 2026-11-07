@@ -81,6 +81,15 @@ func TestWriteWindowAndRefUpdates(t *testing.T) {
 		{AccessWrite, prWin, http.MethodPost, "/github/acme/widgets.git/git-receive-pack", approved, http.StatusForbidden, "", false},
 		{AccessWrite, prWin, http.MethodGet, "/api/repos/acme/widgets", "", http.StatusForbidden, "", false},
 		{AccessWrite, prWin, http.MethodPost, "/api/repos/acme/widgets/merges", `{"head":"feature"}`, http.StatusForbidden, "", false},
+		{AccessWrite, Window{Kind: WindowIssue, Owner: "acme", Repo: "widgets"}, http.MethodPost, "/api/repos/acme/widgets/issues", `{"title":"T","body":"b"}`, http.StatusNoContent, "", true},
+		{AccessWrite, Window{Kind: WindowIssue, Owner: "acme", Repo: "widgets"}, http.MethodPost, "/api/repos/acme/widgets/issues", `{"title":"T","assignees":["a"]}`, http.StatusForbidden, "body", false},
+		{AccessWrite, Window{Kind: WindowIssue, Owner: "acme", Repo: "widgets"}, http.MethodPost, "/api/repos/acme/widgets/pulls", `{"title":"T"}`, http.StatusForbidden, "", false},
+		{AccessWrite, Window{Kind: WindowComment, Owner: "acme", Repo: "widgets", Number: 7}, http.MethodPost, "/api/repos/acme/widgets/issues/7/comments", `{"body":"hello"}`, http.StatusNoContent, "", true},
+		{AccessWrite, Window{Kind: WindowComment, Owner: "acme", Repo: "widgets", Number: 7}, http.MethodPost, "/api/repos/acme/widgets/issues/8/comments", `{"body":"hello"}`, http.StatusForbidden, "", false},
+		{AccessWrite, Window{Kind: WindowComment, Owner: "acme", Repo: "widgets", Number: 7}, http.MethodPost, "/api/repos/acme/widgets/issues/7/comments", `{"body":"hello","event":"COMMENT"}`, http.StatusForbidden, "body", false},
+		{AccessRead, Window{}, http.MethodGet, "/api/repos/acme/widgets/issues?state=open&per_page=10&page=1", "", http.StatusNoContent, "", true},
+		{AccessRead, Window{}, http.MethodGet, "/api/repos/acme/widgets/issues?state=closed", "", http.StatusForbidden, "", false},
+		{AccessRead, Window{}, http.MethodPost, "/api/repos/acme/widgets/issues", `{"title":"T"}`, http.StatusForbidden, "", false},
 		{AccessRead, Window{}, http.MethodPost, "/github/acme/widgets.git/git-upload-pack", "0000", http.StatusNoContent, "", true},
 		{AccessRead, Window{}, http.MethodPost, "/github/acme/widgets.git/git-receive-pack", approved, http.StatusForbidden, "", false},
 	}
@@ -130,7 +139,11 @@ func TestWriteWindowAndRefUpdates(t *testing.T) {
 		if !tc.fwd && gotHits != 0 {
 			t.Fatalf("case %d forwarded", i)
 		}
-		if tc.fwd && tc.body != "" && !strings.Contains(body, "refs/heads/feature") && !strings.Contains(body, `"head":"feature"`) && !strings.HasPrefix(tc.path, "/github/") {
+		if tc.fwd && tc.body != "" && !strings.HasPrefix(tc.path, "/github/") &&
+			!strings.Contains(body, "refs/heads/feature") &&
+			!strings.Contains(body, `"head":"feature"`) &&
+			!strings.Contains(body, `"title":`) &&
+			!strings.Contains(body, `"body":`) {
 			t.Fatalf("case %d body %q", i, body)
 		}
 		if tc.reason != "" {
