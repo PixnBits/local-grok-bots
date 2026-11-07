@@ -35,7 +35,8 @@ func autoAllowOK(in inspected) bool {
 // reason is the critical level or a critical path. The ceiling still
 // has to be exactly critical for that level. Every other reason asks,
 // including at a critical ceiling. A git form that runs a command, a
-// compound part with no known level, a git-risk, and a policy path do
+// compound part with no known level, a git-risk, a policy path, an
+// unresolved path, a git-directory write, and a client-config write do
 // not match at any ceiling.
 func (e *Engine) ceilingMatch(req Request, in inspected) (Level, bool) {
 	if e == nil || e.brokerMode != "hook" {
@@ -61,6 +62,15 @@ func (e *Engine) ceilingMatch(req Request, in inspected) (Level, bool) {
 		return "", false
 	}
 	if ceilingProtectedRead(in) {
+		return "", false
+	}
+	if ceilingPathUnresolved(req, in) {
+		return "", false
+	}
+	if ceilingGitSensitiveWrite(req, in) {
+		return "", false
+	}
+	if ceilingClientConfigWrite(req, in) {
 		return "", false
 	}
 	if !e.ceilingRequestEligible(req, in) {
@@ -260,6 +270,11 @@ func (e *Engine) ceilingToolEligible(req Request, in inspected) bool {
 		return false
 	}
 	paths := toolPaths(req.ToolInput)
+	if normTool(req.ToolName) == "glob" {
+		if p := globPatternPath(req.ToolInput); p != "" {
+			paths = append(paths, p)
+		}
+	}
 	ws := req.Workspace
 	if ws == "" {
 		ws = req.Cwd

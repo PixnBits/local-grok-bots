@@ -420,31 +420,116 @@ func pathsLeave(args []string, cwd, workspace string) bool {
 	return false
 }
 
-func resolvesInside(path, cwd, workspace string) bool {
-	if path == "" || strings.ContainsRune(path, 0) || workspace == "" {
-		return false
+// maxSymlinkFollow caps readlink hops on a path and its parents.
+const maxSymlinkFollow = 40
+
+func absPath(path, cwd, workspace string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
 	}
-	abs := path
 	if !filepath.IsAbs(path) {
 		base := cwd
 		if base == "" {
 			base = workspace
 		}
-		abs = filepath.Join(base, path)
+		if base == "" {
+			return filepath.Clean(path)
+		}
+		path = filepath.Join(base, path)
 	}
-	abs = filepath.Clean(abs)
-	if !lexicalInside(abs, workspace) {
+	return filepath.Clean(path)
+}
+
+func resolvesInside(path, cwd, workspace string) bool {
+	if path == "" || strings.ContainsRune(path, 0) || workspace == "" {
 		return false
 	}
-	if real, err := filepath.EvalSymlinks(abs); err == nil {
-		return lexicalInside(real, workspace)
+	abs := absPath(path, cwd, workspace)
+	if abs == "" || !lexicalInside(abs, workspace) {
+		return false
 	}
-	parent := filepath.Dir(abs)
-	realParent, err := filepath.EvalSymlinks(parent)
+	real, ok := resolvePathTarget(abs)
+	if !ok {
+		return false
+	}
+	return lexicalInside(real, workspace)
+}
+
+// resolvePathTarget follows symlinks on path and each parent with a
+// depth-capped readlink loop. ok is false when the cap is hit, a loop
+// is detected, or a readlink on an existing link fails.
+func resolvePathTarget(path string) (string, bool) {
+	path = filepath.Clean(path)
+	if path == "" {
+		return "", false
+	}
+	follows := 0
+	seen := map[string]struct{}{}
+	return resolvePathWalk(path, &follows, seen)
+}
+
+func resolvePathWalk(path string, follows *int, seen map[string]struct{}) (string, bool) {
+	path = filepath.Clean(path)
+	if path == "" {
+		return "", false
+	}
+	var missing []string
+	cur := path
+	for {
+		st, err := os.Lstat(cur)
+		if err != nil {
+			parent := filepath.Dir(cur)
+			if parent == cur {
+				return filepath.Clean(joinMissing(cur, missing)), true
+			}
+			missing = append(missing, filepath.Base(cur))
+			cur = parent
+			continue
+		}
+		if st.Mode()&os.ModeSymlink != 0 {
+			target, ok := readlinkAbs(cur, follows, seen)
+			if !ok {
+				return "", false
+			}
+			return resolvePathWalk(joinMissing(target, missing), follows, seen)
+		}
+		real := cur
+		if r, err := filepath.EvalSymlinks(cur); err == nil {
+			real = r
+		}
+		return filepath.Clean(joinMissing(real, missing)), true
+	}
+}
+
+func readlinkAbs(path string, follows *int, seen map[string]struct{}) (string, bool) {
+	if _, ok := seen[path]; ok {
+		return "", false
+	}
+	seen[path] = struct{}{}
+	*follows++
+	if *follows > maxSymlinkFollow {
+		return "", false
+	}
+	target, err := os.Readlink(path)
 	if err != nil {
-		return true
+		return "", false
 	}
-	return lexicalInside(filepath.Join(realParent, filepath.Base(abs)), workspace)
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return "", false
+	}
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(filepath.Dir(path), target)
+	}
+	return filepath.Clean(target), true
+}
+
+func joinMissing(base string, missing []string) string {
+	for i := len(missing) - 1; i >= 0; i-- {
+		base = filepath.Join(base, missing[i])
+	}
+	return base
 }
 
 func lexicalInside(abs, workspace string) bool {

@@ -169,7 +169,9 @@ imminent_timer_minutes = 2
 # level is at or below that bot's ceiling. The value is the lowercase word
 # low, medium, high, or critical. There is no case folding. Critical
 # auto-approves only when the ceiling is critical and that level or a
-# critical path is the only reason. Other hard asks, ineligible calls,
+# critical path is the only reason. A critical ceiling auto-approves
+# hook-path git operations and credential printing (for example
+# `gh auth token`). Other hard asks, ineligible calls,
 # git forms that run a command, git-risk, drift, unclassified compound
 # parts, paths outside the workspace, and policy-file paths still ask.
 # The bot id must be a UUID listed in broker_bots. The setting does

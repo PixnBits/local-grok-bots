@@ -29,6 +29,8 @@ next try asks again. Pattern and legacy ask rules are included.
 
 A critical request is auto-approved only when the ceiling is exactly
 `critical` and the critical level or a critical path is the only reason.
+A critical ceiling auto-approves hook-path git operations and credential
+printing (for example `gh auth token`).
 An unresolved program, a wrapper, a leading `cd`, a void command, a
 protected-path read, a git form that runs a command, a non-shell path
 outside the workspace, and any other ineligible reason still ask. The
@@ -41,7 +43,10 @@ Non-shell auto-approval is a fixed table: in-workspace `Read`, `Glob`,
 and `Grep` are low; in-workspace `Write`, `Edit`, `MultiEdit`, and
 `NotebookEdit` are medium. Other tools, including `WebFetch`,
 `WebSearch`, `Task`, and `mcp__*`, do not auto-approve. A write of a
-critical path or a policy path does not auto-approve at any ceiling.
+critical path, a policy path, a git directory, or client config that
+can run commands does not auto-approve at any ceiling. Path resolution
+follows dangling links with a depth cap; a loop or ambiguous target
+refuses auto-approval.
 
 A ceiling auto-approval whose audit row cannot be written is a deny.
 The in-memory mirror records the row only after the append succeeds,

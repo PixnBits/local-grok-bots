@@ -81,6 +81,7 @@ func TestCriticalCeilingSoleReason(t *testing.T) {
 		{name: "git-c-pager", cwd: ws, ws: ws, cmd: "git -c core.pager=less log"},
 		{name: "git-c-credential", cwd: ws, ws: ws, cmd: "git -c credential.helper=x status"},
 		{name: "compound-critical", cwd: ws, ws: ws, cmd: "gh auth token; git status"},
+		{name: "login-with-token", cwd: ws, ws: ws, cmd: "gh auth login --with-token"},
 		{name: "compound-unclassified", cwd: ws, ws: ws, cmd: "gh auth token; echo hi"},
 		{name: "background", cwd: ws, ws: ws, cmd: "git status &"},
 		{name: "substitution", cwd: ws, ws: ws, cmd: "git status $(id)"},
@@ -153,6 +154,8 @@ func TestCeilingGitExecRefused(t *testing.T) {
 	}{
 		{name: "foreach-high", ceiling: LevelHigh, cmd: "git submodule foreach git status"},
 		{name: "foreach-critical", ceiling: LevelCritical, cmd: "git submodule foreach git status"},
+		{name: "foreach-C", ceiling: LevelMedium, cmd: "git -C . submodule foreach id"},
+		{name: "foreach-C-critical", ceiling: LevelCritical, cmd: "git -C . submodule foreach id"},
 		{name: "add", ceiling: LevelCritical, cmd: "git submodule add https://example.invalid/a.git"},
 		{name: "update-command", ceiling: LevelCritical, cmd: "git submodule update --command git status"},
 		{name: "update-bang", ceiling: LevelCritical, cmd: "git submodule update !git status"},
@@ -186,6 +189,7 @@ func TestCeilingGitExecRefused(t *testing.T) {
 		{"git", "filter-branch"},
 		{"git", "difftool", "-t", "vimdiff"},
 		{"git", "mergetool", "--extcmd", "vim"},
+		{"git", "-c", "x=y", "submodule", "foreach", "id"},
 		{"git", "-c", "alias.st=status", "status"},
 		{"git", "-c", "core.fsmonitor=id", "status"},
 		{"git", "-c", "credential.helper=x", "status"},
@@ -366,6 +370,8 @@ func TestCeilingToolTable(t *testing.T) {
 		{name: "unknown", tool: "CustomTool", in: in},
 		{name: "empty-read", tool: "Read", in: map[string]any{}},
 		{name: "glob-pattern-only", tool: "Glob", in: map[string]any{"pattern": "**/*.go"}},
+		{name: "glob-abs-pattern", tool: "Glob", in: map[string]any{"path": ws, "pattern": filepath.Join(outside, "*")}},
+		{name: "glob-dotdot-pattern", tool: "Glob", in: map[string]any{"path": ws, "pattern": "../secret/*"}},
 		{name: "hook-write", tool: "Write", in: map[string]any{"file_path": filepath.Join(ws, ".git", "hooks", "pre-commit")}},
 		{name: "protected-read", tool: "Read", in: map[string]any{"file_path": filepath.Join(ws, "id_ed25519")}},
 		{name: "critical-write", tool: "Write", in: in, crit: []string{file}},
@@ -432,10 +438,17 @@ func TestAuditWriteErrorSkipsRecord(t *testing.T) {
 			}
 			cap.mu.Lock()
 			defer cap.mu.Unlock()
+			var mirrored bool
 			for _, row := range cap.rows {
 				if row.Decision == VerdictAllow || row.Actor == AllowThroughSource {
 					t.Fatalf("recorded %+v", row)
 				}
+				if row.Source == AuditWriteFailedSource && row.Decision != VerdictAllow {
+					mirrored = true
+				}
+			}
+			if !mirrored {
+				t.Fatal("deny row was not mirrored")
 			}
 		})
 	}

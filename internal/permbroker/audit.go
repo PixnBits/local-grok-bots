@@ -160,6 +160,10 @@ var redactRes = []*regexp.Regexp{
 // AllowThroughSource is the audit source for a ceiling auto-approval.
 const AllowThroughSource = "dangerously_allow_all_up_through"
 
+// AuditWriteFailedSource marks a deny or ask row mirrored after the
+// audit file write failed.
+const AuditWriteFailedSource = "audit_write_failed"
+
 // Redact hides credentials in text the audit file would otherwise keep.
 // password= and --token= keep the key and replace the value.
 func Redact(s string) string {

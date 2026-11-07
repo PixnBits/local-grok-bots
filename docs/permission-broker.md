@@ -410,6 +410,19 @@ git-risk or a baseline drift, and a call that names the local or managed
 policy file. The policy-file check resolves the path and its parent
 directories the same way a critical path is resolved, including a link
 whose target is a policy file. That refusal holds at a critical ceiling.
+Path resolution follows dangling links with a depth-capped readlink
+loop on the path and each parent. Hitting the cap, a loop, or an
+ambiguous target refuses auto-approval.
+
+Writes to a git directory (a `.git` path component, a file named `.git`,
+or a gitdir lookalike) are not auto-approved at any ceiling. Hook-path
+git operations stay on the critical sole-reason path.
+
+Writes to client config that can run commands are not auto-approved at
+any ceiling: `.grok/` (including `settings.json`), `.claude/`,
+`.vscode/tasks.json`, `.vscode/settings.json`, `.vscode/launch.json`,
+`.idea/runConfigurations/`, `.idea/workspace.xml`, `.envrc` and `.env`
+loader files, and `.devcontainer/`.
 
 A hard ask or a request that is not eligible does not auto-approve,
 including at a critical ceiling, unless the only reason is the critical
@@ -419,8 +432,10 @@ command, a read of a protected path, a git form that runs a command, a
 non-shell path outside the workspace, and any other ineligible reason.
 A credential command whose only reason is the critical level can
 auto-approve when the ceiling is exactly critical. Combined with another
-reason, it asks. The git forms that run a command are refused on the
-ceiling side. The classifier is unchanged, so a rule or a task grant
+reason, it asks. A critical ceiling auto-approves hook-path git
+operations and credential printing (for example `gh auth token`). The
+git forms that run a command are refused on the ceiling side. The
+classifier is unchanged, so a rule or a task grant
 keeps its current eligibility when no ceiling applies. The ceiling does
 not use the Linux-only allow choke that saved rules and task grants use.
 
@@ -432,8 +447,8 @@ table does not auto-approve.
 
 | Tool | Level | Auto-approves when |
 | --- | --- | --- |
-| `Read`, `Glob`, `Grep` | low | every path is inside the workspace and is not protected or a policy file. A path on the critical list is critical and needs an exact critical ceiling |
-| `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | medium | every path is inside the workspace and is not protected, a policy file, or a critical path |
+| `Read`, `Glob`, `Grep` | low | every path is inside the workspace and is not protected or a policy file. A path on the critical list is critical and needs an exact critical ceiling. An absolute Glob `pattern`, or one containing `..`, is checked the same way |
+| `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | medium | every path is inside the workspace and is not protected, a policy file, a critical path, a git directory, or client config that can run commands |
 | `WebFetch`, `WebSearch`, `Task`, `mcp__*`, any other tool | none | never |
 
 A wildcard key such as `*`, a key that is not a UUID, an empty value,

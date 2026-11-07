@@ -485,26 +485,11 @@ func resolveExistingPrefix(path string) string {
 	if path == "" {
 		return ""
 	}
-	cur := path
-	var missing []string
-	for {
-		if _, err := os.Lstat(cur); err == nil {
-			real, err := filepath.EvalSymlinks(cur)
-			if err != nil {
-				real = cur
-			}
-			for i := len(missing) - 1; i >= 0; i-- {
-				real = filepath.Join(real, missing[i])
-			}
-			return filepath.Clean(real)
-		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return path
-		}
-		missing = append(missing, filepath.Base(cur))
-		cur = parent
+	real, ok := resolvePathTarget(path)
+	if !ok {
+		return ""
 	}
+	return real
 }
 
 func expandCandidates(tok string, ce critEnv) []string {

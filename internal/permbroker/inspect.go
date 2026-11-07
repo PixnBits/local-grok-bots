@@ -197,7 +197,11 @@ func inspectSnap(ctx context.Context, req Request, snap evalSnap) inspected {
 		}
 		drifted, driftWhy := gitDriftSnap(snap, req, ws, parsed)
 		if gitRiskTool(req.ToolName) && commandUsesGit(parsed) {
-			if why := gitConfigRisk(ws, snap.homes, snap.env); why != "" {
+			extra := gitCommandDirs(parsed.Argv, req.Cwd, ws)
+			for _, p := range parsed.Parts {
+				extra = append(extra, gitCommandDirs(p.Argv, req.Cwd, ws)...)
+			}
+			if why := gitConfigRiskExtra(ws, snap.homes, snap.env, extra); why != "" {
 				in.GitRisk = why
 				in.Eligible = false
 				in.HardAsk = true

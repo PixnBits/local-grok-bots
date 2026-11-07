@@ -85,6 +85,33 @@ func TestStartupLogsAllowCeilings(t *testing.T) {
 	}
 }
 
+func TestStartupLogsCriticalCeilingWarning(t *testing.T) {
+	const bot = "11111111-1111-4111-8111-111111111111"
+	dir := t.TempDir()
+	if err := chmodDataDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	path, managed := writeCeilingPolicy(t, dir, bot, "hook", "critical")
+	t.Setenv("MANAGED_POLICY", managed)
+	buf := captureStartup(t)
+	app, err := New(config.Config{
+		DataDir: dir, PolicyPath: path, BindAddr: "127.0.0.1:0",
+		OllamaURL: "http://127.0.0.1:9", Model: "test-model", Version: "0.1.0",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Shutdown)
+	log := buf.String()
+	if !strings.Contains(log, "dangerouslyAllowAllPermissionRequestsUpThrough "+bot+" critical") {
+		t.Fatalf("startup log:\n%s", log)
+	}
+	want := "WARNING: bot " + bot + " auto-approves credential-printing commands and hook-path git operations"
+	if !strings.Contains(log, want) {
+		t.Fatalf("missing critical warning:\n%s", log)
+	}
+}
+
 func TestStartupLogsCeilingIgnoredWhenBrokerOff(t *testing.T) {
 	const bot = "11111111-1111-4111-8111-111111111111"
 	dir := t.TempDir()
