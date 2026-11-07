@@ -18,6 +18,15 @@ var ThemeJS []byte
 //go:embed app.js
 var AppJS []byte
 
+//go:embed favicon.svg
+var FaviconSVG []byte
+
+//go:embed favicon.ico
+var FaviconICO []byte
+
+//go:embed apple-touch-icon.png
+var AppleTouchIcon []byte
+
 // ClientSource is the page plus its scripts and styles. Tests that
 // used to read one file still find markers and selectors here.
 func ClientSource() string {
