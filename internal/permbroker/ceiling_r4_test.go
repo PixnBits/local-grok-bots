@@ -70,7 +70,7 @@ func TestCeilingDanglingLinkLoopAndCap(t *testing.T) {
 	if err := os.WriteFile(prev, []byte("e"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	for i := maxSymlinkFollow; i >= 0; i-- {
+	for i := 41; i >= 0; i-- {
 		name := filepath.Join(ws, "s"+strconv.Itoa(i))
 		if err := os.Symlink(prev, name); err != nil {
 			t.Fatal(err)
