@@ -457,6 +457,7 @@ func TestGolden_UnusableHookRefusesTurn(t *testing.T) {
 }
 
 func TestStaleApprovalWritesNoAllow(t *testing.T) {
+	skipIfHostRootLooksLikeNobody(t)
 	for _, tc := range []struct {
 		name string
 		end  string

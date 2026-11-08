@@ -13,6 +13,7 @@ import (
 )
 
 func TestGolden_RulesRevokeImmediateAndAdminOnly(t *testing.T) {
+	skipIfHostRootLooksLikeNobody(t)
 	app := newApp(t, "", nil)
 	srv := serve(t, app)
 	base := srv.URL

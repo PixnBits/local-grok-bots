@@ -282,7 +282,10 @@ config and include targets that resolve, every `.gitattributes` file in
 the worktree, `<git-dir>/info/attributes`, the system git config, each home's `.gitconfig`,
 `~/.config/git/config`, and `~/.config/git/attributes`, the file named
 by `core.attributesFile`, and `GIT_*` variables in the environment
-stored for that bot. A nested `.gitattributes` is read the same way as
+stored for that bot. A managed `GIT_DIR` that is missing or that does
+not resolve to this workspace's git directory asks. A managed
+`GIT_WORK_TREE` that is missing or that does not resolve to this
+workspace root asks. A nested `.gitattributes` is read the same way as
 the one at the worktree root. A directory reached by a symlink inside
 the worktree that contains a `.gitattributes` file asks, and that file
 is not added to the baseline. The walk skips the contents of `.git`
@@ -417,8 +420,19 @@ root, or at the resolved working directory, and resolves each symlink
 target against the parent it has already resolved. The hop cap is 40.
 A seen-set refuses a loop. A dangling symlink is an error. A missing
 final component that is not a symlink is a new file and stays eligible
-when the rest of the checks pass. Any walk error means the request is
-not eligible for ceiling auto-approval.
+when the rest of the checks pass. The walk keeps the bytes of each
+component and each symlink target. It does not trim whitespace and it
+does not turn a backslash into a slash. A NUL, or any other path that
+cannot be a kernel name, is an error. Any walk error means the request
+is not eligible for ceiling auto-approval.
+
+An existing regular file whose link count is above one is not
+auto-approved. A regular file that is the same inode as an existing
+sensitive file is not auto-approved either. That set is `.git/config`,
+a file in `.git/hooks`, a policy file, a critical or protected file,
+and a client-config file that is already on disk. `git fetch` and
+`git ls-remote` ask when an argument contains `ext::`, including when
+that remote is a single quoted word.
 
 The spelled path and the resolved target are both checked. If either
 one matches, the ceiling does not auto-approve at any level, including

@@ -13,10 +13,11 @@ const maxSymlinkFollow = 40
 const maxPathComponents = 1024
 
 var (
-	errSymlinkLoop     = errors.New("symlink loop")
-	errSymlinkHops     = errors.New("symlink hop cap")
-	errSymlinkDangling = errors.New("dangling symlink")
-	errPathUnresolved  = errors.New("unresolved path")
+	errSymlinkLoop         = errors.New("symlink loop")
+	errSymlinkHops         = errors.New("symlink hop cap")
+	errSymlinkDangling     = errors.New("dangling symlink")
+	errPathUnresolved      = errors.New("unresolved path")
+	errPathUnrepresentable = errors.New("unrepresentable path")
 )
 
 type walkState struct {
@@ -29,8 +30,10 @@ type walkState struct {
 // A missing final component that is not itself a symlink is a new file.
 // A dangling link, a loop, the hop cap, or an unreadable component is an error.
 func resolvePath(path string) (string, error) {
-	path = strings.TrimSpace(path)
-	if path == "" || strings.ContainsRune(path, 0) || !filepath.IsAbs(path) {
+	if err := refuseUnrepresentable(path); err != nil {
+		return "", err
+	}
+	if path == "" || !filepath.IsAbs(path) {
 		return "", errPathUnresolved
 	}
 	st := &walkState{seen: map[string]struct{}{}}
@@ -39,9 +42,13 @@ func resolvePath(path string) (string, error) {
 
 // resolveFrom walks a relative spelled path from an already-resolved base.
 func resolveFrom(base, spelled string) (string, error) {
-	base = strings.TrimSpace(base)
-	spelled = strings.TrimSpace(spelled)
-	if base == "" || !filepath.IsAbs(base) || spelled == "" || strings.ContainsRune(spelled, 0) {
+	if err := refuseUnrepresentable(base); err != nil {
+		return "", err
+	}
+	if err := refuseUnrepresentable(spelled); err != nil {
+		return "", err
+	}
+	if base == "" || !filepath.IsAbs(base) || spelled == "" {
 		return "", errPathUnresolved
 	}
 	if filepath.IsAbs(spelled) {
@@ -66,9 +73,23 @@ func pathRoot(path string) string {
 	return string(filepath.Separator)
 }
 
+// pathParts splits on the OS separator and does not rewrite bytes.
+// On Unix a backslash is a name byte, the same as the kernel.
 func pathParts(path string) []string {
-	path = strings.ReplaceAll(path, `\`, string(filepath.Separator))
 	return strings.Split(path, string(filepath.Separator))
+}
+
+// unrepresentablePath is true when the bytes cannot be a kernel name.
+// A NUL is the case Go can hold and the kernel cannot.
+func unrepresentablePath(path string) bool {
+	return strings.ContainsRune(path, 0)
+}
+
+func refuseUnrepresentable(path string) error {
+	if unrepresentablePath(path) {
+		return errPathUnrepresentable
+	}
+	return nil
 }
 
 func walkParts(cur string, parts []string, st *walkState, inLink bool) (string, error) {
@@ -154,8 +175,10 @@ func followLink(link, parent string, st *walkState) (string, error) {
 	if err != nil {
 		return "", errPathUnresolved
 	}
-	raw = strings.TrimSpace(raw)
-	if raw == "" || strings.ContainsRune(raw, 0) {
+	if err := refuseUnrepresentable(raw); err != nil {
+		return "", err
+	}
+	if raw == "" {
 		return "", errSymlinkDangling
 	}
 	var start string

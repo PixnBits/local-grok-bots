@@ -115,6 +115,7 @@ func TestGolden_PageCSP(t *testing.T) {
 }
 
 func TestGolden_ReplaceRuleHTTPKeepsBoth(t *testing.T) {
+	skipIfHostRootLooksLikeNobody(t)
 	app := newApp(t, "", nil)
 	srv := serve(t, app)
 	tok := armAdmin(app)

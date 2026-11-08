@@ -267,7 +267,7 @@ type ceilingCand struct {
 }
 
 func ceilingCandRefused(e *Engine, c ceilingCand, cwd, ws, realWS string) bool {
-	spelled := strings.TrimSpace(c.spelled)
+	spelled := c.spelled
 	if spelled == "" || strings.ContainsRune(spelled, 0) {
 		return true
 	}
@@ -276,10 +276,140 @@ func ceilingCandRefused(e *Engine, c ceilingCand, cwd, ws, realWS string) bool {
 		return true
 	}
 	spelledAbs := lexicalAbs(spelled, cwd, ws)
+	if ceilingExistingRefused(e, spelledAbs, resolved, ws, realWS) {
+		return true
+	}
 	hook := c.write && len(c.argv) > 0 && baseName(c.argv[0]) == "git" &&
 		hookPathToken(spelled) && hookPathToken(resolved)
 	class := ceilingClassify(spelled, resolved, spelledAbs, ws, realWS, e.critical, e.policyPaths, c.write)
 	return class.refused(hook)
+}
+
+// ceilingExistingRefused is the hardlink gate. A regular file with Nlink
+// above one is refused. A regular file that is the same inode as an
+// existing sensitive file is refused. Directories are not counted: their
+// link count is the subdirectory count.
+func ceilingExistingRefused(e *Engine, spelledAbs, resolved, ws, realWS string) bool {
+	var infos []os.FileInfo
+	seen := map[string]bool{}
+	for _, p := range []string{spelledAbs, resolved} {
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		st, err := os.Lstat(p)
+		if err != nil || !st.Mode().IsRegular() {
+			continue
+		}
+		if regularHardlink(st) {
+			return true
+		}
+		infos = append(infos, st)
+	}
+	if len(infos) == 0 {
+		return false
+	}
+	for _, s := range sensitiveFiles(e, ws, realWS) {
+		st, err := os.Lstat(s)
+		if err != nil || !st.Mode().IsRegular() {
+			continue
+		}
+		same := false
+		for _, info := range infos {
+			if os.SameFile(info, st) {
+				same = true
+				break
+			}
+		}
+		if !same {
+			continue
+		}
+		// The file's own path is classified elsewhere, including the
+		// critical read and the git-hook exception. An alias is a
+		// different path that still shares the inode (a bind mount).
+		sReal, serr := resolvePath(s)
+		if serr == nil && sReal == resolved {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func regularHardlink(st os.FileInfo) bool {
+	n, ok := nlinkOf(st)
+	if !ok {
+		return true
+	}
+	return n > 1
+}
+
+// sensitiveFiles are existing paths a same-inode write must not match.
+// The list is concrete files, not patterns. Missing entries are ignored
+// by the caller.
+func sensitiveFiles(e *Engine, ws, realWS string) []string {
+	var roots []string
+	addRoot := func(r string) {
+		r = strings.TrimSpace(r)
+		if r == "" {
+			return
+		}
+		for _, old := range roots {
+			if old == r {
+				return
+			}
+		}
+		roots = append(roots, r)
+	}
+	addRoot(ws)
+	addRoot(realWS)
+	rels := []string{
+		filepath.Join(".git", "config"),
+		".gitmodules", ".gitattributes", ".mcp.json", ".envrc", ".env",
+		".bashrc", ".bash_profile", ".bash_login", ".profile",
+		".zshrc", ".zshenv", ".zprofile", ".zlogin",
+		".kshrc", ".cshrc", ".tcshrc", ".inputrc", ".gitconfig", ".netrc", ".pgpass",
+		".credentials", "credentials.json", "id_rsa", "id_ed25519", "known_hosts",
+		filepath.Join(".grok", "settings.json"),
+		filepath.Join(".claude", "settings.json"),
+		filepath.Join(".claude", "settings.local.json"),
+		filepath.Join(".vscode", "tasks.json"),
+		filepath.Join(".vscode", "settings.json"),
+		filepath.Join(".vscode", "launch.json"),
+		filepath.Join(".idea", "workspace.xml"),
+		filepath.Join(".devcontainer", "devcontainer.json"),
+	}
+	var out []string
+	for _, root := range roots {
+		for _, rel := range rels {
+			out = append(out, filepath.Join(root, rel))
+		}
+		out = appendHookFiles(out, filepath.Join(root, ".git", "hooks"))
+		out = appendDirFiles(out, filepath.Join(root, ".ssh"))
+	}
+	if e != nil {
+		out = append(out, e.policyPaths...)
+		out = append(out, e.critical...)
+	}
+	return out
+}
+
+func appendHookFiles(out []string, dir string) []string {
+	return appendDirFiles(out, dir)
+}
+
+func appendDirFiles(out []string, dir string) []string {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return out
+	}
+	for _, ent := range ents {
+		if ent.IsDir() {
+			continue
+		}
+		out = append(out, filepath.Join(dir, ent.Name()))
+	}
+	return out
 }
 
 func ceilingResolveSpelled(spelled, cwd, ws string) (string, error) {
@@ -481,7 +611,6 @@ func redirectTargets(src string) []string {
 			out = append(out, "\x00")
 			return true
 		}
-		word = strings.TrimSpace(word)
 		if word == "" || word == "/dev/null" {
 			return true
 		}

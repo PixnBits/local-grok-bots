@@ -147,6 +147,12 @@ func gitUpstream(sub string, rest []string) bool {
 		if a == "-u" || a == "--upload-pack" || strings.HasPrefix(a, "--upload-pack=") {
 			return true
 		}
+		// ext:: is a remote helper that runs a command. One quoted argv
+		// still contains the marker. Fetch and ls-remote are the forms
+		// that take that remote as a positional argument.
+		if strings.Contains(strings.ToLower(a), "ext::") {
+			return true
+		}
 	}
 	return false
 }
@@ -456,8 +462,7 @@ func resolvesInside(path, cwd, workspace string) bool {
 // resolvePathTarget is the shared resolver. ok is false on a dangling
 // link, a loop, the hop cap, or any other walk error.
 func resolvePathTarget(path string) (string, bool) {
-	path = strings.TrimSpace(path)
-	if path == "" || strings.ContainsRune(path, 0) {
+	if path == "" || unrepresentablePath(path) {
 		return "", false
 	}
 	if !filepath.IsAbs(path) {

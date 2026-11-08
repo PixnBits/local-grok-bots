@@ -14,6 +14,7 @@ import (
 )
 
 func TestGolden_GitRebaselineAdminOnly(t *testing.T) {
+	skipIfHostRootLooksLikeNobody(t)
 	app := newApp(t, "", nil)
 	srv := serve(t, app)
 	const token = "lgbr_admintesttokenvalue"
@@ -107,6 +108,7 @@ func TestGolden_GitRebaselineAdminOnly(t *testing.T) {
 }
 
 func TestGolden_LegacyAllowInactiveUntilConfirm(t *testing.T) {
+	skipIfHostRootLooksLikeNobody(t)
 	app := newApp(t, "", nil)
 	srv := serve(t, app)
 	const token = "lgbr_admintesttokenvalue"

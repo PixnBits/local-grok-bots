@@ -136,6 +136,7 @@ func TestStartupLogsCeilingIgnoredWhenBrokerOff(t *testing.T) {
 }
 
 func TestManagedCeilingAutoApproves(t *testing.T) {
+	skipIfHostRootLooksLikeNobody(t)
 	const bot = "11111111-1111-4111-8111-111111111111"
 	dir := t.TempDir()
 	if err := chmodDataDir(dir); err != nil {

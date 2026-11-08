@@ -317,6 +317,22 @@ func TestCeilingGitPlace(t *testing.T) {
 		wantAsk(t, evalShell(testEngine(t), ceiling, ws, ws, "git --git-dir .git status"))
 		wantAsk(t, evalShell(testEngine(t), ceiling, sub, ws, "git status"))
 	}
+	// A symlink cwd has a different spelling, so the text compare falls
+	// through to resolvePath. The root link is the workspace. The subdir
+	// link is not.
+	link := filepath.Join(t.TempDir(), "cwd-root")
+	if err := os.Symlink(ws, link); err != nil {
+		t.Fatal(err)
+	}
+	sublink := filepath.Join(t.TempDir(), "cwd-sub")
+	if err := os.Symlink(sub, sublink); err != nil {
+		t.Fatal(err)
+	}
+	wantCeilingAllow(t, evalShell(testEngine(t), LevelLow, link, ws, "git status"))
+	wantCeilingAllow(t, evalShell(testEngine(t), LevelMedium, link, ws, "git status"))
+	for _, ceiling := range []Level{LevelLow, LevelMedium, LevelCritical} {
+		wantAsk(t, evalShell(testEngine(t), ceiling, sublink, ws, "git status"))
+	}
 }
 
 func TestCeilingGitdirSignalOrder(t *testing.T) {

@@ -303,6 +303,9 @@ func TestResolvePinnedRejectsUserDir(t *testing.T) {
 	if _, ok := resolvePinned(filepath.Join(t.TempDir(), "git")); ok {
 		t.Fatal("user directory resolved")
 	}
+	if !rootOwnedDir("/usr/bin") && !rootOwnedDir("/bin") {
+		t.Skip("system directories are not uid 0; resolvePinned(git) needs a root-owned /usr/bin or /bin")
+	}
 	abs, ok := resolvePinned("git")
 	if !ok || filepath.Base(abs) != "git" {
 		t.Fatalf("git lookup %q %v", abs, ok)

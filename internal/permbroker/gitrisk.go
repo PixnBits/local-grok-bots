@@ -18,6 +18,9 @@ func gitConfigRisk(ws string, homes, env []string) string {
 }
 
 func gitConfigRiskExtra(ws string, homes, env []string, extra []string) string {
+	if why := managedGitEnvPlace(ws, env); why != "" {
+		return why
+	}
 	seen := map[string]bool{}
 	var files []string
 	if strings.TrimSpace(ws) != "" {
@@ -361,6 +364,10 @@ func gitRiskReason(why string) string {
 		return "A .gitattributes file sets a merge driver"
 	case "cap":
 		return "Too many git attribute files to review"
+	case "GIT_DIR":
+		return "GIT_DIR is not the workspace git dir"
+	case "GIT_WORK_TREE":
+		return "GIT_WORK_TREE is not the workspace root"
 	default:
 		if why == "" {
 			return ""
@@ -735,6 +742,80 @@ func scanGitEnv(env []string, seen map[string]bool, homes []string) string {
 		}
 	}
 	return ""
+}
+
+// managedGitEnvPlace asks when a managed GIT_DIR or GIT_WORK_TREE is not
+// this workspace. A missing directory is not the workspace: the directory
+// can appear after the decision. A value that resolves to the workspace
+// git dir, or a work tree that resolves to the workspace root, is kept.
+func managedGitEnvPlace(ws string, env []string) string {
+	dir, hasDir := envValue(env, "GIT_DIR")
+	wt, hasWT := envValue(env, "GIT_WORK_TREE")
+	if !hasDir && !hasWT {
+		return ""
+	}
+	if strings.TrimSpace(ws) == "" || !filepath.IsAbs(ws) {
+		if hasDir {
+			return "GIT_DIR"
+		}
+		return "GIT_WORK_TREE"
+	}
+	if hasDir {
+		want := ""
+		if g, ok := gitDir(ws); ok {
+			want = g
+		}
+		if !envPathIs(ws, dir, want) {
+			return "GIT_DIR"
+		}
+	}
+	if hasWT && !envPathIs(ws, wt, ws) {
+		return "GIT_WORK_TREE"
+	}
+	return ""
+}
+
+func envValue(env []string, key string) (string, bool) {
+	found := false
+	val := ""
+	for _, e := range env {
+		k, v, ok := strings.Cut(e, "=")
+		if !ok || k != key {
+			continue
+		}
+		found = true
+		val = v
+	}
+	if !found || val == "" {
+		return "", false
+	}
+	return val, true
+}
+
+func envPathIs(ws, path, want string) bool {
+	if path == "" || want == "" {
+		return false
+	}
+	abs := path
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(ws, path)
+	}
+	st, err := os.Lstat(abs)
+	if err != nil {
+		return false
+	}
+	if st.Mode()&os.ModeSymlink == 0 && !st.IsDir() {
+		return false
+	}
+	got, err := resolvePath(abs)
+	if err != nil {
+		return false
+	}
+	wantGot, err := resolvePath(want)
+	if err != nil {
+		return false
+	}
+	return got == wantGot
 }
 
 func riskyInText(s string) string {
