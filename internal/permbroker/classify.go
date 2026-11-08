@@ -140,7 +140,9 @@ func classifyGit(argv []string, cwd, workspace string) argvClass {
 }
 
 func gitUpstream(sub string, rest []string) bool {
-	if sub != "fetch" && sub != "ls-remote" {
+	switch sub {
+	case "fetch", "ls-remote", "clone", "pull":
+	default:
 		return false
 	}
 	for _, a := range rest {
@@ -148,8 +150,8 @@ func gitUpstream(sub string, rest []string) bool {
 			return true
 		}
 		// ext:: is a remote helper that runs a command. One quoted argv
-		// still contains the marker. Fetch and ls-remote are the forms
-		// that take that remote as a positional argument.
+		// still contains the marker. Fetch, ls-remote, clone, and pull
+		// take that remote as an argument.
 		if strings.Contains(strings.ToLower(a), "ext::") {
 			return true
 		}

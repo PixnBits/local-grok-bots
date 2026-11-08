@@ -1462,6 +1462,15 @@ func (e *Engine) Evaluate(ctx context.Context, req Request) Decision {
 		e.touch(rule)
 		return e.finish(req, in, VerdictDeny, "denied by rule "+rule.ID, "", rule.ID, rule.ID)
 	}
+	if why, ok := e.neverAllow(req, in); ok {
+		if d, stop := e.cancelled(ctx, req, in); stop {
+			return d
+		}
+		in.ClassNote = why
+		in.AuditSource = neverAllowActor
+		in.AuditSeverity = neverAllowSeverity
+		return e.finish(req, in, VerdictDeny, why, "", neverAllowActor, "")
+	}
 	// One-time approval is consumed before an ask rule. An ask rule still
 	// runs before the ceiling, so the next try asks again.
 	if tok, ok := e.takeToken(ctx, req, in); ok {
@@ -2308,8 +2317,9 @@ type inspected struct {
 	// be auto-approved.
 	ParseReason string
 	// AuditSource and AuditCeiling are copied onto the audit row.
-	AuditSource  string
-	AuditCeiling Level
+	AuditSource   string
+	AuditCeiling  Level
+	AuditSeverity string
 }
 
 func commandUsesGit(p Parse) bool {
@@ -2457,6 +2467,7 @@ func (e *Engine) auditDecision(req Request, in inspected, verdict, reason, pendi
 		Tool: normTool(req.ToolName), Argv: redactArgv(in.Argv), Input: clip(Redact(in.Raw), 500),
 		InputHash: in.Hash, Cwd: req.Cwd, Decision: verdict, Scope: scope, PendingID: pendingID,
 		Actor: actor, RuleID: ruleID, Level: in.Level, Source: in.AuditSource, Ceiling: in.AuditCeiling,
+		Severity:       in.AuditSeverity,
 		TableVersion:   TableVersion,
 		RulesetVersion: e.rules.Version, Classifier: note, PeerUID: req.PeerUID, PeerPID: req.PeerPID,
 	}

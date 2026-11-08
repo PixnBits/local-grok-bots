@@ -36,8 +36,8 @@ func TestAllowCeilingDecisions(t *testing.T) {
 		{name: "deny_wins", broker: "hook", ceiling: LevelCritical, cmd: "git status", want: "deny", deny: true},
 		{name: "unclassified", broker: "hook", ceiling: LevelCritical, cmd: "echo hi", want: "ask", level: LevelUnclassified},
 		{name: "parse_error", broker: "hook", ceiling: LevelCritical, cmd: "git status \"", want: "ask", level: LevelUnclassified},
-		{name: "critical_ceiling_high", broker: "hook", ceiling: LevelHigh, cmd: "gh auth token", want: "ask", level: LevelCritical},
-		{name: "critical_ceiling_critical", broker: "hook", ceiling: LevelCritical, cmd: "gh auth token", want: "allow", level: LevelCritical},
+		{name: "critical_ceiling_high", broker: "hook", ceiling: LevelHigh, cmd: "gh auth token", want: "never", level: LevelCritical},
+		{name: "critical_ceiling_critical", broker: "hook", ceiling: LevelCritical, cmd: "gh auth token", want: "never", level: LevelCritical},
 		{name: "broker_not_hook", broker: "off", ceiling: LevelCritical, cmd: "git status", want: "ask", level: LevelLow},
 		{name: "bot_not_listed", broker: "hook", ceiling: LevelCritical, forBot: ceilingOther, cmd: "git status", want: "ask", level: LevelLow},
 	}
@@ -87,6 +87,13 @@ func TestAllowCeilingDecisions(t *testing.T) {
 				}
 			case "deny":
 				if d.Verdict != VerdictDeny || d.PendingID != "" || !strings.Contains(d.Reason, "denied by rule") {
+					t.Fatalf("%+v", d)
+				}
+			case "never":
+				if d.Verdict != VerdictDeny || d.PendingID != "" || d.Actor != neverAllowActor || d.Level != tc.level {
+					t.Fatalf("%+v", d)
+				}
+				if !strings.Contains(d.Reason, "credential output is never allowed") {
 					t.Fatalf("%+v", d)
 				}
 			default:

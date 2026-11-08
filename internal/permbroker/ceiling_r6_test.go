@@ -92,7 +92,12 @@ func TestCeilingKernelBytes(t *testing.T) {
 			assertFaithful(t, ws, tc.spelled, tc.suffix)
 			for _, tool := range []string{"Write", "Edit"} {
 				for _, ceiling := range []Level{LevelMedium, LevelCritical} {
-					wantAsk(t, evalWrite(testEngine(t), ceiling, ws, ws, tool, tc.spelled))
+					d := evalWrite(testEngine(t), ceiling, ws, ws, tool, tc.spelled)
+					if strings.HasSuffix(tc.suffix, "/.git/hooks/pre-commit") {
+						wantNeverDeny(t, d)
+						continue
+					}
+					wantAsk(t, d)
 				}
 			}
 		})
@@ -193,12 +198,13 @@ func TestCeilingManagedGitEnvPlace(t *testing.T) {
 	wantAsk(t, evalShell(prime([]string{"GIT_DIR=missing-dir"}), LevelLow, ws, ws, "git status"))
 	wantAsk(t, evalShell(prime([]string{"GIT_DIR=" + filepath.Join(ws, ".git", "config")}), LevelLow, ws, ws, "git status"))
 	wantAsk(t, evalShell(prime([]string{"GIT_WORK_TREE=sub"}), LevelLow, ws, ws, "git status"))
-	wantCeilingAllow(t, evalShell(prime([]string{
+	wantAsk(t, evalShell(prime([]string{
 		"GIT_DIR=" + filepath.Join(ws, ".git"),
 		"GIT_WORK_TREE=" + ws,
 	}), LevelLow, ws, ws, "git status"))
-	wantCeilingAllow(t, evalShell(prime([]string{"GIT_WORK_TREE=."}), LevelLow, ws, ws, "git status"))
-	wantCeilingAllow(t, evalShell(prime([]string{"GIT_DIR="}), LevelLow, ws, ws, "git status"))
+	wantAsk(t, evalShell(prime([]string{"GIT_WORK_TREE=."}), LevelLow, ws, ws, "git status"))
+	wantAsk(t, evalShell(prime([]string{"GIT_DIR="}), LevelLow, ws, ws, "git status"))
+	wantCeilingAllow(t, evalShell(prime([]string{"GIT_AUTHOR_NAME=hooksPath"}), LevelLow, ws, ws, "git status"))
 }
 
 func TestCeilingQuotedExtFetchAsks(t *testing.T) {

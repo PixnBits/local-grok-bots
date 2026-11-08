@@ -27,3 +27,18 @@ func nlinkOf(info os.FileInfo) (uint64, bool) {
 	}
 	return uint64(st.Nlink), true
 }
+
+// deviceOf is the filesystem device. Darwin's Dev is int32. Linux's is
+// uint64. Both convert to uint64.
+func deviceOf(info os.FileInfo) (uint64, bool) {
+	if info == nil {
+		return 0, false
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || st == nil {
+		return 0, false
+	}
+	return uint64(st.Dev), true
+}
+
+func deviceCheckActive() bool { return true }

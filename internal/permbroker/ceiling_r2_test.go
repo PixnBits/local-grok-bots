@@ -160,7 +160,8 @@ func TestAllowCeilingHardAskPaths(t *testing.T) {
 		t.Fatalf("write %+v", wd)
 	}
 	rd := e.Evaluate(ctx, readReq(ceilingBot, ws, ws, secret))
-	if rd.Verdict == VerdictAllow || rd.PendingID == "" {
+	wantNeverDeny(t, rd)
+	if !strings.Contains(rd.Reason, neverAllowCredential) {
 		t.Fatalf("read %+v", rd)
 	}
 	if rd.Level != LevelHigh && rd.Level != LevelCritical {

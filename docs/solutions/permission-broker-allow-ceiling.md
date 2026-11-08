@@ -29,6 +29,9 @@ next try asks again. Pattern and legacy ask rules are included.
 What a critical ceiling auto-approves, and how the path resolver fails
 closed, is in
 [Critical ceiling](../permission-broker.md#critical-ceiling).
+Credential output and hook-path changes are denied when a ceiling is
+set. They are not the sole-reason exception. A bot with no ceiling
+still asks.
 An unresolved program, a wrapper, a leading `cd`, a void command, a
 protected-path read, a git form that runs a command, a non-shell path
 outside the workspace, and any other ineligible reason still ask. The

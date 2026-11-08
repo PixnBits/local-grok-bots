@@ -35,8 +35,10 @@ type AuditRow struct {
 	// Source and Ceiling are set on a ceiling auto-approval.
 	// Source is dangerously_allow_all_up_through. Level is the final
 	// effective level. Ceiling is the bot's configured cap.
-	Source         string `json:"source,omitempty"`
-	Ceiling        Level  `json:"ceiling,omitempty"`
+	Source  string `json:"source,omitempty"`
+	Ceiling Level  `json:"ceiling,omitempty"`
+	// Severity is set on a hard deny. The word is critical.
+	Severity       string `json:"severity,omitempty"`
 	TableVersion   string `json:"table_version"`
 	RulesetVersion int    `json:"ruleset_version"`
 	Classifier     string `json:"classifier"`

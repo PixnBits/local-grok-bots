@@ -149,7 +149,7 @@ func TestCeilingGitDirWriteAsks(t *testing.T) {
 	}
 	wantAsk(t, evalShell(e, LevelMedium, ws, ws, "git add .git/HEAD"))
 	wantAsk(t, evalShell(e, LevelCritical, ws, ws, "git add .git/HEAD"))
-	wantCeilingAllow(t, evalShell(testEngine(t), LevelCritical, ws, ws, "git add .git/hooks/pre-commit"))
+	wantNeverDeny(t, evalShell(testEngine(t), LevelCritical, ws, ws, "git add .git/hooks/pre-commit"))
 }
 
 func TestCeilingGitdirLookalikeWriteAsks(t *testing.T) {
@@ -282,7 +282,7 @@ func TestCeilingRealSubmoduleGitRisk(t *testing.T) {
 
 func TestCeilingN14N3(t *testing.T) {
 	ws := t.TempDir()
-	wantAsk(t, evalShell(testEngine(t), LevelCritical, ws, ws, "gh auth login --with-token"))
+	wantNeverDeny(t, evalShell(testEngine(t), LevelCritical, ws, ws, "gh auth login --with-token"))
 	wantAsk(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git -C . submodule foreach id"))
 	wantAsk(t, evalShell(testEngine(t), LevelCritical, ws, ws, "git -C . submodule foreach id"))
 	e := testEngine(t)

@@ -14,6 +14,8 @@ import (
 //
 //	.grok/ (including settings.json)
 //	.claude/
+//	.husky/
+//	.lgb/
 //	.vscode/tasks.json, .vscode/settings.json, .vscode/launch.json
 //	.idea/runConfigurations/, .idea/workspace.xml
 //	.envrc and .env loader files
@@ -26,7 +28,8 @@ func clientConfigPath(tok string) bool {
 	segs := strings.Split(t, "/")
 	for i, s := range segs {
 		switch {
-		case strings.EqualFold(s, ".grok"), strings.EqualFold(s, ".claude"), strings.EqualFold(s, ".devcontainer"):
+		case strings.EqualFold(s, ".grok"), strings.EqualFold(s, ".claude"), strings.EqualFold(s, ".devcontainer"),
+			strings.EqualFold(s, ".husky"), strings.EqualFold(s, ".lgb"):
 			return true
 		case strings.EqualFold(s, ".vscode"):
 			if i+1 >= len(segs) {
@@ -100,8 +103,25 @@ func gitSensitivePath(tok string) bool {
 }
 
 func hookPathToken(tok string) bool {
-	t := strings.ReplaceAll(tok, `\`, "/")
+	t := strings.ToLower(strings.ReplaceAll(tok, `\`, "/"))
 	return strings.Contains(t, ".git/hooks/") || strings.HasSuffix(t, ".git/hooks")
+}
+
+// clientDirPath is a directory a client may treat as config. It is wider
+// than clientConfigPath for .vscode and .idea, which are only specific
+// files on an ordinary write. A created directory uses this check.
+func clientDirPath(tok string) bool {
+	t := strings.ReplaceAll(strings.TrimSpace(tok), `\`, "/")
+	if t == "" {
+		return false
+	}
+	for _, s := range strings.Split(t, "/") {
+		switch strings.ToLower(s) {
+		case ".vscode", ".idea", ".husky", ".lgb", ".claude", ".grok", ".devcontainer":
+			return true
+		}
+	}
+	return false
 }
 
 func dirLooksLikeGit(dir string) bool {
@@ -264,6 +284,9 @@ type ceilingCand struct {
 	spelled string
 	write   bool
 	argv    []string
+	// created is a directory the command creates, such as a clone or
+	// init destination. .vscode and .idea count for that directory.
+	created bool
 }
 
 func ceilingCandRefused(e *Engine, c ceilingCand, cwd, ws, realWS string) bool {
@@ -277,6 +300,12 @@ func ceilingCandRefused(e *Engine, c ceilingCand, cwd, ws, realWS string) bool {
 	}
 	spelledAbs := lexicalAbs(spelled, cwd, ws)
 	if ceilingExistingRefused(e, spelledAbs, resolved, ws, realWS) {
+		return true
+	}
+	if c.write && ceilingCrossDevice(resolved, ws, realWS) {
+		return true
+	}
+	if c.created && createdDirRefused(spelled, resolved) {
 		return true
 	}
 	hook := c.write && len(c.argv) > 0 && baseName(c.argv[0]) == "git" &&
@@ -448,6 +477,7 @@ func ceilingCandidates(req Request, in inspected, lists [][]string) []ceilingCan
 				continue
 			}
 			write := !readOnlyArgv(argv)
+			created := createdDirIndexes(argv)
 			for i, a := range argv {
 				if i == 0 || strings.TrimSpace(a) == "" {
 					continue
@@ -455,10 +485,13 @@ func ceilingCandidates(req Request, in inspected, lists [][]string) []ceilingCan
 				if strings.HasPrefix(a, "-") && a != "-" && !looksPath(a) {
 					continue
 				}
-				if !write && !looksPath(a) {
+				if !write && !looksPath(a) && !created[i] {
 					continue
 				}
-				out = append(out, ceilingCand{spelled: a, write: write, argv: argv})
+				out = append(out, ceilingCand{spelled: a, write: write, argv: argv, created: created[i]})
+			}
+			if dest := impliedCloneDest(argv); dest != "" {
+				out = append(out, ceilingCand{spelled: dest, write: true, argv: argv, created: true})
 			}
 		}
 		return out

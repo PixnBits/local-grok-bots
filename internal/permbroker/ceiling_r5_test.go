@@ -229,8 +229,13 @@ func TestCeilingMust7AndShould6Symlinks(t *testing.T) {
 		e := testEngine(t)
 		for _, path := range paths {
 			t.Run(string(ceiling)+"/"+filepath.Base(path), func(t *testing.T) {
-				wantAsk(t, evalWrite(e, ceiling, ws, ws, "Write", path))
-				wantAsk(t, evalWrite(e, ceiling, ws, ws, "Edit", path))
+				want := wantAsk
+				base := filepath.Base(path)
+				if base == "g_hook" || base == "innhook" {
+					want = wantNeverDeny
+				}
+				want(t, evalWrite(e, ceiling, ws, ws, "Write", path))
+				want(t, evalWrite(e, ceiling, ws, ws, "Edit", path))
 			})
 		}
 		wantAsk(t, evalShell(e, ceiling, ws, ws, "git add inn"))
@@ -363,8 +368,8 @@ func TestCeilingGitdirSignalOrder(t *testing.T) {
 }
 
 func TestCeilingHookExceptionBounds(t *testing.T) {
-	// A clean tree, so git-risk is not why this asks. The hook exception
-	// is only .git/hooks. A widened "any hooks/" match would allow this.
+	// A path with a hooks component that is not .git/hooks still asks.
+	// A write of .git/hooks is a hard deny when a ceiling is set.
 	clean := t.TempDir()
 	wantAsk(t, evalShell(testEngine(t), LevelMedium, clean, clean, "git add evil/hooks/pre-commit"))
 	wantAsk(t, evalShell(testEngine(t), LevelCritical, clean, clean, "git add evil/hooks/pre-commit"))
@@ -377,10 +382,10 @@ func TestCeilingHookExceptionBounds(t *testing.T) {
 	mustWrite(t, filepath.Join(ws, ".git", "HEAD"), "ref: refs/heads/main\n")
 	mustSymlink(t, "../config", filepath.Join(ws, ".git", "hooks", "pre-commit"))
 	wantAsk(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git add evil/hooks/pre-commit"))
-	wantAsk(t, evalShell(testEngine(t), LevelCritical, ws, ws, "git add .git/hooks/pre-commit"))
+	wantNeverDeny(t, evalShell(testEngine(t), LevelCritical, ws, ws, "git add .git/hooks/pre-commit"))
 	wantAsk(t, evalShell(testEngine(t), LevelCritical, ws, ws, "git diff .git/hooks/pre-commit"))
-	wantAsk(t, evalWrite(testEngine(t), LevelCritical, ws, ws, "Write", filepath.Join(ws, ".git", "hooks", "pre-commit")))
-	wantAsk(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git add .GIT/hooks/pre-commit"))
+	wantNeverDeny(t, evalWrite(testEngine(t), LevelCritical, ws, ws, "Write", filepath.Join(ws, ".git", "hooks", "pre-commit")))
+	wantNeverDeny(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git add .GIT/hooks/pre-commit"))
 	wantAsk(t, evalShell(testEngine(t), LevelCritical, ws, ws, "git add .gitmodules"))
 
 	plain := t.TempDir()
@@ -388,7 +393,7 @@ func TestCeilingHookExceptionBounds(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustWrite(t, filepath.Join(plain, ".git", "hooks", "pre-commit"), "#!/bin/sh\n")
-	wantCeilingAllow(t, evalShell(testEngine(t), LevelCritical, plain, plain, "git add .git/hooks/pre-commit"))
+	wantNeverDeny(t, evalShell(testEngine(t), LevelCritical, plain, plain, "git add .git/hooks/pre-commit"))
 }
 
 func TestCeilingSpelledAndResolvedSides(t *testing.T) {

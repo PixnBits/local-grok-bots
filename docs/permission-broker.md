@@ -282,10 +282,19 @@ config and include targets that resolve, every `.gitattributes` file in
 the worktree, `<git-dir>/info/attributes`, the system git config, each home's `.gitconfig`,
 `~/.config/git/config`, and `~/.config/git/attributes`, the file named
 by `core.attributesFile`, and `GIT_*` variables in the environment
-stored for that bot. A managed `GIT_DIR` that is missing or that does
-not resolve to this workspace's git directory asks. A managed
-`GIT_WORK_TREE` that is missing or that does not resolve to this
-workspace root asks. A nested `.gitattributes` is read the same way as
+stored for that bot. A location, config, or command-helper variable
+asks when it is set, including an empty value and a value that points
+at this workspace. That set is `GIT_DIR`, `GIT_WORK_TREE`,
+`GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
+`GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_EXEC_PATH`, `GIT_CONFIG`,
+`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_COUNT`,
+`GIT_CONFIG_KEY_*`, `GIT_CONFIG_VALUE_*`, `GIT_CONFIG_PARAMETERS`,
+`GIT_CONFIG_NOSYSTEM`, `GIT_TEMPLATE_DIR`, `GIT_NAMESPACE`,
+`GIT_CEILING_DIRECTORIES`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS`,
+`GIT_EDITOR`, `GIT_PAGER`, `GIT_EXTERNAL_DIFF`, `GIT_SEQUENCE_EDITOR`,
+and `GIT_SSH_VARIANT`. The same names ask when they are a shell
+assignment prefix on a git command. Identity variables such as
+`GIT_AUTHOR_NAME` do not. A nested `.gitattributes` is read the same way as
 the one at the worktree root. A directory reached by a symlink inside
 the worktree that contains a `.gitattributes` file asks, and that file
 is not added to the baseline. The walk skips the contents of `.git`
@@ -401,10 +410,12 @@ ceiling still asks. A critical request auto-approves only when the
 ceiling is exactly `critical` and that level or a critical path is the
 only reason, as below.
 
-Evaluate order for this check is deny, then a one-time human approval,
-then an ask rule, then the ceiling. A one-time approval is consumed
-before the ask rule, so the next identical call asks again. An ask rule
-still wins over the ceiling, including a pattern or legacy ask.
+Evaluate order for this check is deny, then a hard deny of credential
+output and of hook-path changes when a ceiling is set, then a one-time
+human approval, then an ask rule, then the ceiling. A one-time approval
+is consumed before the ask rule, so the next identical call asks again.
+An ask rule still wins over the ceiling, including a pattern or legacy
+ask. It does not win over the hard deny.
 
 These are never auto-approved: a deny rule, an ask rule, an unclassified
 command, a parse error, a malformed or ambiguous command, a broker
@@ -424,15 +435,26 @@ when the rest of the checks pass. The walk keeps the bytes of each
 component and each symlink target. It does not trim whitespace and it
 does not turn a backslash into a slash. A NUL, or any other path that
 cannot be a kernel name, is an error. Any walk error means the request
-is not eligible for ceiling auto-approval.
+is not eligible for ceiling auto-approval. An unquoted backslash makes
+the shell word not literal, so the command is not eligible either. A
+quoted backslash stays in the word.
 
 An existing regular file whose link count is above one is not
 auto-approved. A regular file that is the same inode as an existing
 sensitive file is not auto-approved either. That set is `.git/config`,
 a file in `.git/hooks`, a policy file, a critical or protected file,
-and a client-config file that is already on disk. `git fetch` and
-`git ls-remote` ask when an argument contains `ext::`, including when
-that remote is a single quoted word.
+and a client-config file that is already on disk. An already-hardlinked
+file, including a file under a pnpm `node_modules` tree, asks. The
+broker is not the writer. A file can be replaced between this check and
+the write. That window is an accepted residual. Closing it would mean
+the daemon performs the write, with `openat` and `O_NOFOLLOW`, and
+resolves the path again at the write. A write whose resolved path, or
+the nearest existing parent, is on a different device than the
+workspace root asks. A bind on the same filesystem does not change the
+device id. The same-inode check still covers that case when the target
+is an existing sensitive file. `git fetch`, `git ls-remote`,
+`git clone`, and `git pull` ask when an argument contains `ext::`,
+including when that remote is a single quoted word.
 
 The spelled path and the resolved target are both checked. If either
 one matches, the ceiling does not auto-approve at any level, including
@@ -448,10 +470,13 @@ critical:
   `gitdir`, or `attributes` (case-folded). This does not wait until the
   directory already contains `HEAD`, `objects`, or `refs`
 - client config that can run commands (case-folded): `.grok/`,
-  `.claude/`, `.vscode/tasks.json`, `.vscode/settings.json`,
-  `.vscode/launch.json`, `.idea/runConfigurations/`,
-  `.idea/workspace.xml`, `.envrc` and `.env` loader files, and
-  `.devcontainer/`
+  `.claude/`, `.husky/`, `.lgb/`, `.vscode/tasks.json`,
+  `.vscode/settings.json`, `.vscode/launch.json`,
+  `.idea/runConfigurations/`, `.idea/workspace.xml`, `.envrc` and
+  `.env` loader files, and `.devcontainer/`. A directory created by
+  `git clone`, `git init`, `mkdir` (including `-p`), `install -d`, or
+  `cp -r` uses this class on the spelled path and the resolved path.
+  For that created directory, `.vscode` and `.idea` themselves count.
 
 A Glob `pattern` that contains `..` or `{`, starts with `~`, or is an
 absolute path is refused before that walk. `git -C`, `--git-dir`, and
@@ -464,16 +489,21 @@ level or a critical path. These still ask when the ceiling is critical:
 an unresolved or unknown program, a wrapper, a leading `cd`, a void
 command, a read of a protected path, a git form that runs a command, a
 non-shell path outside the workspace, and any other ineligible reason.
-A credential command whose only reason is the critical level can
-auto-approve when the ceiling is exactly critical. Combined with another
-reason, it asks. A critical ceiling auto-approves hook-path git
-operations (a git write whose spelled path and resolved target are both
-under `.git/hooks`) and credential printing (for example `gh auth token`).
-A tool write of a hook still asks. The git forms that run a command are
-refused on the ceiling side. The classifier is unchanged, so a rule or
-a task grant keeps its current eligibility when no ceiling applies. The
-ceiling does not use the Linux-only allow choke that saved rules and
-task grants use.
+Credential output is denied when a ceiling is set, at every ceiling
+including critical. That is `gh auth`, `gh secret`, `gh ssh-key`,
+`git credential`, a file reader of a credential path, and a Read of a
+credential file. The audit actor and source are `ceiling_never_allow`,
+the severity is `critical`, and the reason is `credential output is
+never allowed`. A bot with no ceiling still asks. A git write into
+`.git/hooks`, a git config or `-c` value that names `core.hooksPath`,
+a tool write of `.git/hooks`, and a redirect onto that path are denied
+the same way. The reason is `hook path changes are never allowed`. A
+read such as `git diff` of a hook path still asks. A critical ceiling
+does not auto-approve credential printing or hook-path git operations.
+The git forms that run a command are refused on the ceiling side. The
+classifier is unchanged, so a rule or a task grant keeps its current
+eligibility when no ceiling applies. The ceiling does not use the
+Linux-only allow choke that saved rules and task grants use.
 
 Non-shell tools use this table. A path is `file_path`, `path`, or
 `notebook_path`. Every path must be inside the workspace. No path,
