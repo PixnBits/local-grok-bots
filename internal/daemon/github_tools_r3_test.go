@@ -155,6 +155,96 @@ func heavyReadPayload(fill string) map[string]any {
 	}
 }
 
+func TestReadPRContinuationKeepsIdentifiers(t *testing.T) {
+	unit := strings.Repeat("a", 40) + "é日\n"
+	var raw strings.Builder
+	for raw.Len() <= 11029 {
+		raw.WriteString(unit)
+	}
+	patch := raw.String()
+	if len(patch) <= 11029 || !strings.Contains(patch, "é") || !strings.Contains(patch, "日") {
+		t.Fatalf("patch %d", len(patch))
+	}
+	const (
+		title    = "Tiếng Việt"
+		file     = "h/handler13.go"
+		path     = "internal/daemon/github_tools.go"
+		author   = "alice"
+		talkUser = "bea"
+		name     = "alice"
+	)
+	payload := func() map[string]any {
+		return map[string]any{
+			"title": title,
+			"body":  "short",
+			"files": []any{map[string]any{
+				"filename": file, "patch": patch, "status": "modified",
+			}},
+			"reviews": []any{map[string]any{"user": author, "name": name, "state": "APPROVED", "body": "LGTM"}},
+			"review_comments": []any{map[string]any{
+				"user": author, "path": path, "body": "nit", "diff_hunk": "@@",
+			}},
+			"conversation":   []any{map[string]any{"user": talkUser, "body": "hello"}},
+			"checks":         []any{map[string]any{"name": "check-keep", "conclusion": "success"}},
+			"combined_state": "success",
+			"count":          1,
+		}
+	}
+	var got strings.Builder
+	offset := 0
+	pages := 0
+	for pages < 20 {
+		text := fitGitHubRead(payload(), 1, false, offset)
+		var parsed map[string]any
+		if err := json.Unmarshal([]byte(text), &parsed); err != nil {
+			t.Fatal(err)
+		}
+		if parsed["title"] != title {
+			t.Fatalf("page %d title %#v", pages, parsed["title"])
+		}
+		files, _ := parsed["files"].([]any)
+		if len(files) != 1 {
+			t.Fatalf("page %d files %#v", pages, parsed["files"])
+		}
+		f, _ := files[0].(map[string]any)
+		if f["filename"] != file {
+			t.Fatalf("page %d filename %#v offset %d", pages, f["filename"], offset)
+		}
+		chunk, _ := f["patch"].(string)
+		got.WriteString(chunk)
+		notes, _ := parsed["review_comments"].([]any)
+		n, _ := notes[0].(map[string]any)
+		if n["path"] != path || n["user"] != author {
+			t.Fatalf("page %d note %#v", pages, n)
+		}
+		reviews, _ := parsed["reviews"].([]any)
+		rv, _ := reviews[0].(map[string]any)
+		if rv["user"] != author || rv["name"] != name {
+			t.Fatalf("page %d review %#v", pages, rv)
+		}
+		talk, _ := parsed["conversation"].([]any)
+		cv, _ := talk[0].(map[string]any)
+		if cv["user"] != talkUser {
+			t.Fatalf("page %d author %#v", pages, cv["user"])
+		}
+		pages++
+		next, _ := parsed["next_offset"].(float64)
+		if next == 0 {
+			break
+		}
+		if int(next) <= offset {
+			t.Fatalf("stuck offset %d next %v", offset, next)
+		}
+		offset = int(next)
+	}
+	if pages < 2 || offset == 0 {
+		t.Fatalf("pages %d offset %d", pages, offset)
+	}
+	if got.String() != patch {
+		t.Fatalf("rebuild %d want %d", got.Len(), len(patch))
+	}
+}
+
 func TestProxyCfgNilBeforePolicy(t *testing.T) {
 	b, err := os.ReadFile("github.go")
 	if err != nil {

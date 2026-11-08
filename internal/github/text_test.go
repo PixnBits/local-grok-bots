@@ -252,3 +252,152 @@ func TestSecretAndExternalLinks(t *testing.T) {
 		t.Fatal("title link")
 	}
 }
+
+func TestCombiningMarks(t *testing.T) {
+	pass := []string{
+		"café",
+		"cafe\u0301",
+		"Tie\u0302\u0301ng Vie\u0323\u0302t",
+		"สวัสดีครับ",
+		"नमस्ते",
+		"e\u0300\u0301\u0302",
+		"a\u0301",
+	}
+	for _, s := range pass {
+		for _, kind := range []string{"title", "body", "comment"} {
+			if _, reason := CleanText(s, kind); reason != "" {
+				t.Fatalf("%s %q %q", kind, s, reason)
+			}
+			if VisibleRunes(s) != s {
+				t.Fatalf("escaped %q → %q", s, VisibleRunes(s))
+			}
+		}
+	}
+	secret := accentRun("Thanks, merged!", 464)
+	for _, kind := range []string{"body", "comment"} {
+		if _, reason := CleanText(secret, kind); reason != "text" {
+			t.Fatalf("%s secret %q", kind, reason)
+		}
+	}
+	short := "Thanks, merged!" + strings.Repeat("\u0301", 4)
+	if _, reason := CleanText(short, "title"); reason != "text" {
+		t.Fatalf("title stack %q", reason)
+	}
+	refuse := []string{
+		secret,
+		short,
+		"x" + strings.Repeat("\u0E31", 4),
+		"x" + strings.Repeat("\u0E34", 16),
+		"\u0301Thanks",
+		"\u0E31สวัสดี",
+		"go\n\u0301",
+		"go\n\u0E31x",
+		"e\u0300\u0301\u0302\u0303",
+	}
+	for _, s := range refuse {
+		kinds := []string{"body", "comment"}
+		if !strings.Contains(s, "\n") && len(s) <= 256 {
+			kinds = append(kinds, "title")
+		}
+		for _, kind := range kinds {
+			if _, reason := CleanText(s, kind); reason != "text" {
+				t.Fatalf("%s %q reason %q", kind, s, reason)
+			}
+		}
+	}
+	shown := VisibleRunes(secret)
+	if strings.ContainsRune(shown, '\u0300') || strings.ContainsRune(shown, '\u0301') || !strings.HasPrefix(shown, "Thanks, merged!") {
+		t.Fatalf("secret visible %q", shown[:min(80, len(shown))])
+	}
+	if !strings.Contains(shown, "⟦U+0300⟧") || !strings.Contains(shown, "⟦U+0301⟧") {
+		t.Fatal("secret marks not escaped")
+	}
+	if got := VisibleRunes("\u0301Hi"); got != "⟦U+0301⟧Hi" {
+		t.Fatalf("leading %q", got)
+	}
+	if got := VisibleRunes("go\n\u0E31x"); got != "go\n⟦U+0E31⟧x" {
+		t.Fatalf("line %q", got)
+	}
+	four := VisibleRunes("e" + strings.Repeat("\u0301", 4))
+	if strings.ContainsRune(four, '\u0301') || four != "e"+strings.Repeat("⟦U+0301⟧", 4) {
+		t.Fatalf("four %q", four)
+	}
+	thai := VisibleRunes("x" + strings.Repeat("\u0E31", 4))
+	if strings.ContainsRune(thai, '\u0E31') {
+		t.Fatalf("thai %q", thai)
+	}
+}
+
+func accentRun(prefix string, n int) string {
+	var b strings.Builder
+	b.WriteString(prefix)
+	for i := 0; i < n; i++ {
+		if i%2 == 0 {
+			b.WriteRune(0x0300)
+		} else {
+			b.WriteRune(0x0301)
+		}
+	}
+	return b.String()
+}
+
+func TestEmojiSequences(t *testing.T) {
+	england := "\U0001F3F4\U000E0067\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F"
+	pass := []string{
+		"Thanks ❤️",
+		"👍🏽",
+		"👨‍👩‍👧",
+		"1️⃣",
+		"🏳️‍🌈",
+		"❤\uFE0E",
+		"#\uFE0F\u20E3",
+		"*\uFE0F\u20E3",
+		"\U0001F468\U0001F3FD\u200D\U0001F469",
+		england,
+		"🇺🇸",
+	}
+	for _, s := range pass {
+		for _, kind := range []string{"title", "body", "comment"} {
+			if _, reason := CleanText(s, kind); reason != "" {
+				t.Fatalf("pass %s %q %q", kind, s, reason)
+			}
+			if VisibleRunes(s) != s {
+				t.Fatalf("escaped %q → %q", s, VisibleRunes(s))
+			}
+		}
+	}
+	refuse := []string{
+		"a\u200Db",
+		"x\uFE0F",
+		"x\uFE0E",
+		"\u200D👍",
+		"👍\u200D",
+		"👍\u200D\u200D👍",
+		"x\U0001F3FB",
+		"\U0001F3FD",
+		"❤\U0001F3FB",
+		"a\U000E0067",
+		"\U000E007F",
+		"1\uFE0F",
+		"\U0001F3F4\U000E0067\U000E007F",
+		"\U0001F3F4" + strings.Repeat("\U000E0067", 8) + "\U000E007F",
+		"👍\U000E0067\U000E0062\U000E007F",
+	}
+	for _, s := range refuse {
+		for _, kind := range []string{"body", "title", "comment"} {
+			text := s
+			if kind == "title" && len(s) > 256 {
+				continue
+			}
+			if _, reason := CleanText(text, kind); reason != "text" {
+				t.Fatalf("refuse %s %q %q", kind, s, reason)
+			}
+		}
+		if vis := VisibleRunes(s); vis == s {
+			t.Fatalf("not escaped %q", s)
+		}
+	}
+	if !emojiBase(0x2764) || !emojiBase(0x1F1E6) || emojiBase(0x1F3FB) || !emojiModBase(0x1F44D) {
+		t.Fatal("range table")
+	}
+}

@@ -97,6 +97,9 @@ func TestGitHubRound2(t *testing.T) {
 			io.WriteString(w, `{"number":7,"title":"ab`+"\u202E"+`cd","state":"open","body":"x","html_url":"https://github.com/acme/widgets/issues/7","user":{"login":"ada"}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/7" && mode.Load() == "di-title":
 			io.WriteString(w, `{"number":7,"title":"ok`+"\u034F\uE000\u2800\x7f"+`","state":"open","body":"x","html_url":"https://github.com/acme/widgets/issues/7","user":{"login":"ada"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/7" && mode.Load() == "mark-title":
+			markTitle := "\u0301Thanks, merged!" + strings.Repeat("\u0301", 4)
+			io.WriteString(w, `{"number":7,"title":`+quoteJSON(markTitle)+`,"state":"open","body":"x","html_url":"https://github.com/acme/widgets/issues/7","user":{"login":"ada"}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/7" && mode.Load() == "secret-title":
 			io.WriteString(w, `{"number":7,"title":"see ghp_example https://evil.example/t","state":"open","body":"x","html_url":"https://github.com/acme/widgets/issues/7","user":{"login":"ada"}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/7" && mode.Load() == "long-title":
@@ -1125,6 +1128,89 @@ func TestGitHubRound2(t *testing.T) {
 		}
 		if e.evals.Load() != before {
 			t.Fatalf("evals %d", e.evals.Load()-before)
+		}
+	})
+
+	t.Run("stacked marks never ask", func(t *testing.T) {
+		mode.Store("ok")
+		e := newEnv(t, nil)
+		e.app.editPol(func(p *policy.Policy) { p.PromptTimeout = 200 * time.Millisecond })
+		body := "Thanks, merged!"
+		for i := 0; i < 464; i++ {
+			if i%2 == 0 {
+				body += "\u0300"
+			} else {
+				body += "\u0301"
+			}
+		}
+		beforeHits := hits.Load()
+		beforeEvals := e.evals.Load()
+		beforePosts := posts.Load()
+		calls := []struct {
+			tool string
+			args map[string]any
+		}{
+			{"create_issue", map[string]any{"repo": "acme/widgets", "title": "Fine" + strings.Repeat("\u0301", 4), "body": body}},
+			{"create_comment", map[string]any{"repo": "acme/widgets", "number": float64(7), "body": body}},
+			{"create_pr", map[string]any{"repo": "acme/widgets", "head": "feature", "base": "main", "title": "\u0301Fine", "body": "x" + strings.Repeat("\u0E31", 4)}},
+		}
+		for _, tc := range calls {
+			_, err := e.app.dispatchTool(t.Context(), e.bot, tc.tool, tc.args)
+			if err == nil || !strings.Contains(err.Error(), "text is not allowed") {
+				t.Fatalf("%s %v", tc.tool, err)
+			}
+		}
+		if e.evals.Load() != beforeEvals || posts.Load() != beforePosts || hits.Load() != beforeHits {
+			t.Fatalf("evals %d posts %d hits %d", e.evals.Load()-beforeEvals, posts.Load()-beforePosts, hits.Load()-beforeHits)
+		}
+	})
+
+	t.Run("emoji body can be posted", func(t *testing.T) {
+		mode.Store("ok")
+		e := newEnv(t, nil)
+		body := "Thanks ❤️"
+		before := posts.Load()
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := e.app.dispatchTool(t.Context(), e.bot, "create_issue", map[string]any{
+				"repo": "acme/widgets", "title": "👍🏽", "body": body,
+			})
+			errCh <- err
+		}()
+		card := waitCardArgs(t, e.app, e.bot.ID, "create_issue")
+		if bodyOf(t, card) != body || card["title"] != "👍🏽" {
+			t.Fatalf("card %#v", card)
+		}
+		decideCard(t, e.app, e.bot.ID, "create_issue")
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+		posted, _ := lastPost.Load().(string)
+		if posts.Load() != before+1 || !strings.Contains(posted, body) || !strings.Contains(posted, "👍🏽") {
+			t.Fatalf("posted %s", posted)
+		}
+	})
+
+	t.Run("target title escapes stacked marks", func(t *testing.T) {
+		mode.Store("mark-title")
+		t.Cleanup(func() { mode.Store("ok") })
+		e := newEnv(t, nil)
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := e.app.dispatchTool(t.Context(), e.bot, "create_comment", map[string]any{
+				"repo": "acme/widgets", "number": float64(7), "body": "hello",
+			})
+			errCh <- err
+		}()
+		card := waitCardArgs(t, e.app, e.bot.ID, "create_comment")
+		title, _ := card["target_title"].(string)
+		want := "⟦U+0301⟧Thanks, merged!" + strings.Repeat("⟦U+0301⟧", 4)
+		if title != want || strings.ContainsRune(title, '\u0301') {
+			t.Fatalf("title %q", title)
+		}
+		decideCard(t, e.app, e.bot.ID, "create_comment")
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
 		}
 	})
 }

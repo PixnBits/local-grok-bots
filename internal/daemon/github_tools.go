@@ -748,8 +748,14 @@ func windowGitHubFields(v any, offset, max int) (int, bool) {
 	}
 	switch t := v.(type) {
 	case map[string]any:
-		for _, key := range []string{"body", "patch", "diff_hunk", "title", "filename", "path", "name", "user"} {
+		// offset slices long text only. An identifier cut with that same
+		// cursor is blank once the cursor passes its length.
+		for _, key := range []string{"body", "patch", "diff_hunk"} {
 			next, more := windowField(t, key, offset, max)
+			note(next, more)
+		}
+		for _, key := range []string{"title", "filename", "path", "name", "user"} {
+			next, more := windowIdent(t, key, offset, max)
 			note(next, more)
 		}
 		for _, val := range t {
@@ -763,6 +769,23 @@ func windowGitHubFields(v any, offset, max int) (int, bool) {
 		}
 	}
 	return minNext, cut
+}
+
+// windowIdent keeps a title, file name, path, or author whole when it
+// fits. A longer value is cut from the start, never from offset, so a
+// patch continuation cannot blank it. The cut contributes a continuation
+// only on the first page; the tail of an over-long identifier is not
+// walked by the text offset.
+func windowIdent(m map[string]any, key string, offset, max int) (int, bool) {
+	s, ok := m[key].(string)
+	if !ok || len(s) <= max {
+		return 0, false
+	}
+	if offset > 0 {
+		m[key] = clipUTF8(s, max)
+		return 0, false
+	}
+	return windowField(m, key, 0, max)
 }
 
 func windowField(m map[string]any, key string, offset, max int) (int, bool) {

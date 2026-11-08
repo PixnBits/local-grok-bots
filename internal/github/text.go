@@ -37,10 +37,40 @@ func CleanText(s, kind string) (string, string) {
 }
 
 // VisibleRunes copies s with refused characters written as ⟦U+XXXX⟧.
+// An illegal combining-mark run is escaped in full. An allowed emoji
+// sequence is left as itself.
 func VisibleRunes(s string) string {
-	if s == "" || !needsVisible(s) {
+	if s == "" {
 		return s
 	}
+	if !utf8.ValidString(s) {
+		return visibleInvalid(s)
+	}
+	rs := []rune(s)
+	exempt := emojiExempt(rs)
+	bad := combiningBad(rs)
+	hidden := false
+	for i, r := range rs {
+		if hideRune(r, exempt[i], bad[i]) {
+			hidden = true
+			break
+		}
+	}
+	if !hidden {
+		return s
+	}
+	var b strings.Builder
+	for i, r := range rs {
+		if hideRune(r, exempt[i], bad[i]) {
+			fmt.Fprintf(&b, "⟦U+%04X⟧", r)
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func visibleInvalid(s string) string {
 	var b strings.Builder
 	for i := 0; i < len(s); {
 		r, size := utf8.DecodeRuneInString(s[i:])
@@ -59,16 +89,17 @@ func VisibleRunes(s string) string {
 	return b.String()
 }
 
-func needsVisible(s string) bool {
-	if !utf8.ValidString(s) {
+func hideRune(r rune, exempt, bad bool) bool {
+	if bad {
 		return true
 	}
-	for _, r := range s {
-		if pullRuneIssue(r, true) != "" {
-			return true
-		}
+	if exempt {
+		return false
 	}
-	return false
+	if isSkinTone(r) {
+		return true
+	}
+	return pullRuneIssue(r, true) != ""
 }
 
 // CountLines counts newline, line separator, and paragraph separator.
@@ -274,12 +305,59 @@ func textIssue(s, kind string) string {
 	if allowNL && CountLines(s) > MaxBodyLines {
 		return "lines"
 	}
-	for _, r := range s {
-		if reason := pullRuneIssue(r, allowNL); reason != "" {
-			return reason
+	return scanText(s, allowNL)
+}
+
+// maxCombiningMarks is the most Mn/Me marks that may follow one base.
+// A longer run can hide a payload in a single glyph.
+const maxCombiningMarks = 3
+
+func scanText(s string, allowNL bool) string {
+	rs := []rune(s)
+	exempt := emojiExempt(rs)
+	bad := combiningBad(rs)
+	for i, r := range rs {
+		if !exempt[i] {
+			if reason := pullRuneIssue(r, allowNL); reason != "" {
+				return reason
+			}
+			if isSkinTone(r) {
+				return "text"
+			}
+		}
+		if bad[i] {
+			return "text"
 		}
 	}
 	return ""
+}
+
+// combiningBad marks every Mn/Me in a run that is longer than
+// maxCombiningMarks, or that starts the text or a line (no base).
+func combiningBad(rs []rune) []bool {
+	bad := make([]bool, len(rs))
+	for i := 0; i < len(rs); {
+		if !isCombiningMark(rs[i]) {
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(rs) && isCombiningMark(rs[j]) {
+			j++
+		}
+		lineStart := i == 0 || rs[i-1] == '\n'
+		if lineStart || j-i > maxCombiningMarks {
+			for k := i; k < j; k++ {
+				bad[k] = true
+			}
+		}
+		i = j
+	}
+	return bad
+}
+
+func isCombiningMark(r rune) bool {
+	return unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r)
 }
 
 func pullRuneIssue(r rune, allowNL bool) string {
