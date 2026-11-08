@@ -53,6 +53,14 @@ func TestRedactValueHidesKeysAndTokens(t *testing.T) {
 	if named["token_name"] != "alice" || named["token"] != "[redacted]" {
 		t.Fatalf("token_name %#v", named)
 	}
+	digest := strings.Repeat("ab", 32)
+	kept := RedactDetail(map[string]any{
+		"body_sha256": digest,
+		"token":       digest,
+	}).(map[string]any)
+	if kept["body_sha256"] != digest || kept["token"] != "[redacted]" {
+		t.Fatalf("digest %#v", kept)
+	}
 }
 
 // Real-shaped fakes. Lengths follow the formats this daemon handles:

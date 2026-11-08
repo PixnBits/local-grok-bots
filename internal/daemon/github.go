@@ -20,12 +20,16 @@ var readGitHubToken = github.ReadToken
 
 // openGitHubProxy listens on a private socket for this shell. The token
 // stays in the proxy. A nil proxy means GitHub fetch is unavailable.
+// The jail socket forwards git upload-pack and the repository root only.
 func (a *App) openGitHubProxy(bot store.Bot) (*github.Proxy, error) {
-	turnPol := a.effPol(bot.ID)
+	return a.openGitHubProxyCfg(bot, true)
+}
 
+func (a *App) openGitHubProxyCfg(bot store.Bot, gitOnly bool) (*github.Proxy, error) {
 	if a == nil || !granted(bot.Grants, "github") {
 		return nil, nil
 	}
+	turnPol := a.effPol(bot.ID)
 	repos := turnPol.EffectiveGitHubRepos(bot.GitHubAllow)
 	p, err := github.New(github.Config{
 		Repos:   repos,
@@ -33,6 +37,7 @@ func (a *App) openGitHubProxy(bot store.Bot) (*github.Proxy, error) {
 		GitBase: a.githubGitBase,
 		APIBase: a.githubAPIBase,
 		Audit:   func(ev github.Audit) { a.auditGitHub(bot.ID, ev) },
+		GitOnly: gitOnly,
 	})
 	if err != nil {
 		return nil, err
@@ -257,9 +262,27 @@ func githubUnixClient(sock string) *http.Client {
 	}
 }
 
-// openGitHubReadProxy is the jail-style read proxy. It does not listen on TCP.
+// openGitHubReadProxy is the tool read proxy. It does not listen on TCP.
+// It is not the jail socket: issue, pull request, and check routes stay open.
 func (a *App) openGitHubReadProxy(bot store.Bot) (*github.Proxy, error) {
-	return a.openGitHubProxy(bot)
+	return a.openGitHubProxyCfg(bot, false)
+}
+
+// githubLiveWrite re-reads the bot and the published policy just before a write.
+// A grant, jail, or allowlist change while a card is pending fails closed.
+// Callers must use the returned reason. An empty reason is the only allow.
+func (a *App) githubLiveWrite(bot store.Bot, owner, repo string) (store.Bot, string) {
+	bot = a.freshBot(bot)
+	if sandbox.RootJailWarning() != "" {
+		return bot, "root requires bwrap"
+	}
+	if !granted(bot.Grants, "github") {
+		return bot, "missing grant"
+	}
+	if a == nil || !repoAllowed(a.pol().EffectiveGitHubRepos(bot.GitHubAllow), owner, repo) {
+		return bot, "allowlist"
+	}
+	return bot, ""
 }
 
 // openGitHubWriteGate listens only after an approval card. The caller closes it.
@@ -267,12 +290,16 @@ func (a *App) openGitHubReadProxy(bot store.Bot) (*github.Proxy, error) {
 // The second result is the gate secret. It belongs in the X-LGB-Gate header,
 // not in a URL.
 func (a *App) openGitHubWriteGate(bot store.Bot, win github.Window) (string, string, func(), error) {
-	turnPol := a.effPol(bot.ID)
-
 	noop := func() {}
 	if a == nil {
 		return "", "", noop, errors.New("proxy unavailable")
 	}
+	live, reason := a.githubLiveWrite(bot, win.Owner, win.Repo)
+	if reason != "" {
+		return "", "", noop, errors.New(reason)
+	}
+	bot = live
+	turnPol := a.pol()
 	p, err := github.New(github.Config{
 		Repos:   turnPol.EffectiveGitHubRepos(bot.GitHubAllow),
 		Token:   func() (string, error) { return readGitHubToken(turnPol.GitHub.TokenFile) },

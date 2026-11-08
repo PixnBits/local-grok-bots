@@ -105,7 +105,8 @@ func TestRootWithoutBwrapRefusesGitHubTools(t *testing.T) {
 	app.editPol(func(p *policy.Policy) { p.GitHub.Repos = []string{"acme/widgets"} })
 	var asked atomic.Bool
 	app.perm.AddHook(func(req permission.Request) permission.HookResult {
-		if req.Tool == "create_pr" || req.Tool == "pr_status" {
+		switch req.Tool {
+		case "create_pr", "pr_status", "list_issues", "read_issue", "read_pr", "create_issue", "create_comment":
 			asked.Store(true)
 		}
 		return permission.HookResult{}
@@ -126,6 +127,14 @@ func TestRootWithoutBwrapRefusesGitHubTools(t *testing.T) {
 	out, err = app.dispatchTool(t.Context(), bot, "pr_status", map[string]any{"repo": "acme/widgets", "number": float64(7)})
 	if err == nil || !strings.Contains(err.Error(), "root requires bwrap") {
 		t.Fatalf("pr_status %v %s", err, out)
+	}
+	out, err = app.dispatchTool(t.Context(), bot, "list_issues", map[string]any{"repo": "acme/widgets"})
+	if err == nil || !strings.Contains(err.Error(), "root requires bwrap") {
+		t.Fatalf("list_issues %v %s", err, out)
+	}
+	out, err = app.dispatchTool(t.Context(), bot, "create_issue", map[string]any{"repo": "acme/widgets", "title": "Add a widget"})
+	if err == nil || !strings.Contains(err.Error(), "root requires bwrap") {
+		t.Fatalf("create_issue %v %s", err, out)
 	}
 	if asked.Load() || len(app.perm.Pending(bot.ID)) != 0 {
 		t.Fatal("root without bwrap opened a card")

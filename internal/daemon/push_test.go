@@ -27,6 +27,16 @@ import (
 
 const pushSecret = "lgb-github-test-secret-value"
 
+func TestGitPushCardCommits(t *testing.T) {
+	got := gitPushCardCommits("abc123 hide\u202Eme")
+	if got != "abc123 hide⟦U+202E⟧me" || strings.ContainsRune(got, '\u202E') {
+		t.Fatalf("%q", got)
+	}
+	if gitPushCardCommits("ok") != "ok" {
+		t.Fatal(gitPushCardCommits("ok"))
+	}
+}
+
 func TestGitPushHostApproval(t *testing.T) {
 	for _, bin := range []string{"git", "bwrap", "gcc"} {
 		if _, err := exec.LookPath(bin); err != nil {

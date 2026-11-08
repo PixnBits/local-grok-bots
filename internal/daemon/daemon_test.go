@@ -853,7 +853,7 @@ func TestPromptShowsCreateBot(t *testing.T) {
 	if !strings.Contains(sys, "create_bot") || !strings.Contains(sys, "description is the standing prompt") {
 		t.Fatalf("prompt hides create_bot: %s", sys)
 	}
-	for _, want := range []string{"edit_file", "delete_file", "create_pr", "pr_status", "approval card", "allowlisted", "build grant does not add a network exception"} {
+	for _, want := range []string{"edit_file", "delete_file", "create_pr", "pr_status", "list_issues", "read_issue", "read_pr", "create_issue", "create_comment", "approval card", "allowlisted", "build grant does not add a network exception"} {
 		if !strings.Contains(sys, want) {
 			t.Fatalf("prompt missing %q", want)
 		}
