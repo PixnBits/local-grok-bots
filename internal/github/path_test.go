@@ -2,6 +2,7 @@ package github
 
 import (
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -54,6 +55,25 @@ func TestClassifyGitAndAPI(t *testing.T) {
 	}
 	if _, err := Classify("api", "/repos/Acme/Widgets", "page=2", allow); err == nil {
 		t.Fatal("accepted api query")
+	}
+	listed, err := Classify("api", "/repos/acme/widgets/issues", "per_page=10&page=1&state=open", allow)
+	if err != nil || listed.Query != "page=1&per_page=10&state=open" {
+		t.Fatalf("issue query %#v %v", listed, err)
+	}
+	if _, err := Classify("api", "/repos/acme/widgets/issues", "state=closed", allow); err == nil {
+		t.Fatal("accepted state=closed")
+	}
+	if _, err := Classify("api", "/repos/acme/widgets/issues", "page=1&page=2", allow); err == nil {
+		t.Fatal("accepted duplicate page")
+	}
+	files, err := Classify("api", "/repos/acme/widgets/pulls/7/files", "page=2&per_page=10", allow)
+	if err != nil || files.Query != "page=2&per_page=10" {
+		t.Fatalf("files query %#v %v", files, err)
+	}
+	sha := strings.Repeat("a", 40)
+	checks, err := Classify("api", "/repos/acme/widgets/commits/"+sha+"/check-runs", "page=1&per_page=10", allow)
+	if err != nil || checks.Query != "page=1&per_page=10" {
+		t.Fatalf("checks query %#v %v", checks, err)
 	}
 	if _, err := Classify("api", "/repos/Acme/Widgets.git", "", allow); err == nil {
 		t.Fatal("accepted .git on api")

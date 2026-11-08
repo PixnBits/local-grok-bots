@@ -147,6 +147,19 @@ if (walk(q5,[]).some(n=>n.tag==="img"||n.tag==="script"||n.tag==="html")) throw 
 if (!textOf(q5).includes("<img src=x>") || !textOf(q5).includes("<script>") || !textOf(q5).includes("<i>d</i>")) throw new Error("question text dropped");
 if (!textOf(cardOf("p1")).includes("ship the plan")) throw new Error("plan dropped");
 if (buttons(cardOf("p1")).map(b=>b.textContent).join(",")!=="Allow once,Deny") throw new Error("plan buttons");
+const tail = "TAIL-" + String.fromCharCode(0xe9) + "-END";
+const longBody = "x".repeat(2100) + tail;
+showPermissionRequest({id:"ci1", run_id:"run-1", tool:"create_issue", arguments:{repo:"acme/widgets", title:"Empty", title_len:5, body:longBody, body_len:longBody.length}, deadline:future, session_allowed:false}, "run-1");
+showPermissionRequest({id:"cc1", run_id:"run-1", tool:"create_comment", arguments:{repo:"acme/widgets", number:7, target_kind:"issue", target_title:"Empty state", body:longBody, body_len:longBody.length}, deadline:future, session_allowed:false}, "run-1");
+showPermissionRequest({id:"cp1", run_id:"run-1", tool:"create_pr", arguments:{repo:"acme/widgets", head:"feature", base:"main", title:"Add", draft:true, body:longBody, body_len:longBody.length}, deadline:future, session_allowed:false}, "run-1");
+const ci = cardOf("ci1");
+const cc = cardOf("cc1");
+const cp = cardOf("cp1");
+if (!textOf(ci).includes(tail) || !textOf(ci).includes("acme/widgets") || !textOf(ci).includes("Empty")) throw new Error("issue card hid the body");
+if (textOf(ci).includes("clipped at")) throw new Error("issue card clipped the body");
+if (!textOf(cc).includes(tail) || !textOf(cc).includes("Empty state") || !textOf(cc).includes("7")) throw new Error("comment card hid the body");
+if (!textOf(cp).includes(tail) || !textOf(cp).includes("feature")) throw new Error("pull request card hid the body");
+if (textOf(ci).includes("<script>") && walk(ci, []).some(n => n.tag === "script")) throw new Error("issue card became markup");
 showPermissionDecision({id:"q1", decision:"answer", source:"ui", tool:"AskUserQuestion", kind:"question"});
 setTimeout(()=>{
   let code = 0;
@@ -234,3 +247,149 @@ setTimeout(()=>{
 		}
 	}
 }
+
+func TestCommentCardShowsNumber(t *testing.T) {
+	runPermSnippet(t, `
+showPermissionRequest({id:"cc1", run_id:"run-1", tool:"create_comment", arguments:{repo:"acme/widgets", number:7, target_kind:"issue", target_title:"Empty state", body:"hi", body_len:2}, deadline:future, session_allowed:false}, "run-1");
+if (kvValue(cardOf("cc1"), "Number") !== "7") throw new Error("number " + kvValue(cardOf("cc1"), "Number"));
+`)
+}
+
+func TestCardShowsLineCue(t *testing.T) {
+	if !strings.Contains(ClientSource(), ".card-scroll-cue") {
+		t.Fatal("scroll cue style missing")
+	}
+	runPermSnippet(t, `
+const padded = "LGTM\n".repeat(40) + "PADDED-TAIL";
+showPermissionRequest({id:"pad", run_id:"run-1", tool:"create_issue", arguments:{repo:"acme/widgets", title:"T", body:padded, body_len:padded.length, body_lines:41, scroll_cue:true}, deadline:future, session_allowed:false}, "run-1");
+const card = cardOf("pad");
+if (kvValue(card, "Lines") !== "41") throw new Error("lines " + kvValue(card, "Lines"));
+if (!textOf(card).includes("more lines below")) throw new Error("cue missing " + textOf(card));
+if (!textOf(card).includes("PADDED-TAIL")) throw new Error("tail missing");
+const cue = walk(card, []).find(n => String(n.className || "").indexOf("card-scroll-cue") >= 0);
+if (!cue) throw new Error("cue class missing");
+showPermissionRequest({id:"one", run_id:"run-1", tool:"create_issue", arguments:{repo:"acme/widgets", title:"T", body:"single", body_len:6, body_lines:1}, deadline:future, session_allowed:false}, "run-1");
+if (textOf(cardOf("one")).includes("more lines below")) throw new Error("short card cued");
+const sep = "a\u2028b\u2029c";
+showPermissionRequest({id:"sep", run_id:"run-1", tool:"create_issue", arguments:{repo:"acme/widgets", title:"T", body:sep, body_len:sep.length}, deadline:future, session_allowed:false}, "run-1");
+if (kvValue(cardOf("sep"), "Lines") !== "3") throw new Error("sep lines " + kvValue(cardOf("sep"), "Lines"));
+`)
+}
+
+func TestCardScrollCueFromPayload(t *testing.T) {
+	runPermSnippet(t, `
+showPermissionRequest({id:"cue", run_id:"run-1", tool:"create_issue", arguments:{repo:"acme/widgets", title:"T", body:"single", body_len:6, body_lines:1, scroll_cue:true}, deadline:future, session_allowed:false}, "run-1");
+if (!textOf(cardOf("cue")).toLowerCase().includes("more lines below")) throw new Error("payload cue missing");
+if (kvValue(cardOf("cue"), "Lines") !== "1") throw new Error("lines " + kvValue(cardOf("cue"), "Lines"));
+showPermissionRequest({id:"lines", run_id:"run-1", tool:"create_issue", arguments:{repo:"acme/widgets", title:"T", body:"single", body_len:6, body_lines:20}, deadline:future, session_allowed:false}, "run-1");
+if (kvValue(cardOf("lines"), "Lines") !== "20") throw new Error("body_lines " + kvValue(cardOf("lines"), "Lines"));
+if (!textOf(cardOf("lines")).toLowerCase().includes("more lines below")) throw new Error("line cue missing");
+const long = "x".repeat(500);
+showPermissionRequest({id:"long", run_id:"run-1", tool:"create_issue", arguments:{repo:"acme/widgets", title:"T", body:long, body_len:long.length, body_lines:1}, deadline:future, session_allowed:false}, "run-1");
+if (!textOf(cardOf("long")).toLowerCase().includes("more lines below")) throw new Error("length cue missing");
+`)
+}
+
+func TestMarkTallCard(t *testing.T) {
+	src := ClientSource()
+	if !strings.Contains(src, "function markTallCard") {
+		t.Fatal("markTallCard missing")
+	}
+	runPermSnippet(t, `
+let called = 0;
+const orig = markTallCard;
+markTallCard = function(c){ called++; return orig(c); };
+showPermissionRequest({id:"mt", run_id:"run-1", tool:"create_issue", arguments:{repo:"acme/widgets", title:"T", body:"single", body_len:6, body_lines:1}, deadline:future, session_allowed:false}, "run-1");
+if (called < 1) throw new Error("markTallCard not called");
+const card = cardOf("mt");
+const pre = walk(card, []).find(n => String(n.className || "").split(/\s+/).indexOf("card-pre") >= 0);
+if (!pre) throw new Error("pre missing");
+if (textOf(card).toLowerCase().includes("more lines below")) throw new Error("short already cued");
+pre.scrollHeight = 52;
+pre.clientHeight = 50;
+markTallCard(card);
+if (!textOf(card).toLowerCase().includes("more lines below")) throw new Error("overflow cue missing");
+const cues = walk(card, []).filter(n => String(n.className || "").indexOf("card-scroll-cue") >= 0);
+if (cues.length !== 1) throw new Error("cue count " + cues.length);
+markTallCard(card);
+if (walk(card, []).filter(n => String(n.className || "").indexOf("card-scroll-cue") >= 0).length !== 1) throw new Error("duplicate cue");
+`)
+}
+
+func TestCardNotesSecretAndLinks(t *testing.T) {
+	runPermSnippet(t, `
+showPermissionRequest({id:"sec", run_id:"run-1", tool:"create_issue", arguments:{repo:"acme/widgets", title:"T", body:"ghp_example https://evil.example/a", body_len:32, secret_warning:true, links:["https://evil.example/a"]}, deadline:future, session_allowed:false}, "run-1");
+const card = cardOf("sec");
+if (!textOf(card).includes("secret-looking")) throw new Error("warning missing");
+if (!textOf(card).includes("ghp_example")) throw new Error("body redacted");
+if (kvValue(card, "Links") !== "https://evil.example/a") throw new Error("links " + kvValue(card, "Links"));
+`)
+}
+
+func runPermSnippet(t *testing.T, body string) {
+	t.Helper()
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed")
+	}
+	src := ClientSource()
+	i := strings.Index(src, "// perm:begin")
+	j := strings.Index(src, "// perm:end")
+	if i < 0 || j < i {
+		t.Fatal("permission handler markers missing")
+	}
+	harness := permSnippetPrefix + src[i:j] + permSnippetSuffix + body + "\nclearPermissionCards();\nprocess.exit(0);\n"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "perm.js")
+	if err := os.WriteFile(path, []byte(harness), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, node, path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+}
+
+const permSnippetPrefix = `
+class N {
+  constructor(tag){this.tag=tag;this.kids=[];this.dataset={};this.attrs={};this.className="";this.disabled=false;this._text="";this.listeners={};
+    this.parentNode=null;this.scrollHeight=0;this.clientHeight=0;
+    this.classList={add:(c)=>{this.className += " "+c;}};}
+  append(...k){for (const x of k) { x.parentNode=this; this.kids.push(x); }}
+  querySelectorAll(sel){
+    const all=[]; const walk=(n)=>{all.push(n); (n.kids||[]).forEach(walk)}; walk(this);
+    if (sel==="button") return all.filter(k=>k.tag==="button");
+    if (sel===".card-pre") return all.filter(k=>String(k.className||"").split(/\s+/).indexOf("card-pre")>=0);
+    return [];
+  }
+  addEventListener(type,fn){(this.listeners[type]||=[]).push(fn)}
+  click(){(this.listeners.click||[]).forEach(fn=>fn())}
+  set textContent(v){this._text=v==null?"":String(v)}
+  get textContent(){return this._text}
+  set type(v){this.attrs.type=v}
+  set innerHTML(v){this.kids.push({tag:"html",_text:String(v),kids:[]})}
+}
+const el=(tag,cls,text)=>{const n=new N(tag); if(cls) n.className=cls; if(text!=null) n.textContent=text; return n};
+const live=new N("div");
+const $=(s)=>s==="#live"?live:null;
+const posts=[];
+const api=async(path,opts)=>{posts.push({path, body:opts&&opts.body});};
+const state={botId:"bot-1"};
+const future=new Date(Date.now()+5000).toISOString();
+`
+
+const permSnippetSuffix = `
+const walk=(n,acc)=>{acc.push(n); (n.kids||[]).forEach(k=>walk(k,acc)); return acc};
+const cardOf=id=>live.kids.find(c=>c.dataset&&c.dataset.id===id);
+const textOf=c=>walk(c,[]).map(n=>n._text||"").join("\n");
+const kvValue=(c,k)=>{
+  const rows=walk(c,[]).filter(n=>n.className==="kv");
+  for (const row of rows) {
+    const kids=row.kids||[];
+    if (kids[0] && kids[0]._text===k) return kids[1] ? String(kids[1]._text) : "";
+  }
+  return "";
+};
+`

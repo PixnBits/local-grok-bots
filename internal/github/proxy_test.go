@@ -301,6 +301,8 @@ func TestReadProxyRefusesWrites(t *testing.T) {
 		http.MethodPost + " /api/repos/acme/widgets/merges",
 		http.MethodPost + " /api/repos/acme/widgets/git/refs",
 		http.MethodPost + " /api/repos/acme/widgets/pulls/1/merge",
+		http.MethodPost + " /api/repos/acme/widgets/issues",
+		http.MethodGet + " /api/repos/acme/widgets/issues?state=closed",
 		http.MethodHead + " /github/acme/widgets.git/info/refs?service=git-upload-pack",
 		http.MethodGet + " /api/repos/acme/widgets/merges",
 	}
@@ -358,6 +360,10 @@ func TestReadProxyRefusesWrites(t *testing.T) {
 	code, body = do(http.MethodGet, "/api/repos/acme/widgets/pulls/1")
 	if code != http.StatusOK {
 		t.Fatalf("pull GET %d %q", code, body)
+	}
+	code, body = do(http.MethodGet, "/api/repos/acme/widgets/issues?state=open&per_page=10&page=1")
+	if code != http.StatusOK {
+		t.Fatalf("issues GET %d %q", code, body)
 	}
 
 	var writeAudits []Audit

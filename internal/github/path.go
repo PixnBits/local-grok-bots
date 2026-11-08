@@ -73,7 +73,8 @@ func classifyGit(norm, rawQuery string, allow map[string]bool) (Route, error) {
 }
 
 func classifyAPI(norm, rawQuery string, allow map[string]bool) (Route, error) {
-	if rawQuery != "" {
+	query, ok := canonicalAPIQuery(norm, rawQuery)
+	if !ok {
 		return Route{}, ErrRepo
 	}
 	parts := splitParts(norm)
@@ -93,7 +94,7 @@ func classifyAPI(norm, rawQuery string, allow map[string]bool) (Route, error) {
 			return Route{}, ErrRepo
 		}
 	}
-	route := Route{Service: "api", Owner: owner, Repo: repo, Path: norm, Query: ""}
+	route := Route{Service: "api", Owner: owner, Repo: repo, Path: norm, Query: query}
 	if !allowListed(allow, owner, repo) {
 		return route, ErrNotAllowed
 	}
@@ -230,6 +231,132 @@ func badPath(s string) bool {
 		}
 	}
 	return false
+}
+
+// canonicalAPIQuery accepts an empty query, or a page query on a list route.
+// The issues collection may also set state=open. The result is rebuilt.
+// Any other query, including a query on the repository root, is refused.
+func canonicalAPIQuery(norm, raw string) (string, bool) {
+	if raw == "" {
+		return "", true
+	}
+	if !querySafe(raw) || strings.ContainsAny(raw, " \t?#") {
+		return "", false
+	}
+	kind := apiQueryKind(norm)
+	if kind == "" {
+		return "", false
+	}
+	seen := map[string]string{}
+	for _, part := range strings.Split(raw, "&") {
+		key, val, ok := strings.Cut(part, "=")
+		if !ok || key == "" || strings.Contains(val, "=") {
+			return "", false
+		}
+		if _, dup := seen[key]; dup {
+			return "", false
+		}
+		if strings.ContainsAny(key+val, "%+") {
+			return "", false
+		}
+		seen[key] = val
+	}
+	for key := range seen {
+		switch key {
+		case "page", "per_page", "state":
+		default:
+			return "", false
+		}
+	}
+	state, hasState := seen["state"]
+	if hasState && (kind != "issues" || state != "open") {
+		return "", false
+	}
+	page := ""
+	if v, ok := seen["page"]; ok {
+		if !pageNum(v, 20) {
+			return "", false
+		}
+		page = v
+	}
+	per := ""
+	if v, ok := seen["per_page"]; ok {
+		if !pageNum(v, 100) {
+			return "", false
+		}
+		per = v
+	}
+	if page == "" && per == "" && !hasState {
+		return "", false
+	}
+	var b strings.Builder
+	if page != "" {
+		b.WriteString("page=" + page)
+	}
+	if per != "" {
+		if b.Len() > 0 {
+			b.WriteByte('&')
+		}
+		b.WriteString("per_page=" + per)
+	}
+	if hasState {
+		if b.Len() > 0 {
+			b.WriteByte('&')
+		}
+		b.WriteString("state=open")
+	}
+	return b.String(), true
+}
+
+// apiQueryKind is "issues" for the open-issue collection and "page" for the
+// other list routes. An empty result means the path takes no query.
+func apiQueryKind(norm string) string {
+	parts := splitParts(norm)
+	if len(parts) < 4 || parts[0] != "repos" {
+		return ""
+	}
+	tail := parts[3:]
+	switch {
+	case len(tail) == 1 && tail[0] == "issues":
+		return "issues"
+	case len(tail) == 3 && tail[0] == "issues" && pullNumber(tail[1]) && tail[2] == "comments":
+		return "page"
+	case len(tail) == 3 && tail[0] == "pulls" && pullNumber(tail[1]) && (tail[2] == "files" || tail[2] == "comments" || tail[2] == "reviews"):
+		return "page"
+	case len(tail) == 3 && tail[0] == "commits" && commitSHA(tail[1]) && tail[2] == "check-runs":
+		return "page"
+	default:
+		return ""
+	}
+}
+
+func pageNum(s string, max int) bool {
+	if s == "" || len(s) > 3 || s[0] == '0' {
+		return false
+	}
+	n := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+		n = n*10 + int(s[i]-'0')
+	}
+	return n >= 1 && n <= max
+}
+
+func commitSHA(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= '0' && c <= '9', c >= 'a' && c <= 'f', c >= 'A' && c <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func querySafe(q string) bool {

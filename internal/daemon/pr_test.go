@@ -123,7 +123,7 @@ func TestCreatePRAndStatus(t *testing.T) {
 		if aerr := <-done; aerr != nil {
 			t.Fatal(aerr)
 		}
-		if err != nil || out != `{"html_url":"https://github.com/acme/widgets/pull/7"}` {
+		if err != nil || !strings.HasPrefix(out, `{"untrusted_github_data_notice":`) || !strings.Contains(out, `"html_url":"https://github.com/acme/widgets/pull/7"`) || strings.Contains(out, leak) {
 			t.Fatalf("create: %v %s", err, out)
 		}
 		if env.evals.Load() == 0 || posts.Load() <= before {
