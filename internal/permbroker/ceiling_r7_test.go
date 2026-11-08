@@ -32,6 +32,16 @@ func TestCeilingUnquotedBackslashAsks(t *testing.T) {
 	wantAsk(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git clone . sub"))
 	wantCeilingAllow(t, evalShell(testEngine(t), LevelMedium, ws, ws, `git add ".clau\de"`))
 	wantCeilingAllow(t, evalShell(testEngine(t), LevelLow, ws, ws, "git status"))
+	// Clone, fetch, and pull ask because they are not on the allowlist.
+	// These are on it, so only the unquoted backslash keeps them an ask.
+	wantAsk(t, evalShell(testEngine(t), LevelMedium, ws, ws, `git add .clau\de`))
+	wantAsk(t, evalShell(testEngine(t), LevelCritical, ws, ws, `git add .clau\de`))
+	wantAsk(t, evalShell(testEngine(t), LevelMedium, ws, ws, `git add path\ with\ space.txt`))
+	wantAsk(t, evalShell(testEngine(t), LevelMedium, ws, ws, `git commit -m fix\ typo`))
+	wantAsk(t, evalShell(testEngine(t), LevelLow, ws, ws, `git log --format=%H\ %s`))
+	wantCeilingAllow(t, evalShell(testEngine(t), LevelMedium, ws, ws, `git commit -m "fix typo"`))
+	wantCeilingAllow(t, evalShell(testEngine(t), LevelLow, ws, ws, `git log --format=%s`))
+	wantCeilingAllow(t, evalShell(testEngine(t), LevelMedium, ws, ws, `git add "path with space.txt"`))
 }
 
 func TestCeilingCloneInitDestAsks(t *testing.T) {

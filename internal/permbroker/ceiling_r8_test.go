@@ -277,6 +277,7 @@ func TestCeilingExactHardDeny(t *testing.T) {
 		"tee .git/hooks/pre-commit",
 		"grep TOKEN " + key,
 		"git config user.name core.hooksPath",
+		"git -c include.path=core.hooksPath status",
 		"git clone --separate-git-dir=.vscode sub",
 		"git clone --template=.claude sub",
 		"git clone --work-tree=.vscode status",
