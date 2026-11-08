@@ -244,5 +244,13 @@ func tagFlagExempt(rs []rune, i int) bool {
 	if n < minFlagTags || n > maxFlagTags || k >= len(rs) || rs[k] != 0xE007F {
 		return false
 	}
+	// Only the recommended subdivision flags; any other tag text stays refused.
+	tag := make([]byte, 0, n)
+	for _, t := range rs[start:k] {
+		tag = append(tag, byte(t-0xE0000))
+	}
+	if s := string(tag); s != "gbeng" && s != "gbsct" && s != "gbwls" {
+		return false
+	}
 	return i <= k
 }
