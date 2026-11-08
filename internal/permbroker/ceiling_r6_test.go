@@ -223,8 +223,9 @@ func TestCeilingQuotedExtFetchAsks(t *testing.T) {
 			wantAsk(t, evalShell(testEngine(t), ceiling, ws, ws, cmd))
 		}
 	}
-	wantCeilingAllow(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git fetch origin"))
-	wantCeilingAllow(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git ls-remote origin"))
+	wantAsk(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git fetch origin"))
+	wantAsk(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git ls-remote origin"))
+	wantCeilingAllow(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git status"))
 }
 
 func TestCeilingGitApplyKeepsLinkBytes(t *testing.T) {
@@ -271,7 +272,7 @@ func TestCeilingGitApplyKeepsLinkBytes(t *testing.T) {
 		t.Fatalf("patch dropped a link target:\n%s", patch)
 	}
 	mustWrite(t, filepath.Join(ws, "p.patch"), string(patch))
-	wantCeilingAllow(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git apply p.patch"))
+	wantAsk(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git apply p.patch"))
 	runGit(t, ws, "apply", "p.patch")
 	for _, l := range links {
 		got, err := os.Readlink(filepath.Join(ws, l.name))

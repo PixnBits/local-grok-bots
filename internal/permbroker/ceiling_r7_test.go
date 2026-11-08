@@ -28,8 +28,10 @@ func TestCeilingUnquotedBackslashAsks(t *testing.T) {
 			}
 		}
 	}
-	wantCeilingAllow(t, evalShell(testEngine(t), LevelMedium, ws, ws, `git clone . ".clau\de"`))
-	wantCeilingAllow(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git clone . sub"))
+	wantAsk(t, evalShell(testEngine(t), LevelMedium, ws, ws, `git clone . ".clau\de"`))
+	wantAsk(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git clone . sub"))
+	wantCeilingAllow(t, evalShell(testEngine(t), LevelMedium, ws, ws, `git add ".clau\de"`))
+	wantCeilingAllow(t, evalShell(testEngine(t), LevelLow, ws, ws, "git status"))
 }
 
 func TestCeilingCloneInitDestAsks(t *testing.T) {
@@ -59,8 +61,9 @@ func TestCeilingCloneInitDestAsks(t *testing.T) {
 			})
 		}
 	}
-	wantCeilingAllow(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git clone . sub"))
-	wantCeilingAllow(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git init"))
+	wantAsk(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git clone . sub"))
+	wantAsk(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git init"))
+	wantCeilingAllow(t, evalShell(testEngine(t), LevelLow, ws, ws, "git status"))
 	if err := os.MkdirAll(filepath.Join(ws, ".husky"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -99,8 +102,9 @@ func TestCeilingExtClonePullAsks(t *testing.T) {
 			wantAsk(t, evalShell(testEngine(t), ceiling, ws, ws, cmd))
 		}
 	}
-	wantCeilingAllow(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git clone . sub"))
-	wantCeilingAllow(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git pull origin"))
+	wantAsk(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git clone . sub"))
+	wantAsk(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git pull origin"))
+	wantCeilingAllow(t, evalShell(testEngine(t), LevelLow, ws, ws, "git status"))
 }
 
 func TestCeilingGitLocationEnvAsks(t *testing.T) {
@@ -166,8 +170,6 @@ func TestCeilingCredentialNeverDeny(t *testing.T) {
 		never    bool
 	}{
 		{"gh auth token", neverAllowCredential, true},
-		{"gh secret list", neverAllowCredential, true},
-		{"gh ssh-key list", neverAllowCredential, true},
 		{"git credential fill", neverAllowCredential, true},
 		{"head " + key, neverAllowCredential, true},
 		{"cat " + key, neverAllowCredential, true},

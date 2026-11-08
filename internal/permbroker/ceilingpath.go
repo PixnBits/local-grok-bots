@@ -308,9 +308,18 @@ func ceilingCandRefused(e *Engine, c ceilingCand, cwd, ws, realWS string) bool {
 	if c.created && createdDirRefused(spelled, resolved) {
 		return true
 	}
+	// An allowlisted git read that does not print file content may name
+	// a secret path. git log without -p is the case: subjects only.
+	namesOnly := len(c.argv) > 0 && readOnlyArgv(c.argv) && ceilingGitPermit(c.argv) && !gitSecretRead(c.argv)
+	if !namesOnly && (secretAskPath(spelled) || secretAskPath(resolved)) {
+		return true
+	}
 	hook := c.write && len(c.argv) > 0 && baseName(c.argv[0]) == "git" &&
 		hookPathToken(spelled) && hookPathToken(resolved)
 	class := ceilingClassify(spelled, resolved, spelledAbs, ws, realWS, e.critical, e.policyPaths, c.write)
+	if namesOnly {
+		return class.outside || class.policy
+	}
 	return class.refused(hook)
 }
 
@@ -478,17 +487,21 @@ func ceilingCandidates(req Request, in inspected, lists [][]string) []ceilingCan
 			}
 			write := !readOnlyArgv(argv)
 			created := createdDirIndexes(argv)
+			skipMsg := messageValueIndexes(argv)
 			for i, a := range argv {
-				if i == 0 || strings.TrimSpace(a) == "" {
+				if i == 0 || strings.TrimSpace(a) == "" || skipMsg[i] {
 					continue
 				}
 				if strings.HasPrefix(a, "-") && a != "-" && !looksPath(a) {
 					continue
 				}
-				if !write && !looksPath(a) && !created[i] {
+				if !write && !looksPath(a) && !created[i] && !secretAskPath(a) {
 					continue
 				}
 				out = append(out, ceilingCand{spelled: a, write: write, argv: argv, created: created[i]})
+			}
+			for _, fp := range gitPathFlagPaths(argv) {
+				out = append(out, ceilingCand{spelled: fp.value, write: true, argv: argv, created: fp.created})
 			}
 			if dest := impliedCloneDest(argv); dest != "" {
 				out = append(out, ceilingCand{spelled: dest, write: true, argv: argv, created: true})

@@ -118,7 +118,7 @@ func TestCeilingGitApplyDanglingChain(t *testing.T) {
 	}
 	e := testEngine(t)
 	wantCeilingAllow(t, evalWrite(e, LevelMedium, ws, ws, "Write", patchPath))
-	wantCeilingAllow(t, evalShell(e, LevelMedium, ws, ws, "git apply x.patch"))
+	wantAsk(t, evalShell(e, LevelMedium, ws, ws, "git apply x.patch"))
 	runGit(t, ws, "apply", "x.patch")
 	for _, ceiling := range []Level{LevelMedium, LevelHigh, LevelCritical} {
 		wantAsk(t, evalWrite(testEngine(t), ceiling, ws, ws, "Write", link))
@@ -282,7 +282,7 @@ func TestCeilingRealSubmoduleGitRisk(t *testing.T) {
 
 func TestCeilingN14N3(t *testing.T) {
 	ws := t.TempDir()
-	wantNeverDeny(t, evalShell(testEngine(t), LevelCritical, ws, ws, "gh auth login --with-token"))
+	wantAsk(t, evalShell(testEngine(t), LevelCritical, ws, ws, "gh auth login --with-token"))
 	wantAsk(t, evalShell(testEngine(t), LevelMedium, ws, ws, "git -C . submodule foreach id"))
 	wantAsk(t, evalShell(testEngine(t), LevelCritical, ws, ws, "git -C . submodule foreach id"))
 	e := testEngine(t)

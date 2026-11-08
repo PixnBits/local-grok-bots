@@ -450,11 +450,13 @@ the write. That window is an accepted residual. Closing it would mean
 the daemon performs the write, with `openat` and `O_NOFOLLOW`, and
 resolves the path again at the write. A write whose resolved path, or
 the nearest existing parent, is on a different device than the
-workspace root asks. A bind on the same filesystem does not change the
-device id. The same-inode check still covers that case when the target
-is an existing sensitive file. `git fetch`, `git ls-remote`,
-`git clone`, and `git pull` ask when an argument contains `ext::`,
-including when that remote is a single quoted word.
+workspace root asks. On Linux the check also compares mount ids from
+`/proc/self/mountinfo`. A bind on the same filesystem keeps the device
+id and changes the mount id, so that write asks. If the mount table
+cannot be read, the write asks. Darwin compares the device id only. The
+same-inode check still covers an existing sensitive file. `git fetch`,
+`git ls-remote`, `git clone`, and `git pull` ask when an argument
+contains `ext::`, including when that remote is a single quoted word.
 
 The spelled path and the resolved target are both checked. If either
 one matches, the ceiling does not auto-approve at any level, including
@@ -474,9 +476,10 @@ critical:
   `.vscode/settings.json`, `.vscode/launch.json`,
   `.idea/runConfigurations/`, `.idea/workspace.xml`, `.envrc` and
   `.env` loader files, and `.devcontainer/`. A directory created by
-  `git clone`, `git init`, `mkdir` (including `-p`), `install -d`, or
-  `cp -r` uses this class on the spelled path and the resolved path.
-  For that created directory, `.vscode` and `.idea` themselves count.
+  `git clone`, `git init`, `git mv`, `mkdir` (including `-p`),
+  `install`, `cp`, `mv`, `ln`, or `rsync` uses this class on the spelled
+  path and the resolved path. For that created directory, `.vscode` and
+  `.idea` themselves count, including `.VSCode` and `.IDEA`.
 
 A Glob `pattern` that contains `..` or `{`, starts with `~`, or is an
 absolute path is refused before that walk. `git -C`, `--git-dir`, and
@@ -489,21 +492,89 @@ level or a critical path. These still ask when the ceiling is critical:
 an unresolved or unknown program, a wrapper, a leading `cd`, a void
 command, a read of a protected path, a git form that runs a command, a
 non-shell path outside the workspace, and any other ineligible reason.
-Credential output is denied when a ceiling is set, at every ceiling
-including critical. That is `gh auth`, `gh secret`, `gh ssh-key`,
-`git credential`, a file reader of a credential path, and a Read of a
-credential file. The audit actor and source are `ceiling_never_allow`,
-the severity is `critical`, and the reason is `credential output is
-never allowed`. A bot with no ceiling still asks. A git write into
-`.git/hooks`, a git config or `-c` value that names `core.hooksPath`,
-a tool write of `.git/hooks`, and a redirect onto that path are denied
-the same way. The reason is `hook path changes are never allowed`. A
-read such as `git diff` of a hook path still asks. A critical ceiling
-does not auto-approve credential printing or hook-path git operations.
 The git forms that run a command are refused on the ceiling side. The
 classifier is unchanged, so a rule or a task grant keeps its current
 eligibility when no ceiling applies. The ceiling does not use the
 Linux-only allow choke that saved rules and task grants use.
+
+Ceiling auto-approval of git is an allowlist. The only table is
+`ceilingGitAllow` in `internal/permbroker/gitallow.go`. A subcommand
+that is not a row asks, at every ceiling including critical. The shipped
+classifier table above is a different list.
+
+| Subcommand | Auto-approves when |
+| --- | --- |
+| `status` | the listed status flags only. Low |
+| `log` | no `-p`, `--patch`, `-L`, `--ext-diff`, `--textconv`, or `--output`. A named path prints commit subjects only, including `.env`. Low |
+| `diff` | a non-content format (`--stat`, `--name-only`, `--name-status`, `--numstat`, `--shortstat`) and none of `--patch`, `-p`, `--no-index`, `--output`, `-L`, `--ext-diff`, or `--textconv`. A sensitive path asks. Bare `git diff` asks. Low |
+| `show` | a non-patch format (`--stat`, `--name-only`, `--name-status`, `--no-patch`, `-s`) and no `rev:path`. Low |
+| `rev-parse` | the listed flags. No `rev:path`. Low |
+| `ls-files` | the listed flags. Low |
+| `blame` | a path that is not secret material. Low |
+| `describe` | the listed flags. Low |
+| `branch` | `--list`, `-l`, `-a`, `--all`, `-v`, `-vv`, `--verbose`, `-r`, `--remotes`, or no arguments. No create or delete. Low |
+| `tag` | `--list`, `-l`, or no arguments. Low |
+| `remote` | no arguments, or `-v` / `--verbose`. Low on the ceiling. The shipped table still calls `git remote` critical |
+| `add` | pathspecs other than `.` or `./`, and no `-A`, `--all`, or `-u`. Medium. The path class still applies |
+| `commit` | `-m` or `--message` only, plus optional pathspecs. No `--amend`, `-a`, `-F`, or `--no-verify`. Medium |
+
+These ask at every ceiling because they can write work-tree files from
+content: `apply` (including `--cached` and `--index`), `am`, `checkout`,
+`switch`, `restore`, `merge`, `pull`, `rebase`, `cherry-pick`, `revert`,
+`reset` (any), `stash` (any, including `pop` and `apply`), `mv`,
+`read-tree` (any, including `-u`), `worktree add`, `clone`,
+`submodule update`, `checkout-index`, and `sparse-checkout`. `git init`,
+`git fetch`, `git push`, and any other unlisted subcommand ask too.
+
+`mv`, `cp`, `install`, `ln`, and `rsync` into a client-config directory
+ask. The destination is class-checked.
+
+A path-valued flag is split on `=` and the value is resolved and
+class-checked the same way as the next-argument form. The flags are
+`--separate-git-dir`, `--template`, `--git-dir`, `--work-tree`,
+`--output`, `--exec-path`, `--reference`, `--reference-if-able`, `-C`,
+and `git config --file`.
+
+These git reads ask: `git show rev:path`, any `git cat-file`, `git grep`
+with no pathspec, `git grep` of a sensitive path, and `git log -p` or
+`git diff` of a sensitive path (`.env*`, `*.pem`, `*.key`, `id_*`, a
+token file, `.git/config`, or `.git/hooks`). `git grep TOKEN` with no
+path filter asks. `git log` without `-p` may name a secret path.
+
+Hard deny, only when a ceiling is set, is an exact argv match. It is
+not a substring of a message or of another command. A bot with no
+ceiling still gets the human approval prompt. The audit actor and source
+are `ceiling_never_allow` and the severity is `critical`.
+
+Credential output (`credential output is never allowed`):
+
+- `gh auth token`, including flags such as `--hostname`
+- `git credential fill`, `git credential approve`, and `git credential reject`
+- `cat`, `head`, `tail`, `less`, and the Read tool, of a known token file:
+  `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`, `.netrc`,
+  `.git-credentials`, `admin-token`, `github.token`,
+  `.config/git/credentials`, `hosts.yml` under a `gh` directory, `.env`,
+  and `.env.*` other than `.env.example`, `.env.sample`, and
+  `.env.template`
+
+These ask and are not a hard deny: `gh auth status` (including `-t` and
+`--show-token`), `gh auth login --with-token`, `gh secret list`,
+`gh ssh-key list`, `cat .env.example`, a `*.pem` or `*.key` file,
+`git credential-store`, and `git commit -m "core.hooksPath"`. `gh auth`,
+`gh secret`, and `gh ssh-key` still do not auto-approve.
+
+Hook-path changes (`hook path changes are never allowed`):
+
+- `git config`, or `git -c` / `--config`, whose key is exactly `core.hooksPath`
+- a write into `.git/hooks`, including a tool write and an output redirect onto that path
+- a path-valued flag whose value is inside `.git/hooks`
+
+A read of a hook path asks. A config value that is only the text
+`core.hooksPath` is not a key. Wrappers ask and do not auto-approve:
+`command`, `env`, `timeout`, `sh -c`, `printenv`, an input redirect, and
+`cp`, `mv`, `ln`, or `tee` into `.git/hooks`. An environment assignment
+of `core.hooksPath` asks through the git location check. It is not this
+hard deny.
 
 Non-shell tools use this table. A path is `file_path`, `path`, or
 `notebook_path`. Every path must be inside the workspace. No path,

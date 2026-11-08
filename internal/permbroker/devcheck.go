@@ -8,8 +8,10 @@ import (
 
 // ceilingCrossDevice asks when a write's resolved path, or the nearest
 // existing parent, is on a different device than the workspace root.
-// A same-filesystem bind mount keeps the device id. The same-inode check
-// covers that case. Without Stat_t the check is skipped.
+// On Linux it also compares mount ids from mountinfo. A same-filesystem
+// bind keeps the device id and changes the mount id, so that write asks.
+// If mountinfo cannot be read, the write asks. Darwin compares the device
+// id only. Without Stat_t the check is skipped.
 func ceilingCrossDevice(resolved, ws, realWS string) bool {
 	if !deviceCheckActive() {
 		return false
@@ -18,15 +20,23 @@ func ceilingCrossDevice(resolved, ws, realWS string) bool {
 	if root == "" {
 		root = strings.TrimSpace(ws)
 	}
-	rootDev, ok := pathDevice(root)
-	if !ok {
-		return false
+	devAsk := false
+	rootDev, okR := pathDevice(root)
+	dev, okD := nearestDevice(resolved)
+	switch {
+	case okR && !okD:
+		devAsk = true
+	case okR && okD && dev != rootDev:
+		devAsk = true
 	}
-	dev, ok := nearestDevice(resolved)
-	if !ok {
+	if devAsk {
 		return true
 	}
-	return dev != rootDev
+	differ, ok := mountMismatch(resolved, root)
+	if !ok || differ {
+		return true
+	}
+	return false
 }
 
 func pathDevice(p string) (uint64, bool) {

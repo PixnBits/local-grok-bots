@@ -75,7 +75,7 @@ func TestCriticalCeilingSoleReason(t *testing.T) {
 		{name: "nohup", cwd: ws, ws: ws, cmd: "nohup cat " + key},
 		{name: "xargs", cwd: ws, ws: ws, cmd: "xargs cat " + key},
 		{name: "void-config", cwd: ws, ws: ws, cmd: "git config user.name"},
-		{name: "void-remote", cwd: ws, ws: ws, cmd: "git remote"},
+		{name: "void-remote", cwd: ws, ws: ws, cmd: "git remote add origin https://example.invalid/x.git"},
 		{name: "void-export", cwd: ws, ws: ws, cmd: "export A=1"},
 		{name: "git-config-fsmonitor", cwd: ws, ws: ws, cmd: "git config core.fsmonitor true"},
 		{name: "git-c-fsmonitor", cwd: ws, ws: ws, cmd: "git -c core.fsmonitor=id status"},
@@ -102,7 +102,6 @@ func TestCriticalCeilingSoleReason(t *testing.T) {
 		{name: "cd-inside", cmd: "cd " + ws + " && gh auth token", why: neverAllowCredential},
 		{name: "git-config-hookspath", cmd: "git config core.hooksPath ./h", why: neverAllowHook},
 		{name: "compound-critical", cmd: "gh auth token; git status", why: neverAllowCredential},
-		{name: "login-with-token", cmd: "gh auth login --with-token", why: neverAllowCredential},
 		{name: "compound-unclassified", cmd: "gh auth token; echo hi", why: neverAllowCredential},
 	}
 	for _, tc := range nevers {
@@ -142,10 +141,12 @@ func TestCriticalCeilingSoleReason(t *testing.T) {
 		if !strings.Contains(d.Reason, neverAllowCredential) {
 			t.Fatalf("reason %+v", d)
 		}
-		for _, c := range []string{"git diff " + inKey, "git log -- " + inKey, "git show HEAD:" + inKey, "git diff " + filepath.Join(ws, ".git", "hooks", "pre-commit")} {
+		for _, c := range []string{"git diff " + inKey, "git show HEAD:" + inKey, "git diff " + filepath.Join(ws, ".git", "hooks", "pre-commit")} {
 			wantAsk(t, evalShell(testEngine(t), LevelCritical, ws, ws, c))
 			wantAsk(t, evalShell(testEngine(t), LevelLow, ws, ws, c))
 		}
+		// git log without -p prints subjects, including for a key path.
+		wantCeilingAllow(t, evalShell(testEngine(t), LevelLow, ws, ws, "git log -- "+inKey))
 	})
 	t.Run("write-outside", func(t *testing.T) {
 		e := testEngine(t)
@@ -198,7 +199,7 @@ func TestCeilingGitExecRefused(t *testing.T) {
 	for _, cmd := range allows {
 		t.Run(cmd, func(t *testing.T) {
 			e := testEngine(t)
-			wantCeilingAllow(t, evalShell(e, LevelHigh, ws, ws, cmd))
+			wantAsk(t, evalShell(e, LevelHigh, ws, ws, cmd))
 		})
 	}
 
@@ -236,8 +237,15 @@ func TestCeilingGitExecRefused(t *testing.T) {
 		Eligible: true, Literal: true, Level: LevelMedium,
 		Argv: []string{"git", "rebase", "--continue"}, Raw: "git rebase --continue",
 	}
-	if _, ok := e.ceilingMatch(req, plain); !ok {
-		t.Fatal("plain rebase was refused")
+	if _, ok := e.ceilingMatch(req, plain); ok {
+		t.Fatal("plain rebase was auto-approved")
+	}
+	status := inspected{
+		Eligible: true, Literal: true, Level: LevelLow,
+		Argv: []string{"git", "status"}, Raw: "git status",
+	}
+	if _, ok := e.ceilingMatch(req, status); !ok {
+		t.Fatal("git status was refused")
 	}
 }
 
@@ -496,21 +504,21 @@ func (c *captureAudit) Record(row AuditRow) {
 
 func TestPatternAskBeatsCeiling(t *testing.T) {
 	ctx := context.Background()
-	req := bashReq(ceilingBot, "sess", "task", "/work", "git push")
+	req := bashReq(ceilingBot, "sess", "task", "/work", "git status")
 	for _, tc := range []struct {
 		name string
 		rule Rule
 	}{
 		{name: "exact", rule: Rule{
-			ID: "ex", Effect: EffectAsk, Argv: []string{"git", "push"},
+			ID: "ex", Effect: EffectAsk, Argv: []string{"git", "status"},
 			Tool: ToolShell, Scope: ScopeBot, BotID: ceilingBot,
 		}},
 		{name: "pattern", rule: Rule{
-			ID: "pat", Effect: EffectAsk, Kind: "pattern", Pattern: "git push",
+			ID: "pat", Effect: EffectAsk, Kind: "pattern", Pattern: "git status",
 			Tool: ToolShell, Scope: ScopeBot, BotID: ceilingBot,
 		}},
 		{name: "legacy", rule: Rule{
-			ID: "leg", Effect: EffectAsk, Kind: "legacy", Pattern: "git push",
+			ID: "leg", Effect: EffectAsk, Kind: "legacy", Pattern: "git status",
 			Tool: ToolShell, Scope: ScopeBot, BotID: ceilingBot,
 		}},
 	} {

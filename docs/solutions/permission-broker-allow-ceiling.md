@@ -30,8 +30,12 @@ What a critical ceiling auto-approves, and how the path resolver fails
 closed, is in
 [Critical ceiling](../permission-broker.md#critical-ceiling).
 Credential output and hook-path changes are denied when a ceiling is
-set. They are not the sole-reason exception. A bot with no ceiling
-still asks.
+set, and only for the exact argv list in
+[Critical ceiling](../permission-broker.md#critical-ceiling). They are
+not the sole-reason exception. A bot with no ceiling still asks. Git
+auto-approval is `ceilingGitAllow`. A git subcommand that is not a row
+asks, including at a critical ceiling. `git remote` with no arguments
+or `-v` is low on that list. The shipped table still calls it critical.
 An unresolved program, a wrapper, a leading `cd`, a void command, a
 protected-path read, a git form that runs a command, a non-shell path
 outside the workspace, and any other ineligible reason still ask. The

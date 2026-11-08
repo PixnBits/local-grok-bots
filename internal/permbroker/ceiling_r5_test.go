@@ -135,7 +135,7 @@ func TestCeilingMust6Layouts(t *testing.T) {
 	for _, ceiling := range []Level{LevelMedium, LevelCritical} {
 		e := testEngine(t)
 		wantCeilingAllow(t, evalWrite(e, ceiling, ws, ws, "Write", patch))
-		wantCeilingAllow(t, evalShell(e, ceiling, ws, ws, "git apply x.patch"))
+		wantAsk(t, evalShell(e, ceiling, ws, ws, "git apply x.patch"))
 		for _, path := range rows {
 			wantAsk(t, evalWrite(e, ceiling, ws, ws, "Write", path))
 			wantAsk(t, evalWrite(e, ceiling, ws, ws, "Edit", path))

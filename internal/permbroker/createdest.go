@@ -19,12 +19,9 @@ func createdDirIndexes(argv []string) map[int]bool {
 		if installCreatesDir(argv) {
 			markPlainCreated(argv, installValueFlags, out)
 		}
-	case "cp":
-		if cpRecursive(argv) {
-			if i := lastPlain(argv, nil); i > 0 {
-				out[i] = true
-			}
-		}
+		markCopyDest(argv, installValueFlags, out)
+	case "cp", "mv", "ln", "rsync":
+		markCopyDest(argv, shellCopyFlags, out)
 	}
 	return out
 }
@@ -57,6 +54,11 @@ func markGitCreated(argv []string, out map[int]bool) {
 			for _, i := range pos[1:] {
 				out[i] = true
 			}
+		}
+	case "mv":
+		pos := positionalIdx(argv, idx, flagNameSet("-k"))
+		if len(pos) >= 2 {
+			out[pos[len(pos)-1]] = true
 		}
 	}
 }
@@ -165,6 +167,32 @@ var worktreeValueFlags = flagNameSet("-b", "-B", "--reason")
 var mkdirValueFlags = flagNameSet("-m", "--mode")
 
 var installValueFlags = flagNameSet("-m", "--mode", "-o", "--owner", "-g", "--group", "-t", "--target-directory")
+
+var shellCopyFlags = flagNameSet("-t", "--target-directory", "-S", "--suffix")
+
+func markCopyDest(argv []string, valueFlags map[string]bool, out map[int]bool) {
+	if i := lastPlain(argv, valueFlags); i > 0 {
+		out[i] = true
+	}
+	for _, name := range []string{"-t", "--target-directory"} {
+		markNamedFlag(argv, name, out)
+	}
+}
+
+func markNamedFlag(argv []string, flag string, out map[int]bool) {
+	for i := 1; i < len(argv); i++ {
+		name, _, has := splitFlag(argv[i])
+		if name != flag {
+			continue
+		}
+		if has {
+			continue
+		}
+		if i+1 < len(argv) {
+			out[i+1] = true
+		}
+	}
+}
 
 func flagNameSet(names ...string) map[string]bool {
 	m := make(map[string]bool, len(names))

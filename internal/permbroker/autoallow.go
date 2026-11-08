@@ -65,7 +65,7 @@ func (e *Engine) ceilingMatch(req Request, in inspected) (Level, bool) {
 	if !e.ceilingRequestEligible(req, in) {
 		return "", false
 	}
-	level := in.Level
+	level := ceilingDecisionLevel(in)
 	if !ceilingCovers(level, ceiling) {
 		return "", false
 	}
@@ -83,6 +83,24 @@ func (e *Engine) ceilingRequestEligible(req Request, in inspected) bool {
 }
 
 func (e *Engine) ceilingShellEligible(req Request, in inspected) bool {
+	if ceilingGitInvocation(in) {
+		if in.Compound || !ceilingGitPermitted(in) {
+			return false
+		}
+		if in.ParseReason == "state" && !isRemoteList(in.Argv) {
+			return false
+		}
+		if wrapperArgv(in.Argv) {
+			return false
+		}
+		// A hard ask or an ineligible command below critical is some other
+		// reason. git remote is critical in the shipped table and is the
+		// list-form exception.
+		if (in.HardAsk || !in.Eligible) && in.Level != LevelCritical && !isRemoteList(in.Argv) {
+			return false
+		}
+		return true
+	}
 	if !in.HardAsk && in.Eligible && !in.Compound {
 		return true
 	}
@@ -190,6 +208,9 @@ func ceilingUnknownBinary(argv0 string, resolve func(string) (string, bool)) boo
 func ceilingClassBlocks(argv []string, cwd, ws string, repos []string, resolve func(string) (string, bool)) bool {
 	if len(argv) == 0 || wrapperArgv(argv) {
 		return false
+	}
+	if ghCredentialFamily(argv) {
+		return true
 	}
 	c := classifyArgv(argv, cwd, ws, repos, resolve)
 	switch c.Reason {
