@@ -3,6 +3,7 @@ package github
 import (
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -11,6 +12,21 @@ import (
 // MaxBodyLines is the most lines a write body may contain.
 // The approval card shows about eight lines and a cue for the rest.
 const MaxBodyLines = 400
+
+// CardCueLines is the number of body lines that fit in the card box.
+const CardCueLines = 8
+
+// CardCueBytes is a body length that wraps past the card box.
+const CardCueBytes = 480
+
+var (
+	secretAWS    = regexp.MustCompile(`(?i)(?:^|[^A-Z0-9])A[KS]IA[0-9A-Z]{16}`)
+	secretSlack  = regexp.MustCompile(`(?i)xox[abpr]-`)
+	secretPEM    = regexp.MustCompile(`(?i)-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----`)
+	secretBearer = regexp.MustCompile(`(?i)bearer\s+\S{8,}`)
+	secretAssign = regexp.MustCompile(`(?i)(pass(word|wd)?|secret|token)\s*[:=]`)
+	secretSK     = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])sk-[a-z0-9]`)
+)
 
 // CleanText returns text with CRLF stored as LF, and a reason when it
 // cannot be sent. An empty reason means the returned text is acceptable.
@@ -55,45 +71,65 @@ func needsVisible(s string) bool {
 	return false
 }
 
-// LooksSecret reports whether s contains a secret-shaped token.
-func LooksSecret(s string) bool {
-	if strings.Contains(s, "ghp_") || strings.Contains(s, "github_pat_") || strings.Contains(s, "sk-ant-") {
-		return true
+// CountLines counts newline, line separator, and paragraph separator.
+func CountLines(s string) int {
+	if s == "" {
+		return 0
 	}
-	return strings.Contains(strings.ToLower(s), "password=")
+	n := 1
+	for _, r := range s {
+		if r == '\n' || isLineSepRune(r) {
+			n++
+		}
+	}
+	return n
 }
 
-// ExternalLinks lists http(s) URLs in s whose host is not github.com.
-// At most eight links are returned, each at most 200 bytes.
+// CardNeedsCue reports whether the approval card should show a scroll cue.
+func CardNeedsCue(s string) bool {
+	return CountLines(s) > CardCueLines || len(s) > CardCueBytes
+}
+
+// LooksSecret reports whether s contains a secret-shaped token.
+func LooksSecret(s string) bool {
+	if s == "" {
+		return false
+	}
+	lower := strings.ToLower(s)
+	for _, p := range []string{"ghp_", "gho_", "ghs_", "ghu_", "ghr_", "github_pat_"} {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+	if secretSK.FindString(s) != "" || secretAWS.FindString(s) != "" || secretSlack.FindString(s) != "" {
+		return true
+	}
+	if secretPEM.FindString(s) != "" || secretBearer.FindString(s) != "" || secretAssign.FindString(s) != "" {
+		return true
+	}
+	return false
+}
+
+// ExternalLinks lists URLs in s whose host is not github.com.
+// At most eight links are returned, each at most 200 bytes. Additional
+// matches are summarized as "+N more".
 func ExternalLinks(s string) []string {
 	var out []string
+	extra := 0
 	for i := 0; i < len(s); {
-		rest := s[i:]
-		httpAt := strings.Index(rest, "http://")
-		httpsAt := strings.Index(rest, "https://")
-		rel := httpAt
-		if httpsAt >= 0 && (rel < 0 || httpsAt < rel) {
-			rel = httpsAt
-		}
-		if rel < 0 {
+		start, end := nextLink(s, i)
+		if start < 0 {
 			break
 		}
-		start := i + rel
-		end := start
-		for end < len(s) {
-			c := s[end]
-			if c <= ' ' || c == ')' || c == ']' || c == '>' || c == '"' || c == '\'' {
-				break
-			}
-			end++
+		raw := s[start:end]
+		if len(raw) > 200 {
+			raw = raw[:200]
 		}
-		if end > start {
-			raw := s[start:end]
-			if len(raw) > 200 {
-				raw = raw[:200]
-			}
-			if externalHost(raw) && !linkSeen(out, raw) && len(out) < 8 {
+		if externalHost(raw) && !linkSeen(out, raw) {
+			if len(out) < 8 {
 				out = append(out, raw)
+			} else {
+				extra++
 			}
 		}
 		if end <= i {
@@ -101,6 +137,9 @@ func ExternalLinks(s string) []string {
 		} else {
 			i = end
 		}
+	}
+	if extra > 0 {
+		out = append(out, fmt.Sprintf("+%d more", extra))
 	}
 	return out
 }
@@ -114,16 +153,104 @@ func linkSeen(out []string, raw string) bool {
 	return false
 }
 
+func nextLink(s string, from int) (int, int) {
+	rest := s[from:]
+	lower := strings.ToLower(rest)
+	rel := -1
+	kind := ""
+	consider := func(at int, k string) {
+		if at < 0 {
+			return
+		}
+		if rel < 0 || at < rel {
+			rel = at
+			kind = k
+		}
+	}
+	consider(strings.Index(lower, "https://"), "https")
+	consider(strings.Index(lower, "http://"), "http")
+	consider(indexProtocolRelative(lower), "rel")
+	consider(indexWWW(lower), "www")
+	if rel < 0 {
+		return -1, -1
+	}
+	start := from + rel
+	end := start
+	for end < len(s) {
+		c := s[end]
+		if c <= ' ' || c == ')' || c == ']' || c == '>' || c == '"' || c == '\'' {
+			break
+		}
+		end++
+	}
+	if kind == "www" && end == start {
+		return -1, -1
+	}
+	if end <= start {
+		return start, start + 1
+	}
+	return start, end
+}
+
+func indexProtocolRelative(lower string) int {
+	from := 0
+	for from < len(lower) {
+		at := strings.Index(lower[from:], "//")
+		if at < 0 {
+			return -1
+		}
+		at += from
+		if at == 0 || lower[at-1] != ':' {
+			return at
+		}
+		from = at + 2
+	}
+	return -1
+}
+
+func indexWWW(lower string) int {
+	from := 0
+	for from < len(lower) {
+		at := strings.Index(lower[from:], "www.")
+		if at < 0 {
+			return -1
+		}
+		at += from
+		if at == 0 || isWWWBoundary(lower[at-1]) {
+			return at
+		}
+		from = at + 4
+	}
+	return -1
+}
+
+func isWWWBoundary(c byte) bool {
+	return c <= ' ' || c == '(' || c == '[' || c == '<' || c == '"' || c == '\''
+}
+
 func externalHost(raw string) bool {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" {
-		return false
+	if strings.Contains(raw, `\`) {
+		return true
 	}
-	if u.Scheme != "http" && u.Scheme != "https" {
-		return false
+	host := linkHost(raw)
+	if host == "" {
+		return true
 	}
-	host := strings.ToLower(u.Hostname())
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	return host != "github.com" && host != "www.github.com"
+}
+
+func linkHost(raw string) string {
+	if strings.HasPrefix(strings.ToLower(raw), "www.") {
+		raw = "http://" + raw
+	} else if strings.HasPrefix(raw, "//") {
+		raw = "http:" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 func textIssue(s, kind string) string {
@@ -144,83 +271,77 @@ func textIssue(s, kind string) string {
 	if len(s) > max || strings.ContainsRune(s, 0) || !utf8.ValidString(s) {
 		return "arguments"
 	}
-	lines := 0
-	if s != "" {
-		lines = 1
+	if allowNL && CountLines(s) > MaxBodyLines {
+		return "lines"
 	}
 	for _, r := range s {
-		if r == '\n' {
-			lines++
-		}
 		if reason := pullRuneIssue(r, allowNL); reason != "" {
 			return reason
 		}
-	}
-	if allowNL && lines > MaxBodyLines {
-		return "lines"
 	}
 	return ""
 }
 
 func pullRuneIssue(r rune, allowNL bool) string {
-	if r == 0 || r == 0x7f {
-		return "arguments"
-	}
-	if r < 0x20 {
-		if allowNL && (r == '\n' || r == '\t') {
+	if r == '\n' || r == '\t' {
+		if allowNL {
 			return ""
 		}
 		return "arguments"
 	}
-	if isC1Rune(r) || isBidiRune(r) || isZeroWidthRune(r) || isTagRune(r) || isVariationRune(r) || isOtherFormat(r) {
-		return "text"
+	if !refusedRune(r) {
+		return ""
 	}
-	return ""
+	if r < 0x20 || r == 0x7f {
+		return "arguments"
+	}
+	return "text"
+}
+
+// refusedRune is the shared check for characters that must not appear in
+// bot-supplied GitHub text and must be escaped in fetched titles.
+func refusedRune(r rune) bool {
+	if r == '\n' || r == '\t' {
+		return false
+	}
+	if r < 0x20 || r == 0x7f || isC1Rune(r) {
+		return true
+	}
+	if isDefaultIgnorable(r) {
+		return true
+	}
+	if isPrivateUseBMP(r) || isPrivateUsePlane(r) {
+		return true
+	}
+	return isLineSepRune(r) || isBrailleBlank(r)
 }
 
 func isC1Rune(r rune) bool {
 	return r >= 0x80 && r <= 0x9f
 }
 
-func isBidiRune(r rune) bool {
-	if r >= 0x202A && r <= 0x202E {
+func isDefaultIgnorable(r rune) bool {
+	if unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) {
 		return true
 	}
-	if r >= 0x2066 && r <= 0x2069 {
+	if unicode.Is(unicode.Cf, r) {
 		return true
 	}
-	return r == 0x200E || r == 0x200F || r == 0x061C
+	return unicode.Is(unicode.Variation_Selector, r)
 }
 
-func isZeroWidthRune(r rune) bool {
-	if r >= 0x200B && r <= 0x200D {
-		return true
-	}
-	return r == 0x2060 || r == 0xFEFF
+func isPrivateUseBMP(r rune) bool {
+	return r >= 0xE000 && r <= 0xF8FF
 }
 
-func isTagRune(r rune) bool {
-	return r >= 0xE0000 && r <= 0xE007F
+func isPrivateUsePlane(r rune) bool {
+	return r >= 0xF0000 && r <= 0x10FFFF
 }
 
-func isVariationRune(r rune) bool {
-	if r >= 0xFE00 && r <= 0xFE0F {
-		return true
-	}
-	return r >= 0xE0100 && r <= 0xE01EF
+func isLineSepRune(r rune) bool {
+	return r == 0x2028 || r == 0x2029
 }
 
-// isOtherFormat is the format-character backstop. The classes above are
-// listed again so this function does not decide them.
-func isOtherFormat(r rune) bool {
-	if r >= 0x202A && r <= 0x202E || (r >= 0x2066 && r <= 0x2069) || r == 0x200E || r == 0x200F || r == 0x061C {
-		return false
-	}
-	if (r >= 0x200B && r <= 0x200D) || r == 0x2060 || r == 0xFEFF {
-		return false
-	}
-	if r >= 0xE0000 && r <= 0xE007F {
-		return false
-	}
-	return unicode.Is(unicode.Cf, r)
+func isBrailleBlank(r rune) bool {
+	return r == 0x2800
 }

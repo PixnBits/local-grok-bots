@@ -4,11 +4,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -21,6 +23,7 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/permission"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
+	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
 
@@ -92,6 +95,10 @@ func TestGitHubRound2(t *testing.T) {
 			http.NotFound(w, r)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/7" && mode.Load() == "rtl-title":
 			io.WriteString(w, `{"number":7,"title":"ab`+"\u202E"+`cd","state":"open","body":"x","html_url":"https://github.com/acme/widgets/issues/7","user":{"login":"ada"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/7" && mode.Load() == "di-title":
+			io.WriteString(w, `{"number":7,"title":"ok`+"\u034F\uE000\u2800\x7f"+`","state":"open","body":"x","html_url":"https://github.com/acme/widgets/issues/7","user":{"login":"ada"}}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/7" && mode.Load() == "secret-title":
+			io.WriteString(w, `{"number":7,"title":"see ghp_example https://evil.example/t","state":"open","body":"x","html_url":"https://github.com/acme/widgets/issues/7","user":{"login":"ada"}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/7" && mode.Load() == "long-title":
 			io.WriteString(w, `{"number":7,"title":`+quoteJSON(strings.Repeat("A", 2001))+`,"state":"open","body":"x","html_url":"https://github.com/acme/widgets/issues/7","user":{"login":"ada"}}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/repos/acme/widgets/issues/7" && mode.Load() == "pull-url":
@@ -641,13 +648,17 @@ func TestGitHubRound2(t *testing.T) {
 		wantHash := `"body_sha256":"` + hex.EncodeToString(sum[:]) + `"`
 		wantLen := `"body_len":` + strconv.Itoa(len(body))
 		sawIntent := false
+		sawProposed := false
 		sawSent := false
 		for _, line := range strings.Split(raw, "\n") {
-			if !strings.Contains(line, "github_issue_intent") && !strings.Contains(line, "github_issue_allowed") {
+			if !strings.Contains(line, "github_issue_intent") && !strings.Contains(line, "github_issue_allowed") && !strings.Contains(line, "github_issue_proposed") {
 				continue
 			}
 			if strings.Contains(line, body) {
 				t.Fatalf("audit copied the body: %s", line)
+			}
+			if strings.Contains(line, "github_issue_proposed") && strings.Contains(line, wantHash) && strings.Contains(line, wantLen) {
+				sawProposed = true
 			}
 			if strings.Contains(line, "github_issue_intent") && strings.Contains(line, wantHash) && strings.Contains(line, wantLen) {
 				sawIntent = true
@@ -656,8 +667,11 @@ func TestGitHubRound2(t *testing.T) {
 				sawSent = true
 			}
 		}
-		if !sawIntent || !sawSent {
+		if !sawProposed || !sawIntent || !sawSent {
 			t.Fatalf("audit %s", raw)
+		}
+		if strings.Count(raw, `"action":"github_issue_intent"`) != 1 || strings.Count(raw, `"action":"github_issue_proposed"`) != 1 {
+			t.Fatalf("phase rows %s", raw)
 		}
 	})
 
@@ -718,6 +732,12 @@ func TestGitHubRound2(t *testing.T) {
 			{"c1", "\u0085"},
 			{"format", "\u2061"},
 			{"variation", "\uFE0F"},
+			{"other-default-ignorable", "\u034F"},
+			{"hangul-filler", "\u115F"},
+			{"private-use-bmp", "\uE000"},
+			{"private-use-plane", "\U000F0000"},
+			{"line-sep", "\u2028"},
+			{"braille-blank", "\u2800"},
 		}
 		type call struct {
 			tool string
@@ -811,6 +831,35 @@ func TestGitHubRound2(t *testing.T) {
 		title, _ := card["target_title"].(string)
 		if title != "ab⟦U+202E⟧cd" || strings.ContainsRune(title, '\u202E') {
 			t.Fatalf("title %q", title)
+		}
+		decideCard(t, e.app, e.bot.ID, "create_comment")
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("target title escapes the new set", func(t *testing.T) {
+		mode.Store("di-title")
+		t.Cleanup(func() { mode.Store("ok") })
+		e := newEnv(t, nil)
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := e.app.dispatchTool(t.Context(), e.bot, "create_comment", map[string]any{
+				"repo": "acme/widgets", "number": float64(7), "body": "hello",
+			})
+			errCh <- err
+		}()
+		card := waitCardArgs(t, e.app, e.bot.ID, "create_comment")
+		title, _ := card["target_title"].(string)
+		for _, r := range []rune{0x034F, 0xE000, 0x2800, 0x7F} {
+			if strings.ContainsRune(title, r) {
+				t.Fatalf("raw U+%04X in %q", r, title)
+			}
+		}
+		for _, mark := range []string{"⟦U+034F⟧", "⟦U+E000⟧", "⟦U+2800⟧", "⟦U+007F⟧"} {
+			if !strings.Contains(title, mark) {
+				t.Fatalf("missing %s in %q", mark, title)
+			}
 		}
 		decideCard(t, e.app, e.bot.ID, "create_comment")
 		if err := <-errCh; err != nil {
@@ -964,6 +1013,118 @@ func TestGitHubRound2(t *testing.T) {
 		})
 		if err != nil || strings.Contains(again, `"omitted":true`) || !strings.Contains(again, "check-keep") {
 			t.Fatalf("%v %s", err, again)
+		}
+	})
+
+	t.Run("card names line count and cue", func(t *testing.T) {
+		mode.Store("ok")
+		e := newEnv(t, nil)
+		body := strings.Repeat("a\n", 8) + "tail"
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := e.app.dispatchTool(t.Context(), e.bot, "create_issue", map[string]any{
+				"repo": "acme/widgets", "title": "Fine", "body": body,
+			})
+			errCh <- err
+		}()
+		card := waitCardArgs(t, e.app, e.bot.ID, "create_issue")
+		if card["body_lines"] != float64(9) && card["body_lines"] != 9 {
+			t.Fatalf("lines %#v", card["body_lines"])
+		}
+		if card["scroll_cue"] != true {
+			t.Fatalf("cue %#v", card["scroll_cue"])
+		}
+		decideCard(t, e.app, e.bot.ID, "create_issue")
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("target title is scanned for secrets and links", func(t *testing.T) {
+		mode.Store("secret-title")
+		t.Cleanup(func() { mode.Store("ok") })
+		e := newEnv(t, nil)
+		errCh := make(chan error, 1)
+		go func() {
+			_, err := e.app.dispatchTool(t.Context(), e.bot, "create_comment", map[string]any{
+				"repo": "acme/widgets", "number": float64(7), "body": "hello",
+			})
+			errCh <- err
+		}()
+		card := waitCardArgs(t, e.app, e.bot.ID, "create_comment")
+		if card["secret_warning"] != true {
+			t.Fatalf("secret %#v", card)
+		}
+		links, _ := card["links"].([]any)
+		if fmt.Sprint(links) == "" || !strings.Contains(fmt.Sprint(links), "https://evil.example/t") {
+			t.Fatalf("links %v", links)
+		}
+		decideCard(t, e.app, e.bot.ID, "create_comment")
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("jail revoked while pending writes nothing", func(t *testing.T) {
+		mode.Store("ok")
+		prevE, prevL := sandbox.EUID, sandbox.LookPath
+		t.Cleanup(func() { sandbox.EUID, sandbox.LookPath = prevE, prevL })
+		for _, tc := range []struct {
+			tool string
+			args map[string]any
+		}{
+			{"create_issue", map[string]any{"repo": "acme/widgets", "title": "Later"}},
+			{"create_comment", map[string]any{"repo": "acme/widgets", "number": float64(7), "body": "later"}},
+			{"create_pr", map[string]any{"repo": "acme/widgets", "head": "feature", "base": "main", "title": "Later"}},
+		} {
+			t.Run(tc.tool, func(t *testing.T) {
+				sandbox.EUID, sandbox.LookPath = prevE, prevL
+				e := newEnv(t, nil)
+				before := posts.Load()
+				errCh := make(chan error, 1)
+				go func() {
+					_, err := e.app.dispatchTool(t.Context(), e.bot, tc.tool, tc.args)
+					errCh <- err
+				}()
+				_ = waitCardArgs(t, e.app, e.bot.ID, tc.tool)
+				sandbox.EUID = func() int { return 0 }
+				sandbox.LookPath = func(name string) (string, error) {
+					if name == "bwrap" {
+						return "", errors.New("not found")
+					}
+					return exec.LookPath(name)
+				}
+				decideCard(t, e.app, e.bot.ID, tc.tool)
+				err := <-errCh
+				if err == nil || !strings.Contains(err.Error(), "root requires bwrap") || posts.Load() != before {
+					t.Fatalf("%v posts %d", err, posts.Load()-before)
+				}
+			})
+		}
+	})
+
+	t.Run("del and title limits never ask", func(t *testing.T) {
+		mode.Store("ok")
+		e := newEnv(t, nil)
+		e.app.editPol(func(p *policy.Policy) { p.PromptTimeout = 200 * time.Millisecond })
+		before := e.evals.Load()
+		if _, err := e.app.dispatchTool(t.Context(), e.bot, "create_issue", map[string]any{
+			"repo": "acme/widgets", "title": "Fine", "body": "a\x7fb",
+		}); err == nil || !strings.Contains(err.Error(), "invalid arguments") {
+			t.Fatalf("del %v", err)
+		}
+		if _, err := e.app.dispatchTool(t.Context(), e.bot, "create_issue", map[string]any{
+			"repo": "acme/widgets", "title": strings.Repeat("a", 257),
+		}); err == nil || !strings.Contains(err.Error(), "invalid arguments") {
+			t.Fatalf("title size %v", err)
+		}
+		if _, err := e.app.dispatchTool(t.Context(), e.bot, "create_issue", map[string]any{
+			"repo": "acme/widgets", "title": "   ",
+		}); err == nil || !strings.Contains(err.Error(), "invalid arguments") {
+			t.Fatalf("title blank %v", err)
+		}
+		if e.evals.Load() != before {
+			t.Fatalf("evals %d", e.evals.Load()-before)
 		}
 	})
 }

@@ -1838,14 +1838,21 @@ function fillCardBody(body, payload) {
     const bodyText = args.body == null ? "" : String(args.body);
     const bodyLen = args.body_len == null ? bodyText.length : args.body_len;
     addKV(body, "Body length", String(bodyLen));
-    const lineCount = bodyText === "" ? 0 : bodyText.split("\n").length;
+    const counted = bodyText === "" ? 0 : bodyText.split(/\n|\u2028|\u2029/).length;
+    let lineCount = counted;
+    if (args.body_lines != null) {
+      const n = Number(args.body_lines);
+      if (Number.isFinite(n)) lineCount = n;
+    }
     addKV(body, "Lines", String(lineCount));
     const pre = el("pre", "card-pre");
     pre.textContent = bodyText;
-    if (lineCount > 8) pre.className = "card-pre card-pre-scroll";
+    const wantCue = args.scroll_cue === true || lineCount > 8 || bodyLen > 480;
+    if (wantCue) pre.className = "card-pre card-pre-scroll";
     body.append(pre);
-    if (lineCount > 8) {
-      body.append(el("div", "card-scroll-cue", (lineCount - 8) + " more lines below. Scroll the body."));
+    if (wantCue) {
+      const extra = lineCount > 8 ? (lineCount - 8) + " more lines below. Scroll the body." : "More lines below. Scroll the body.";
+      body.append(el("div", "card-scroll-cue", extra));
     }
     if (args.secret_warning) {
       body.append(el("div", "card-warn", "This text contains a secret-looking string."));

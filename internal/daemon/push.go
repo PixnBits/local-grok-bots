@@ -152,7 +152,7 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 			"repo":    owner + "/" + repo,
 			"branch":  strings.Join(branches, ","),
 			"remote":  github.RemoteURL(owner, repo),
-			"commits": clip(commits, 4000),
+			"commits": gitPushCardCommits(commits),
 		},
 	}))
 	if out.Behavior != "allow" {
@@ -276,6 +276,10 @@ func (a *App) pushDenied(bot store.Bot, owner, repo, claimedFrom, reason string)
 		Stderr: stderr,
 		Events: []sandbox.Event{ev},
 	}
+}
+
+func gitPushCardCommits(s string) string {
+	return github.VisibleRunes(clip(s, 4000))
 }
 
 func (a *App) auditPush(bot store.Bot, owner, repo, decision, reason, claimedFrom, listWhere string) sandbox.Event {

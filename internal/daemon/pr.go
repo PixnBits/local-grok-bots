@@ -312,26 +312,30 @@ func (a *App) auditGitHubExtra(bot store.Bot, action, owner, repo, decision, rea
 	a.logGitHub(bot.ID, decision, reason)
 }
 
-// githubAuditFirst records the intent before the approval card is shown.
+// githubAuditFirst records the proposed write before the approval card is shown.
 func (a *App) githubAuditFirst(bot store.Bot, denyAction, owner, repo string, extra map[string]any) error {
-	return a.auditGitHubIntent(bot, denyAction, owner, repo, extra)
+	return a.auditGitHubPhase(bot, denyAction, owner, repo, extra, "proposed")
 }
 
 // auditGitHubIntent writes the row that must land before a write is sent.
 // A nil or disabled audit log refuses the write. A closed sink returns an error.
 func (a *App) auditGitHubIntent(bot store.Bot, denyAction, owner, repo string, extra map[string]any) error {
+	return a.auditGitHubPhase(bot, denyAction, owner, repo, extra, "intent")
+}
+
+func (a *App) auditGitHubPhase(bot store.Bot, denyAction, owner, repo string, extra map[string]any, phase string) error {
 	if a == nil || a.audit == nil || !a.audit.Enabled() {
 		return errors.New("audit disabled")
 	}
-	action := strings.TrimSuffix(denyAction, "_denied") + "_intent"
-	err := a.audit.WriteErr(githubAuditRec(a, bot, action, owner, repo, "intent", "pending", extra))
-	a.logGitHub(bot.ID, "intent", "pending")
+	action := strings.TrimSuffix(denyAction, "_denied") + "_" + phase
+	err := a.audit.WriteErr(githubAuditRec(a, bot, action, owner, repo, phase, "pending", extra))
+	a.logGitHub(bot.ID, phase, "pending")
 	return err
 }
 
 func (a *App) logGitHub(botID, decision, reason string) {
 	kind := "grant_denied"
-	if decision == "allow" || decision == "unknown" || decision == "intent" {
+	if decision == "allow" || decision == "unknown" || decision == "intent" || decision == "proposed" {
 		kind = "grant_use"
 	}
 	a.log(botID, kind, map[string]any{"grant": "github", "detail": reason})

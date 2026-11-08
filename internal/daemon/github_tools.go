@@ -490,11 +490,19 @@ func renderGitHub(payload map[string]any, page int, pageMore bool, nextOffset in
 	if payload == nil {
 		payload = map[string]any{}
 	}
+	omitted, _ := payload["omitted"].(bool)
+	if omitted {
+		pageMore = false
+		nextOffset = 0
+	}
 	payload, capMore := applyGitHubSizeCap(payload)
 	payload["untrusted"] = githubUntrustedNote
 	payload["page"] = page
-	truncated := pageMore || nextOffset > 0 || capMore
+	truncated := pageMore || nextOffset > 0 || capMore || omitted
 	payload["truncated"] = truncated
+	if omitted {
+		payload["omitted"] = true
+	}
 	if pageMore {
 		payload["next_page"] = page + 1
 	}
@@ -520,13 +528,9 @@ func fitGitHubRead(payload map[string]any, page int, pageMore bool, offset int) 
 			return text
 		}
 		if field <= 64 {
-			slim := map[string]any{}
+			slim := map[string]any{"omitted": true}
 			putGitHubSummary(slim, summary)
-			cont := 0
-			if next > offset {
-				cont = next
-			}
-			return renderGitHub(slim, page, true, cont)
+			return renderGitHub(slim, page, false, 0)
 		}
 		field /= 2
 	}
@@ -567,6 +571,11 @@ func noteGitHubCard(card map[string]any, parts ...string) {
 	}
 	if links := github.ExternalLinks(joined); len(links) > 0 {
 		card["links"] = links
+	}
+	body, _ := card["body"].(string)
+	card["body_lines"] = github.CountLines(body)
+	if github.CardNeedsCue(body) {
+		card["scroll_cue"] = true
 	}
 }
 
@@ -739,7 +748,7 @@ func windowGitHubFields(v any, offset, max int) (int, bool) {
 	}
 	switch t := v.(type) {
 	case map[string]any:
-		for _, key := range []string{"body", "patch", "diff_hunk", "title"} {
+		for _, key := range []string{"body", "patch", "diff_hunk", "title", "filename", "path", "name", "user"} {
 			next, more := windowField(t, key, offset, max)
 			note(next, more)
 		}
