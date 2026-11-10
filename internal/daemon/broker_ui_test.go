@@ -105,6 +105,7 @@ func TestGolden_BrokerAuthIsTheRoute(t *testing.T) {
 }
 
 func TestGolden_BrokerUIRoutes(t *testing.T) {
+	skipIfHostRootLooksLikeNobody(t)
 	app := newApp(t, "", nil)
 	srv := serve(t, app)
 	const token = "lgbr_admintesttokenvalue"

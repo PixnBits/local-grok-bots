@@ -35,6 +35,7 @@ func (a *App) setPol(p policy.Policy) {
 			return
 		}
 		a.broker.SetApprovalTTL(p.EffectiveApprovalTTL())
+		a.broker.SetAllowCeilings(p.Broker, p.AllowCeilings)
 		a.seedStartupCriticalPaths(p)
 	}
 	p.NoteShellSignalWarning()

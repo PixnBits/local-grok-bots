@@ -14,10 +14,13 @@ import (
 )
 
 // Part is one simple command inside a compound.
+// Level is the classified level of that part. The ceiling refuses a
+// compound when any part has no known level.
 type Part struct {
-	Argv []string
-	Hash string
-	Raw  string
+	Argv  []string
+	Hash  string
+	Raw   string
+	Level Level
 }
 
 // Parse is the normalized shape of one shell string.
@@ -364,7 +367,9 @@ func literalWord(w *syntax.Word) (string, bool) {
 func literalPart(part syntax.WordPart, quoted bool) (string, bool) {
 	switch n := part.(type) {
 	case *syntax.Lit:
-		if !quoted && unsafeBare(n.Value) {
+		// An unquoted backslash is not a literal. The ceiling does not
+		// unescape it. A quoted backslash stays in the word.
+		if !quoted && (unsafeBare(n.Value) || strings.Contains(n.Value, `\`)) {
 			return "", false
 		}
 		return n.Value, true
@@ -390,6 +395,82 @@ func literalPart(part syntax.WordPart, quoted bool) (string, bool) {
 
 func unsafeBare(s string) bool {
 	return strings.ContainsAny(s, "*?[{~") || strings.Contains(s, "~")
+}
+
+// literalCalls is every simple command whose words are literal, including
+// a command that has an assignment prefix. ParseCommand refuses that
+// prefix before it records argv.
+func literalCalls(src string) [][]string {
+	if strings.TrimSpace(src) == "" || badShellSource(src) {
+		return nil
+	}
+	f, err := parseLang(src, syntax.LangBash)
+	if err != nil || f == nil {
+		return nil
+	}
+	var out [][]string
+	syntax.Walk(f, func(n syntax.Node) bool {
+		call, ok := n.(*syntax.CallExpr)
+		if !ok || call == nil || len(call.Args) == 0 {
+			return true
+		}
+		argv := make([]string, 0, len(call.Args))
+		for _, w := range call.Args {
+			word, ok := literalWord(w)
+			if !ok {
+				return true
+			}
+			argv = append(argv, word)
+		}
+		out = append(out, argv)
+		return true
+	})
+	return out
+}
+
+// shellGitLocationEnv is the location, config, and helper assignments on
+// a git command. Other assignments are left out.
+func shellGitLocationEnv(src string) []string {
+	if strings.TrimSpace(src) == "" || badShellSource(src) {
+		return nil
+	}
+	f, err := parseLang(src, syntax.LangBash)
+	if err != nil || f == nil {
+		return nil
+	}
+	var out []string
+	syntax.Walk(f, func(n syntax.Node) bool {
+		call, ok := n.(*syntax.CallExpr)
+		if !ok || call == nil || !callInvokesGit(call) {
+			return true
+		}
+		for _, as := range call.Assigns {
+			if as == nil || as.Name == nil {
+				continue
+			}
+			name := as.Name.Value
+			if !gitLocationName(name) {
+				continue
+			}
+			val := ""
+			if as.Value != nil {
+				if s, ok := literalWord(as.Value); ok {
+					val = s
+				}
+			}
+			out = append(out, name+"="+val)
+		}
+		return true
+	})
+	return out
+}
+
+func callInvokesGit(call *syntax.CallExpr) bool {
+	if call == nil || len(call.Args) == 0 {
+		return false
+	}
+	word, ok := literalWord(call.Args[0])
+	return ok && baseName(word) == "git"
 }
 
 func baseName(argv0 string) string {

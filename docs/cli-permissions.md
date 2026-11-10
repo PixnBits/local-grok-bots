@@ -18,6 +18,22 @@ The stock page subscribes to the run stream with `?prompts=1` and renders `permi
 | `prompt_timeout` | How long a permission or question card waits. Default 10m. A managed `max_prompt_timeout` caps it. See Timeouts in `docs/cli-isolation.md`. |
 | `allow_session_grants` | Lets a UI answer `allow_session`. Honored only from the managed policy file. |
 | `claude_transport` | `mcp` (default), `stream_control`, or `none`. Empty is `mcp`. Any other value is a config error, and load uses the existing fail-closed fallback (daemon jail on, CLI backends off). |
+| `dangerouslyAllowAllPermissionRequestsUpThrough` | Per-bot ceiling for the permission broker. See below. It is not the profile `AutoAllow` list. |
+
+`dangerouslyAllowAllPermissionRequestsUpThrough` auto-approves one hook-broker request when that request's final level is at or below the bot's ceiling. The ceiling is the lowercase word `low`, `medium`, `high`, or `critical`. There is no case folding and no trimming. The bot id is a UUID that must also appear in `broker_bots`. Only the managed policy file may set the key. The same key in the local policy file is a startup error, including a folded spelling after escapes are decoded. Text inside a string value is not the key. The setting does nothing unless `broker` is `hook`. What a critical ceiling auto-approves is in [Critical ceiling](permission-broker.md#critical-ceiling).
+
+The check order is deny, then a one-time human approval, then an ask rule, then the ceiling. Deny rules and ask rules win. Unclassified commands, parse errors, malformed or ambiguous commands, broker errors, a hard ask or ineligible request for any reason other than the critical level or a critical path, a compound part with no known level, a git form that runs a command, a git-risk, baseline drift, a non-shell path outside the workspace, an unknown tool, and a call that names a policy file are not auto-approved. The non-shell table is in `docs/permission-broker.md`: in-workspace `Read`, `Glob`, and `Grep` are low; in-workspace `Write`, `Edit`, `MultiEdit`, and `NotebookEdit` are medium; other tools are not auto-approved. A failed audit write is logged and denies the auto-approval. The ceiling is not limited to Linux. The decision rules are in `docs/permission-broker.md`.
+
+Write the map as a subtable in the managed policy file. A multi-line inline table is not valid TOML 1.0.
+
+```toml
+[cli.permission]
+broker = "hook"
+broker_bots = ["00000000-0000-4000-8000-000000000000"]
+
+[cli.permission.dangerouslyAllowAllPermissionRequestsUpThrough]
+00000000-0000-4000-8000-000000000000 = "low"
+```
 
 Precedence is unchanged: managed settings, then `policy.toml`, then defaults. A missing or unparseable file still fail-closes (daemon jail on, CLI backends off). Managed policy is read when the daemon starts. The permission broker, CLI turn flags, and permission mode use that snapshot. Editing the managed file does not change a running daemon; restart it.
 

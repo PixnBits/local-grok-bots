@@ -1,6 +1,7 @@
 package permbroker
 
 import (
+	iofs "io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,6 +14,10 @@ import (
 // git directory, the bot and user git config, and the managed environment
 // stored for that bot. A missing file is not itself a reason.
 func gitConfigRisk(ws string, homes, env []string) string {
+	return gitConfigRiskExtra(ws, homes, env, nil)
+}
+
+func gitConfigRiskExtra(ws string, homes, env []string, extra []string) string {
 	seen := map[string]bool{}
 	var files []string
 	if strings.TrimSpace(ws) != "" {
@@ -55,8 +60,296 @@ func gitConfigRisk(ws string, homes, env []string) string {
 		if why := symlinkAttrRisk(ws); why != "" {
 			return why
 		}
+		if why := scanNestedGitDirs(ws, seen, homes); why != "" {
+			return why
+		}
+	}
+	for _, dir := range extra {
+		if why := scanWorkTreeGit(dir, seen, homes); why != "" {
+			return why
+		}
+	}
+	if why := gitLocationEnv(env); why != "" {
+		return why
 	}
 	return ""
+}
+
+func gitCommandDirs(argv []string, cwd, ws string) []string {
+	if len(argv) == 0 || baseName(argv[0]) != "git" {
+		return nil
+	}
+	var out []string
+	cur := cwd
+	if cur == "" {
+		cur = ws
+	}
+	args := argv[1:]
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" || !strings.HasPrefix(a, "-") {
+			break
+		}
+		name, val, has := splitFlag(a)
+		add := func(p string) {
+			p = strings.TrimSpace(p)
+			if p == "" {
+				return
+			}
+			if !filepath.IsAbs(p) {
+				if cur == "" {
+					return
+				}
+				p = filepath.Join(cur, p)
+			}
+			p = filepath.Clean(p)
+			out = append(out, p)
+			if name == "-C" {
+				cur = p
+			}
+		}
+		switch name {
+		case "-C", "--git-dir":
+			if has {
+				add(val)
+			} else if i+1 < len(args) {
+				i++
+				add(args[i])
+			}
+		default:
+			if gitOptionSkipsNext(a) {
+				i++
+			}
+		}
+	}
+	return out
+}
+
+func scanWorkTreeGit(dir string, seen map[string]bool, homes []string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return ""
+	}
+	if why := scanGitFile(gitConfigPath(dir), seen, 0, homes, false); why != "" {
+		return why
+	}
+	if gd, ok := gitDir(dir); ok {
+		if why := scanGitFile(filepath.Join(gd, "info", "attributes"), seen, 0, homes, false); why != "" {
+			return why
+		}
+		if why := scanGitFile(filepath.Join(gd, "config.worktree"), seen, 0, homes, false); why != "" {
+			return why
+		}
+		if why := gitHookRiskDir(gd); why != "" {
+			return why
+		}
+		return ""
+	}
+	if dirLooksLikeGit(dir) {
+		if why := scanGitFile(filepath.Join(dir, "config"), seen, 0, homes, false); why != "" {
+			return why
+		}
+		if why := gitHookRiskDir(dir); why != "" {
+			return why
+		}
+	}
+	return ""
+}
+
+func scanNestedGitDirs(ws string, seen map[string]bool, homes []string) string {
+	n := 0
+	walk := func(root string) string {
+		if _, err := os.Lstat(root); err != nil {
+			return ""
+		}
+		var why string
+		_ = filepath.WalkDir(root, func(path string, d iofs.DirEntry, err error) error {
+			if err != nil || why != "" {
+				why = "cap"
+				return iofs.SkipAll
+			}
+			rel, relErr := filepath.Rel(root, path)
+			if relErr != nil {
+				why = "cap"
+				return iofs.SkipAll
+			}
+			depth := 0
+			if rel != "." {
+				depth = strings.Count(rel, string(os.PathSeparator))
+			}
+			if d.IsDir() {
+				if depth > gitAttrMaxDepth {
+					why = "cap"
+					return iofs.SkipDir
+				}
+				if d.Name() == "hooks" {
+					if h := gitHookRiskDir(filepath.Dir(path)); h != "" {
+						why = h
+						return iofs.SkipAll
+					}
+				}
+				return nil
+			}
+			name := d.Name()
+			if name == "gitdir" {
+				if w := scanGitdirPointer(path, filepath.Dir(path), seen, homes); w != "" {
+					why = w
+					return iofs.SkipAll
+				}
+				return nil
+			}
+			if name != "config" && name != "config.worktree" {
+				return nil
+			}
+			n++
+			if n > gitAttrMaxFiles {
+				why = "cap"
+				return iofs.SkipAll
+			}
+			if w := scanGitFile(path, seen, 0, homes, false); w != "" {
+				why = w
+				return iofs.SkipAll
+			}
+			return nil
+		})
+		return why
+	}
+	if why := walk(filepath.Join(ws, ".git", "modules")); why != "" {
+		return why
+	}
+	if why := walk(filepath.Join(ws, ".git", "worktrees")); why != "" {
+		return why
+	}
+	for _, p := range submodulePaths(ws) {
+		if why := scanWorkTreeGit(filepath.Join(ws, p), seen, homes); why != "" {
+			return why
+		}
+	}
+	if why := scanLooseGitDirs(ws, seen, homes); why != "" {
+		return why
+	}
+	return ""
+}
+
+// scanLooseGitDirs scans a nested git dir or gitfile that is not the
+// workspace root and is not listed in .gitmodules. The walk does not
+// enter a .git directory. The file cap is gitAttrMaxFiles.
+func scanLooseGitDirs(ws string, seen map[string]bool, homes []string) string {
+	ws = filepath.Clean(strings.TrimSpace(ws))
+	if ws == "" {
+		return ""
+	}
+	st, err := os.Stat(ws)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ""
+		}
+		return "cap"
+	}
+	if !st.IsDir() {
+		return ""
+	}
+	n := 0
+	var why string
+	_ = filepath.WalkDir(ws, func(path string, d iofs.DirEntry, err error) error {
+		if err != nil || why != "" {
+			why = "cap"
+			return iofs.SkipAll
+		}
+		rel, relErr := filepath.Rel(ws, path)
+		if relErr != nil {
+			why = "cap"
+			return iofs.SkipAll
+		}
+		depth := 0
+		if rel != "." {
+			depth = strings.Count(rel, string(os.PathSeparator))
+		}
+		if d.Name() == ".git" && rel != ".git" {
+			n++
+			if n > gitAttrMaxFiles {
+				why = "cap"
+				return iofs.SkipAll
+			}
+			if w := scanWorkTreeGit(filepath.Dir(path), seen, homes); w != "" {
+				why = w
+				return iofs.SkipAll
+			}
+			if d.IsDir() {
+				return iofs.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return iofs.SkipDir
+			}
+			if depth > gitAttrMaxDepth {
+				why = "cap"
+				return iofs.SkipDir
+			}
+		}
+		return nil
+	})
+	return why
+}
+
+func scanGitdirPointer(path, base string, seen map[string]bool, homes []string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	line := strings.TrimSpace(string(b))
+	if i := strings.IndexAny(line, "\r\n"); i >= 0 {
+		line = strings.TrimSpace(line[:i])
+	}
+	if line == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(line), "gitdir:") {
+		line = strings.TrimSpace(line[len("gitdir:"):])
+	}
+	line = strings.Trim(line, `"'`)
+	if line == "" {
+		return ""
+	}
+	if !filepath.IsAbs(line) {
+		line = filepath.Join(base, line)
+	}
+	line = filepath.Clean(line)
+	st, err := os.Lstat(line)
+	if err != nil {
+		return scanWorkTreeGit(line, seen, homes)
+	}
+	if st.Mode().IsRegular() {
+		if dir, ok := gitdirFile(line, filepath.Dir(line)); ok {
+			return scanWorkTreeGit(dir, seen, homes)
+		}
+		return scanWorkTreeGit(filepath.Dir(line), seen, homes)
+	}
+	return scanWorkTreeGit(line, seen, homes)
+}
+
+func submodulePaths(ws string) []string {
+	b, err := os.ReadFile(filepath.Join(ws, ".gitmodules"))
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		key, val, ok := splitKV(strings.TrimSpace(line))
+		if !ok || key != "path" || val == "" {
+			continue
+		}
+		if strings.Contains(val, "..") {
+			continue
+		}
+		out = append(out, val)
+		if len(out) >= gitAttrMaxFiles {
+			break
+		}
+	}
+	return out
 }
 
 // gitRiskReason is the card text for a git-risk hard ask that is not
@@ -74,6 +367,9 @@ func gitRiskReason(why string) string {
 	default:
 		if why == "" {
 			return ""
+		}
+		if gitLocationName(why) {
+			return why + " is set"
 		}
 		return "Git config sets " + why
 	}
@@ -143,7 +439,10 @@ func scanGitFile(path string, seen map[string]bool, depth int, homes []string, m
 	}
 	abs = filepath.Clean(abs)
 	if seen[abs] {
-		return "include"
+		if missingIsInclude {
+			return "include"
+		}
+		return ""
 	}
 	b, err := os.ReadFile(abs)
 	if err != nil {
@@ -444,6 +743,35 @@ func scanGitEnv(env []string, seen map[string]bool, homes []string) string {
 	return ""
 }
 
+// gitLocationEnv asks when a location, config, or command-helper variable
+// is present. An empty value counts. Identity variables do not.
+func gitLocationEnv(env []string) string {
+	seen := map[string]bool{}
+	for _, e := range env {
+		k, _, ok := strings.Cut(e, "=")
+		if !ok || seen[k] || !gitLocationName(k) {
+			continue
+		}
+		seen[k] = true
+		return k
+	}
+	return ""
+}
+
+func gitLocationName(k string) bool {
+	switch k {
+	case "GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
+		"GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+		"GIT_EXEC_PATH", "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+		"GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_NOSYSTEM",
+		"GIT_TEMPLATE_DIR", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
+		"GIT_SSH", "GIT_SSH_COMMAND", "GIT_ASKPASS", "GIT_EDITOR", "GIT_PAGER",
+		"GIT_EXTERNAL_DIFF", "GIT_SEQUENCE_EDITOR", "GIT_SSH_VARIANT":
+		return true
+	}
+	return strings.HasPrefix(k, "GIT_CONFIG_KEY_") || strings.HasPrefix(k, "GIT_CONFIG_VALUE_")
+}
+
 func riskyInText(s string) string {
 	low := strings.ToLower(s)
 	switch {
@@ -495,6 +823,10 @@ func gitHookRisk(ws string) string {
 	if !ok {
 		return ""
 	}
+	return gitHookRiskDir(dir)
+}
+
+func gitHookRiskDir(dir string) string {
 	entries, err := os.ReadDir(filepath.Join(dir, "hooks"))
 	if err != nil {
 		return ""

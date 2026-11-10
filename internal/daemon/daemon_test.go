@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -23,6 +24,25 @@ import (
 	"github.com/PixnBits/local-grok-bots/internal/store"
 	"github.com/PixnBits/local-grok-bots/web"
 )
+
+// skipIfHostRootLooksLikeNobody skips tests that need a uid-0 /usr/bin
+// or /bin. Inside a user namespace those directories are the overflow
+// uid, so pinned git lookup and hook-owner checks fail closed. The
+// checks themselves stay.
+func skipIfHostRootLooksLikeNobody(t *testing.T) {
+	t.Helper()
+	for _, dir := range []string{"/usr/bin", "/bin"} {
+		st, err := os.Stat(dir)
+		if err != nil || !st.IsDir() {
+			continue
+		}
+		sys, ok := st.Sys().(*syscall.Stat_t)
+		if ok && sys != nil && sys.Uid == 0 {
+			return
+		}
+	}
+	t.Skip("system directories are not uid 0; pinned git and hook-owner checks need a root-owned /usr/bin or /bin")
+}
 
 func TestMain(m *testing.M) {
 	// Version probes run this binary with a clean environment. Answer before

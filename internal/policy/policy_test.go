@@ -58,6 +58,147 @@ level = "high"
 	}
 }
 
+func TestAllowCeilingLoad(t *testing.T) {
+	const bot = "11111111-1111-4111-8111-111111111111"
+	const other = "22222222-2222-4222-8222-222222222222"
+	const mixed = "aabbccdd-1111-4111-8111-111111111111"
+	head := "[backend]\nbackend = \"ollama\"\n[cli.permission]\nbroker = \"hook\"\n"
+	listed := head + "broker_bots = [\"" + bot + "\"]\n"
+	sub := "\n[cli.permission.dangerouslyAllowAllPermissionRequestsUpThrough]\n"
+	cases := []struct {
+		name    string
+		local   string
+		managed string
+		ok      bool
+	}{
+		{name: "local_layer", local: listed + sub + bot + " = \"medium\"\n"},
+		{name: "local_empty_table", local: listed + sub},
+		{name: "unknown_level", local: listed, managed: sub + bot + " = \"severe\"\n"},
+		{name: "unclassified", local: listed, managed: sub + bot + " = \"unclassified\"\n"},
+		{name: "upper_level", local: listed, managed: sub + bot + " = \"HIGH\"\n"},
+		{name: "mixed_case_level", local: listed, managed: sub + bot + " = \"Low\"\n"},
+		{name: "padded_level", local: listed, managed: sub + bot + " = \" low \"\n"},
+		{name: "missing_or_empty_value", local: listed, managed: sub + bot + " = \"\"\n"},
+		{name: "wildcard_key", local: listed, managed: sub + "\"*\" = \"low\"\n"},
+		{name: "non_uuid_key", local: head + "broker_bots = [\"bot-id\"]\n", managed: sub + "bot-id = \"low\"\n"},
+		{name: "non_map_value", local: listed, managed: listed + "dangerouslyAllowAllPermissionRequestsUpThrough = \"low\"\n"},
+		{name: "bot_not_in_broker_bots", local: head + "broker_bots = [\"" + other + "\"]\n", managed: sub + bot + " = \"low\"\n"},
+		{name: "duplicate_case", local: head + "broker_bots = [\"" + bot + "\", \"" + mixed + "\"]\n", managed: sub + mixed + " = \"low\"\n" + strings.ToUpper(mixed) + " = \"high\"\n"},
+		{name: "folded_table_name", local: listed, managed: "\n[cli.permission.dangerouslyallowallpermissionrequestsupthrough]\n" + bot + " = \"low\"\n"},
+		{name: "subtable", local: listed, managed: sub + bot + " = \"medium\"\n", ok: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "policy.toml")
+			if err := os.WriteFile(path, []byte(tc.local), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			opts := Options{Path: path}
+			if tc.managed != "" {
+				mp := filepath.Join(dir, "managed.toml")
+				if err := os.WriteFile(mp, []byte(tc.managed), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				opts.ManagedPath = mp
+			}
+			p, err := Load(opts)
+			if tc.ok {
+				if err != nil || !p.Loaded || p.AllowCeilings[bot] != permbroker.LevelMedium {
+					t.Fatalf("err=%v loaded=%v ceilings=%v warnings=%v", err, p.Loaded, p.AllowCeilings, p.Warnings)
+				}
+				if p.Broker != "hook" || len(p.BrokerBots) != 1 || p.BrokerBots[0] != bot {
+					t.Fatalf("broker %q bots %v", p.Broker, p.BrokerBots)
+				}
+				return
+			}
+			if err == nil || !errors.Is(err, errAllowCeiling) {
+				t.Fatalf("err=%v loaded=%v warnings=%v", err, p.Loaded, p.Warnings)
+			}
+		})
+	}
+}
+
+func TestAllowCeilingDecodedKey(t *testing.T) {
+	const bot = "11111111-1111-4111-8111-111111111111"
+	head := "[backend]\nbackend = \"ollama\"\n[cli.permission]\nbroker = \"hook\"\nbroker_bots = [\"" + bot + "\"]\n"
+	folded := "dangerouslyallowallpermission\\u0072equestsupthrough"
+	exact := "dangerouslyAllowAllPermission\\u0052equestsUpThrough"
+	cases := []struct {
+		name    string
+		local   string
+		managed string
+		ok      bool
+	}{
+		{
+			name:  "local-string-value",
+			local: "[backend]\nbackend = \"ollama\"\n[ollama]\nmodel = \"dangerouslyAllowAllPermissionRequestsUpThrough\"\n",
+			ok:    true,
+		},
+		{
+			name:    "managed-escaped-folded",
+			local:   head,
+			managed: "\n[cli.permission.\"" + folded + "\"]\n" + bot + " = \"low\"\n",
+		},
+		{
+			name:    "managed-escaped-exact",
+			local:   head,
+			managed: "\n[cli.permission.\"" + exact + "\"]\n" + bot + " = \"low\"\n",
+			ok:      true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "policy.toml")
+			if err := os.WriteFile(path, []byte(tc.local), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			opts := Options{Path: path}
+			if tc.managed != "" {
+				mp := filepath.Join(dir, "managed.toml")
+				if err := os.WriteFile(mp, []byte(tc.managed), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				opts.ManagedPath = mp
+			}
+			p, err := Load(opts)
+			if tc.ok {
+				if err != nil || !p.Loaded {
+					t.Fatalf("err=%v loaded=%v warnings=%v ceilings=%v", err, p.Loaded, p.Warnings, p.AllowCeilings)
+				}
+				if tc.managed != "" && p.AllowCeilings[bot] != permbroker.LevelLow {
+					t.Fatalf("ceilings %v", p.AllowCeilings)
+				}
+				return
+			}
+			if err == nil || !errors.Is(err, errAllowCeiling) {
+				t.Fatalf("err=%v loaded=%v warnings=%v ceilings=%v", err, p.Loaded, p.Warnings, p.AllowCeilings)
+			}
+		})
+	}
+}
+
+func TestAllowCeilingUntrustedApply(t *testing.T) {
+	const bot = "11111111-1111-4111-8111-111111111111"
+	broker := "hook"
+	bots := []string{bot}
+	doc := document{}
+	doc.CLI.Permission = &cliPermDoc{
+		Broker:       &broker,
+		BrokerBots:   &bots,
+		AllowThrough: map[string]any{bot: "low"},
+	}
+	p := Defaults()
+	if err := p.apply(doc, false); !errors.Is(err, errAllowCeiling) {
+		t.Fatalf("untrusted err=%v ceilings=%v", err, p.AllowCeilings)
+	}
+	p = Defaults()
+	if err := p.apply(doc, true); err != nil || p.AllowCeilings[bot] != permbroker.LevelLow {
+		t.Fatalf("trusted err=%v ceilings=%v", err, p.AllowCeilings)
+	}
+}
+
 func TestMissingPolicyFailClosed(t *testing.T) {
 	p, err := Load(Options{Path: filepath.Join(t.TempDir(), "nope.toml")})
 	if err != nil {

@@ -15,6 +15,13 @@ the run.
 broker = "hook"   # off (default) or hook
 # broker_bots = ["bot-id"]   # optional; empty means every bot
 # hook_path = "/usr/local/bin/lgb-permhook"  # optional absolute path
+
+# Per-bot auto-approval ceiling. Put it in the managed policy file only.
+# A copy in this file is a startup error. The bot id must be a UUID listed
+# in broker_bots. Level names are lowercase: low, medium, high, critical.
+# A critical level auto-approves only when the ceiling is exactly critical
+# and that level or a critical path is the only reason. See the ceiling
+# section below. A multi-line inline table is not valid TOML 1.0.
 ```
 
 `hook` arms two paths: Claude Code, through `cmd/lgb-permhook`, and the
@@ -275,7 +282,19 @@ config and include targets that resolve, every `.gitattributes` file in
 the worktree, `<git-dir>/info/attributes`, the system git config, each home's `.gitconfig`,
 `~/.config/git/config`, and `~/.config/git/attributes`, the file named
 by `core.attributesFile`, and `GIT_*` variables in the environment
-stored for that bot. A nested `.gitattributes` is read the same way as
+stored for that bot. A location, config, or command-helper variable
+asks when it is set, including an empty value and a value that points
+at this workspace. That set is `GIT_DIR`, `GIT_WORK_TREE`,
+`GIT_COMMON_DIR`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
+`GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_EXEC_PATH`, `GIT_CONFIG`,
+`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`, `GIT_CONFIG_COUNT`,
+`GIT_CONFIG_KEY_*`, `GIT_CONFIG_VALUE_*`, `GIT_CONFIG_PARAMETERS`,
+`GIT_CONFIG_NOSYSTEM`, `GIT_TEMPLATE_DIR`, `GIT_NAMESPACE`,
+`GIT_CEILING_DIRECTORIES`, `GIT_SSH`, `GIT_SSH_COMMAND`, `GIT_ASKPASS`,
+`GIT_EDITOR`, `GIT_PAGER`, `GIT_EXTERNAL_DIFF`, `GIT_SEQUENCE_EDITOR`,
+and `GIT_SSH_VARIANT`. The same names ask when they are a shell
+assignment prefix on a git command. Identity variables such as
+`GIT_AUTHOR_NAME` do not. A nested `.gitattributes` is read the same way as
 the one at the worktree root. A directory reached by a symlink inside
 the worktree that contains a `.gitattributes` file asks, and that file
 is not added to the baseline. The walk skips the contents of `.git`
@@ -365,6 +384,248 @@ startup error. A command the table does not list is `unclassified`.
 only. They are not task-grantable and not eligible for a bot or global
 allow. The profile auto-allow list in `docs/cli-permissions.md` is a
 different classifier.
+
+## Auto-approval ceiling
+
+`dangerouslyAllowAllPermissionRequestsUpThrough` maps a bot id to a
+ceiling: `low`, `medium`, `high`, or `critical`. Only the managed policy
+file may set it. The same key in the local policy file is a startup
+error. It does nothing unless `broker` is `hook`. It does not add a bot
+to `broker_bots`. A ceiling for a bot that is not listed there is a
+startup error, including when `broker_bots` is empty.
+
+Level names are lowercase only. There is no case folding and no
+trimming. `HIGH`, `Low`, and a padded name are startup errors.
+`unclassified` is not a ceiling. Bot ids are stored lowercase. Two keys
+that are the same id after that are a startup error.
+
+The comparison is a strict rank: low is 1, medium is 2, high is 3, and
+critical is 4. A lower rank does not cover a higher one. Unclassified,
+an empty name, and any unknown name have no rank and are never covered.
+The comparison uses the final level. That level is the shipped table,
+then a policy raise, then a classifier raise, then a critical-path
+check. A ceiling cannot skip one of those. A request at or below the
+bot's ceiling is auto-approved with no card. A request above the
+ceiling still asks. A critical request auto-approves only when the
+ceiling is exactly `critical` and that level or a critical path is the
+only reason, as below.
+
+Evaluate order for this check is deny, then a hard deny of credential
+output and of hook-path changes when a ceiling is set, then a one-time
+human approval, then an ask rule, then the ceiling. A one-time approval
+is consumed before the ask rule, so the next identical call asks again.
+An ask rule still wins over the ceiling, including a pattern or legacy
+ask. It does not win over the hard deny.
+
+These are never auto-approved: a deny rule, an ask rule, an unclassified
+command, a parse error, a malformed or ambiguous command, a broker
+error, a compound command with a part that has no known level, a
+git-risk or a baseline drift, and a call that names the local or managed
+policy file. See [Critical ceiling](#critical-ceiling) for the path
+resolver and for what a critical ceiling still auto-approves.
+
+## Critical ceiling
+
+One resolver walks every ceiling path. It starts at the real workspace
+root, or at the resolved working directory, and resolves each symlink
+target against the parent it has already resolved. The hop cap is 40.
+A seen-set refuses a loop. A dangling symlink is an error. A missing
+final component that is not a symlink is a new file and stays eligible
+when the rest of the checks pass. The walk keeps the bytes of each
+component and each symlink target. It does not trim whitespace and it
+does not turn a backslash into a slash. A NUL, or any other path that
+cannot be a kernel name, is an error. Any walk error means the request
+is not eligible for ceiling auto-approval. An unquoted backslash makes
+the shell word not literal, so the command is not eligible either. A
+quoted backslash stays in the word.
+
+An existing regular file whose link count is above one is not
+auto-approved. A regular file that is the same inode as an existing
+sensitive file is not auto-approved either. That set is `.git/config`,
+a file in `.git/hooks`, a policy file, a critical or protected file,
+and a client-config file that is already on disk. An already-hardlinked
+file, including a file under a pnpm `node_modules` tree, asks. The
+broker is not the writer. A file can be replaced between this check and
+the write. That window is an accepted residual. Closing it would mean
+the daemon performs the write, with `openat` and `O_NOFOLLOW`, and
+resolves the path again at the write. A write whose resolved path, or
+the nearest existing parent, is on a different device than the
+workspace root asks. On Linux the check also compares mount ids from
+`/proc/self/mountinfo`. A bind on the same filesystem keeps the device
+id and changes the mount id, so that write asks. If the mount table
+cannot be read, the write asks. Darwin compares the device id only. The
+same-inode check still covers an existing sensitive file. `git fetch`,
+`git ls-remote`, `git clone`, and `git pull` ask when an argument
+contains `ext::`, including when that remote is a single quoted word.
+
+The spelled path and the resolved target are both checked. If either
+one matches, the ceiling does not auto-approve at any level, including
+critical:
+
+- outside the workspace
+- a protected path, compared case-insensitively
+- a write of a path on the critical list
+- the local or managed policy file, including a link to that file
+- a git-sensitive path: any `.git` component (case-folded), a
+  `objects`, `refs`, `hooks`, or `modules` component, or a final name
+  of `HEAD`, `config`, `packed-refs`, `commondir`, `config.worktree`,
+  `gitdir`, or `attributes` (case-folded). This does not wait until the
+  directory already contains `HEAD`, `objects`, or `refs`
+- client config that can run commands (case-folded): `.grok/`,
+  `.claude/`, `.husky/`, `.lgb/`, `.vscode/tasks.json`,
+  `.vscode/settings.json`, `.vscode/launch.json`,
+  `.idea/runConfigurations/`, `.idea/workspace.xml`, `.envrc` and
+  `.env` loader files, and `.devcontainer/`. A directory created by
+  `git clone`, `git init`, `git mv`, `mkdir` (including `-p`),
+  `install`, `cp`, `mv`, `ln`, or `rsync` uses this class on the spelled
+  path and the resolved path. For that created directory, `.vscode` and
+  `.idea` themselves count, including `.VSCode` and `.IDEA`.
+
+A Glob `pattern` that contains `..` or `{`, starts with `~`, or is an
+absolute path is refused before that walk. `git -C`, `--git-dir`, and
+git whose working directory is not the workspace root are not
+auto-approved. `>/dev/null` and `2>&1` stay eligible.
+
+A hard ask or a request that is not eligible does not auto-approve,
+including at a critical ceiling, unless the only reason is the critical
+level or a critical path. These still ask when the ceiling is critical:
+an unresolved or unknown program, a wrapper, a leading `cd`, a void
+command, a read of a protected path, a git form that runs a command, a
+non-shell path outside the workspace, and any other ineligible reason.
+The git forms that run a command are refused on the ceiling side. The
+classifier is unchanged, so a rule or a task grant keeps its current
+eligibility when no ceiling applies. The ceiling does not use the
+Linux-only allow choke that saved rules and task grants use.
+
+Ceiling auto-approval of git is an allowlist. The only table is
+`ceilingGitAllow` in `internal/permbroker/gitallow.go`. A subcommand
+that is not a row asks, at every ceiling including critical. The shipped
+classifier table above is a different list.
+
+| Subcommand | Auto-approves when |
+| --- | --- |
+| `status` | the listed status flags only. `--untracked-files` / `-u`, `--ignored`, and `--find-renames` take an optional value only as `--flag=value` or an attached short form such as `-uall`. The next word is a pathspec. A pathspec that starts with `:`, contains `*`, `?`, or `[`, or whose clean form is `.`, `..`, `/`, or a parent asks. Low |
+| `log` | no `-p`, `--patch`, `-L`, `--ext-diff`, `--textconv`, or `--output`. `--pretty` and `--format` take an optional value only with `=`. A `%G` placeholder in that value asks. A named path prints commit subjects only, including `.env`. A magic, glob, or root pathspec asks. Low |
+| `diff` | a non-content format (`--stat`, `--name-only`, `--name-status`, `--numstat`, `--shortstat`) and none of `--patch`, `-p`, `--no-index`, `--output`, `-L`, `--ext-diff`, or `--textconv`. A sensitive path asks. A magic, glob, or root pathspec asks. Bare `git diff` asks. Low |
+| `show` | a non-patch format (`--stat`, `--name-only`, `--name-status`, `--no-patch`, `-s`) and every object is a plain commit-ish (`HEAD` with `^` or `~`, or a branch or tag name). A hex object id asks, because the broker does not run git to tell a commit from a blob. `rev:path`, a magic or glob pathspec, and a root pathspec ask. `--pretty` and `--format` take a value only with `=`. A `%G` placeholder in that value asks. Bare `git show <commit>` asks because it prints the patch. Low |
+| `rev-parse` | the listed flags. No `rev:path`. A magic, glob, or root pathspec asks. Low |
+| `ls-files` | the listed flags. A magic, glob, or root pathspec asks. Low |
+| `blame` | a path that is not secret material. Secret names are the shared credential list below, plus `.env*` (including `.env.example`), `*.pem`, `*.key`, `id_*`, `.git/config`, and hooks. A magic, glob, or root pathspec asks. Low |
+| `describe` | the listed flags. `--abbrev` takes a value only with `=`. `--match` still takes the next word. A magic, glob, or root pathspec asks. Low |
+| `branch` | no arguments, or the list flags `--list`, `-l`, `-a`, `--all`, `-v`, `-vv`, `--verbose`, `-r`, `--remotes`. A positional pattern is allowed only with `--list` or `-l`. `-a` and `-r` need `--list` as well. `-v` or `-vv` with a name asks, because that creates a branch. No create or delete. Low |
+| `tag` | `--list`, `-l`, or no arguments. Low |
+| `remote` | no arguments. `-v`, `--verbose`, `-vv`, `show`, and `get-url` ask because they print remote URLs. Bare `git remote` is low on the ceiling. The shipped table still calls `git remote` critical |
+| `add` | ordinary named pathspecs. A pathspec that starts with `:`, contains a glob character, or cleans to the work tree root or a parent asks. No `-A`, `--all`, or `-u`. Medium. The path class still applies |
+| `commit` | `-m` or `--message` only, plus ordinary pathspecs. The same magic, glob, and root pathspecs ask. No `--amend`, `-a`, `-F`, or `--no-verify`. Medium |
+
+These ask at every ceiling because they can write work-tree files from
+content: `apply` (including `--cached` and `--index`), `am`, `checkout`,
+`switch`, `restore`, `merge`, `pull`, `rebase`, `cherry-pick`, `revert`,
+`reset` (any), `stash` (any, including `pop` and `apply`), `mv`,
+`read-tree` (any, including `-u`), `worktree add`, `clone`,
+`submodule update`, `checkout-index`, and `sparse-checkout`. `git init`,
+`git fetch`, `git push`, and any other unlisted subcommand ask too.
+
+`mv`, `cp`, `install`, `ln`, and `rsync` into a client-config directory
+ask. The destination is class-checked.
+
+A path-valued flag is split on `=` and the value is resolved and
+class-checked the same way as the next-argument form. The flags are
+`--separate-git-dir`, `--template`, `--git-dir`, `--work-tree`,
+`--output`, `--exec-path`, `--reference`, `--reference-if-able`, `-C`,
+and `git config --file`.
+
+These git reads ask: `git show rev:path`, `git show` of a blob id or any
+object that is not a plain commit-ish, any `git cat-file`, `git grep`
+with no pathspec, `git grep` of a sensitive path, and `git log -p` or
+`git diff` of a sensitive path. Sensitive paths are the shared credential
+list (`.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`, `.aws/*`,
+`.ssh/*`, `.docker/*`, `.kube/*`, `credentials*`, `auth.json`, `cookies`,
+and the token files below) plus `.env*` (including `.env.example`),
+`*.pem`, `*.key`, `id_*`, `.git/config`, and `.git/hooks`. `git grep TOKEN`
+with no path filter asks. `git log` without `-p` may name a secret path.
+A `%G` placeholder in `--pretty` or `--format` asks. An optional git
+value (`--pretty`, `--format`, `--abbrev`, `--untracked-files`, `-u`,
+`--ignored`, `--find-renames`, and the same class) counts only when it
+is attached with `=` or an attached short form. The next word stays a
+positional.
+
+Hard deny, only when a ceiling is set, is an exact argv match. It is
+not a substring of a message or of another command. A bot with no
+ceiling still gets the human approval prompt. The audit actor and source
+are `ceiling_never_allow` and the severity is `critical`.
+
+Credential output (`credential output is never allowed`):
+
+- `gh auth token`, including flags such as `--hostname`
+- `git credential fill`, `git credential approve`, and `git credential reject`
+- `cat`, `head`, `tail`, `less`, and the Read tool, of a known token file.
+  Git reads use this same list. The names are `id_rsa`, `id_ed25519`,
+  `id_ecdsa`, `id_dsa`, `.netrc`, `.npmrc`, `.pypirc`,
+  `.git-credentials`, `admin-token`, `github.token`, `auth.json`,
+  `cookies`, a basename that starts with `credentials`, anything under
+  `.aws`, `.ssh`, `.docker`, or `.kube`, `.config/git/credentials`,
+  `hosts.yml` under a `gh` directory, `.env`, and `.env.*` other than
+  `.env.example`, `.env.sample`, and `.env.template`
+
+These ask and are not a hard deny: `gh auth status` (including `-t` and
+`--show-token`), `gh auth login --with-token`, `gh secret list`,
+`gh ssh-key list`, `cat .env.example`, a `*.pem` or `*.key` file,
+`git credential-store`, and `git commit -m "core.hooksPath"`. `gh auth`,
+`gh secret`, and `gh ssh-key` still do not auto-approve.
+
+Hook-path changes (`hook path changes are never allowed`):
+
+- `git config`, or `git -c` / `--config`, whose key is exactly `core.hooksPath`
+- a write into `.git/hooks`, including a tool write and an output redirect onto that path
+- a path-valued flag whose value is inside `.git/hooks`
+
+A read of a hook path asks. A config value that is only the text
+`core.hooksPath` is not a key. Wrappers ask and do not auto-approve:
+`command`, `env`, `timeout`, `sh -c`, `printenv`, an input redirect, and
+`cp`, `mv`, `ln`, or `tee` into `.git/hooks`. An environment assignment
+of `core.hooksPath` asks through the git location check. It is not this
+hard deny.
+
+Non-shell tools use this table. A path is `file_path`, `path`, or
+`notebook_path`. Every path must be inside the workspace. No path,
+a protected path, or a policy path does not auto-approve. A write of a
+critical path does not auto-approve at any ceiling. Anything not in the
+table does not auto-approve.
+
+| Tool | Level | Auto-approves when |
+| --- | --- | --- |
+| `Read`, `Glob`, `Grep` | low | every path is inside the workspace and is not protected or a policy file. A path on the critical list is critical and needs an exact critical ceiling. A Glob `pattern` that contains `..` or `{`, starts with `~`, or is absolute does not auto-approve |
+| `Write`, `Edit`, `MultiEdit`, `NotebookEdit` | medium | every path is inside the workspace and is not protected, a policy file, a critical path, git-sensitive, or client config that can run commands. The spelled path and the resolved target are both checked |
+| `WebFetch`, `WebSearch`, `Task`, `mcp__*`, any other tool | none | never |
+
+A wildcard key such as `*`, a key that is not a UUID, an empty value,
+an unknown level, and a value that is not a map are startup errors.
+
+Write the map as a subtable in the managed policy file. A multi-line
+inline table is not valid TOML 1.0.
+
+```toml
+[cli.permission]
+broker = "hook"
+broker_bots = ["00000000-0000-4000-8000-000000000000"]
+
+[cli.permission.dangerouslyAllowAllPermissionRequestsUpThrough]
+00000000-0000-4000-8000-000000000000 = "low"
+```
+
+Each auto-approval appends an audit row whose `source` is
+`dangerously_allow_all_up_through`. The row's `level` is the final
+level. `ceiling` is the bot's cap. The in-memory audit mirror records
+the row only after that append succeeds. If the append fails, the
+failure is written to the daemon log and the auto-approval is a deny.
+The mirror does not keep the allow. A human ask does not depend on that
+write.
+Startup logs each configured bot id and its ceiling, and logs that the
+ceiling is ignored when `broker` is not `hook`. A running daemon keeps
+the ceilings from process start. Editing the file does not change them
+until restart. A change to this key is reported as a restart key. `broker`
+and `broker_bots` stay on the startup snapshot and are not restart keys.
 
 A stricter row is:
 

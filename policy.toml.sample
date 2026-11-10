@@ -163,6 +163,22 @@ imminent_timer_minutes = 2
 # broker = "off"
 # broker_bots = ["bot-id"]
 # hook_path = "/usr/local/bin/lgb-permhook"
+# dangerouslyAllowAllPermissionRequestsUpThrough belongs in the managed
+# policy file, not this one. A copy here is a startup error, including a
+# folded spelling. It auto-approves a hook-broker request when its final
+# level is at or below that bot's ceiling. The value is the lowercase word
+# low, medium, high, or critical. There is no case folding. What a
+# critical ceiling auto-approves is in docs/permission-broker.md
+# under "Critical ceiling". Credential output and hook-path git
+# changes are denied when a ceiling is set, including at critical.
+# A bot with no ceiling still asks. Other hard asks, ineligible calls,
+# git forms that run a command, git-risk, drift, unclassified compound
+# parts, paths outside the workspace, and policy-file paths still ask.
+# The bot id must be a UUID listed in broker_bots. The setting does
+# nothing unless broker = "hook". A multi-line inline table is not valid
+# TOML 1.0. Use the subtable in the managed file. The check order is deny,
+# a one-time approval, an ask rule, then the ceiling. A failed audit write
+# is logged and is not auto-approved.
 # approval_ttl is how long a once-token stays usable, and the cap on a
 # task grant along with the 4h task cap. Default 15m. Bounds are 1m..24h.
 # Pending items do not expire.

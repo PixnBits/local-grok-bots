@@ -501,11 +501,13 @@ func TestJailPATHIncludesToolchain(t *testing.T) {
 		t.Fatalf("jail PATH %q want %q", res.Stdout, path)
 	}
 	goBin := "/usr/local/go/bin/go"
-	if st, err := os.Stat(goBin); err == nil && !st.IsDir() {
-		res, err = runCmd(t, Request{Workspace: t.TempDir(), Command: "command -v go"})
-		if err != nil || strings.TrimSpace(res.Stdout) != goBin {
-			t.Fatalf("go lookup: %v stdout=%q stderr=%q", err, res.Stdout, res.Stderr)
-		}
+	st, err := os.Stat(goBin)
+	if err != nil || st.IsDir() || !rootOwnedDir("/usr/local/go/bin") {
+		t.Skip("go toolchain is not a root-owned /usr/local/go/bin")
+	}
+	res, err = runCmd(t, Request{Workspace: t.TempDir(), Command: "command -v go"})
+	if err != nil || strings.TrimSpace(res.Stdout) != goBin {
+		t.Fatalf("go lookup: %v stdout=%q stderr=%q", err, res.Stdout, res.Stderr)
 	}
 }
 

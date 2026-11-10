@@ -114,6 +114,9 @@ func TestGolden_SocketPeerMustBeHookUnderBotCLI(t *testing.T) {
 	})
 	e.ClearHookIDs()
 	if err := e.NoteHookFile(sleepBin); err != nil {
+		if err.Error() == "hook owner" && !rootOwnedDir("/usr/bin") && !rootOwnedDir("/bin") {
+			t.Skip("sleep is not uid 0 or this uid; hook-owner checks need a root-owned /usr/bin or /bin")
+		}
 		t.Fatal(err)
 	}
 	e.RegisterLaunch("bot", sleep.Process.Pid)

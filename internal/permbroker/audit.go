@@ -4,6 +4,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -14,29 +16,36 @@ import (
 // AuditRow is one daemon decision. The hook does not write this file.
 // Argv and Input are redacted before they are stored.
 type AuditRow struct {
-	Time           time.Time `json:"time"`
-	BotID          string    `json:"bot_id"`
-	SessionID      string    `json:"session_id"`
-	RunID          string    `json:"run_id"`
-	TaskID         string    `json:"task_id"`
-	Tool           string    `json:"tool"`
-	Argv           []string  `json:"argv,omitempty"`
-	Input          string    `json:"input,omitempty"`
-	InputHash      string    `json:"input_hash"`
-	Cwd            string    `json:"cwd"`
-	Decision       string    `json:"decision"`
-	Scope          string    `json:"scope,omitempty"`
-	PendingID      string    `json:"pending_id,omitempty"`
-	Actor          string    `json:"actor"`
-	RuleID         string    `json:"rule_id,omitempty"`
-	Level          Level     `json:"level"`
-	TableVersion   string    `json:"table_version"`
-	RulesetVersion int       `json:"ruleset_version"`
-	Classifier     string    `json:"classifier"`
-	PeerUID        int       `json:"peer_uid,omitempty"`
-	PeerPID        int       `json:"peer_pid,omitempty"`
-	PrevHash       string    `json:"prev_hash"`
-	Hash           string    `json:"hash"`
+	Time      time.Time `json:"time"`
+	BotID     string    `json:"bot_id"`
+	SessionID string    `json:"session_id"`
+	RunID     string    `json:"run_id"`
+	TaskID    string    `json:"task_id"`
+	Tool      string    `json:"tool"`
+	Argv      []string  `json:"argv,omitempty"`
+	Input     string    `json:"input,omitempty"`
+	InputHash string    `json:"input_hash"`
+	Cwd       string    `json:"cwd"`
+	Decision  string    `json:"decision"`
+	Scope     string    `json:"scope,omitempty"`
+	PendingID string    `json:"pending_id,omitempty"`
+	Actor     string    `json:"actor"`
+	RuleID    string    `json:"rule_id,omitempty"`
+	Level     Level     `json:"level"`
+	// Source and Ceiling are set on a ceiling auto-approval.
+	// Source is dangerously_allow_all_up_through. Level is the final
+	// effective level. Ceiling is the bot's configured cap.
+	Source  string `json:"source,omitempty"`
+	Ceiling Level  `json:"ceiling,omitempty"`
+	// Severity is set on a hard deny. The word is critical.
+	Severity       string `json:"severity,omitempty"`
+	TableVersion   string `json:"table_version"`
+	RulesetVersion int    `json:"ruleset_version"`
+	Classifier     string `json:"classifier"`
+	PeerUID        int    `json:"peer_uid,omitempty"`
+	PeerPID        int    `json:"peer_pid,omitempty"`
+	PrevHash       string `json:"prev_hash"`
+	Hash           string `json:"hash"`
 }
 
 // Auditor receives a copy of each row after it is appended. The daemon
@@ -91,10 +100,14 @@ func lastAuditHash(path string) (string, error) {
 	return "", nil
 }
 
-func (a *fileAudit) append(row AuditRow) AuditRow {
+// errAuditWrite is a failed or missing audit append. A ceiling
+// auto-approval denies when this happens. Other decisions ignore it.
+var errAuditWrite = errors.New("permission broker audit write failed")
+
+func (a *fileAudit) append(row AuditRow) (AuditRow, error) {
 	if a == nil || a.f == nil {
 		row.TableVersion = TableVersion
-		return row
+		return row, errAuditWrite
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -102,17 +115,26 @@ func (a *fileAudit) append(row AuditRow) AuditRow {
 	row.Hash = ""
 	body, err := json.Marshal(row)
 	if err != nil {
-		return row
+		return row, err
 	}
 	sum := sha256.Sum256(append([]byte(a.prev), body...))
 	row.Hash = hex.EncodeToString(sum[:])
 	body, err = json.Marshal(row)
 	if err != nil {
-		return row
+		row.Hash = ""
+		return row, err
 	}
-	_, _ = a.f.Write(append(body, '\n'))
+	line := append(body, '\n')
+	n, err := a.f.Write(line)
+	if err != nil || n != len(line) {
+		row.Hash = ""
+		if err == nil {
+			err = io.ErrShortWrite
+		}
+		return row, err
+	}
 	a.prev = row.Hash
-	return row
+	return row, nil
 }
 
 func (a *fileAudit) close() {
@@ -136,6 +158,13 @@ var redactRes = []*regexp.Regexp{
 	regexp.MustCompile(`lgbr_[A-Za-z0-9_\-]+`),
 	regexp.MustCompile(`\b[0-9a-fA-F]{64}\b`),
 }
+
+// AllowThroughSource is the audit source for a ceiling auto-approval.
+const AllowThroughSource = "dangerously_allow_all_up_through"
+
+// AuditWriteFailedSource marks a deny or ask row mirrored after the
+// audit file write failed.
+const AuditWriteFailedSource = "audit_write_failed"
 
 // Redact hides credentials in text the audit file would otherwise keep.
 // password= and --token= keep the key and replace the value.

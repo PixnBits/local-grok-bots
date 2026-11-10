@@ -480,6 +480,7 @@ func TestGolden_RestartThenApproveResumes(t *testing.T) {
 // the suspended command. The ask's tool_start is the only shell entry;
 // sandbox.Run is reached only from a later execTool.
 func TestGolden_PolicyChangeBeforeApproveRefuses(t *testing.T) {
+	skipIfHostRootLooksLikeNobody(t)
 	const cmd = "git status"
 	r, _ := newResumeRig(t, "", cmd, "should not continue", nil)
 	r.post("go")
@@ -859,6 +860,7 @@ func assertSavedCallOnce(t *testing.T, r *resumeRig, card resumeCard, before int
 // before afterBrokerDecision, so the test drives resumeApproved itself.
 // The allow rule makes both re-evals allow; the state check is the gate.
 func TestGolden_ResumeApprovedExecutesOnce(t *testing.T) {
+	skipIfHostRootLooksLikeNobody(t)
 	t.Run("twice", func(t *testing.T) {
 		r, card, ck := openAllowedResume(t)
 		before := shellStartCount(t, r.app, r.bot.ID)

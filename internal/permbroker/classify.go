@@ -140,11 +140,19 @@ func classifyGit(argv []string, cwd, workspace string) argvClass {
 }
 
 func gitUpstream(sub string, rest []string) bool {
-	if sub != "fetch" && sub != "ls-remote" {
+	switch sub {
+	case "fetch", "ls-remote", "clone", "pull":
+	default:
 		return false
 	}
 	for _, a := range rest {
 		if a == "-u" || a == "--upload-pack" || strings.HasPrefix(a, "--upload-pack=") {
+			return true
+		}
+		// ext:: is a remote helper that runs a command. One quoted argv
+		// still contains the marker. Fetch, ls-remote, clone, and pull
+		// take that remote as an argument.
+		if strings.Contains(strings.ToLower(a), "ext::") {
 			return true
 		}
 	}
@@ -420,31 +428,56 @@ func pathsLeave(args []string, cwd, workspace string) bool {
 	return false
 }
 
-func resolvesInside(path, cwd, workspace string) bool {
-	if path == "" || strings.ContainsRune(path, 0) || workspace == "" {
-		return false
+func absPath(path, cwd, workspace string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
 	}
-	abs := path
 	if !filepath.IsAbs(path) {
 		base := cwd
 		if base == "" {
 			base = workspace
 		}
-		abs = filepath.Join(base, path)
+		if base == "" {
+			return filepath.Clean(path)
+		}
+		path = filepath.Join(base, path)
 	}
-	abs = filepath.Clean(abs)
-	if !lexicalInside(abs, workspace) {
+	return filepath.Clean(path)
+}
+
+func resolvesInside(path, cwd, workspace string) bool {
+	if path == "" || strings.ContainsRune(path, 0) || workspace == "" {
 		return false
 	}
-	if real, err := filepath.EvalSymlinks(abs); err == nil {
-		return lexicalInside(real, workspace)
+	abs := absPath(path, cwd, workspace)
+	if abs == "" || !lexicalInside(abs, workspace) {
+		return false
 	}
-	parent := filepath.Dir(abs)
-	realParent, err := filepath.EvalSymlinks(parent)
+	real, ok := resolvePathTarget(abs)
+	if !ok {
+		return false
+	}
+	return lexicalInside(real, workspace)
+}
+
+// resolvePathTarget is the shared resolver. ok is false on a dangling
+// link, a loop, the hop cap, or any other walk error.
+func resolvePathTarget(path string) (string, bool) {
+	if path == "" || unrepresentablePath(path) {
+		return "", false
+	}
+	if !filepath.IsAbs(path) {
+		path = filepath.Clean(path)
+		if !filepath.IsAbs(path) {
+			return "", false
+		}
+	}
+	got, err := resolvePath(path)
 	if err != nil {
-		return true
+		return "", false
 	}
-	return lexicalInside(filepath.Join(realParent, filepath.Base(abs)), workspace)
+	return got, true
 }
 
 func lexicalInside(abs, workspace string) bool {
