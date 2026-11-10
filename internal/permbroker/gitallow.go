@@ -1,6 +1,9 @@
 package permbroker
 
-import "strings"
+import (
+	"path/filepath"
+	"strings"
+)
 
 // ceilingGitRule is one row of the ceiling git allowlist. The slice
 // ceilingGitAllow is the only table. A subcommand that is not a row asks.
@@ -189,8 +192,8 @@ func isRemoteList(argv []string) bool {
 func ceilingGitShape(rule ceilingGitRule, rest []string) bool {
 	switch rule.kind {
 	case "status", "names":
-		_, ok := parseAllowFlags(rest, rule.bools, rule.vals, rule.nums)
-		return ok
+		pos, ok := parseAllowFlags(rest, rule.bools, rule.vals, rule.nums)
+		return ok && !pathspecRisky(pos)
 	case "log":
 		return logShape(rest, rule)
 	case "diff":
@@ -227,6 +230,9 @@ func logShape(rest []string, rule ceilingGitRule) bool {
 	if !ok {
 		return false
 	}
+	if formatPlaceholderG(rest) || pathspecRisky(pos) {
+		return false
+	}
 	for _, p := range pos {
 		if strings.Contains(p, ":") {
 			return false
@@ -238,6 +244,9 @@ func logShape(rest []string, rule ceilingGitRule) bool {
 func diffShape(rest []string, rule ceilingGitRule) bool {
 	pos, ok := parseAllowFlags(rest, rule.bools, rule.vals, rule.nums)
 	if !ok || !diffFormat(rest) {
+		return false
+	}
+	if pathspecRisky(pos) {
 		return false
 	}
 	for _, p := range pos {
@@ -262,12 +271,21 @@ func diffFormat(rest []string) bool {
 }
 
 func showShape(rest []string, rule ceilingGitRule) bool {
-	pos, ok := parseAllowFlags(rest, rule.bools, rule.vals, rule.nums)
-	if !ok || !showFormat(rest) {
+	_, ok := parseAllowFlags(rest, rule.bools, rule.vals, rule.nums)
+	if !ok || !showFormat(rest) || formatPlaceholderG(rest) {
 		return false
 	}
-	for _, p := range pos {
-		if strings.Contains(p, ":") || gitSecretReadPath(p) {
+	// Objects come before `--`. A non-patch format still prints a blob
+	// when the object is not a commit, so every object must be a plain
+	// commit-ish. Words after `--` are pathspecs.
+	objs, paths := dashSplit(rest)
+	for _, p := range objs {
+		if !plainCommitish(p) || gitSecretReadPath(p) || riskyPathspec(p) {
+			return false
+		}
+	}
+	for _, p := range paths {
+		if gitSecretReadPath(p) || riskyPathspec(p) || strings.Contains(p, ":") {
 			return false
 		}
 	}
@@ -292,6 +310,9 @@ func revShape(rest []string, rule ceilingGitRule) bool {
 	if !ok {
 		return false
 	}
+	if pathspecRisky(pos) {
+		return false
+	}
 	for _, p := range pos {
 		if strings.Contains(p, ":") || gitSecretReadPath(p) {
 			return false
@@ -306,7 +327,7 @@ func blameShape(rest []string, rule ceilingGitRule) bool {
 		return false
 	}
 	for _, p := range pos {
-		if strings.Contains(p, ":") || gitSecretReadPath(p) {
+		if strings.Contains(p, ":") || gitSecretReadPath(p) || riskyPathspec(p) {
 			return false
 		}
 	}
@@ -321,12 +342,13 @@ func branchListOK(rest []string, rule ceilingGitRule) bool {
 	if len(pos) == 0 {
 		return true
 	}
+	// A name with -v or -vv creates a branch. -a and -r do not list a
+	// pattern unless --list or -l is also present.
 	for _, a := range rest {
 		if a == "--" {
 			break
 		}
-		switch a {
-		case "--list", "-l", "-a", "--all", "-v", "-vv", "--verbose", "-r", "--remotes":
+		if a == "--list" || a == "-l" {
 			return true
 		}
 	}
@@ -353,10 +375,8 @@ func tagListOK(rest []string, rule ceilingGitRule) bool {
 }
 
 func remoteListOK(rest []string) bool {
-	if len(rest) == 0 {
-		return true
-	}
-	return len(rest) == 1 && (rest[0] == "-v" || rest[0] == "--verbose")
+	// Bare `git remote` prints names. -v, show, and get-url print URLs.
+	return len(rest) == 0
 }
 
 func addShape(rest []string, rule ceilingGitRule) bool {
@@ -364,27 +384,20 @@ func addShape(rest []string, rule ceilingGitRule) bool {
 	if !ok || len(pos) == 0 {
 		return false
 	}
-	for _, p := range pos {
-		if p == "." || p == "./" || p == ".." {
-			return false
-		}
-	}
-	return true
+	return !pathspecRisky(pos)
 }
 
 // commitShape is -m or --message, repeated, plus optional pathspecs.
 // --amend, -F, --no-verify, and -a are not in the shape.
+// A magic, glob, or root pathspec asks, before `--` and after it.
 func commitShape(rest []string) bool {
 	saw := false
+	var paths []string
 	for i := 0; i < len(rest); i++ {
 		a := rest[i]
 		if a == "--" {
-			for _, p := range rest[i+1:] {
-				if p == "." || p == "./" {
-					return false
-				}
-			}
-			return saw
+			paths = append(paths, rest[i+1:]...)
+			break
 		}
 		if a == "-m" || a == "--message" {
 			if i+1 >= len(rest) {
@@ -405,8 +418,9 @@ func commitShape(rest []string) bool {
 		if strings.HasPrefix(a, "-") {
 			return false
 		}
+		paths = append(paths, a)
 	}
-	return saw
+	return saw && !pathspecRisky(paths)
 }
 
 // gitSecretRead is a git read of file content the ceiling must not
@@ -571,21 +585,189 @@ func positionalsOf(rest []string) []string {
 }
 
 func flagConsumesValue(name string) bool {
+	if gitOptionalValue(name) {
+		return false
+	}
 	switch name {
 	case "-m", "--message", "-F", "--file", "-n", "--max-count", "-L",
-		"--pretty", "--format", "-e", "--regexp", "--author", "--date",
+		"-e", "--regexp", "--author", "--date",
 		"-c", "-C", "--git-dir", "--work-tree", "--output", "--exec-path",
 		"--template", "--separate-git-dir", "--namespace", "--super-prefix",
-		"--config-env", "--upload-pack", "--config", "--match", "--abbrev":
+		"--config-env", "--upload-pack", "--config", "--match":
 		return true
 	default:
 		return gitPathValueFlag(name)
 	}
 }
 
+// gitOptionalValue is a git option whose argument is optional.
+// Git accepts the value only as `--flag=value` or an attached short form
+// such as `-uall`. A bare flag does not take the next word.
+// --date and --match are required, so they are not in this set.
+// --decorate and --color are included so a later allowlist row cannot
+// swallow the next word. -C is required (change directory) and is not here.
+func gitOptionalValue(name string) bool {
+	switch name {
+	case "--pretty", "--format",
+		"--abbrev",
+		"--untracked-files", "-u",
+		"--ignored",
+		"--find-renames", "-M",
+		"--decorate",
+		"--color",
+		"--porcelain",
+		"--dirty",
+		"--column",
+		"--ignore-submodules",
+		"--notes",
+		"--branches", "--tags", "--remotes",
+		"--short", "--abbrev-ref",
+		"--word-diff", "--color-words", "--color-moved",
+		"--dirstat", "--submodule", "--relative",
+		"--break-rewrites", "-B",
+		"--find-copies":
+		return true
+	default:
+		return false
+	}
+}
+
+func pathspecRisky(paths []string) bool {
+	for _, p := range paths {
+		if riskyPathspec(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// riskyPathspec is a pathspec that can name the whole tree or a glob.
+// Git magic starts with ':'. A clean form of '.', '..', '/', or a parent
+// is the work tree root or outside it.
+func riskyPathspec(p string) bool {
+	if p == "" || strings.HasPrefix(p, ":") || strings.ContainsAny(p, "*?[") {
+		return true
+	}
+	c := filepath.Clean(p)
+	if c == "." || c == ".." || c == string(filepath.Separator) {
+		return true
+	}
+	return strings.HasPrefix(c, ".."+string(filepath.Separator))
+}
+
+// dashSplit keeps words before `--` apart from pathspecs after it.
+// Optional-value flags do not consume the next word.
+func dashSplit(rest []string) (before, after []string) {
+	for i := 0; i < len(rest); i++ {
+		a := rest[i]
+		if a == "--" {
+			return before, rest[i+1:]
+		}
+		if strings.HasPrefix(a, "-") && a != "-" {
+			name, _, has := splitFlag(a)
+			if !has && flagConsumesValue(name) && i+1 < len(rest) {
+				i++
+			}
+			continue
+		}
+		before = append(before, a)
+	}
+	return before, nil
+}
+
+// formatPlaceholderG is a %G pretty placeholder. It runs signature checks.
+func formatPlaceholderG(rest []string) bool {
+	for _, a := range rest {
+		if a == "--" {
+			break
+		}
+		name, val, has := splitFlag(a)
+		if !has {
+			continue
+		}
+		if (name == "--pretty" || name == "--format") && strings.Contains(val, "%G") {
+			return true
+		}
+	}
+	return false
+}
+
+// plainCommitish is a rev word accepted without running git.
+// Hex object ids ask. A blob id is hex too, and the broker does not run
+// `git cat-file -t` to tell a commit from a blob. A branch whose name is
+// only hex digits asks for the same reason.
+func plainCommitish(p string) bool {
+	if p == "" || strings.Contains(p, ":") || riskyPathspec(p) || hexObjectID(p) {
+		return false
+	}
+	if headish(p) {
+		return true
+	}
+	return refLike(p)
+}
+
+func hexObjectID(p string) bool {
+	if len(p) < 4 || len(p) > 64 {
+		return false
+	}
+	for _, r := range p {
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func headish(p string) bool {
+	if p == "HEAD" || p == "@" {
+		return true
+	}
+	rest := ""
+	switch {
+	case strings.HasPrefix(p, "HEAD"):
+		rest = p[len("HEAD"):]
+	case strings.HasPrefix(p, "@"):
+		rest = p[1:]
+	default:
+		return false
+	}
+	if rest == "" {
+		return false
+	}
+	for len(rest) > 0 {
+		if rest[0] != '^' && rest[0] != '~' {
+			return false
+		}
+		rest = rest[1:]
+		for len(rest) > 0 && rest[0] >= '0' && rest[0] <= '9' {
+			rest = rest[1:]
+		}
+	}
+	return true
+}
+
+func refLike(p string) bool {
+	if p == "" || strings.Contains(p, "..") || strings.HasPrefix(p, ".") || strings.HasPrefix(p, "/") {
+		return false
+	}
+	for _, r := range p {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '_' || r == '.' || r == '/' || r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // gitSecretReadPath is a path whose contents a git read must not print.
-// .env* includes example and sample. *.pem and *.key are included.
-// id_* is a key name with no dot. Token files and .git/config are included.
+// Credential names come from pathIsCredential, which uses ceilingTokenFile.
+// .env* includes example and sample, which the hard-deny list does not.
+// That prefix is what `git blame .env.example` hits. *.pem and *.key are
+// included. id_* is a key name with no dot. .git/config and hooks are included.
 func gitSecretReadPath(p string) bool {
 	if p == "" || p == "-" {
 		return false
@@ -595,7 +777,12 @@ func gitSecretReadPath(p string) bool {
 			return true
 		}
 	}
+	if pathIsCredential(p, "", "") {
+		return true
+	}
 	base := strings.ToLower(pathBase(p))
+	// Wider than the hard-deny list: .env.example, .env.sample, and
+	// .env.template ask here and do not hard-deny.
 	if base == ".env" || strings.HasPrefix(base, ".env.") {
 		return true
 	}
@@ -603,9 +790,6 @@ func gitSecretReadPath(p string) bool {
 		return true
 	}
 	if strings.HasPrefix(base, "id_") && !strings.Contains(base, ".") {
-		return true
-	}
-	if ceilingTokenFile(p) {
 		return true
 	}
 	low := strings.ToLower(strings.ReplaceAll(p, `\`, "/"))

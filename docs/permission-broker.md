@@ -504,19 +504,19 @@ classifier table above is a different list.
 
 | Subcommand | Auto-approves when |
 | --- | --- |
-| `status` | the listed status flags only. Low |
-| `log` | no `-p`, `--patch`, `-L`, `--ext-diff`, `--textconv`, or `--output`. A named path prints commit subjects only, including `.env`. Low |
-| `diff` | a non-content format (`--stat`, `--name-only`, `--name-status`, `--numstat`, `--shortstat`) and none of `--patch`, `-p`, `--no-index`, `--output`, `-L`, `--ext-diff`, or `--textconv`. A sensitive path asks. Bare `git diff` asks. Low |
-| `show` | a non-patch format (`--stat`, `--name-only`, `--name-status`, `--no-patch`, `-s`) and no `rev:path`. Low |
-| `rev-parse` | the listed flags. No `rev:path`. Low |
-| `ls-files` | the listed flags. Low |
-| `blame` | a path that is not secret material. Low |
-| `describe` | the listed flags. Low |
-| `branch` | `--list`, `-l`, `-a`, `--all`, `-v`, `-vv`, `--verbose`, `-r`, `--remotes`, or no arguments. No create or delete. Low |
+| `status` | the listed status flags only. `--untracked-files` / `-u`, `--ignored`, and `--find-renames` take an optional value only as `--flag=value` or an attached short form such as `-uall`. The next word is a pathspec. A pathspec that starts with `:`, contains `*`, `?`, or `[`, or whose clean form is `.`, `..`, `/`, or a parent asks. Low |
+| `log` | no `-p`, `--patch`, `-L`, `--ext-diff`, `--textconv`, or `--output`. `--pretty` and `--format` take an optional value only with `=`. A `%G` placeholder in that value asks. A named path prints commit subjects only, including `.env`. A magic, glob, or root pathspec asks. Low |
+| `diff` | a non-content format (`--stat`, `--name-only`, `--name-status`, `--numstat`, `--shortstat`) and none of `--patch`, `-p`, `--no-index`, `--output`, `-L`, `--ext-diff`, or `--textconv`. A sensitive path asks. A magic, glob, or root pathspec asks. Bare `git diff` asks. Low |
+| `show` | a non-patch format (`--stat`, `--name-only`, `--name-status`, `--no-patch`, `-s`) and every object is a plain commit-ish (`HEAD` with `^` or `~`, or a branch or tag name). A hex object id asks, because the broker does not run git to tell a commit from a blob. `rev:path`, a magic or glob pathspec, and a root pathspec ask. `--pretty` and `--format` take a value only with `=`. A `%G` placeholder in that value asks. Bare `git show <commit>` asks because it prints the patch. Low |
+| `rev-parse` | the listed flags. No `rev:path`. A magic, glob, or root pathspec asks. Low |
+| `ls-files` | the listed flags. A magic, glob, or root pathspec asks. Low |
+| `blame` | a path that is not secret material. Secret names are the shared credential list below, plus `.env*` (including `.env.example`), `*.pem`, `*.key`, `id_*`, `.git/config`, and hooks. A magic, glob, or root pathspec asks. Low |
+| `describe` | the listed flags. `--abbrev` takes a value only with `=`. `--match` still takes the next word. A magic, glob, or root pathspec asks. Low |
+| `branch` | no arguments, or the list flags `--list`, `-l`, `-a`, `--all`, `-v`, `-vv`, `--verbose`, `-r`, `--remotes`. A positional pattern is allowed only with `--list` or `-l`. `-a` and `-r` need `--list` as well. `-v` or `-vv` with a name asks, because that creates a branch. No create or delete. Low |
 | `tag` | `--list`, `-l`, or no arguments. Low |
-| `remote` | no arguments, or `-v` / `--verbose`. Low on the ceiling. The shipped table still calls `git remote` critical |
-| `add` | pathspecs other than `.` or `./`, and no `-A`, `--all`, or `-u`. Medium. The path class still applies |
-| `commit` | `-m` or `--message` only, plus optional pathspecs. No `--amend`, `-a`, `-F`, or `--no-verify`. Medium |
+| `remote` | no arguments. `-v`, `--verbose`, `-vv`, `show`, and `get-url` ask because they print remote URLs. Bare `git remote` is low on the ceiling. The shipped table still calls `git remote` critical |
+| `add` | ordinary named pathspecs. A pathspec that starts with `:`, contains a glob character, or cleans to the work tree root or a parent asks. No `-A`, `--all`, or `-u`. Medium. The path class still applies |
+| `commit` | `-m` or `--message` only, plus ordinary pathspecs. The same magic, glob, and root pathspecs ask. No `--amend`, `-a`, `-F`, or `--no-verify`. Medium |
 
 These ask at every ceiling because they can write work-tree files from
 content: `apply` (including `--cached` and `--index`), `am`, `checkout`,
@@ -535,11 +535,20 @@ class-checked the same way as the next-argument form. The flags are
 `--output`, `--exec-path`, `--reference`, `--reference-if-able`, `-C`,
 and `git config --file`.
 
-These git reads ask: `git show rev:path`, any `git cat-file`, `git grep`
+These git reads ask: `git show rev:path`, `git show` of a blob id or any
+object that is not a plain commit-ish, any `git cat-file`, `git grep`
 with no pathspec, `git grep` of a sensitive path, and `git log -p` or
-`git diff` of a sensitive path (`.env*`, `*.pem`, `*.key`, `id_*`, a
-token file, `.git/config`, or `.git/hooks`). `git grep TOKEN` with no
-path filter asks. `git log` without `-p` may name a secret path.
+`git diff` of a sensitive path. Sensitive paths are the shared credential
+list (`.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`, `.aws/*`,
+`.ssh/*`, `.docker/*`, `.kube/*`, `credentials*`, `auth.json`, `cookies`,
+and the token files below) plus `.env*` (including `.env.example`),
+`*.pem`, `*.key`, `id_*`, `.git/config`, and `.git/hooks`. `git grep TOKEN`
+with no path filter asks. `git log` without `-p` may name a secret path.
+A `%G` placeholder in `--pretty` or `--format` asks. An optional git
+value (`--pretty`, `--format`, `--abbrev`, `--untracked-files`, `-u`,
+`--ignored`, `--find-renames`, and the same class) counts only when it
+is attached with `=` or an attached short form. The next word stays a
+positional.
 
 Hard deny, only when a ceiling is set, is an exact argv match. It is
 not a substring of a message or of another command. A bot with no
@@ -550,12 +559,14 @@ Credential output (`credential output is never allowed`):
 
 - `gh auth token`, including flags such as `--hostname`
 - `git credential fill`, `git credential approve`, and `git credential reject`
-- `cat`, `head`, `tail`, `less`, and the Read tool, of a known token file:
-  `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa`, `.netrc`,
-  `.git-credentials`, `admin-token`, `github.token`,
-  `.config/git/credentials`, `hosts.yml` under a `gh` directory, `.env`,
-  and `.env.*` other than `.env.example`, `.env.sample`, and
-  `.env.template`
+- `cat`, `head`, `tail`, `less`, and the Read tool, of a known token file.
+  Git reads use this same list. The names are `id_rsa`, `id_ed25519`,
+  `id_ecdsa`, `id_dsa`, `.netrc`, `.npmrc`, `.pypirc`,
+  `.git-credentials`, `admin-token`, `github.token`, `auth.json`,
+  `cookies`, a basename that starts with `credentials`, anything under
+  `.aws`, `.ssh`, `.docker`, or `.kube`, `.config/git/credentials`,
+  `hosts.yml` under a `gh` directory, `.env`, and `.env.*` other than
+  `.env.example`, `.env.sample`, and `.env.template`
 
 These ask and are not a hard deny: `gh auth status` (including `-t` and
 `--show-token`), `gh auth login --with-token`, `gh secret list`,

@@ -59,6 +59,11 @@ func (f flagSet) ok(args []string) ([]string, bool) {
 			continue
 		}
 		if _, ok := f.vals[name]; ok {
+			// Git takes an optional argument only when it is attached
+			// (`--pretty=oneline`, `-uall`). The next word is not the value.
+			if gitOptionalValue(name) {
+				continue
+			}
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				i++
 			}

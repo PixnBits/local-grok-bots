@@ -223,19 +223,33 @@ func ceilingCredentialPath(p string) bool {
 	return ceilingTokenFile(p)
 }
 
-// ceilingTokenFile is the exact token-file list. A basename match is
-// enough for the key names and the dotfiles. hosts.yml counts only under
-// a gh directory. .env.example, .env.sample, and .env.template do not.
-// *.pem and *.key do not. Those ask through the path class.
+// ceilingTokenFile is the one credential-name list. ceilingCredentialPath
+// and git reads both use it. A basename match is enough for the key names
+// and the dotfiles. hosts.yml counts only under a gh directory.
+// .env.example, .env.sample, and .env.template do not. *.pem and *.key do
+// not. Those ask through the path class or through gitSecretReadPath.
 func ceilingTokenFile(p string) bool {
 	t := strings.ReplaceAll(strings.TrimSpace(p), `\`, "/")
 	if t == "" {
 		return false
 	}
+	low := strings.ToLower(t)
 	base := strings.ToLower(pathBase(t))
 	switch base {
-	case ".git-credentials", ".netrc", "admin-token", "github.token",
+	case ".git-credentials", ".netrc", ".npmrc", ".pypirc",
+		"admin-token", "github.token", "auth.json",
 		"id_rsa", "id_ed25519", "id_ecdsa", "id_dsa":
+		return true
+	}
+	if base == "cookies" || strings.HasPrefix(base, "cookies.") {
+		return true
+	}
+	// credentials* covers credentials, credentials.json, and credentials.txt.
+	if base == ".credentials" || strings.HasPrefix(base, "credentials") {
+		return true
+	}
+	if credentialSegment(low, ".aws") || credentialSegment(low, ".ssh") ||
+		credentialSegment(low, ".docker") || credentialSegment(low, ".kube") {
 		return true
 	}
 	if base == ".env" {
@@ -249,11 +263,18 @@ func ceilingTokenFile(p string) bool {
 			return true
 		}
 	}
-	low := strings.ToLower(t)
 	if base == "hosts.yml" || base == "hosts.yaml" {
 		return strings.Contains(low, "/gh/") || strings.HasPrefix(low, "gh/")
 	}
 	return strings.HasSuffix(low, "/.config/git/credentials") || low == ".config/git/credentials"
+}
+
+// credentialSegment is a path segment equal to dir, such as .aws or .kube.
+func credentialSegment(low, dir string) bool {
+	if low == dir || strings.HasPrefix(low, dir+"/") || strings.HasSuffix(low, "/"+dir) {
+		return true
+	}
+	return strings.Contains(low, "/"+dir+"/")
 }
 
 // secretAskPath is material the ceiling must not auto-approve and must

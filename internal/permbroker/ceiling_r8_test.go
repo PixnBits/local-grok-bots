@@ -30,7 +30,7 @@ func TestCeilingGitAllowlist(t *testing.T) {
 		{LevelLow, "git branch -a"},
 		{LevelLow, "git tag --list"},
 		{LevelLow, "git remote"},
-		{LevelLow, "git remote -v"},
+		// r9 SHOULD-5: `git remote -v` prints remote URLs, so it asks.
 		{LevelLow, "git describe --tags"},
 		{LevelLow, "git blame README"},
 		{LevelMedium, "git add README"},
@@ -67,6 +67,8 @@ func TestCeilingGitAllowlist(t *testing.T) {
 		"git stash list",
 		"git checkout main",
 		"git remote add origin https://example.invalid/x.git",
+		// r9 SHOULD-5: verbose remote output is no longer low-allowed.
+		"git remote -v",
 		"git diff --stat -- .env",
 		"git show HEAD:.env",
 		"git show --stat HEAD:.env",
