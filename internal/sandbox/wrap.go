@@ -166,6 +166,8 @@ if [ "$bridge" = 1 ]; then
 else
   export GIT_ALLOW_PROTOCOL=https:ssh
 fi
+allow_file=0
+pfile=never
 sub=
 prev=
 for arg in "$@"; do
@@ -208,6 +210,120 @@ say_deny() {
   deny_allow "$1"
   exit 1
 }
+say_file() {
+  echo "git ${sub} denied: local path is outside the workspace" >&2
+  printf '%s\n' "deny git ${sub}" >> "$log"
+  exit 1
+}
+clean_abs() {
+  p=$1
+  case "$p" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  out=
+  rest=$p
+  while [ -n "$rest" ]; do
+    rest=${rest#/}
+    seg=${rest%%/*}
+    if [ "$rest" = "$seg" ]; then
+      rest=
+    else
+      rest=${rest#*/}
+    fi
+    if [ -z "$seg" ] || [ "$seg" = "." ]; then
+      continue
+    fi
+    if [ "$seg" = ".." ]; then
+      return 1
+    fi
+    out=$out/$seg
+  done
+  if [ -z "$out" ]; then
+    out=/
+  fi
+  printf '%s' "$out"
+}
+inside_work() {
+  case "$1" in
+    /work|/work/*) return 0 ;;
+  esac
+  return 1
+}
+phys_inside() {
+  target=$1
+  depth=$2
+  if [ -z "$depth" ]; then
+    depth=0
+  fi
+  if [ "$depth" -gt 8 ]; then
+    return 1
+  fi
+  if [ ! -d /work ]; then
+    return 0
+  fi
+  if [ -L "$target" ]; then
+    dest=$(readlink "$target") || return 1
+    case "$dest" in
+      /*) ;;
+      *) dest=$(dirname "$target")/$dest ;;
+    esac
+    cleaned=$(clean_abs "$dest") || return 1
+    inside_work "$cleaned" || return 1
+    phys_inside "$cleaned" $((depth + 1))
+    return $?
+  fi
+  dir=$target
+  if [ ! -d "$target" ]; then
+    if [ -e "$target" ]; then
+      dir=$(dirname "$target")
+    else
+      while [ ! -d "$dir" ] && [ "$dir" != / ]; do
+        dir=$(dirname "$dir")
+      done
+    fi
+  fi
+  phys=$(cd "$dir" && pwd -P) || return 1
+  inside_work "$phys" || return 1
+  return 0
+}
+file_url_path() {
+  raw=$1
+  prefix=$(printf '%s' "$raw" | cut -c 1-7 | tr '[:upper:]' '[:lower:]') || return 1
+  if [ "$prefix" != "file://" ]; then
+    return 1
+  fi
+  rest=$(printf '%s' "$raw" | cut -c 8-) || return 1
+  case "$rest" in
+    /*)
+      printf '%s' "$rest"
+      return 0
+      ;;
+  esac
+  case "$rest" in
+    */*) ;;
+    *) return 1 ;;
+  esac
+  host=$(printf '%s' "${rest%%/*}" | tr '[:upper:]' '[:lower:]') || return 1
+  if [ "$host" != "localhost" ]; then
+    return 1
+  fi
+  printf '%s' "/${rest#*/}"
+}
+accept_local() {
+  cleaned=$(clean_abs "$1") || say_file
+  inside_work "$cleaned" || say_file
+  phys_inside "$cleaned" || say_file
+  allow_file=1
+}
+scan_urls() {
+  for arg in "$@"; do
+    prefix=$(printf '%s' "$arg" | cut -c 1-7 | tr '[:upper:]' '[:lower:]') || say_file
+    if [ "$prefix" = "file://" ]; then
+      vet "$arg"
+    fi
+  done
+}
 vet() {
   case "$1" in
     *"$nl"*)
@@ -216,12 +332,31 @@ vet() {
   esac
   folded=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || say_deny "$1"
   case "$folded" in
-    ""|file://*)
+    "")
+      return 0
+      ;;
+    file://*)
+      pth=$(file_url_path "$1") || say_file
+      accept_local "$pth"
       return 0
       ;;
 @@REPOS@@
     *://*|git@*)
       say_deny "$1"
+      ;;
+  esac
+  case "$1" in
+    /*)
+      accept_local "$1"
+      return 0
+      ;;
+    ./*|../*|..|*/..|*/../*)
+      case "$PWD" in
+        /work|/work/*) ;;
+        *) say_file ;;
+      esac
+      accept_local "$PWD/$1"
+      return 0
       ;;
   esac
   return 0
@@ -232,7 +367,7 @@ resolve_remote() {
     ""|-*)
       return
       ;;
-    *://*|git@*|file://*|/*|./*|../*)
+    *://*|git@*|file://*|/*|./*|../*|..|*/..|*/../*)
       vet "$name"
       found_url=1
       return
@@ -276,6 +411,13 @@ ensure_bridge() {
   return 0
 }
 run() {
+  if [ "$allow_file" = 1 ]; then
+    GIT_ALLOW_PROTOCOL="${GIT_ALLOW_PROTOCOL}:file"
+    export GIT_ALLOW_PROTOCOL
+    pfile=always
+  else
+    pfile=never
+  fi
   if [ "$sub" = diff ] || [ "$sub" = log ] || [ "$sub" = show ]; then
     if [ -x /bin/bash ]; then
       exec /bin/bash --norc --noprofile -c '
@@ -315,7 +457,7 @@ for arg in "$@"; do
     ins=1
   fi
 done
-cargs=(-c user.name="$name" -c user.email="$email" -c commit.gpgsign=false -c core.sshCommand=/bin/false -c core.hooksPath=/dev/null -c diff.external= -c core.pager=cat -c core.fsmonitor= -c core.fsmonitorHookVersion=)
+cargs=(-c user.name="$name" -c user.email="$email" -c commit.gpgsign=false -c core.sshCommand=/bin/false -c core.hooksPath=/dev/null -c protocol.file.allow=never -c diff.external= -c core.pager=cat -c core.fsmonitor= -c core.fsmonitorHookVersion=)
 if [ -n "$port" ]; then
   exec "$real" "${cargs[@]}" -c http.proxy= -c "url.http://127.0.0.1:${port}/github/.insteadOf=https://github.com/" -c "url.http://127.0.0.1:${port}/api/.insteadOf=https://api.github.com/" "${args[@]}"
 fi
@@ -334,6 +476,7 @@ exec "$real" "${cargs[@]}" "${args[@]}"
       -c core.pager=cat \
       -c core.fsmonitor= \
       -c core.fsmonitorHookVersion= \
+      -c protocol.file.allow="$pfile" \
       -c http.proxy= \
       -c "url.http://127.0.0.1:${GHPORT}/github/.insteadOf=https://github.com/" \
       -c "url.http://127.0.0.1:${GHPORT}/api/.insteadOf=https://api.github.com/" \
@@ -349,8 +492,10 @@ exec "$real" "${cargs[@]}" "${args[@]}"
     -c core.pager=cat \
     -c core.fsmonitor= \
     -c core.fsmonitorHookVersion= \
+    -c protocol.file.allow="$pfile" \
     "$@"
 }
+scan_urls "$@"
 case "$sub" in
   ""|status|diff|log|show|rev-parse|blame|ls-files|grep|version|help|describe|name-rev|cat-file|shortlog|var)
     run "$@"
@@ -384,7 +529,7 @@ if [ "$sub" = "push" ]; then
   exit $?
 fi
 case "$sub" in
-  clone|fetch|pull|ls-remote|remote)
+  clone|fetch|pull|ls-remote|remote|submodule)
     prev=
     seen_sub=
     for arg in "$@"; do
@@ -409,7 +554,7 @@ case "$sub" in
         continue
       fi
       case "$arg" in
-        *://*|git@*)
+        *://*|git@*|file://*|/*|./*|../*|..|*/..|*/../*)
           vet "$arg"
           found_url=1
           ;;

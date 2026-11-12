@@ -68,13 +68,21 @@ func TestCheckHookBinaryParents(t *testing.T) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	tmp, err := os.CreateTemp("", "lgb-hook-tmp-*")
+	// Do not assume the system temp dir is group/world writable; jail /tmp is often 0700.
+	tmpDir, err := os.MkdirTemp("", "lgb-hook-tmpdir-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
+	if err := os.Chmod(tmpDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	tmp, err := os.CreateTemp(tmpDir, "lgb-hook-tmp-*")
 	if err != nil {
 		t.Fatal(err)
 	}
 	tmpPath := tmp.Name()
 	tmp.Close()
-	t.Cleanup(func() { _ = os.Remove(tmpPath) })
 	if err := os.Chmod(tmpPath, 0o755); err != nil {
 		t.Fatal(err)
 	}

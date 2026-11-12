@@ -310,7 +310,7 @@ func ceilingCandRefused(e *Engine, c ceilingCand, cwd, ws, realWS string) bool {
 	}
 	// An allowlisted git read that does not print file content may name
 	// a secret path. git log without -p is the case: subjects only.
-	namesOnly := len(c.argv) > 0 && readOnlyArgv(c.argv) && ceilingGitPermit(c.argv) && !gitSecretRead(c.argv)
+	namesOnly := len(c.argv) > 0 && readOnlyArgv(c.argv) && ceilingGitPermit(c.argv, cwd, ws) && !gitSecretRead(c.argv)
 	if !namesOnly && (secretAskPath(spelled) || secretAskPath(resolved)) {
 		return true
 	}

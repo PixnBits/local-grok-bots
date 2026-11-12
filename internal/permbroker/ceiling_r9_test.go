@@ -43,10 +43,10 @@ func TestR9Fix1_OptionalValue(t *testing.T) {
 	if len(pos) != 1 || pos[0] != "HEAD:.env" {
 		t.Fatalf("positionals %#v", pos)
 	}
-	if ceilingGitPermit([]string{"git", "show", "--pretty", "HEAD:.env", "--stat"}) {
+	if ceilingGitPermit([]string{"git", "show", "--pretty", "HEAD:.env", "--stat"}, "", "") {
 		t.Fatal("show shape swallowed HEAD:.env")
 	}
-	if ceilingGitPermit([]string{"git", "describe", "--abbrev", "HEAD:.env"}) {
+	if ceilingGitPermit([]string{"git", "describe", "--abbrev", "HEAD:.env"}, "", "") {
 		t.Fatal("describe swallowed HEAD:.env")
 	}
 	asks := []string{
@@ -82,11 +82,13 @@ func TestR9Fix1_OptionalValue(t *testing.T) {
 	r9Allow(t, ws, LevelLow, "git describe --match 'v*' --always")
 }
 
-// TestR9Fix2_ShowCommitish pins show to plain commit-ish objects.
-// A hex id is not checked with git cat-file. The broker does not run git.
+// TestR9Fix2_ShowCommitish pins show to confirmed commits.
+// A hex id is not checked with git. HEAD-relative forms do not need git.
+// A branch name is allowed only when the repository says it is a commit.
 // Bare `git show HEAD` stays an ask because it prints the patch.
 func TestR9Fix2_ShowCommitish(t *testing.T) {
 	ws := r9Repo(t)
+	gitInitMain(t, ws)
 	blob := "e9aaabc9e1bc61bd99aa4617cf6ac4d72dd64915"
 	if plainCommitish(blob) || plainCommitish("e9aaabc") || plainCommitish("ABCD") {
 		t.Fatal("hex id treated as a commit")
@@ -173,7 +175,7 @@ func TestR9Fix4_SharedSecrets(t *testing.T) {
 		t.Fatal(".env.example must ask for git and must not hard-deny")
 	}
 	rule, ok := ceilingGitLookup("blame")
-	if !ok || blameShape([]string{".env.example"}, rule) {
+	if !ok || blameShape([]string{".env.example"}, rule, "", "") {
 		t.Fatal("blameShape allowed .env.example")
 	}
 	for _, name := range names {
@@ -286,7 +288,7 @@ func TestR9Fix6a_BranchVerbose(t *testing.T) {
 func TestR9Fix6b_FormatGPG(t *testing.T) {
 	ws := r9Repo(t)
 	rule, ok := ceilingGitLookup("log")
-	if !ok || logShape([]string{"--pretty=format:%GG"}, rule) {
+	if !ok || logShape([]string{"--pretty=format:%GG"}, rule, "", "") {
 		t.Fatal("log allowed a G placeholder")
 	}
 	for _, cmd := range []string{

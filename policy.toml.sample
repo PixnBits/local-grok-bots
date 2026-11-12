@@ -310,6 +310,20 @@ conflict_policy = "refuse"
 # author_name = "ci-bot"
 # author_email = "{name}@users.noreply"
 
+# [sandbox]
+# Go toolchain for the shell jail. Managed policy sets the ceiling.
+# This file can only narrow it. Cache directories are not keys: each bot
+# gets DATA_DIR/bots/<bot>/go/mod and go/cache, outside the git workspace.
+# Defaults when a key is omitted: goproxy = "off", gotoolchain = "local",
+# and empty goflags. GOSUMDB is off with those defaults, including when a
+# proxy list is narrowed, so the checksum database is not contacted.
+# off is the tightest proxy. local is the tightest toolchain.
+# A wider local value is ignored and warned. Default net_allow does not
+# gain proxy.golang.org, sum.golang.org, or storage.googleapis.com.
+# goproxy = "off"
+# gotoolchain = "local"
+# goflags = ""
+
 [managed]
 # Path where server-managed or MDM-delivered policy is read from.
 # Managed settings always override this file.

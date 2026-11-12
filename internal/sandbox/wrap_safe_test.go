@@ -18,11 +18,15 @@ func TestGitWrapForcesSafeConfig(t *testing.T) {
 		"--no-ext-diff",
 		"--no-textconv",
 		"core.hooksPath=/dev/null",
+		"protocol.file.allow=never",
 		"unset SSH_AUTH_SOCK http_proxy https_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY no_proxy",
 	} {
 		if !strings.Contains(script, needle) {
 			t.Fatalf("missing %s", needle)
 		}
+	}
+	if strings.Contains(script, `""|file://*)`) {
+		t.Fatal("file URL is still a blanket allow")
 	}
 	path := filepath.Join(t.TempDir(), "gitwrap")
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
@@ -133,6 +137,36 @@ func TestGitWrapBridgeDown(t *testing.T) {
 	text = runGitWrap(t, script, "clone", "https://github.com/other/nope.git", "dest")
 	if !strings.Contains(text, RepoNotAvailable) || strings.Contains(text, GitHubBridgeDown) {
 		t.Fatalf("off-list bridge: %s", text)
+	}
+}
+
+func TestGitWrapFileRemoteStaysInWorkspace(t *testing.T) {
+	script := gitWrap(gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost"})
+	outside := "local path is outside the workspace"
+	for _, args := range [][]string{
+		{"clone", "file:///etc/passwd", "dest"},
+		{"clone", "FILE:///etc/passwd", "dest"},
+		{"clone", "file:///work/../etc/passwd", "dest"},
+		{"clone", "file://localhost/etc/passwd", "dest"},
+		{"clone", "file://otherhost/work/repo", "dest"},
+		{"clone", "/etc/passwd", "dest"},
+		{"submodule", "add", "file:///etc/passwd"},
+	} {
+		text := runGitWrap(t, script, args...)
+		if !strings.Contains(text, outside) {
+			t.Fatalf("%v: %s", args, text)
+		}
+	}
+	for _, args := range [][]string{
+		{"clone", "file:///work/fixture", "dest"},
+		{"clone", "file://localhost/work/fixture", "dest"},
+		{"clone", "/work/fixture", "dest"},
+		{"submodule", "add", "file:///work/fixture"},
+	} {
+		text := runGitWrap(t, script, args...)
+		if strings.Contains(text, outside) {
+			t.Fatalf("%v: %s", args, text)
+		}
 	}
 }
 

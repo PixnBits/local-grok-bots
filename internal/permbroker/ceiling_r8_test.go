@@ -102,13 +102,13 @@ func TestCeilingGitAllowlistUnits(t *testing.T) {
 			t.Fatalf("%s is not always-ask", sub)
 		}
 	}
-	if ceilingGitPermit([]string{"git", "version"}) {
+	if ceilingGitPermit([]string{"git", "version"}, "", "") {
 		t.Fatal("version permitted")
 	}
-	if ceilingGitPermit([]string{"git", "apply", "p.patch"}) {
+	if ceilingGitPermit([]string{"git", "apply", "p.patch"}, "", "") {
 		t.Fatal("apply permitted")
 	}
-	if !ceilingGitPermit([]string{"git", "status"}) {
+	if !ceilingGitPermit([]string{"git", "status"}, "", "") {
 		t.Fatal("status refused")
 	}
 	if !gitSecretRead([]string{"git", "cat-file", "-p", "HEAD:.env"}) {

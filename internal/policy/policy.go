@@ -278,6 +278,24 @@ type Policy struct {
 	// AllowInsecureLAN lets a non-loopback listener use plain HTTP.
 	// It is fixed at startup. The default is false.
 	AllowInsecureLAN bool
+	// Go toolchain settings for the shell jail. Managed policy sets them.
+	// Local policy can only narrow them. Cache paths are not policy keys.
+	GoProxy           string
+	GoToolchain       string
+	GoFlags           string
+	GoSumDB           string
+	goProxyManaged    string
+	goProxyLocal      string
+	goProxyManagedSet bool
+	goProxyLocalSet   bool
+	goToolManaged     string
+	goToolLocal       string
+	goToolManagedSet  bool
+	goToolLocalSet    bool
+	goFlagsManaged    string
+	goFlagsLocal      string
+	goFlagsManagedSet bool
+	goFlagsLocalSet   bool
 
 	managedBind  bool
 	managedHost  bool
@@ -384,6 +402,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 		p.finishEgressPorts()
 		p.finishServerTools()
 		p.finishGitHub()
+		p.finishGoEnv()
 		p.dropIncompleteCLI()
 		p.warnClampedCeilings()
 		return p, nil
@@ -437,6 +456,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 	base.finishEgressPorts()
 	base.finishServerTools()
 	base.finishGitHub()
+	base.finishGoEnv()
 	base.dropIncompleteCLI()
 	base.warnClampedCeilings()
 	return base, nil
@@ -1576,6 +1596,15 @@ type document struct {
 	Tools    toolsDoc    `toml:"tools" json:"tools"`
 	GitHub   *githubDoc  `toml:"github" json:"github"`
 	Voice    voiceDoc    `toml:"voice" json:"voice"`
+	Sandbox  *sandboxDoc `toml:"sandbox" json:"sandbox"`
+}
+
+// sandboxDoc is [sandbox]. Cache directories are not keys.
+// Local policy can only narrow goproxy, gotoolchain, and goflags.
+type sandboxDoc struct {
+	GoProxy     *string `toml:"goproxy" json:"goproxy"`
+	GoToolchain *string `toml:"gotoolchain" json:"gotoolchain"`
+	GoFlags     *string `toml:"goflags" json:"goflags"`
 }
 
 type daemonDoc struct {
@@ -2060,6 +2089,9 @@ func (p *Policy) apply(doc document, trusted bool) error {
 		return err
 	}
 	if err := p.applyVoiceCeilings(doc.Managed, trusted); err != nil {
+		return err
+	}
+	if err := p.applySandbox(doc.Sandbox, trusted); err != nil {
 		return err
 	}
 	if doc.Managed.Path != nil {

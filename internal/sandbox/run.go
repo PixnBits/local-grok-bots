@@ -73,6 +73,15 @@ type Request struct {
 	// workspace root. The Linux jail uses it as bwrap --chdir /work/<rel>
 	// (the unshare fallback chdirs there). It is not a shell cd prefix.
 	Chdir string
+	// BotGoRoot is the bot's data directory on the host. Go caches are
+	// created under it when the path stays outside the workspace.
+	// GoProxy, GoToolchain, and GoFlags are the already-narrowed policy
+	// values. Empty uses GOPROXY=off, GOTOOLCHAIN=local, and no GOFLAGS.
+	BotGoRoot   string
+	GoProxy     string
+	GoToolchain string
+	GoFlags     string
+	GoSumDB     string
 }
 
 // Result is the captured output and the grant events for this command.
@@ -127,6 +136,9 @@ type prepared struct {
 	before    *treeSnap
 	extra     []Event
 	grants    map[string]bool
+	// goLines is the toolchain environment. Darwin launch reads it because
+	// it does not use env. Linux copies the same lines into env.
+	goLines []string
 }
 
 // attachShellEgress starts the in-jail HTTP proxy when the net grant is on.
@@ -460,6 +472,9 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 	}
 	if p.cleanBash {
 		p.env = dropEnvKeys(p.env, "BASH_ENV", "ENV")
+	}
+	if err := applyJailGoEnv(p, req, ws, rw); err != nil {
+		return nil, err
 	}
 	if p.proxy != nil {
 		p.env = append(p.env,

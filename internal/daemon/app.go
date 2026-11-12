@@ -640,6 +640,9 @@ func (a *App) log(botID, kind string, detail any) {
 	if kind == "sandbox_block" {
 		a.auditSandboxBlock(botID, detail)
 	}
+	if kind == "jail_go_env" {
+		a.auditJailGoEnv(botID, detail)
+	}
 }
 
 // clipASCII keeps bytes in 0x20–0x7E and then cuts to 256 bytes.
@@ -691,6 +694,23 @@ func (a *App) auditSandboxBlock(botID string, detail any) {
 	}
 	if d := sandboxBlockDetail(detail); d != "" {
 		rec["detail"] = d
+	}
+	a.audit.Write(rec)
+}
+
+// auditJailGoEnv mirrors the toolchain environment into the audit log.
+// The row is the effective values only. It has no notice text.
+func (a *App) auditJailGoEnv(botID string, detail any) {
+	if a == nil || a.audit == nil || !a.audit.Enabled() {
+		return
+	}
+	text := sandboxBlockDetail(detail)
+	if text == "" {
+		return
+	}
+	rec := map[string]any{"action": "jail_go_env", "detail": text}
+	if botID != "" {
+		rec["bot_id"] = botID
 	}
 	a.audit.Write(rec)
 }

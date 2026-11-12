@@ -65,7 +65,7 @@ func (e *Engine) ceilingMatch(req Request, in inspected) (Level, bool) {
 	if !e.ceilingRequestEligible(req, in) {
 		return "", false
 	}
-	level := ceilingDecisionLevel(in)
+	level := ceilingDecisionLevel(in, req.Cwd, req.Workspace)
 	if !ceilingCovers(level, ceiling) {
 		return "", false
 	}
@@ -84,7 +84,7 @@ func (e *Engine) ceilingRequestEligible(req Request, in inspected) bool {
 
 func (e *Engine) ceilingShellEligible(req Request, in inspected) bool {
 	if ceilingGitInvocation(in) {
-		if in.Compound || !ceilingGitPermitted(in) {
+		if in.Compound || !ceilingGitPermitted(in, req.Cwd, req.Workspace) {
 			return false
 		}
 		if in.ParseReason == "state" && !isRemoteList(in.Argv) {
