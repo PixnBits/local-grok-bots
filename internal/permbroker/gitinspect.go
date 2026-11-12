@@ -59,16 +59,7 @@ func gitCommitObject(ws, name string) bool {
 	defer os.RemoveAll(hooks)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, gitBin,
-		"-C", ws,
-		"--git-dir", gitDir,
-		"-c", "core.hooksPath="+hooks,
-		"-c", "core.pager=cat",
-		"-c", "diff.external=",
-		"-c", "diff.textconv=",
-		"-c", "alias.cat-file=",
-		"cat-file", "-t", "--", name+"^{commit}",
-	)
+	cmd := exec.CommandContext(ctx, gitBin, gitInspectArgs(ws, gitDir, hooks, name)...)
 	cmd.Env = gitInspectEnv()
 	cmd.Dir = ws
 	out, err := cmd.Output()
@@ -82,8 +73,26 @@ func gitCommitObject(ws, name string) bool {
 	return true
 }
 
+// gitInspectArgs is the read-only cat-file invocation. protocol.allow=never
+// and core.sshCommand keep a partial clone from starting a transport.
+func gitInspectArgs(ws, gitDir, hooks, name string) []string {
+	return []string{
+		"-C", ws,
+		"--git-dir", gitDir,
+		"-c", "protocol.allow=never",
+		"-c", "core.sshCommand=/bin/false",
+		"-c", "core.hooksPath=" + hooks,
+		"-c", "core.pager=cat",
+		"-c", "diff.external=",
+		"-c", "diff.textconv=",
+		"-c", "alias.cat-file=",
+		"cat-file", "-t", "--", name + "^{commit}",
+	}
+}
+
 // gitInspectEnv is a fresh environment. Repository hooks and inherited
-// diff or textconv settings are not passed through.
+// diff or textconv settings are not passed through. Lazy fetch and
+// transports are off.
 func gitInspectEnv() []string {
 	path := os.Getenv("PATH")
 	if path == "" {
@@ -97,6 +106,8 @@ func gitInspectEnv() []string {
 		"GIT_CONFIG_NOSYSTEM=1",
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_OPTIONAL_LOCKS=0",
+		"GIT_NO_LAZY_FETCH=1",
+		"GIT_ALLOW_PROTOCOL=",
 		"GIT_PAGER=cat",
 		"PAGER=cat",
 		"LANG=C",

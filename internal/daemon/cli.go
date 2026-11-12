@@ -1255,6 +1255,11 @@ func (a *App) shellProtectBot(botID string) []string {
 	for _, p := range pathForms(a.cfg.DataDir) {
 		add(p)
 	}
+	if a.dataDirGiven != "" {
+		for _, p := range pathForms(a.dataDirGiven) {
+			add(p)
+		}
+	}
 	return out
 }
 

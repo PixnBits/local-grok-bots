@@ -168,6 +168,7 @@ else
 fi
 allow_file=0
 pfile=never
+vet_base=$PWD
 sub=
 prev=
 for arg in "$@"; do
@@ -214,6 +215,69 @@ say_file() {
   echo "git ${sub} denied: local path is outside the workspace" >&2
   printf '%s\n' "deny git ${sub}" >> "$log"
   exit 1
+}
+say_config() {
+  echo "git ${sub} denied: configuration is not allowed" >&2
+  printf '%s\n' "deny git ${sub}" >> "$log"
+  exit 1
+}
+# Refuse a config assignment whose key rewrites URLs.
+url_assign() {
+  folded=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || say_config
+  key=${folded%%=*}
+  case "$key" in
+    url.*) say_config ;;
+  esac
+}
+# Record -C as the base for a relative path, and refuse url rewrites.
+scan_global() {
+  prev=
+  base=$PWD
+  for arg in "$@"; do
+    if [ -n "$prev" ]; then
+      case "$prev" in
+        C)
+          case "$arg" in
+            /*) base=$arg ;;
+            *) base=$base/$arg ;;
+          esac
+          ;;
+        c|env)
+          url_assign "$arg"
+          ;;
+      esac
+      prev=
+      continue
+    fi
+    case "$arg" in
+      -C)
+        prev=C
+        ;;
+      -c)
+        prev=c
+        ;;
+      -c*)
+        url_assign "${arg#-c}"
+        ;;
+      --config-env)
+        prev=env
+        ;;
+      --config-env=*)
+        url_assign "${arg#--config-env=}"
+        ;;
+      --git-dir|--work-tree|--namespace|--super-prefix|--exec-path)
+        prev=x
+        ;;
+      --)
+        ;;
+      -*)
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+  vet_base=$base
 }
 clean_abs() {
   p=$1
@@ -287,6 +351,56 @@ phys_inside() {
   inside_work "$phys" || return 1
   return 0
 }
+# Percent-decode one path. Git decodes a file URL before opening it.
+# A short or non-hex escape, a NUL, or a newline is refused.
+pct_decode() {
+  s=$1
+  out=
+  while [ -n "$s" ]; do
+    c=${s%"${s#?}"}
+    rest=${s#?}
+    if [ "$c" = "%" ]; then
+      h1=${rest%"${rest#?}"}
+      rest=${rest#?}
+      h2=${rest%"${rest#?}"}
+      rest=${rest#?}
+      hex=$h1$h2
+      case "$hex" in
+        [0-9A-Fa-f][0-9A-Fa-f]) ;;
+        *) return 1 ;;
+      esac
+      dec=$((0x$hex)) || return 1
+      if [ "$dec" -eq 0 ] || [ "$dec" -eq 10 ] || [ "$dec" -eq 13 ]; then
+        return 1
+      fi
+      oct=$(printf '%03o' "$dec")
+      ch=$(printf "\\$oct")
+      out=$out$ch
+      s=$rest
+    else
+      out=$out$c
+      s=$rest
+    fi
+  done
+  printf '%s' "$out"
+}
+# Refuse a ".." path segment. This runs on the decoded path.
+reject_dotdot() {
+  rest=$1
+  while [ -n "$rest" ]; do
+    rest=${rest#/}
+    seg=${rest%%/*}
+    if [ "$rest" = "$seg" ]; then
+      rest=
+    else
+      rest=${rest#*/}
+    fi
+    if [ "$seg" = ".." ]; then
+      return 1
+    fi
+  done
+  return 0
+}
 file_url_path() {
   raw=$1
   prefix=$(printf '%s' "$raw" | cut -c 1-7 | tr '[:upper:]' '[:lower:]') || return 1
@@ -296,19 +410,23 @@ file_url_path() {
   rest=$(printf '%s' "$raw" | cut -c 8-) || return 1
   case "$rest" in
     /*)
-      printf '%s' "$rest"
-      return 0
+      path=$rest
+      ;;
+    *)
+      case "$rest" in
+        */*) ;;
+        *) return 1 ;;
+      esac
+      host=$(printf '%s' "${rest%%/*}" | tr '[:upper:]' '[:lower:]') || return 1
+      if [ "$host" != "localhost" ]; then
+        return 1
+      fi
+      path="/${rest#*/}"
       ;;
   esac
-  case "$rest" in
-    */*) ;;
-    *) return 1 ;;
-  esac
-  host=$(printf '%s' "${rest%%/*}" | tr '[:upper:]' '[:lower:]') || return 1
-  if [ "$host" != "localhost" ]; then
-    return 1
-  fi
-  printf '%s' "/${rest#*/}"
+  decoded=$(pct_decode "$path") || return 1
+  reject_dotdot "$decoded" || return 1
+  printf '%s' "$decoded"
 }
 accept_local() {
   cleaned=$(clean_abs "$1") || say_file
@@ -350,16 +468,22 @@ vet() {
       accept_local "$1"
       return 0
       ;;
-    ./*|../*|..|*/..|*/../*)
-      case "$PWD" in
-        /work|/work/*) ;;
-        *) say_file ;;
-      esac
-      accept_local "$PWD/$1"
+    ./*|../*|..|*/..|*/../*|*/*|.)
+      vet_local "$1"
       return 0
       ;;
   esac
   return 0
+}
+vet_local() {
+  case "$1" in
+    /*)
+      accept_local "$1"
+      ;;
+    *)
+      accept_local "$vet_base/$1"
+      ;;
+  esac
 }
 resolve_remote() {
   name=$1
@@ -367,7 +491,7 @@ resolve_remote() {
     ""|-*)
       return
       ;;
-    *://*|git@*|file://*|/*|./*|../*|..|*/..|*/../*)
+    *://*|git@*|file://*|/*|./*|../*|..|*/..|*/../*|*/*|.)
       vet "$name"
       found_url=1
       return
@@ -495,6 +619,7 @@ exec "$real" "${cargs[@]}" "${args[@]}"
     -c protocol.file.allow="$pfile" \
     "$@"
 }
+scan_global "$@"
 scan_urls "$@"
 case "$sub" in
   ""|status|diff|log|show|rev-parse|blame|ls-files|grep|version|help|describe|name-rev|cat-file|shortlog|var)
@@ -534,11 +659,38 @@ case "$sub" in
     seen_sub=
     for arg in "$@"; do
       if [ -n "$prev" ]; then
+        if [ "$prev" = cfg ]; then
+          url_assign "$arg"
+        fi
         prev=
         continue
       fi
       case "$arg" in
-        -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path|--upload-pack|--depth|--branch|-b|-o|--origin|--reference|--separate-git-dir|--template|--config|--server-option)
+        --recurse-submodules|--recurse-submodules=*|--recursive|--shallow-submodules)
+          if [ "$sub" = clone ] || [ "$sub" = fetch ] || [ "$sub" = pull ]; then
+            echo "git ${sub} denied: submodule path is outside the workspace" >&2
+            printf '%s\n' "deny git ${sub}" >> "$log"
+            exit 1
+          fi
+          continue
+          ;;
+        -c|--config|--config-env)
+          prev=cfg
+          continue
+          ;;
+        -c*)
+          url_assign "${arg#-c}"
+          continue
+          ;;
+        --config=*)
+          url_assign "${arg#--config=}"
+          continue
+          ;;
+        --config-env=*)
+          url_assign "${arg#--config-env=}"
+          continue
+          ;;
+        -C|--git-dir|--work-tree|--namespace|--super-prefix|--exec-path|--upload-pack|--depth|--branch|-b|-o|--origin|--reference|--separate-git-dir|--template|--server-option)
           prev=1
           continue
           ;;
@@ -554,12 +706,15 @@ case "$sub" in
         continue
       fi
       case "$arg" in
-        *://*|git@*|file://*|/*|./*|../*|..|*/..|*/../*)
+        *://*|git@*|file://*|/*|./*|../*|..|*/..|*/../*|*/*|.)
           vet "$arg"
           found_url=1
           ;;
         *)
-          if [ -z "$pos" ]; then
+          if [ "$sub" = clone ] && [ "$found_url" = "0" ]; then
+            vet_local "$arg"
+            found_url=1
+          elif [ -z "$pos" ]; then
             pos=$arg
           fi
           ;;

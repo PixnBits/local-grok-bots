@@ -476,6 +476,9 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 	if err := applyJailGoEnv(p, req, ws, rw); err != nil {
 		return nil, err
 	}
+	if err := installGoWrap(p, ro, rw, req); err != nil {
+		return nil, err
+	}
 	if p.proxy != nil {
 		p.env = append(p.env,
 			"LD_PRELOAD=/lgb/preload.so",

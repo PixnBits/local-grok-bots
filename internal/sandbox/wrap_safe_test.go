@@ -147,6 +147,15 @@ func TestGitWrapFileRemoteStaysInWorkspace(t *testing.T) {
 		{"clone", "file:///etc/passwd", "dest"},
 		{"clone", "FILE:///etc/passwd", "dest"},
 		{"clone", "file:///work/../etc/passwd", "dest"},
+		{"clone", "file:///work/%2e%2e/etc/passwd", "dest"},
+		{"clone", "file:///work/%2E%2E/etc/passwd", "dest"},
+		{"clone", "FILE:///work/%2e%2e/etc/passwd", "dest"},
+		{"clone", "file:///work/..%2fetc/passwd", "dest"},
+		{"clone", "file:///work/ok%2f..%2f..%2fetc/passwd", "dest"},
+		{"clone", "file:///work/a%00b", "dest"},
+		{"clone", "file:///work/%", "dest"},
+		{"clone", "file:///work/%2", "dest"},
+		{"clone", "file:///work/%zz", "dest"},
 		{"clone", "file://localhost/etc/passwd", "dest"},
 		{"clone", "file://otherhost/work/repo", "dest"},
 		{"clone", "/etc/passwd", "dest"},
@@ -160,6 +169,10 @@ func TestGitWrapFileRemoteStaysInWorkspace(t *testing.T) {
 	for _, args := range [][]string{
 		{"clone", "file:///work/fixture", "dest"},
 		{"clone", "file://localhost/work/fixture", "dest"},
+		{"clone", "file:///work/%66ixture", "dest"},
+		{"clone", "file:///work/%252e%252e/fixture", "dest"},
+		{"clone", "file:///work/foo..bar", "dest"},
+		{"clone", "file:///work/..hidden", "dest"},
 		{"clone", "/work/fixture", "dest"},
 		{"submodule", "add", "file:///work/fixture"},
 	} {
@@ -168,6 +181,171 @@ func TestGitWrapFileRemoteStaysInWorkspace(t *testing.T) {
 			t.Fatalf("%v: %s", args, text)
 		}
 	}
+}
+
+func TestGitWrapRemoteBase(t *testing.T) {
+	script := gitWrap(gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost"})
+	outside := "local path is outside the workspace"
+	configDenied := "configuration is not allowed"
+	for _, args := range [][]string{
+		{"-C", "/etc", "clone", "passwd"},
+		{"clone", "sub/dir"},
+		{"clone", ".", "dest"},
+	} {
+		text := runGitWrap(t, script, args...)
+		if !strings.Contains(text, outside) {
+			t.Fatalf("%v: %s", args, text)
+		}
+	}
+	for _, args := range [][]string{
+		{"-C", "/work", "clone", "./fixture"},
+		{"-c", "user.name=Ada", "clone", "file:///work/fixture", "dest"},
+		{"clone", "--no-recurse-submodules", "file:///work/fixture", "dest"},
+	} {
+		text := runGitWrap(t, script, args...)
+		if strings.Contains(text, outside) || strings.Contains(text, configDenied) {
+			t.Fatalf("%v: %s", args, text)
+		}
+	}
+	for _, args := range [][]string{
+		{"-c", "url.https://example.com/.insteadOf=file:///etc/passwd", "clone", "file:///work/fixture", "dest"},
+		{"-c", "URL.https://example.com/.insteadOf=file:///etc/passwd", "clone", "file:///work/fixture", "dest"},
+		{"--config-env", "url.x=VAR", "status"},
+		{"--config-env=url.x=VAR", "status"},
+		{"clone", "-c", "url.file:///work/.insteadOf=file:///etc/passwd", "file:///work/fixture", "dest"},
+		{"clone", "--config", "url.file:///work/.insteadOf=file:///etc/passwd", "file:///work/fixture", "dest"},
+		{"clone", "--config=url.file:///work/.insteadOf=file:///etc/passwd", "file:///work/fixture", "dest"},
+	} {
+		text := runGitWrap(t, script, args...)
+		if !strings.Contains(text, configDenied) {
+			t.Fatalf("%v: %s", args, text)
+		}
+	}
+	sub := "submodule path is outside the workspace"
+	for _, flag := range []string{"--recurse-submodules", "--recursive", "--shallow-submodules"} {
+		for _, subcmd := range []string{"clone", "fetch", "pull"} {
+			text := runGitWrap(t, script, subcmd, flag, "file:///work/fixture", "dest")
+			if !strings.Contains(text, sub) {
+				t.Fatalf("%s %s: %s", subcmd, flag, text)
+			}
+		}
+	}
+}
+
+func TestGitWrapSubmoduleStaysInWorkspace(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal("git is not installed")
+	}
+	work := t.TempDir()
+	outside := t.TempDir()
+	parent := filepath.Join(work, "parent")
+	if err := os.Mkdir(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := "outside-marker-content\n"
+	if err := os.WriteFile(filepath.Join(outside, "outside.txt"), []byte(marker), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parent, "parent.txt"), []byte("parent-content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, outside, "init", "-b", "main")
+	gitCmd(t, outside, "add", "--", "outside.txt")
+	gitCmd(t, outside, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "outside")
+	gitCmd(t, parent, "init", "-b", "main")
+	gitCmd(t, parent, "add", "--", "parent.txt")
+	gitCmd(t, parent, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "parent")
+	gitCmd(t, parent, "-c", "protocol.file.allow=always", "-c", "user.name=Test", "-c", "user.email=test@example.com", "submodule", "add", "file://"+outside, "sub")
+	gitCmd(t, parent, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "add sub")
+
+	real, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	real, err = filepath.Abs(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := gitWrap(gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost"})
+	script = strings.ReplaceAll(script, "/lgb/bin/git", real)
+	script = strings.ReplaceAll(script, "/work", work)
+	wrap := filepath.Join(t.TempDir(), "gitwrap")
+	if err := os.WriteFile(wrap, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	dest := filepath.Join(work, "dest")
+	cmd := exec.Command(wrap, "clone", "--recurse-submodules", "file://"+parent, dest)
+	cmd.Dir = work
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("recurse clone succeeded:\n%s", out)
+	}
+	if !strings.Contains(string(out), "submodule path is outside the workspace") {
+		t.Fatalf("recurse: %s", out)
+	}
+	if treeHas(t, dest, marker) {
+		t.Fatal("recurse clone fetched the submodule")
+	}
+
+	plain := filepath.Join(work, "plain")
+	cmd = exec.Command(wrap, "clone", "file://"+parent, plain)
+	cmd.Dir = work
+	out, err = cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("clone: %v\n%s", err, out)
+	}
+	body, err := os.ReadFile(filepath.Join(plain, "parent.txt"))
+	if err != nil || string(body) != "parent-content\n" {
+		t.Fatalf("parent content %q %v", body, err)
+	}
+	if treeHas(t, plain, marker) {
+		t.Fatal("clone fetched the submodule")
+	}
+}
+
+func gitCmd(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + dir,
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_AUTHOR_NAME=Test",
+		"GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=Test",
+		"GIT_COMMITTER_EMAIL=test@example.com",
+		"GIT_TERMINAL_PROMPT=0",
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+}
+
+func treeHas(t *testing.T, root, needle string) bool {
+	t.Helper()
+	found := false
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		if strings.Contains(string(b), needle) {
+			found = true
+			return os.ErrExist
+		}
+		return nil
+	})
+	if err != nil && !os.IsExist(err) && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	return found
 }
 
 func runGitWrap(t *testing.T, script string, args ...string) string {

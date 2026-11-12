@@ -134,6 +134,22 @@ func TestCeilingShowConfirmsCommit(t *testing.T) {
 	r9Ask(t, ws, "git cat-file -t HEAD")
 }
 
+func TestCeilingShowNoReplaceObjectsAsks(t *testing.T) {
+	ws := r9Repo(t)
+	gitInitMain(t, ws)
+	mustWrite(t, filepath.Join(ws, "secret.txt"), "secret-blob\n")
+	gitRun(t, ws, "add", "--", "secret.txt")
+	gitRun(t, ws, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "secret")
+	blob := gitRun(t, ws, "rev-parse", "HEAD:secret.txt")
+	if len(blob) < 12 {
+		t.Fatalf("blob id %q", blob)
+	}
+	gitRun(t, ws, "update-ref", "refs/tags/blobtag", blob)
+	gitRun(t, ws, "update-ref", "refs/replace/"+blob, "HEAD")
+	r9Allow(t, ws, LevelLow, "git show --stat blobtag")
+	r9Ask(t, ws, "git --no-replace-objects show --stat blobtag")
+}
+
 func sprintfShow(form, ref string) string {
 	return strings.Replace(form, "%s", ref, 1)
 }

@@ -148,7 +148,7 @@ func fs(bools, vals string) flagSet {
 
 var gitGlobal = func() flagSet {
 	f := fs(
-		"--no-pager --literal-pathspecs --no-optional-locks --no-replace-objects",
+		"--no-pager --literal-pathspecs --no-optional-locks",
 		"-C",
 	)
 	return f

@@ -106,6 +106,9 @@ func (a *App) protectSpecs() []protectSpec {
 	if ok {
 		add(data, true)
 	}
+	if a.dataDirGiven != "" {
+		add(a.dataDirGiven, true)
+	}
 	if data != "" {
 		token := filepath.Join(data, adminTokenFile)
 		if protectPathExists(token) {

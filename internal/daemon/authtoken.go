@@ -123,6 +123,21 @@ func prepareAdminDir(dataDir string) error {
 	return nil
 }
 
+// resolveDataDir is the absolute DATA_DIR after prepareAdminDir.
+// Symlink ancestors are resolved once. The final component is already a
+// real directory; a symlink there is refused before this runs.
+func resolveDataDir(dataDir string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(dataDir)
+	if err != nil {
+		return "", fmt.Errorf("DATA_DIR %s: %w", dataDir, err)
+	}
+	resolved = filepath.Clean(resolved)
+	if resolved == "" || resolved == "." {
+		return "", fmt.Errorf("DATA_DIR %s: empty", dataDir)
+	}
+	return resolved, nil
+}
+
 // cleanAdminTokenTemps removes regular DATA_DIR/admin-token.tmp-* files
 // owned by the effective uid. It uses Lstat and does not follow symlinks.
 // Directories, symlinks, and other non-regular entries are left in place.
