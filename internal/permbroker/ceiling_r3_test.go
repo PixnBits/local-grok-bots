@@ -146,7 +146,8 @@ func TestCriticalCeilingSoleReason(t *testing.T) {
 			wantAsk(t, evalShell(testEngine(t), LevelLow, ws, ws, c))
 		}
 		// git log without -p prints subjects, including for a key path.
-		wantCeilingAllow(t, evalShell(testEngine(t), LevelLow, ws, ws, "git log -- "+inKey))
+		// An absolute pathspec asks, so the allow uses the relative name.
+		wantCeilingAllow(t, evalShell(testEngine(t), LevelLow, ws, ws, "git log -- id_ed25519"))
 	})
 	t.Run("write-outside", func(t *testing.T) {
 		e := testEngine(t)

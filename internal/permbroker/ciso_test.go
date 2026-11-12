@@ -367,7 +367,8 @@ func TestGolden_CriticalReasonCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	tmp := t.TempDir()
-	e.SetCriticalPaths([]string{secret, filepath.Join(tmp, "nested")})
+	// Include /tmp itself so "ls /tmp" stays critical when the test temp dir is not under /tmp (for example a jail TMPDIR under /work).
+	e.SetCriticalPaths([]string{secret, filepath.Join(tmp, "nested"), "/tmp"})
 	e.SetBotRuntime("bot", home, home, nil)
 	ctx := context.Background()
 	check := func(cmd, want string) {

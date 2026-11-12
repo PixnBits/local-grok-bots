@@ -571,6 +571,43 @@ func TestNonLoopbackInsecureOptOut(t *testing.T) {
 	}
 }
 
+func TestDataDirAncestorSymlinkResolved(t *testing.T) {
+	t.Setenv("MANAGED_POLICY", "")
+	t.Setenv("AUTH_TOKEN", "")
+	realParent := t.TempDir()
+	data := filepath.Join(realParent, "data")
+	if err := os.Mkdir(data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linkParent := t.TempDir()
+	home := filepath.Join(linkParent, "home")
+	if err := os.Symlink(realParent, home); err != nil {
+		t.Fatal(err)
+	}
+	via := filepath.Join(home, "data")
+	app, out, err := newStartup(t, config.Config{
+		DataDir:   via,
+		BindAddr:  "127.0.0.1:0",
+		OllamaURL: "http://127.0.0.1:9",
+		Model:     "test-model",
+		Version:   "0.1.0",
+	}, "")
+	if err != nil || app == nil {
+		t.Fatalf("start: %v\n%s", err, out)
+	}
+	want, err := filepath.EvalSymlinks(via)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = filepath.Clean(want)
+	if app.cfg.DataDir != want {
+		t.Fatalf("data dir %q want %q", app.cfg.DataDir, want)
+	}
+	if app.cfg.DataDir == via {
+		t.Fatal("symlink ancestor was kept")
+	}
+}
+
 func TestLoopbackUnchanged(t *testing.T) {
 	t.Setenv("MANAGED_POLICY", "")
 	t.Setenv("AUTH_TOKEN", "")

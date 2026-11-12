@@ -628,6 +628,7 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			a.clearShellPlan(current.ID)
 			return "", rerr
 		}
+		goEnv := turnPol.EffectiveGoEnv()
 		res, err := sandbox.Run(shellCtx, sandbox.Request{
 			Workspace:       shellWS,
 			Command:         command,
@@ -646,6 +647,11 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 			GitAuthor:       author,
 			GitAuthorEmail:  email,
 			GitAuthorRefuse: aerr != nil,
+			BotGoRoot:       goRootForBot(a.cfg.DataDir, current.ID),
+			GoProxy:         goEnv.Proxy,
+			GoToolchain:     goEnv.Toolchain,
+			GoFlags:         goEnv.Flags,
+			GoSumDB:         goEnv.SumDB,
 			Guard:           guard,
 			OnPushStart: func() {
 				// The shell cap is not paused. Record the budget left so it
@@ -741,6 +747,20 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 
 func (a *App) sshKeyPath() string {
 	return filepath.Join(a.cfg.DataDir, "sandbox", "id_ed25519")
+}
+
+// goRootForBot is the per-bot directory that holds Go caches.
+// It is outside the git workspace. An unsafe id returns empty.
+func goRootForBot(dataDir, botID string) string {
+	dataDir = strings.TrimSpace(dataDir)
+	botID = strings.TrimSpace(botID)
+	if dataDir == "" || botID == "" || botID == "." || botID == ".." {
+		return ""
+	}
+	if strings.Contains(botID, "..") || strings.ContainsAny(botID, `/\`) {
+		return ""
+	}
+	return filepath.Join(dataDir, "bots", botID)
 }
 
 func (a *App) recordSandbox(botID string, ev sandbox.Event) {

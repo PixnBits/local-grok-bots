@@ -504,19 +504,19 @@ classifier table above is a different list.
 
 | Subcommand | Auto-approves when |
 | --- | --- |
-| `status` | the listed status flags only. `--untracked-files` / `-u`, `--ignored`, and `--find-renames` take an optional value only as `--flag=value` or an attached short form such as `-uall`. The next word is a pathspec. A pathspec that starts with `:`, contains `*`, `?`, or `[`, or whose clean form is `.`, `..`, `/`, or a parent asks. Low |
-| `log` | no `-p`, `--patch`, `-L`, `--ext-diff`, `--textconv`, or `--output`. `--pretty` and `--format` take an optional value only with `=`. A `%G` placeholder in that value asks. A named path prints commit subjects only, including `.env`. A magic, glob, or root pathspec asks. Low |
-| `diff` | a non-content format (`--stat`, `--name-only`, `--name-status`, `--numstat`, `--shortstat`) and none of `--patch`, `-p`, `--no-index`, `--output`, `-L`, `--ext-diff`, or `--textconv`. A sensitive path asks. A magic, glob, or root pathspec asks. Bare `git diff` asks. Low |
-| `show` | a non-patch format (`--stat`, `--name-only`, `--name-status`, `--no-patch`, `-s`) and every object is a plain commit-ish (`HEAD` with `^` or `~`, or a branch or tag name). A hex object id asks, because the broker does not run git to tell a commit from a blob. `rev:path`, a magic or glob pathspec, and a root pathspec ask. `--pretty` and `--format` take a value only with `=`. A `%G` placeholder in that value asks. Bare `git show <commit>` asks because it prints the patch. Low |
-| `rev-parse` | the listed flags. No `rev:path`. A magic, glob, or root pathspec asks. Low |
-| `ls-files` | the listed flags. A magic, glob, or root pathspec asks. Low |
-| `blame` | a path that is not secret material. Secret names are the shared credential list below, plus `.env*` (including `.env.example`), `*.pem`, `*.key`, `id_*`, `.git/config`, and hooks. A magic, glob, or root pathspec asks. Low |
-| `describe` | the listed flags. `--abbrev` takes a value only with `=`. `--match` still takes the next word. A magic, glob, or root pathspec asks. Low |
+| `status` | the listed status flags only. `--untracked-files` / `-u`, `--ignored`, and `--find-renames` take an optional value only as `--flag=value` or an attached short form such as `-uall`. The next word is a pathspec. A pathspec that starts with `:`, contains `*`, `?`, or `[`, is absolute, or whose clean form is `.`, `..`, `/`, or a parent asks. A directory pathspec asks when it contains a credential or client-config file. Low |
+| `log` | no `-p`, `--patch`, `-L`, `--ext-diff`, `--textconv`, or `--output`. `--pretty` and `--format` take an optional value only with `=`. A `%G` placeholder in that value asks. A named path prints commit subjects only, including `.env`. A magic, glob, absolute, or root pathspec asks. A directory pathspec asks when it contains a credential or client-config file. Low |
+| `diff` | a non-content format (`--stat`, `--name-only`, `--name-status`, `--numstat`, `--shortstat`) and none of `--patch`, `-p`, `--no-index`, `--output`, `-L`, `--ext-diff`, or `--textconv`. A sensitive path asks. A magic, glob, absolute, or root pathspec asks. A directory pathspec asks when it contains a credential or client-config file. Bare `git diff` asks. Low |
+| `show` | a non-patch format (`--stat`, `--name-only`, `--name-status`, `--no-patch`, `-s`) and every object is a confirmed commit. `HEAD`, `@`, and a strict `HEAD` or `@` form that uses only `^` and `~` are commits and do not run git. Any other branch, tag, or ref is auto-approved only when a read-only type check in the workspace repository reports a commit. A hex object id asks and is not looked up. A describe-style name (`<name>-<digits>-g<hex>`) asks before that check. A tag or ref that is not a commit asks. A tag that peels to a commit may auto-approve. `rev:path`, a magic, glob, or absolute pathspec, and a root pathspec ask. A directory pathspec asks when it contains a credential or client-config file. `--pretty` and `--format` take a value only with `=`. A `%G` placeholder in that value asks. Bare `git show <commit>` asks because it prints the patch. Low |
+| `rev-parse` | the listed flags. No `rev:path`. A magic, glob, absolute, or root pathspec asks. A directory pathspec asks when it contains a credential or client-config file. Low |
+| `ls-files` | the listed flags. A magic, glob, absolute, or root pathspec asks. A directory pathspec asks when it contains a credential or client-config file. Low |
+| `blame` | a path that is not secret material. Secret names are the shared credential list below, plus `.env*` (including `.env.example`), `*.pem`, `*.key`, `id_*`, `.git/config`, and hooks. A magic, glob, absolute, or root pathspec asks. A directory pathspec asks when it contains a credential or client-config file. Low |
+| `describe` | the listed flags. `--abbrev` takes a value only with `=`. `--match` still takes the next word. A magic, glob, absolute, or root pathspec asks. A directory pathspec asks when it contains a credential or client-config file. Low |
 | `branch` | no arguments, or the list flags `--list`, `-l`, `-a`, `--all`, `-v`, `-vv`, `--verbose`, `-r`, `--remotes`. A positional pattern is allowed only with `--list` or `-l`. `-a` and `-r` need `--list` as well. `-v` or `-vv` with a name asks, because that creates a branch. No create or delete. Low |
 | `tag` | `--list`, `-l`, or no arguments. Low |
 | `remote` | no arguments. `-v`, `--verbose`, `-vv`, `show`, and `get-url` ask because they print remote URLs. Bare `git remote` is low on the ceiling. The shipped table still calls `git remote` critical |
-| `add` | ordinary named pathspecs. A pathspec that starts with `:`, contains a glob character, or cleans to the work tree root or a parent asks. No `-A`, `--all`, or `-u`. Medium. The path class still applies |
-| `commit` | `-m` or `--message` only, plus ordinary pathspecs. The same magic, glob, and root pathspecs ask. No `--amend`, `-a`, `-F`, or `--no-verify`. Medium |
+| `add` | ordinary named pathspecs. An absolute pathspec asks, including a file inside the workspace. A pathspec that starts with `:`, contains a glob character, resolves to the work tree root or a parent, or is a symlink to that root asks. A directory asks when anything under it is a credential or a client-config / auto-run file (`.vscode/tasks.json`, `.claude/settings.json`, `.envrc`, `.mcp.json`, `.github/workflows`, and the same class). A directory that contains none of those may still auto-approve. If the directory cannot be inspected, add asks. No `-A`, `--all`, or `-u`. Medium. The path class still applies |
+| `commit` | `-m` or `--message` only, plus ordinary pathspecs, including pathspecs after `--`. The same absolute, magic, glob, and root pathspecs ask. A directory that contains a credential or client-config / auto-run file asks. If the directory cannot be inspected, commit asks. No `--amend`, `-a`, `-F`, or `--no-verify`. Medium |
 
 These ask at every ceiling because they can write work-tree files from
 content: `apply` (including `--cached` and `--index`), `am`, `checkout`,
@@ -535,8 +535,9 @@ class-checked the same way as the next-argument form. The flags are
 `--output`, `--exec-path`, `--reference`, `--reference-if-able`, `-C`,
 and `git config --file`.
 
-These git reads ask: `git show rev:path`, `git show` of a blob id or any
-object that is not a plain commit-ish, any `git cat-file`, `git grep`
+These git reads ask: `git show rev:path`, `git show` of a blob id, a tag or
+ref that is not a commit, a describe-style `<name>-<digits>-g<hex>` name, or
+any object that is not a confirmed commit, any `git cat-file`, `git grep`
 with no pathspec, `git grep` of a sensitive path, and `git log -p` or
 `git diff` of a sensitive path. Sensitive paths are the shared credential
 list (`.npmrc`, `.netrc`, `.pypirc`, `.git-credentials`, `.aws/*`,

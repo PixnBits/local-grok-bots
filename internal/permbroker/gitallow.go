@@ -1,7 +1,6 @@
 package permbroker
 
 import (
-	"path/filepath"
 	"strings"
 )
 
@@ -126,20 +125,22 @@ func sameArgv(a, b []string) bool {
 
 // ceilingGitPermitted is true when every git argv is an allowlist row
 // whose flag shape matches and the command does not read a secret.
-func ceilingGitPermitted(in inspected) bool {
+// cwd and ws are the request directory and workspace. Empty values skip
+// directory inspection. An absolute pathspec still asks.
+func ceilingGitPermitted(in inspected, cwd, ws string) bool {
 	argvs := gitArgvsOf(in)
 	if len(argvs) == 0 {
 		return false
 	}
 	for _, argv := range argvs {
-		if !ceilingGitPermit(argv) || gitSecretRead(argv) {
+		if !ceilingGitPermit(argv, cwd, ws) || gitSecretRead(argv) {
 			return false
 		}
 	}
 	return true
 }
 
-func ceilingGitPermit(argv []string) bool {
+func ceilingGitPermit(argv []string, cwd, ws string) bool {
 	sub, rest, ok := splitGit(argv)
 	if !ok || sub == "" {
 		return false
@@ -148,7 +149,7 @@ func ceilingGitPermit(argv []string) bool {
 	if !found || rule.alwaysAsk {
 		return false
 	}
-	return ceilingGitShape(rule, rest)
+	return ceilingGitShape(rule, rest, cwd, ws)
 }
 
 func ceilingGitAllowLevel(argv []string) Level {
@@ -166,8 +167,8 @@ func ceilingGitAllowLevel(argv []string) Level {
 // ceilingDecisionLevel is the level the ceiling compares for an allowlisted
 // git command. A policy or classifier raise above the shipped level is kept.
 // git remote is critical in the shipped table. The list form is low here.
-func ceilingDecisionLevel(in inspected) Level {
-	if len(in.Argv) == 0 || baseName(in.Argv[0]) != "git" || !ceilingGitPermit(in.Argv) {
+func ceilingDecisionLevel(in inspected, cwd, ws string) Level {
+	if len(in.Argv) == 0 || baseName(in.Argv[0]) != "git" || !ceilingGitPermit(in.Argv, cwd, ws) {
 		return in.Level
 	}
 	allow := ceilingGitAllowLevel(in.Argv)
@@ -189,21 +190,21 @@ func isRemoteList(argv []string) bool {
 	return remoteListOK(rest)
 }
 
-func ceilingGitShape(rule ceilingGitRule, rest []string) bool {
+func ceilingGitShape(rule ceilingGitRule, rest []string, cwd, ws string) bool {
 	switch rule.kind {
 	case "status", "names":
 		pos, ok := parseAllowFlags(rest, rule.bools, rule.vals, rule.nums)
-		return ok && !pathspecRisky(pos)
+		return ok && !pathspecRisky(pos, cwd, ws, false)
 	case "log":
-		return logShape(rest, rule)
+		return logShape(rest, rule, cwd, ws)
 	case "diff":
-		return diffShape(rest, rule)
+		return diffShape(rest, rule, cwd, ws)
 	case "show":
-		return showShape(rest, rule)
+		return showShape(rest, rule, cwd, ws)
 	case "rev":
-		return revShape(rest, rule)
+		return revShape(rest, rule, cwd, ws)
 	case "blame":
-		return blameShape(rest, rule)
+		return blameShape(rest, rule, cwd, ws)
 	case "branch":
 		return branchListOK(rest, rule)
 	case "tag":
@@ -211,9 +212,9 @@ func ceilingGitShape(rule ceilingGitRule, rest []string) bool {
 	case "remote":
 		return remoteListOK(rest)
 	case "add":
-		return addShape(rest, rule)
+		return addShape(rest, rule, cwd, ws)
 	case "commit":
-		return commitShape(rest)
+		return commitShape(rest, cwd, ws)
 	default:
 		return false
 	}
@@ -225,12 +226,12 @@ func parseAllowFlags(rest []string, bools, vals string, nums bool) ([]string, bo
 	return f.ok(rest)
 }
 
-func logShape(rest []string, rule ceilingGitRule) bool {
+func logShape(rest []string, rule ceilingGitRule, cwd, ws string) bool {
 	pos, ok := parseAllowFlags(rest, rule.bools, rule.vals, rule.nums)
 	if !ok {
 		return false
 	}
-	if formatPlaceholderG(rest) || pathspecRisky(pos) {
+	if formatPlaceholderG(rest) || pathspecRisky(pos, cwd, ws, false) {
 		return false
 	}
 	for _, p := range pos {
@@ -241,12 +242,12 @@ func logShape(rest []string, rule ceilingGitRule) bool {
 	return true
 }
 
-func diffShape(rest []string, rule ceilingGitRule) bool {
+func diffShape(rest []string, rule ceilingGitRule, cwd, ws string) bool {
 	pos, ok := parseAllowFlags(rest, rule.bools, rule.vals, rule.nums)
 	if !ok || !diffFormat(rest) {
 		return false
 	}
-	if pathspecRisky(pos) {
+	if pathspecRisky(pos, cwd, ws, false) {
 		return false
 	}
 	for _, p := range pos {
@@ -270,22 +271,22 @@ func diffFormat(rest []string) bool {
 	return false
 }
 
-func showShape(rest []string, rule ceilingGitRule) bool {
+func showShape(rest []string, rule ceilingGitRule, cwd, ws string) bool {
 	_, ok := parseAllowFlags(rest, rule.bools, rule.vals, rule.nums)
 	if !ok || !showFormat(rest) || formatPlaceholderG(rest) {
 		return false
 	}
-	// Objects come before `--`. A non-patch format still prints a blob
-	// when the object is not a commit, so every object must be a plain
-	// commit-ish. Words after `--` are pathspecs.
+	// Objects come before `--`. A non-patch format still prints file
+	// bytes when the object is not a commit, so every object must be a
+	// confirmed commit. Words after `--` are pathspecs.
 	objs, paths := dashSplit(rest)
 	for _, p := range objs {
-		if !plainCommitish(p) || gitSecretReadPath(p) || riskyPathspec(p) {
+		if !showObjectOK(ws, p) || gitSecretReadPath(p) || riskyPathspec(p, cwd, ws, false) {
 			return false
 		}
 	}
 	for _, p := range paths {
-		if gitSecretReadPath(p) || riskyPathspec(p) || strings.Contains(p, ":") {
+		if gitSecretReadPath(p) || riskyPathspec(p, cwd, ws, false) || strings.Contains(p, ":") {
 			return false
 		}
 	}
@@ -305,12 +306,12 @@ func showFormat(rest []string) bool {
 	return false
 }
 
-func revShape(rest []string, rule ceilingGitRule) bool {
+func revShape(rest []string, rule ceilingGitRule, cwd, ws string) bool {
 	pos, ok := parseAllowFlags(rest, rule.bools, rule.vals, rule.nums)
 	if !ok {
 		return false
 	}
-	if pathspecRisky(pos) {
+	if pathspecRisky(pos, cwd, ws, false) {
 		return false
 	}
 	for _, p := range pos {
@@ -321,13 +322,13 @@ func revShape(rest []string, rule ceilingGitRule) bool {
 	return true
 }
 
-func blameShape(rest []string, rule ceilingGitRule) bool {
+func blameShape(rest []string, rule ceilingGitRule, cwd, ws string) bool {
 	pos, ok := parseAllowFlags(rest, rule.bools, rule.vals, rule.nums)
 	if !ok || len(pos) == 0 {
 		return false
 	}
 	for _, p := range pos {
-		if strings.Contains(p, ":") || gitSecretReadPath(p) || riskyPathspec(p) {
+		if strings.Contains(p, ":") || gitSecretReadPath(p) || riskyPathspec(p, cwd, ws, false) {
 			return false
 		}
 	}
@@ -379,18 +380,18 @@ func remoteListOK(rest []string) bool {
 	return len(rest) == 0
 }
 
-func addShape(rest []string, rule ceilingGitRule) bool {
+func addShape(rest []string, rule ceilingGitRule, cwd, ws string) bool {
 	pos, ok := parseAllowFlags(rest, rule.bools, rule.vals, rule.nums)
 	if !ok || len(pos) == 0 {
 		return false
 	}
-	return !pathspecRisky(pos)
+	return !pathspecRisky(pos, cwd, ws, true)
 }
 
 // commitShape is -m or --message, repeated, plus optional pathspecs.
 // --amend, -F, --no-verify, and -a are not in the shape.
-// A magic, glob, or root pathspec asks, before `--` and after it.
-func commitShape(rest []string) bool {
+// A magic, glob, absolute, or root pathspec asks, before `--` and after it.
+func commitShape(rest []string, cwd, ws string) bool {
 	saw := false
 	var paths []string
 	for i := 0; i < len(rest); i++ {
@@ -420,7 +421,7 @@ func commitShape(rest []string) bool {
 		}
 		paths = append(paths, a)
 	}
-	return saw && !pathspecRisky(paths)
+	return saw && !pathspecRisky(paths, cwd, ws, true)
 }
 
 // gitSecretRead is a git read of file content the ceiling must not
@@ -632,27 +633,13 @@ func gitOptionalValue(name string) bool {
 	}
 }
 
-func pathspecRisky(paths []string) bool {
+func pathspecRisky(paths []string, cwd, ws string, strict bool) bool {
 	for _, p := range paths {
-		if riskyPathspec(p) {
+		if riskyPathspec(p, cwd, ws, strict) {
 			return true
 		}
 	}
 	return false
-}
-
-// riskyPathspec is a pathspec that can name the whole tree or a glob.
-// Git magic starts with ':'. A clean form of '.', '..', '/', or a parent
-// is the work tree root or outside it.
-func riskyPathspec(p string) bool {
-	if p == "" || strings.HasPrefix(p, ":") || strings.ContainsAny(p, "*?[") {
-		return true
-	}
-	c := filepath.Clean(p)
-	if c == "." || c == ".." || c == string(filepath.Separator) {
-		return true
-	}
-	return strings.HasPrefix(c, ".."+string(filepath.Separator))
 }
 
 // dashSplit keeps words before `--` apart from pathspecs after it.
@@ -692,12 +679,11 @@ func formatPlaceholderG(rest []string) bool {
 	return false
 }
 
-// plainCommitish is a rev word accepted without running git.
-// Hex object ids ask. A blob id is hex too, and the broker does not run
-// `git cat-file -t` to tell a commit from a blob. A branch whose name is
-// only hex digits asks for the same reason.
+// plainCommitish is a rev spelling. Hex object ids are not included.
+// HEAD-relative forms are commits. Other names still need showObjectOK,
+// which checks the object type in the workspace repository.
 func plainCommitish(p string) bool {
-	if p == "" || strings.Contains(p, ":") || riskyPathspec(p) || hexObjectID(p) {
+	if p == "" || strings.Contains(p, ":") || riskyPathspecLexical(p) || hexObjectID(p) {
 		return false
 	}
 	if headish(p) {

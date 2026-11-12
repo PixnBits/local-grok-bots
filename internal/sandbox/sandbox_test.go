@@ -398,7 +398,7 @@ echo PUSH_DONE
 		t.Fatalf("push was not denied:\nstdout:\n%s\nstderr:\n%s", res.Stdout, res.Stderr)
 	}
 	for _, e := range res.Events {
-		if e.Notice != "" {
+		if e.Notice != "" && e.Notice != "Go build cache is ephemeral for this command" {
 			t.Fatalf("push notice: %+v", e)
 		}
 	}

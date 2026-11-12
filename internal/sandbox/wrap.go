@@ -148,10 +148,30 @@ func authorEmbeddable(name, email string) bool {
 }
 
 const gitWrapScript = `#!/bin/sh
+# Drop config that arrived in the environment, then pin the files git may read.
+unset GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+cfg_names=$(env | while IFS= read -r cfg_line; do
+  case "$cfg_line" in
+    GIT_CONFIG*=*)
+      printf '%s\n' "${cfg_line%%=*}"
+      ;;
+  esac
+done)
+for cfg_name in $cfg_names; do
+  case "$cfg_name" in
+    GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_CONFIG_NOSYSTEM)
+      ;;
+    *)
+      unset "$cfg_name"
+      ;;
+  esac
+done
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
 unset SSH_AUTH_SOCK http_proxy https_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY no_proxy
+# An inherited allow list would override the protocol.* settings below.
+unset GIT_ALLOW_PROTOCOL
 real=/lgb/bin/git
 log=/lgb/events/log
 nl='
@@ -161,11 +181,9 @@ hub=@@HUB@@
 bridge=@@BRIDGE@@
 author_name=@@NAME@@
 author_email=@@EMAIL@@
-if [ "$bridge" = 1 ]; then
-  export GIT_ALLOW_PROTOCOL=https:ssh:http
-else
-  export GIT_ALLOW_PROTOCOL=https:ssh
-fi
+allow_file=0
+pfile=never
+vet_base=$PWD
 sub=
 prev=
 for arg in "$@"; do
@@ -208,6 +226,271 @@ say_deny() {
   deny_allow "$1"
   exit 1
 }
+say_file() {
+  echo "git ${sub} denied: local path is outside the workspace" >&2
+  printf '%s\n' "deny git ${sub}" >> "$log"
+  exit 1
+}
+say_config() {
+  echo "git ${sub} denied: configuration is not allowed" >&2
+  printf '%s\n' "deny git ${sub}" >> "$log"
+  exit 1
+}
+say_option() {
+  echo "git ${sub} denied: option is not allowed" >&2
+  printf '%s\n' "deny git ${sub}" >> "$log"
+  exit 1
+}
+# These options name a command. A shorter spelling is refused as well.
+# --exec-path is a different option and does not match.
+refuse_command_opt() {
+  case "$1" in
+    --*) ;;
+    *) return 1 ;;
+  esac
+  body=${1#--}
+  name=${body%%=*}
+  if [ -z "$name" ]; then
+    return 1
+  fi
+  case "$sub" in
+    clone|fetch|pull|ls-remote)
+      case "upload-pack" in
+        "$name"*) say_option ;;
+      esac
+      ;;
+    push)
+      case "receive-pack" in
+        "$name"*) say_option ;;
+      esac
+      case "exec" in
+        "$name"*) say_option ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+# Refuse a config assignment whose key rewrites URLs.
+url_assign() {
+  folded=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || say_config
+  key=${folded%%=*}
+  case "$key" in
+    url.*) say_config ;;
+  esac
+}
+# Record -C as the base for a relative path, and refuse url rewrites.
+scan_global() {
+  prev=
+  base=$PWD
+  for arg in "$@"; do
+    if [ -n "$prev" ]; then
+      case "$prev" in
+        C)
+          case "$arg" in
+            /*) base=$arg ;;
+            *) base=$base/$arg ;;
+          esac
+          ;;
+        c|env)
+          url_assign "$arg"
+          ;;
+      esac
+      prev=
+      continue
+    fi
+    case "$arg" in
+      -C)
+        prev=C
+        ;;
+      -c)
+        prev=c
+        ;;
+      -c*)
+        url_assign "${arg#-c}"
+        ;;
+      --config-env)
+        prev=env
+        ;;
+      --config-env=*)
+        url_assign "${arg#--config-env=}"
+        ;;
+      --git-dir|--work-tree|--namespace|--super-prefix|--exec-path)
+        prev=x
+        ;;
+      --)
+        ;;
+      -*)
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+  vet_base=$base
+}
+clean_abs() {
+  p=$1
+  case "$p" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  out=
+  rest=$p
+  while [ -n "$rest" ]; do
+    rest=${rest#/}
+    seg=${rest%%/*}
+    if [ "$rest" = "$seg" ]; then
+      rest=
+    else
+      rest=${rest#*/}
+    fi
+    if [ -z "$seg" ] || [ "$seg" = "." ]; then
+      continue
+    fi
+    if [ "$seg" = ".." ]; then
+      return 1
+    fi
+    out=$out/$seg
+  done
+  if [ -z "$out" ]; then
+    out=/
+  fi
+  printf '%s' "$out"
+}
+inside_work() {
+  case "$1" in
+    /work|/work/*) return 0 ;;
+  esac
+  return 1
+}
+phys_inside() {
+  target=$1
+  depth=$2
+  if [ -z "$depth" ]; then
+    depth=0
+  fi
+  if [ "$depth" -gt 8 ]; then
+    return 1
+  fi
+  if [ ! -d /work ]; then
+    return 0
+  fi
+  if [ -L "$target" ]; then
+    dest=$(readlink "$target") || return 1
+    case "$dest" in
+      /*) ;;
+      *) dest=$(dirname "$target")/$dest ;;
+    esac
+    cleaned=$(clean_abs "$dest") || return 1
+    inside_work "$cleaned" || return 1
+    phys_inside "$cleaned" $((depth + 1))
+    return $?
+  fi
+  dir=$target
+  if [ ! -d "$target" ]; then
+    if [ -e "$target" ]; then
+      dir=$(dirname "$target")
+    else
+      while [ ! -d "$dir" ] && [ "$dir" != / ]; do
+        dir=$(dirname "$dir")
+      done
+    fi
+  fi
+  phys=$(cd "$dir" && pwd -P) || return 1
+  inside_work "$phys" || return 1
+  return 0
+}
+# Percent-decode one path. Git decodes a file URL before opening it.
+# A short or non-hex escape, a NUL, or a newline is refused.
+pct_decode() {
+  s=$1
+  out=
+  while [ -n "$s" ]; do
+    c=${s%"${s#?}"}
+    rest=${s#?}
+    if [ "$c" = "%" ]; then
+      h1=${rest%"${rest#?}"}
+      rest=${rest#?}
+      h2=${rest%"${rest#?}"}
+      rest=${rest#?}
+      hex=$h1$h2
+      case "$hex" in
+        [0-9A-Fa-f][0-9A-Fa-f]) ;;
+        *) return 1 ;;
+      esac
+      dec=$((0x$hex)) || return 1
+      if [ "$dec" -eq 0 ] || [ "$dec" -eq 10 ] || [ "$dec" -eq 13 ]; then
+        return 1
+      fi
+      oct=$(printf '%03o' "$dec")
+      ch=$(printf "\\$oct")
+      out=$out$ch
+      s=$rest
+    else
+      out=$out$c
+      s=$rest
+    fi
+  done
+  printf '%s' "$out"
+}
+# Refuse a ".." path segment. This runs on the decoded path.
+reject_dotdot() {
+  rest=$1
+  while [ -n "$rest" ]; do
+    rest=${rest#/}
+    seg=${rest%%/*}
+    if [ "$rest" = "$seg" ]; then
+      rest=
+    else
+      rest=${rest#*/}
+    fi
+    if [ "$seg" = ".." ]; then
+      return 1
+    fi
+  done
+  return 0
+}
+file_url_path() {
+  raw=$1
+  prefix=$(printf '%s' "$raw" | cut -c 1-7 | tr '[:upper:]' '[:lower:]') || return 1
+  if [ "$prefix" != "file://" ]; then
+    return 1
+  fi
+  rest=$(printf '%s' "$raw" | cut -c 8-) || return 1
+  case "$rest" in
+    /*)
+      path=$rest
+      ;;
+    *)
+      case "$rest" in
+        */*) ;;
+        *) return 1 ;;
+      esac
+      host=$(printf '%s' "${rest%%/*}" | tr '[:upper:]' '[:lower:]') || return 1
+      if [ "$host" != "localhost" ]; then
+        return 1
+      fi
+      path="/${rest#*/}"
+      ;;
+  esac
+  decoded=$(pct_decode "$path") || return 1
+  reject_dotdot "$decoded" || return 1
+  printf '%s' "$decoded"
+}
+accept_local() {
+  cleaned=$(clean_abs "$1") || say_file
+  inside_work "$cleaned" || say_file
+  phys_inside "$cleaned" || say_file
+  allow_file=1
+}
+scan_urls() {
+  for arg in "$@"; do
+    prefix=$(printf '%s' "$arg" | cut -c 1-7 | tr '[:upper:]' '[:lower:]') || say_file
+    if [ "$prefix" = "file://" ]; then
+      vet "$arg"
+    fi
+  done
+}
 vet() {
   case "$1" in
     *"$nl"*)
@@ -216,7 +499,12 @@ vet() {
   esac
   folded=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || say_deny "$1"
   case "$folded" in
-    ""|file://*)
+    "")
+      return 0
+      ;;
+    file://*)
+      pth=$(file_url_path "$1") || say_file
+      accept_local "$pth"
       return 0
       ;;
 @@REPOS@@
@@ -224,7 +512,38 @@ vet() {
       say_deny "$1"
       ;;
   esac
+  case "$1" in
+    /*)
+      accept_local "$1"
+      return 0
+      ;;
+    ./*|../*|..|*/..|*/../*|*/*|.)
+      vet_local "$1"
+      return 0
+      ;;
+  esac
   return 0
+}
+vet_local() {
+  case "$1" in
+    /*)
+      accept_local "$1"
+      ;;
+    *)
+      accept_local "$vet_base/$1"
+      ;;
+  esac
+}
+# An option value that is a repository, a destination, or another path.
+vet_opt() {
+  case "$1" in
+    *://*|git@*)
+      vet "$1"
+      ;;
+    *)
+      vet_local "$1"
+      ;;
+  esac
 }
 resolve_remote() {
   name=$1
@@ -232,7 +551,7 @@ resolve_remote() {
     ""|-*)
       return
       ;;
-    *://*|git@*|file://*|/*|./*|../*)
+    *://*|git@*|file://*|/*|./*|../*|..|*/..|*/../*|*/*|.)
       vet "$name"
       found_url=1
       return
@@ -276,6 +595,13 @@ ensure_bridge() {
   return 0
 }
 run() {
+  # "user" allows a top-level local path. Nested git clears the user bit,
+  # so it does not keep that permission.
+  if [ "$allow_file" = 1 ]; then
+    pfile=user
+  else
+    pfile=never
+  fi
   if [ "$sub" = diff ] || [ "$sub" = log ] || [ "$sub" = show ]; then
     if [ -x /bin/bash ]; then
       exec /bin/bash --norc --noprofile -c '
@@ -283,8 +609,9 @@ real=$1
 name=$2
 email=$3
 port=$4
-sub=$5
-shift 5
+pfile=$5
+sub=$6
+shift 6
 args=()
 prev=
 ins=0
@@ -300,7 +627,7 @@ for arg in "$@"; do
       prev=1
       continue
       ;;
-    --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*|--upload-pack=*)
+    --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*)
       args+=("$arg")
       continue
       ;;
@@ -315,12 +642,12 @@ for arg in "$@"; do
     ins=1
   fi
 done
-cargs=(-c user.name="$name" -c user.email="$email" -c commit.gpgsign=false -c core.sshCommand=/bin/false -c core.hooksPath=/dev/null -c diff.external= -c core.pager=cat -c core.fsmonitor= -c core.fsmonitorHookVersion=)
+cargs=(-c user.name="$name" -c user.email="$email" -c commit.gpgsign=false -c core.sshCommand=/bin/false -c core.hooksPath=/dev/null -c protocol.allow=never -c protocol.https.allow=always -c protocol.ssh.allow=always -c protocol.file.allow="$pfile" -c diff.external= -c core.pager=cat -c core.fsmonitor= -c core.fsmonitorHookVersion=)
 if [ -n "$port" ]; then
-  exec "$real" "${cargs[@]}" -c http.proxy= -c "url.http://127.0.0.1:${port}/github/.insteadOf=https://github.com/" -c "url.http://127.0.0.1:${port}/api/.insteadOf=https://api.github.com/" "${args[@]}"
+  exec "$real" "${cargs[@]}" -c protocol.http.allow=always -c http.proxy= -c "url.http://127.0.0.1:${port}/github/.insteadOf=https://github.com/" -c "url.http://127.0.0.1:${port}/api/.insteadOf=https://api.github.com/" "${args[@]}"
 fi
 exec "$real" "${cargs[@]}" "${args[@]}"
-' bash "$real" "$author_name" "$author_email" "$GHPORT" "$sub" "$@"
+' bash "$real" "$author_name" "$author_email" "$GHPORT" "$pfile" "$sub" "$@"
     fi
   fi
   if [ -n "$GHPORT" ]; then
@@ -334,6 +661,11 @@ exec "$real" "${cargs[@]}" "${args[@]}"
       -c core.pager=cat \
       -c core.fsmonitor= \
       -c core.fsmonitorHookVersion= \
+      -c protocol.allow=never \
+      -c protocol.https.allow=always \
+      -c protocol.ssh.allow=always \
+      -c protocol.http.allow=always \
+      -c protocol.file.allow="$pfile" \
       -c http.proxy= \
       -c "url.http://127.0.0.1:${GHPORT}/github/.insteadOf=https://github.com/" \
       -c "url.http://127.0.0.1:${GHPORT}/api/.insteadOf=https://api.github.com/" \
@@ -349,8 +681,14 @@ exec "$real" "${cargs[@]}" "${args[@]}"
     -c core.pager=cat \
     -c core.fsmonitor= \
     -c core.fsmonitorHookVersion= \
+    -c protocol.allow=never \
+    -c protocol.https.allow=always \
+    -c protocol.ssh.allow=always \
+    -c protocol.file.allow="$pfile" \
     "$@"
 }
+scan_global "$@"
+scan_urls "$@"
 case "$sub" in
   ""|status|diff|log|show|rev-parse|blame|ls-files|grep|version|help|describe|name-rev|cat-file|shortlog|var)
     run "$@"
@@ -362,6 +700,9 @@ if [ "$grant" != "1" ]; then
   exit 1
 fi
 if [ "$sub" = "push" ]; then
+  for arg in "$@"; do
+    refuse_command_opt "$arg"
+  done
   if [ ! -x /lgb/bin/ghbridge ] || [ ! -S /lgb/sock/push.sock ]; then
     echo "git push denied: not sent" >&2
     printf '%s\n' "deny git push" >> "$log"
@@ -384,17 +725,73 @@ if [ "$sub" = "push" ]; then
   exit $?
 fi
 case "$sub" in
-  clone|fetch|pull|ls-remote|remote)
+  clone|fetch|pull|ls-remote|remote|submodule)
     prev=
     seen_sub=
     for arg in "$@"; do
       if [ -n "$prev" ]; then
+        case "$prev" in
+          cfg)
+            url_assign "$arg"
+            ;;
+          path)
+            vet_opt "$arg"
+            ;;
+        esac
         prev=
         continue
       fi
+      refuse_command_opt "$arg"
       case "$arg" in
-        -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path|--upload-pack|--depth|--branch|-b|-o|--origin|--reference|--separate-git-dir|--template|--config|--server-option)
-          prev=1
+        --recurse-submodules|--recurse-submodules=*|--recursive|--shallow-submodules)
+          if [ "$sub" = clone ] || [ "$sub" = fetch ] || [ "$sub" = pull ]; then
+            echo "git ${sub} denied: submodule path is outside the workspace" >&2
+            printf '%s\n' "deny git ${sub}" >> "$log"
+            exit 1
+          fi
+          continue
+          ;;
+        -c|--config|--config-env)
+          prev=cfg
+          continue
+          ;;
+        -c*)
+          url_assign "${arg#-c}"
+          continue
+          ;;
+        --config=*)
+          url_assign "${arg#--config=}"
+          continue
+          ;;
+        --config-env=*)
+          url_assign "${arg#--config-env=}"
+          continue
+          ;;
+        --reference|--reference-if-able|--separate-git-dir|--template|--bundle-uri)
+          prev=path
+          continue
+          ;;
+        --reference=*|--reference-if-able=*|--separate-git-dir=*|--template=*|--bundle-uri=*)
+          vet_opt "${arg#*=}"
+          continue
+          ;;
+        -u|-u*)
+          if [ "$sub" = clone ]; then
+            say_option
+          fi
+          case "$arg" in
+            -u) prev=skip ;;
+          esac
+          continue
+          ;;
+        -C|--git-dir|--work-tree|--namespace|--super-prefix|--exec-path|--depth|--branch|-b|--origin|-o|--server-option|--jobs|-j|--filter|--shallow-since|--shallow-exclude|--revision)
+          prev=skip
+          continue
+          ;;
+        --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--exec-path=*|--depth=*|--branch=*|--origin=*|--server-option=*|--jobs=*|--filter=*|--shallow-since=*|--shallow-exclude=*|--revision=*)
+          continue
+          ;;
+        -j*|-b*|-o*)
           continue
           ;;
         --)
@@ -414,8 +811,21 @@ case "$sub" in
           found_url=1
           ;;
         *)
-          if [ -z "$pos" ]; then
-            pos=$arg
+          if [ "$sub" = clone ]; then
+            vet_local "$arg"
+            found_url=1
+          else
+            case "$arg" in
+              /*|./*|../*|..|*/..|*/../*|*/*|.)
+                vet "$arg"
+                found_url=1
+                ;;
+              *)
+                if [ -z "$pos" ]; then
+                  pos=$arg
+                fi
+                ;;
+            esac
           fi
           ;;
       esac

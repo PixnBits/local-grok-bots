@@ -30,9 +30,7 @@ func TestCeilingBindHook(t *testing.T) {
 
 func runUnshareTest(t *testing.T, run, envKey string) {
 	t.Helper()
-	if _, err := exec.LookPath("unshare"); err != nil {
-		t.Skip("unshare is not installed")
-	}
+	skipIfNoUnshare(t)
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)

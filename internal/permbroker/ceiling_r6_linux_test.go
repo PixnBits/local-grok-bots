@@ -20,9 +20,7 @@ func TestCeilingSameFileBind(t *testing.T) {
 		sameFileBindChild(t)
 		return
 	}
-	if _, err := exec.LookPath("unshare"); err != nil {
-		t.Skip("unshare is not installed")
-	}
+	skipIfNoUnshare(t)
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)

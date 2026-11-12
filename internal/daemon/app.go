@@ -53,6 +53,10 @@ type loopState struct {
 // App is the daemon: HTTP API, turn queue, timers, and the model loop.
 type App struct {
 	cfg config.Config
+	// dataDirGiven is the DATA_DIR path as passed at startup, after cleaning,
+	// when it differs from the resolved directory (a symlink ancestor).
+	// The protect list includes it so a bind can name either path.
+	dataDirGiven string
 	// logw receives startup lines. Nil means stderr.
 	logw  io.Writer
 	st    *store.Store
@@ -279,9 +283,16 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		return nil, err
 	}
 	// Every start checks DATA_DIR before the admin token file is read.
+	// Symlink ancestors are resolved once so later paths use that directory.
 	if err := prepareAdminDir(cfg.DataDir); err != nil {
 		return nil, err
 	}
+	dataDir, err := resolveDataDir(cfg.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	given, givenOK := cleanProtectPath(cfg.DataDir)
+	cfg.DataDir = dataDir
 	if err := sandbox.SetCacheDir(filepath.Join(cfg.DataDir, "cache", "sandbox")); err != nil {
 		return nil, err
 	}
@@ -384,6 +395,9 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		stt:        stt,
 		sttSlot:    make(chan struct{}, 1),
 		broker:     br,
+	}
+	if givenOK && given != dataDir {
+		a.dataDirGiven = given
 	}
 	br.SetAuditor(brokerAudit{a})
 	br.SetHookGuard(func(bot string) error {
@@ -640,6 +654,9 @@ func (a *App) log(botID, kind string, detail any) {
 	if kind == "sandbox_block" {
 		a.auditSandboxBlock(botID, detail)
 	}
+	if kind == "jail_go_env" {
+		a.auditJailGoEnv(botID, detail)
+	}
 }
 
 // clipASCII keeps bytes in 0x20–0x7E and then cuts to 256 bytes.
@@ -691,6 +708,23 @@ func (a *App) auditSandboxBlock(botID string, detail any) {
 	}
 	if d := sandboxBlockDetail(detail); d != "" {
 		rec["detail"] = d
+	}
+	a.audit.Write(rec)
+}
+
+// auditJailGoEnv mirrors the toolchain environment into the audit log.
+// The row is the effective values only. It has no notice text.
+func (a *App) auditJailGoEnv(botID string, detail any) {
+	if a == nil || a.audit == nil || !a.audit.Enabled() {
+		return
+	}
+	text := sandboxBlockDetail(detail)
+	if text == "" {
+		return
+	}
+	rec := map[string]any{"action": "jail_go_env", "detail": text}
+	if botID != "" {
+		rec["bot_id"] = botID
 	}
 	a.audit.Write(rec)
 }
