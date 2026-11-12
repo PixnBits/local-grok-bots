@@ -316,9 +316,12 @@ conflict_policy = "refuse"
 # gets DATA_DIR/bots/<bot>/go/mod and go/cache, outside the git workspace.
 # The jail sets GOENV=off and GOWORK=off. A go wrapper sets the policy
 # values again, so go env -w, a go env file, and a command prefix do not
-# change GOPROXY, GOTOOLCHAIN, GOFLAGS, or GOSUMDB. At startup a DATA_DIR
-# reached through a symlink ancestor is resolved once; the directory itself
-# must not be a symlink. Caches then stay under that resolved bots/<bot>/go.
+# change GOPROXY, GOTOOLCHAIN, GOFLAGS, or GOSUMDB. These values are
+# defaults enforced by the jail environment and the go wrapper; a bot can
+# run /lgb/bin/go or a copy of that binary; net_allow is the boundary.
+# At startup a DATA_DIR reached through a symlink ancestor is resolved
+# once; the directory itself must not be a symlink. Caches then stay under
+# that resolved bots/<bot>/go.
 # Defaults when a key is omitted: goproxy = "off", gotoolchain = "local",
 # and empty goflags. GOSUMDB is off with those defaults, including when a
 # proxy list is narrowed, so the checksum database is not contacted.

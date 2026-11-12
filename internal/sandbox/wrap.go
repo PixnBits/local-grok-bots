@@ -148,10 +148,30 @@ func authorEmbeddable(name, email string) bool {
 }
 
 const gitWrapScript = `#!/bin/sh
+# Drop config that arrived in the environment, then pin the files git may read.
+unset GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT
+cfg_names=$(env | while IFS= read -r cfg_line; do
+  case "$cfg_line" in
+    GIT_CONFIG*=*)
+      printf '%s\n' "${cfg_line%%=*}"
+      ;;
+  esac
+done)
+for cfg_name in $cfg_names; do
+  case "$cfg_name" in
+    GIT_CONFIG_GLOBAL|GIT_CONFIG_SYSTEM|GIT_CONFIG_NOSYSTEM)
+      ;;
+    *)
+      unset "$cfg_name"
+      ;;
+  esac
+done
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
 unset SSH_AUTH_SOCK http_proxy https_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY no_proxy
+# An inherited allow list would override the protocol.* settings below.
+unset GIT_ALLOW_PROTOCOL
 real=/lgb/bin/git
 log=/lgb/events/log
 nl='
@@ -161,11 +181,6 @@ hub=@@HUB@@
 bridge=@@BRIDGE@@
 author_name=@@NAME@@
 author_email=@@EMAIL@@
-if [ "$bridge" = 1 ]; then
-  export GIT_ALLOW_PROTOCOL=https:ssh:http
-else
-  export GIT_ALLOW_PROTOCOL=https:ssh
-fi
 allow_file=0
 pfile=never
 vet_base=$PWD
@@ -220,6 +235,40 @@ say_config() {
   echo "git ${sub} denied: configuration is not allowed" >&2
   printf '%s\n' "deny git ${sub}" >> "$log"
   exit 1
+}
+say_option() {
+  echo "git ${sub} denied: option is not allowed" >&2
+  printf '%s\n' "deny git ${sub}" >> "$log"
+  exit 1
+}
+# These options name a command. A shorter spelling is refused as well.
+# --exec-path is a different option and does not match.
+refuse_command_opt() {
+  case "$1" in
+    --*) ;;
+    *) return 1 ;;
+  esac
+  body=${1#--}
+  name=${body%%=*}
+  if [ -z "$name" ]; then
+    return 1
+  fi
+  case "$sub" in
+    clone|fetch|pull|ls-remote)
+      case "upload-pack" in
+        "$name"*) say_option ;;
+      esac
+      ;;
+    push)
+      case "receive-pack" in
+        "$name"*) say_option ;;
+      esac
+      case "exec" in
+        "$name"*) say_option ;;
+      esac
+      ;;
+  esac
+  return 1
 }
 # Refuse a config assignment whose key rewrites URLs.
 url_assign() {
@@ -485,6 +534,17 @@ vet_local() {
       ;;
   esac
 }
+# An option value that is a repository, a destination, or another path.
+vet_opt() {
+  case "$1" in
+    *://*|git@*)
+      vet "$1"
+      ;;
+    *)
+      vet_local "$1"
+      ;;
+  esac
+}
 resolve_remote() {
   name=$1
   case "$name" in
@@ -535,10 +595,10 @@ ensure_bridge() {
   return 0
 }
 run() {
+  # "user" allows a top-level local path. Nested git clears the user bit,
+  # so it does not keep that permission.
   if [ "$allow_file" = 1 ]; then
-    GIT_ALLOW_PROTOCOL="${GIT_ALLOW_PROTOCOL}:file"
-    export GIT_ALLOW_PROTOCOL
-    pfile=always
+    pfile=user
   else
     pfile=never
   fi
@@ -549,8 +609,9 @@ real=$1
 name=$2
 email=$3
 port=$4
-sub=$5
-shift 5
+pfile=$5
+sub=$6
+shift 6
 args=()
 prev=
 ins=0
@@ -566,7 +627,7 @@ for arg in "$@"; do
       prev=1
       continue
       ;;
-    --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*|--upload-pack=*)
+    --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*)
       args+=("$arg")
       continue
       ;;
@@ -581,12 +642,12 @@ for arg in "$@"; do
     ins=1
   fi
 done
-cargs=(-c user.name="$name" -c user.email="$email" -c commit.gpgsign=false -c core.sshCommand=/bin/false -c core.hooksPath=/dev/null -c protocol.file.allow=never -c diff.external= -c core.pager=cat -c core.fsmonitor= -c core.fsmonitorHookVersion=)
+cargs=(-c user.name="$name" -c user.email="$email" -c commit.gpgsign=false -c core.sshCommand=/bin/false -c core.hooksPath=/dev/null -c protocol.allow=never -c protocol.https.allow=always -c protocol.ssh.allow=always -c protocol.file.allow="$pfile" -c diff.external= -c core.pager=cat -c core.fsmonitor= -c core.fsmonitorHookVersion=)
 if [ -n "$port" ]; then
-  exec "$real" "${cargs[@]}" -c http.proxy= -c "url.http://127.0.0.1:${port}/github/.insteadOf=https://github.com/" -c "url.http://127.0.0.1:${port}/api/.insteadOf=https://api.github.com/" "${args[@]}"
+  exec "$real" "${cargs[@]}" -c protocol.http.allow=always -c http.proxy= -c "url.http://127.0.0.1:${port}/github/.insteadOf=https://github.com/" -c "url.http://127.0.0.1:${port}/api/.insteadOf=https://api.github.com/" "${args[@]}"
 fi
 exec "$real" "${cargs[@]}" "${args[@]}"
-' bash "$real" "$author_name" "$author_email" "$GHPORT" "$sub" "$@"
+' bash "$real" "$author_name" "$author_email" "$GHPORT" "$pfile" "$sub" "$@"
     fi
   fi
   if [ -n "$GHPORT" ]; then
@@ -600,6 +661,10 @@ exec "$real" "${cargs[@]}" "${args[@]}"
       -c core.pager=cat \
       -c core.fsmonitor= \
       -c core.fsmonitorHookVersion= \
+      -c protocol.allow=never \
+      -c protocol.https.allow=always \
+      -c protocol.ssh.allow=always \
+      -c protocol.http.allow=always \
       -c protocol.file.allow="$pfile" \
       -c http.proxy= \
       -c "url.http://127.0.0.1:${GHPORT}/github/.insteadOf=https://github.com/" \
@@ -616,6 +681,9 @@ exec "$real" "${cargs[@]}" "${args[@]}"
     -c core.pager=cat \
     -c core.fsmonitor= \
     -c core.fsmonitorHookVersion= \
+    -c protocol.allow=never \
+    -c protocol.https.allow=always \
+    -c protocol.ssh.allow=always \
     -c protocol.file.allow="$pfile" \
     "$@"
 }
@@ -632,6 +700,9 @@ if [ "$grant" != "1" ]; then
   exit 1
 fi
 if [ "$sub" = "push" ]; then
+  for arg in "$@"; do
+    refuse_command_opt "$arg"
+  done
   if [ ! -x /lgb/bin/ghbridge ] || [ ! -S /lgb/sock/push.sock ]; then
     echo "git push denied: not sent" >&2
     printf '%s\n' "deny git push" >> "$log"
@@ -659,12 +730,18 @@ case "$sub" in
     seen_sub=
     for arg in "$@"; do
       if [ -n "$prev" ]; then
-        if [ "$prev" = cfg ]; then
-          url_assign "$arg"
-        fi
+        case "$prev" in
+          cfg)
+            url_assign "$arg"
+            ;;
+          path)
+            vet_opt "$arg"
+            ;;
+        esac
         prev=
         continue
       fi
+      refuse_command_opt "$arg"
       case "$arg" in
         --recurse-submodules|--recurse-submodules=*|--recursive|--shallow-submodules)
           if [ "$sub" = clone ] || [ "$sub" = fetch ] || [ "$sub" = pull ]; then
@@ -690,8 +767,31 @@ case "$sub" in
           url_assign "${arg#--config-env=}"
           continue
           ;;
-        -C|--git-dir|--work-tree|--namespace|--super-prefix|--exec-path|--upload-pack|--depth|--branch|-b|-o|--origin|--reference|--separate-git-dir|--template|--server-option)
-          prev=1
+        --reference|--reference-if-able|--separate-git-dir|--template|--bundle-uri)
+          prev=path
+          continue
+          ;;
+        --reference=*|--reference-if-able=*|--separate-git-dir=*|--template=*|--bundle-uri=*)
+          vet_opt "${arg#*=}"
+          continue
+          ;;
+        -u|-u*)
+          if [ "$sub" = clone ]; then
+            say_option
+          fi
+          case "$arg" in
+            -u) prev=skip ;;
+          esac
+          continue
+          ;;
+        -C|--git-dir|--work-tree|--namespace|--super-prefix|--exec-path|--depth|--branch|-b|--origin|-o|--server-option|--jobs|-j|--filter|--shallow-since|--shallow-exclude|--revision)
+          prev=skip
+          continue
+          ;;
+        --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--exec-path=*|--depth=*|--branch=*|--origin=*|--server-option=*|--jobs=*|--filter=*|--shallow-since=*|--shallow-exclude=*|--revision=*)
+          continue
+          ;;
+        -j*|-b*|-o*)
           continue
           ;;
         --)
@@ -706,16 +806,26 @@ case "$sub" in
         continue
       fi
       case "$arg" in
-        *://*|git@*|file://*|/*|./*|../*|..|*/..|*/../*|*/*|.)
+        *://*|git@*)
           vet "$arg"
           found_url=1
           ;;
         *)
-          if [ "$sub" = clone ] && [ "$found_url" = "0" ]; then
+          if [ "$sub" = clone ]; then
             vet_local "$arg"
             found_url=1
-          elif [ -z "$pos" ]; then
-            pos=$arg
+          else
+            case "$arg" in
+              /*|./*|../*|..|*/..|*/../*|*/*|.)
+                vet "$arg"
+                found_url=1
+                ;;
+              *)
+                if [ -z "$pos" ]; then
+                  pos=$arg
+                fi
+                ;;
+            esac
           fi
           ;;
       esac

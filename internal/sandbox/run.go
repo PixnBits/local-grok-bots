@@ -466,8 +466,8 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 		"GIT_CONFIG_GLOBAL=/dev/null",
 		"GIT_CONFIG_SYSTEM=/dev/null",
 		"GIT_CONFIG_NOSYSTEM=1",
-		// The git wrapper widens this to include http only while the
-		// loopback credential proxy is on.
+		// The git wrapper clears this and pins protocols with git -c.
+		// http is enabled there only while the credential proxy is in use.
 		"GIT_ALLOW_PROTOCOL=https:ssh",
 	}
 	if p.cleanBash {
