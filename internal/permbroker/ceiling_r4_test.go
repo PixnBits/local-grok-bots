@@ -249,6 +249,7 @@ func TestCeilingGitRiskNested(t *testing.T) {
 }
 
 func TestCeilingRealSubmoduleGitRisk(t *testing.T) {
+	skipIfJailWrapper(t)
 	requireGit(t)
 	sub := t.TempDir()
 	runGit(t, sub, "init")

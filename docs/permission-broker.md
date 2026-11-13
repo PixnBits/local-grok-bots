@@ -242,8 +242,12 @@ to an allowlisted binary on that PATH. An assignment prefix is never
 eligible. The jail git wrapper sets a narrow config for `run_shell`,
 including an empty fsmonitor, no external diff, and a protocol list of
 https and ssh. http is added while the loopback credential proxy is in
-use, and file is added when a local repository path was accepted. That wrapper is not treated as proof that every git invocation
-inside the jail has those keys forced off. Claude is not rewritten.
+use. A local repository path unsets that list and sets `protocol.file.allow=user`
+for the command; `file` is not exported. That wrapper is not treated as proof
+that every git invocation inside the jail has those keys forced off. Tests
+that drive git with `-c core.*` or `-c protocol.*` skip when run inside the
+jail, because the jail's git wrapper refuses those keys on purpose. Claude is
+not rewritten.
 Inside-workspace checks and the git baseline use that bot's directory
 (`<workspace>/bots/<id>`), not the shared root. The shell jail binds
 that same directory at `/work`. Another bot's tree is outside. The

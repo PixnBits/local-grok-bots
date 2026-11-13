@@ -344,6 +344,9 @@ scan_global() {
       continue
     fi
     case "$arg" in
+      --exec-path|--exec-path=*)
+        say_option
+        ;;
       -C)
         prev=C
         ;;
@@ -359,7 +362,7 @@ scan_global() {
       --config=*|--config-env=*)
         url_assign "${arg#*=}"
         ;;
-      --git-dir|--work-tree|--namespace|--super-prefix|--exec-path)
+      --git-dir|--work-tree|--namespace|--super-prefix)
         prev=x
         ;;
       --)
@@ -629,39 +632,46 @@ vet_opt() {
       ;;
   esac
 }
-# Bundled clone short options. A u in the cluster names a remote command.
+# Bundled clone short options. Digits are flags with no value.
+# A u anywhere before an argument value names a remote command.
 clone_short() {
   case "$1" in
-    -[A-Za-z]*) ;;
+    -[A-Za-z0-9]*) ;;
     *) return 1 ;;
   esac
   rest=${1#-}
   while [ -n "$rest" ]; do
     letter=${rest%"${rest#?}"}
     case "$letter" in
-      [A-Za-z]) ;;
-      *) return 1 ;;
-    esac
-    rest=${rest#?}
-    case "$letter" in
-      u)
-        say_option
+      [0-9])
+        rest=${rest#?}
         ;;
-      c)
-        if [ -n "$rest" ]; then
-          url_assign "$rest"
-        else
-          prev=cfg
-        fi
-        return 0
-        ;;
-      b|j|o)
-        if [ -z "$rest" ]; then
-          prev=skip
-        fi
-        return 0
-        ;;
-      q|v|n|l|s)
+      [A-Za-z])
+        rest=${rest#?}
+        case "$letter" in
+          u)
+            say_option
+            ;;
+          c)
+            if [ -n "$rest" ]; then
+              url_assign "$rest"
+            else
+              prev=cfg
+            fi
+            return 0
+            ;;
+          b|j|o)
+            if [ -z "$rest" ]; then
+              prev=skip
+            fi
+            return 0
+            ;;
+          q|v|n|l|s)
+            ;;
+          *)
+            return 1
+            ;;
+        esac
         ;;
       *)
         return 1
@@ -670,15 +680,27 @@ clone_short() {
   done
   return 0
 }
-# A repository config value that names a remote command.
+# A repository config value that names a remote command, or a config
+# file pulled in from another path. --no-includes reads every scope
+# without opening an included file. The helper read follows includes.
 remote_helper_config() {
-  found=$("$real" \
+  found=$("$real" -C "$vet_base" \
     -c core.hooksPath=/dev/null \
     -c core.fsmonitor= \
     -c core.sshCommand=/bin/false \
     -c protocol.allow=never \
     -c safe.directory='*' \
-    config --local --get-regexp 'remote\..*\.(uploadpack|receivepack|vcs|proxy)$' 2>/dev/null) || found=
+    config --no-includes --get-regexp '^include(if\..*)?\.path$' 2>/dev/null) || found=
+  if [ -n "$found" ]; then
+    say_config
+  fi
+  found=$("$real" -C "$vet_base" \
+    -c core.hooksPath=/dev/null \
+    -c core.fsmonitor= \
+    -c core.sshCommand=/bin/false \
+    -c protocol.allow=never \
+    -c safe.directory='*' \
+    config --includes --get-regexp 'remote\..*\.(uploadpack|receivepack|vcs|proxy)$' 2>/dev/null) || found=
   if [ -n "$found" ]; then
     say_config
   fi
@@ -805,22 +827,19 @@ exec_git() {
 }
 run() {
   # "user" allows a top-level local path. Nested git clears the user bit,
-  # so it does not keep that permission.
+  # so it does not keep that permission. Leave the protocol list unset so
+  # an inherited value cannot add file for this command or a child.
   if [ "$allow_file" = 1 ]; then
     pfile=user
+    unset GIT_ALLOW_PROTOCOL
   else
     pfile=never
+    protos=https:ssh
+    if [ -n "$GHPORT" ]; then
+      protos=$protos:http
+    fi
+    export GIT_ALLOW_PROTOCOL=$protos
   fi
-  # The allow list overrides protocol.* and forces each listed transport on.
-  # file is included only for a repository path this command accepted.
-  protos=https:ssh
-  if [ -n "$GHPORT" ]; then
-    protos=$protos:http
-  fi
-  if [ "$allow_file" = 1 ]; then
-    protos=$protos:file
-  fi
-  export GIT_ALLOW_PROTOCOL=$protos
   if [ "$sub" = diff ] || [ "$sub" = log ] || [ "$sub" = show ]; then
     if [ -x /bin/bash ]; then
       exec /bin/bash --norc --noprofile -c '
@@ -861,7 +880,7 @@ for arg in "$@"; do
     ins=1
   fi
 done
-cargs=(-c user.name="$name" -c user.email="$email" -c commit.gpgsign=false -c core.sshCommand=/bin/false -c core.hooksPath=/dev/null -c protocol.allow=never -c protocol.https.allow=always -c protocol.ssh.allow=always -c protocol.file.allow="$pfile" -c diff.external= -c core.pager=cat -c core.fsmonitor= -c core.fsmonitorHookVersion=)
+cargs=(-c user.name="$name" -c user.email="$email" -c commit.gpgsign=false -c core.sshCommand=/bin/false -c core.hooksPath=/dev/null -c protocol.allow=never -c protocol.https.allow=always -c protocol.ssh.allow=always -c protocol.file.allow="$pfile" -c fetch.recurseSubmodules=false -c submodule.recurse=false -c diff.external= -c core.pager=cat -c core.fsmonitor= -c core.fsmonitorHookVersion=)
 lead=()
 tail=()
 prev=
@@ -920,6 +939,8 @@ exec "$real" "${lead[@]}" "${cargs[@]}" "${tail[@]}"
       -c protocol.ssh.allow=always \
       -c protocol.http.allow=always \
       -c protocol.file.allow="$pfile" \
+      -c fetch.recurseSubmodules=false \
+      -c submodule.recurse=false \
       -c http.proxy= \
       -c "url.http://127.0.0.1:${GHPORT}/github/.insteadOf=https://github.com/" \
       -c "url.http://127.0.0.1:${GHPORT}/api/.insteadOf=https://api.github.com/" \
@@ -939,6 +960,8 @@ exec "$real" "${lead[@]}" "${cargs[@]}" "${tail[@]}"
     -c protocol.https.allow=always \
     -c protocol.ssh.allow=always \
     -c protocol.file.allow="$pfile" \
+    -c fetch.recurseSubmodules=false \
+    -c submodule.recurse=false \
     -- "$@"
 }
 scan_global "$@"
