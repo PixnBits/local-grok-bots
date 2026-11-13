@@ -96,6 +96,7 @@ func TestCeilingAbsolutePathspec(t *testing.T) {
 }
 
 func TestCeilingShowConfirmsCommit(t *testing.T) {
+	skipIfJailWrapper(t)
 	ws := r9Repo(t)
 	gitInitMain(t, ws)
 	blobFile := filepath.Join(ws, "blob.txt")
@@ -135,6 +136,7 @@ func TestCeilingShowConfirmsCommit(t *testing.T) {
 }
 
 func TestCeilingShowNoReplaceObjectsAsks(t *testing.T) {
+	skipIfJailWrapper(t)
 	ws := r9Repo(t)
 	gitInitMain(t, ws)
 	mustWrite(t, filepath.Join(ws, "secret.txt"), "secret-blob\n")

@@ -170,8 +170,10 @@ export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_SYSTEM=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
 unset SSH_AUTH_SOCK http_proxy https_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY no_proxy
-# An inherited allow list would override the protocol.* settings below.
+# Drop an inherited transport list and command paths. run sets the list for this command.
 unset GIT_ALLOW_PROTOCOL
+unset GIT_SSH GIT_SSH_COMMAND GIT_SSH_VARIANT GIT_PROXY_COMMAND GIT_EXEC_PATH GIT_TEMPLATE_DIR
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_NAMESPACE GIT_OBJECT_DIRECTORY GIT_INDEX_FILE GIT_CEILING_DIRECTORIES GIT_ASKPASS GIT_EXTERNAL_DIFF GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PROTOCOL
 real=/lgb/bin/git
 log=/lgb/events/log
 nl='
@@ -184,6 +186,9 @@ author_email=@@EMAIL@@
 allow_file=0
 pfile=never
 vet_base=$PWD
+saw_repo_opt=
+# Quoted --git-dir and --work-tree words. Expanded when config is read.
+gitdir_args=
 sub=
 prev=
 for arg in "$@"; do
@@ -192,10 +197,10 @@ for arg in "$@"; do
     continue
   fi
   case "$arg" in
-    -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path)
+    -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path|--config)
       prev=1
       ;;
-    --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*)
+    --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*|--config=*)
       ;;
     --)
       ;;
@@ -258,6 +263,9 @@ refuse_command_opt() {
       case "upload-pack" in
         "$name"*) say_option ;;
       esac
+      case "exec" in
+        "$name"*) say_option ;;
+      esac
       ;;
     push)
       case "receive-pack" in
@@ -268,20 +276,67 @@ refuse_command_opt() {
       esac
       ;;
   esac
+  # fetch --multiple is one remote list. A shorter spelling is the same option.
+  if [ "$sub" = fetch ]; then
+    case "multiple" in
+      "$name"*) say_option ;;
+    esac
+  fi
   return 1
 }
-# Refuse a config assignment whose key rewrites URLs.
+# A short spelling of the submodule options is refused as well.
+refuse_submodule_opt() {
+  case "$1" in
+    --*) ;;
+    *) return 1 ;;
+  esac
+  case "$sub" in
+    clone|fetch|pull) ;;
+    *) return 1 ;;
+  esac
+  body=${1#--}
+  name=${body%%=*}
+  if [ -z "$name" ]; then
+    return 1
+  fi
+  case "recurse-submodules" in
+    "$name"*)
+      echo "git ${sub} denied: submodule path is outside the workspace" >&2
+      printf '%s\n' "deny git ${sub}" >> "$log"
+      exit 1
+      ;;
+  esac
+  case "recursive" in
+    "$name"*)
+      echo "git ${sub} denied: submodule path is outside the workspace" >&2
+      printf '%s\n' "deny git ${sub}" >> "$log"
+      exit 1
+      ;;
+  esac
+  case "shallow-submodules" in
+    "$name"*)
+      echo "git ${sub} denied: submodule path is outside the workspace" >&2
+      printf '%s\n' "deny git ${sub}" >> "$log"
+      exit 1
+      ;;
+  esac
+  return 1
+}
+# Refuse a config assignment that can retarget a remote or name a command.
 url_assign() {
   folded=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || say_config
   key=${folded%%=*}
   case "$key" in
-    url.*) say_config ;;
+    protocol.*|core.*|remote.*|url.*|include*|includeif.*|credential.*|http.*|ssh.*|filter.*|alias.*)
+      say_config
+      ;;
   esac
 }
 # Record -C as the base for a relative path, and refuse url rewrites.
 scan_global() {
   prev=
   base=$PWD
+  gitdir_args=
   for arg in "$@"; do
     if [ -n "$prev" ]; then
       case "$prev" in
@@ -294,11 +349,17 @@ scan_global() {
         c|env)
           url_assign "$arg"
           ;;
+        repo)
+          gitdir_args="$gitdir_args $(quote "$arg")"
+          ;;
       esac
       prev=
       continue
     fi
     case "$arg" in
+      --exec-path|--exec-path=*)
+        say_option
+        ;;
       -C)
         prev=C
         ;;
@@ -308,13 +369,22 @@ scan_global() {
       -c*)
         url_assign "${arg#-c}"
         ;;
-      --config-env)
-        prev=env
+      --config|--config-env)
+        prev=c
         ;;
-      --config-env=*)
-        url_assign "${arg#--config-env=}"
+      --config=*|--config-env=*)
+        url_assign "${arg#*=}"
         ;;
-      --git-dir|--work-tree|--namespace|--super-prefix|--exec-path)
+      --git-dir|--work-tree)
+        saw_repo_opt=1
+        gitdir_args="$gitdir_args $(quote "$arg")"
+        prev=repo
+        ;;
+      --git-dir=*|--work-tree=*)
+        saw_repo_opt=1
+        gitdir_args="$gitdir_args $(quote "$arg")"
+        ;;
+      --namespace|--super-prefix)
         prev=x
         ;;
       --)
@@ -477,11 +547,20 @@ file_url_path() {
   reject_dotdot "$decoded" || return 1
   printf '%s' "$decoded"
 }
-accept_local() {
+# arm=1 marks a repository path that this command itself is opening.
+guard_local() {
   cleaned=$(clean_abs "$1") || say_file
   inside_work "$cleaned" || say_file
   phys_inside "$cleaned" || say_file
-  allow_file=1
+  if [ "$2" = 1 ]; then
+    allow_file=1
+  fi
+}
+accept_local() {
+  guard_local "$1" 1
+}
+check_local() {
+  guard_local "$1" 0
 }
 scan_urls() {
   for arg in "$@"; do
@@ -490,6 +569,17 @@ scan_urls() {
       vet "$arg"
     fi
   done
+}
+# host:path and localhost:/path are remote URLs, not workspace paths.
+colon_remote() {
+  case "$1" in
+    *://*) return 1 ;;
+  esac
+  head=${1%%/*}
+  case "$head" in
+    *:*) return 0 ;;
+  esac
+  return 1
 }
 vet() {
   case "$1" in
@@ -512,6 +602,9 @@ vet() {
       say_deny "$1"
       ;;
   esac
+  if colon_remote "$1"; then
+    say_deny "$1"
+  fi
   case "$1" in
     /*)
       accept_local "$1"
@@ -525,12 +618,28 @@ vet() {
   return 0
 }
 vet_local() {
+  if colon_remote "$1"; then
+    say_deny "$1"
+  fi
   case "$1" in
     /*)
       accept_local "$1"
       ;;
     *)
       accept_local "$vet_base/$1"
+      ;;
+  esac
+}
+check_local_arg() {
+  if colon_remote "$1"; then
+    say_deny "$1"
+  fi
+  case "$1" in
+    /*)
+      check_local "$1"
+      ;;
+    *)
+      check_local "$vet_base/$1"
       ;;
   esac
 }
@@ -545,8 +654,112 @@ vet_opt() {
       ;;
   esac
 }
+# Bundled clone short options. Digits are flags with no value.
+# A u anywhere before an argument value names a remote command.
+clone_short() {
+  case "$1" in
+    -[A-Za-z0-9]*) ;;
+    *) return 1 ;;
+  esac
+  rest=${1#-}
+  while [ -n "$rest" ]; do
+    letter=${rest%"${rest#?}"}
+    case "$letter" in
+      [0-9])
+        rest=${rest#?}
+        ;;
+      [A-Za-z])
+        rest=${rest#?}
+        case "$letter" in
+          u)
+            say_option
+            ;;
+          c)
+            if [ -n "$rest" ]; then
+              url_assign "$rest"
+            else
+              prev=cfg
+            fi
+            return 0
+            ;;
+          b|j|o)
+            if [ -z "$rest" ]; then
+              prev=skip
+            fi
+            return 0
+            ;;
+          q|v|n|l|s)
+            ;;
+          *)
+            return 1
+            ;;
+        esac
+        ;;
+      *)
+        return 1
+        ;;
+    esac
+  done
+  return 0
+}
+# Bundled fetch short options. j and o take the rest of the word as a value.
+# An m before either of those is --multiple.
+fetch_multiple_short() {
+  case "$sub" in
+    fetch) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    -[A-Za-z0-9]*) ;;
+    *) return 1 ;;
+  esac
+  rest=${1#-}
+  while [ -n "$rest" ]; do
+    letter=${rest%"${rest#?}"}
+    case "$letter" in
+      j|o)
+        return 0
+        ;;
+      m)
+        say_option
+        ;;
+    esac
+    rest=${rest#?}
+  done
+  return 0
+}
+# A repository config value that names a remote command, or a config
+# file pulled in from another path. --no-includes reads every scope
+# without opening an included file. The helper read follows includes.
+remote_helper_config() {
+  found=$("$real" -C "$vet_base" \
+    -c core.hooksPath=/dev/null \
+    -c core.fsmonitor= \
+    -c core.sshCommand=/bin/false \
+    -c protocol.allow=never \
+    -c safe.directory='*' \
+    config --no-includes --get-regexp '^include(if\..*)?\.path$' 2>/dev/null) || found=
+  if [ -n "$found" ]; then
+    say_config
+  fi
+  found=$("$real" -C "$vet_base" \
+    -c core.hooksPath=/dev/null \
+    -c core.fsmonitor= \
+    -c core.sshCommand=/bin/false \
+    -c protocol.allow=never \
+    -c safe.directory='*' \
+    config --includes --get-regexp 'remote\..*\.(uploadpack|receivepack|vcs|proxy)$|^url\..*\.(insteadof|pushinsteadof)$' 2>/dev/null) || found=
+  if [ -n "$found" ]; then
+    say_config
+  fi
+}
 resolve_remote() {
   name=$1
+  if colon_remote "$name"; then
+    vet "$name"
+    found_url=1
+    return
+  fi
   case "$name" in
     ""|-*)
       return
@@ -594,13 +807,86 @@ ensure_bridge() {
   GHPORT=$p
   return 0
 }
+quote() {
+  printf "'"
+  s=$1
+  while :; do
+    case "$s" in
+      *\'*)
+        printf "%s'\\''" "${s%%\'*}"
+        s=${s#*\'}
+        ;;
+      *)
+        printf "%s" "$s"
+        break
+        ;;
+    esac
+  done
+  printf "'"
+}
+# Wrapper -c values follow the caller's global options and precede the git command.
+exec_git() {
+  pins=
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "--" ]; then
+      shift
+      break
+    fi
+    pins="$pins $(quote "$1")"
+    shift
+  done
+  lead=
+  rest=
+  seen=
+  prev=
+  for arg in "$@"; do
+    if [ -n "$seen" ]; then
+      rest="$rest $(quote "$arg")"
+      continue
+    fi
+    if [ -n "$prev" ]; then
+      lead="$lead $(quote "$arg")"
+      prev=
+      continue
+    fi
+    case "$arg" in
+      -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path|--config)
+        lead="$lead $(quote "$arg")"
+        prev=1
+        ;;
+      --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*|--config=*|-c*)
+        lead="$lead $(quote "$arg")"
+        ;;
+      --)
+        seen=1
+        rest="$rest $(quote "$arg")"
+        ;;
+      -*)
+        lead="$lead $(quote "$arg")"
+        ;;
+      *)
+        seen=1
+        rest="$rest $(quote "$arg")"
+        ;;
+    esac
+  done
+  eval "set -- $lead $pins $rest"
+  exec "$real" "$@"
+}
 run() {
   # "user" allows a top-level local path. Nested git clears the user bit,
-  # so it does not keep that permission.
+  # so it does not keep that permission. Leave the protocol list unset so
+  # an inherited value cannot add file for this command or a child.
   if [ "$allow_file" = 1 ]; then
     pfile=user
+    unset GIT_ALLOW_PROTOCOL
   else
     pfile=never
+    protos=https:ssh
+    if [ -n "$GHPORT" ]; then
+      protos=$protos:http
+    fi
+    export GIT_ALLOW_PROTOCOL=$protos
   fi
   if [ "$sub" = diff ] || [ "$sub" = log ] || [ "$sub" = show ]; then
     if [ -x /bin/bash ]; then
@@ -622,12 +908,12 @@ for arg in "$@"; do
     continue
   fi
   case "$arg" in
-    -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path)
+    -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path|--config)
       args+=("$arg")
       prev=1
       continue
       ;;
-    --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*)
+    --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*|--config=*)
       args+=("$arg")
       continue
       ;;
@@ -642,16 +928,51 @@ for arg in "$@"; do
     ins=1
   fi
 done
-cargs=(-c user.name="$name" -c user.email="$email" -c commit.gpgsign=false -c core.sshCommand=/bin/false -c core.hooksPath=/dev/null -c protocol.allow=never -c protocol.https.allow=always -c protocol.ssh.allow=always -c protocol.file.allow="$pfile" -c diff.external= -c core.pager=cat -c core.fsmonitor= -c core.fsmonitorHookVersion=)
+cargs=(-c user.name="$name" -c user.email="$email" -c commit.gpgsign=false -c core.sshCommand=/bin/false -c core.hooksPath=/dev/null -c protocol.allow=never -c protocol.https.allow=always -c protocol.ssh.allow=always -c protocol.file.allow="$pfile" -c fetch.recurseSubmodules=false -c submodule.recurse=false -c diff.external= -c core.pager=cat -c core.fsmonitor= -c core.fsmonitorHookVersion=)
+lead=()
+tail=()
+prev=
+seen=0
+for arg in "${args[@]}"; do
+  if [ "$seen" = 1 ]; then
+    tail+=("$arg")
+    continue
+  fi
+  if [ -n "$prev" ]; then
+    lead+=("$arg")
+    prev=
+    continue
+  fi
+  case "$arg" in
+    -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path|--config)
+      lead+=("$arg")
+      prev=1
+      ;;
+    --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*|--config=*|-c*)
+      lead+=("$arg")
+      ;;
+    --)
+      seen=1
+      tail+=("$arg")
+      ;;
+    -*)
+      lead+=("$arg")
+      ;;
+    *)
+      seen=1
+      tail+=("$arg")
+      ;;
+  esac
+done
 if [ -n "$port" ]; then
-  exec "$real" "${cargs[@]}" -c protocol.http.allow=always -c http.proxy= -c "url.http://127.0.0.1:${port}/github/.insteadOf=https://github.com/" -c "url.http://127.0.0.1:${port}/api/.insteadOf=https://api.github.com/" "${args[@]}"
+  exec "$real" "${lead[@]}" "${cargs[@]}" -c protocol.http.allow=always -c http.proxy= -c "url.http://127.0.0.1:${port}/github/.insteadOf=https://github.com/" -c "url.http://127.0.0.1:${port}/api/.insteadOf=https://api.github.com/" "${tail[@]}"
 fi
-exec "$real" "${cargs[@]}" "${args[@]}"
+exec "$real" "${lead[@]}" "${cargs[@]}" "${tail[@]}"
 ' bash "$real" "$author_name" "$author_email" "$GHPORT" "$pfile" "$sub" "$@"
     fi
   fi
   if [ -n "$GHPORT" ]; then
-    exec "$real" \
+    exec_git \
       -c user.name="$author_name" \
       -c user.email="$author_email" \
       -c commit.gpgsign=false \
@@ -666,12 +987,14 @@ exec "$real" "${cargs[@]}" "${args[@]}"
       -c protocol.ssh.allow=always \
       -c protocol.http.allow=always \
       -c protocol.file.allow="$pfile" \
+      -c fetch.recurseSubmodules=false \
+      -c submodule.recurse=false \
       -c http.proxy= \
       -c "url.http://127.0.0.1:${GHPORT}/github/.insteadOf=https://github.com/" \
       -c "url.http://127.0.0.1:${GHPORT}/api/.insteadOf=https://api.github.com/" \
-      "$@"
+      -- "$@"
   fi
-  exec "$real" \
+  exec_git \
     -c user.name="$author_name" \
     -c user.email="$author_email" \
     -c commit.gpgsign=false \
@@ -685,10 +1008,117 @@ exec "$real" "${cargs[@]}" "${args[@]}"
     -c protocol.https.allow=always \
     -c protocol.ssh.allow=always \
     -c protocol.file.allow="$pfile" \
-    "$@"
+    -c fetch.recurseSubmodules=false \
+    -c submodule.recurse=false \
+    -- "$@"
 }
 scan_global "$@"
+# --git-dir and --work-tree select a repository the cwd checks did not read.
+# Read-only commands may still name one.
+if [ "$saw_repo_opt" = 1 ]; then
+  case "$sub" in
+    ""|status|diff|log|show|rev-parse|blame|ls-files|grep|version|help|describe|name-rev|cat-file|shortlog|var)
+      ;;
+    *)
+      say_option
+      ;;
+  esac
+fi
 scan_urls "$@"
+# Effective config, including included files and worktree config.
+# git config stays available so a refused key can be removed.
+# Command-line pins are not repository keys and are skipped.
+# gitdir_args is expanded in a subshell so this command's arguments stay intact.
+# A missing git binary is not a repository key. The later checks still run.
+if [ "$sub" != config ] && [ -x "$real" ]; then
+  cfg_tab=$(printf '\t')
+  lines=$(
+    eval "set -- $gitdir_args"
+    "$real" -C "$vet_base" "$@" \
+      -c core.hooksPath=/dev/null \
+      -c core.fsmonitor= \
+      -c core.sshCommand=/bin/false \
+      -c protocol.allow=never \
+      -c safe.directory='*' \
+      config --includes --name-only --list --show-origin 2>/dev/null
+  ) || say_config
+  cfg_rest=$lines
+  while [ -n "$cfg_rest" ]; do
+    case "$cfg_rest" in
+      *"$nl"*)
+        cfg_line=${cfg_rest%%"$nl"*}
+        cfg_rest=${cfg_rest#*"$nl"}
+        ;;
+      *)
+        cfg_line=$cfg_rest
+        cfg_rest=
+        ;;
+    esac
+    case "$cfg_line" in
+      ""|"command line:"*)
+        continue
+        ;;
+    esac
+    cfg_key=$cfg_line
+    case "$cfg_line" in
+      *"$cfg_tab"*)
+        cfg_key=${cfg_line#*"$cfg_tab"}
+        ;;
+    esac
+    case "$cfg_key" in
+      # Repository format and filesystem probes written by init and clone.
+      core.repositoryformatversion|core.filemode|core.bare|core.logallrefupdates|core.ignorecase|core.precomposeunicode|core.symlinks)
+        ;;
+      # Written in a submodule git directory by submodule add.
+      core.worktree)
+        ;;
+      # Upstream tracking written by clone, checkout -b, and branch --set-upstream-to.
+      branch.*.remote|branch.*.merge|branch.*.rebase|branch.*.description|branch.*.pushremote)
+        ;;
+      # Remote definition. The url is checked again when a command uses it.
+      remote.*.url|remote.*.fetch)
+        ;;
+      # Written by clone --no-tags and clone --mirror.
+      remote.*.tagopt)
+        ;;
+      # Written by clone --filter.
+      remote.*.promisor|remote.*.partialclonefilter)
+        ;;
+      # Written by clone --mirror. It marks a mirror remote and does not name a command.
+      remote.*.mirror)
+        ;;
+      # Written by init --object-format=sha256.
+      extensions.objectformat)
+        ;;
+      # Author identity. Refusing these would lock the repository after git config user.name.
+      user.name|user.email)
+        ;;
+      # Written by submodule add. Submodule paths and urls are checked separately.
+      submodule.*.url|submodule.*.active|submodule.active)
+        ;;
+      *)
+        say_config
+        ;;
+    esac
+  done
+fi
+# An alias hides the command word. Git does not let an alias replace a builtin.
+# Any stored alias key is refused by the check above, including one that is not invoked.
+if [ -n "$sub" ]; then
+  found=$(
+    eval "set -- $gitdir_args"
+    "$real" -C "$vet_base" "$@" \
+      -c core.hooksPath=/dev/null \
+      -c core.fsmonitor= \
+      -c core.sshCommand=/bin/false \
+      -c protocol.allow=never \
+      -c safe.directory='*' \
+      config --includes --get "alias.$sub" 2>/dev/null
+  ) || found=
+  if [ -n "$found" ]; then
+    say_config
+  fi
+fi
 case "$sub" in
   ""|status|diff|log|show|rev-parse|blame|ls-files|grep|version|help|describe|name-rev|cat-file|shortlog|var)
     run "$@"
@@ -726,6 +1156,7 @@ if [ "$sub" = "push" ]; then
 fi
 case "$sub" in
   clone|fetch|pull|ls-remote|remote|submodule)
+    remote_helper_config
     prev=
     seen_sub=
     for arg in "$@"; do
@@ -742,6 +1173,11 @@ case "$sub" in
         continue
       fi
       refuse_command_opt "$arg"
+      refuse_submodule_opt "$arg"
+      fetch_multiple_short "$arg"
+      if [ "$sub" = clone ] && clone_short "$arg"; then
+        continue
+      fi
       case "$arg" in
         --recurse-submodules|--recurse-submodules=*|--recursive|--shallow-submodules)
           if [ "$sub" = clone ] || [ "$sub" = fetch ] || [ "$sub" = pull ]; then
@@ -805,6 +1241,11 @@ case "$sub" in
         seen_sub=1
         continue
       fi
+      if colon_remote "$arg"; then
+        vet "$arg"
+        found_url=1
+        continue
+      fi
       case "$arg" in
         *://*|git@*)
           vet "$arg"
@@ -814,6 +1255,17 @@ case "$sub" in
           if [ "$sub" = clone ]; then
             vet_local "$arg"
             found_url=1
+          elif [ "$sub" = submodule ]; then
+            case "$arg" in
+              /*|./*|../*|..|*/..|*/../*|*/*|.)
+                check_local_arg "$arg"
+                ;;
+              *)
+                if [ -z "$pos" ]; then
+                  pos=$arg
+                fi
+                ;;
+            esac
           else
             case "$arg" in
               /*|./*|../*|..|*/..|*/../*|*/*|.)

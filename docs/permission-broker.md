@@ -241,9 +241,37 @@ environment allowlist. A rule names a command only when argv0 resolves
 to an allowlisted binary on that PATH. An assignment prefix is never
 eligible. The jail git wrapper sets a narrow config for `run_shell`,
 including an empty fsmonitor, no external diff, and a protocol list of
-https and ssh. http is added only while the loopback credential proxy
-is on. That wrapper is not treated as proof that every git invocation
-inside the jail has those keys forced off. Claude is not rewritten.
+https and ssh. http is added while the loopback credential proxy is in
+use. A local repository path unsets that list and sets `protocol.file.allow=user`
+for the command; `file` is not exported. That wrapper is not treated as proof
+that every git invocation inside the jail has those keys forced off. Tests
+that drive git with `-c core.*` or `-c protocol.*` skip when run inside the
+jail, because the jail's git wrapper refuses those keys on purpose. Claude is
+not rewritten.
+
+The same wrapper refuses a global `--git-dir` or `--work-tree` except on a
+read-only command, refuses an invoked alias and an `alias.` key on `-c`,
+refuses `fetch --multiple` and `-m`, and refuses a repository
+`url.*.insteadOf` or `pushInsteadOf`. It reads the effective repository
+configuration (`git config --includes --name-only --list`, no scope flag, so
+system, global, local, worktree, and included files are included) and refuses
+any other key on every command except `git config`. A `--git-dir` or
+`--work-tree` on a read-only command is part of that read. Allowed keys are
+the init and clone probes (`core.repositoryformatversion`, `core.filemode`,
+`core.bare`, `core.logallrefupdates`, `core.ignorecase`,
+`core.precomposeunicode`, `core.symlinks`), `core.worktree` from a submodule
+git dir, upstream tracking (`branch.*.remote`, `branch.*.merge`,
+`branch.*.rebase`, `branch.*.description`, `branch.*.pushRemote`), the remote
+definition (`remote.*.url`, `remote.*.fetch`, plus `remote.*.tagopt`,
+`remote.*.promisor`, `remote.*.partialclonefilter`, and `remote.*.mirror`
+when clone wrote them), `extensions.objectformat` from a sha256 init,
+`user.name` and `user.email`, and `submodule.*.url`, `submodule.*.active`,
+and `submodule.active`. A stored `alias.*` key refuses every command except
+`git config`, even when that alias is not the invoked word. The wrapper unsets `GIT_COMMON_DIR`,
+`GIT_NAMESPACE`, `GIT_OBJECT_DIRECTORY`, `GIT_INDEX_FILE`, and
+`GIT_CEILING_DIRECTORIES`. Behavioral checks of the wrapper run on the host.
+In the jail, the static script checks still run.
+
 Inside-workspace checks and the git baseline use that bot's directory
 (`<workspace>/bots/<id>`), not the shared root. The shell jail binds
 that same directory at `/work`. Another bot's tree is outside. The

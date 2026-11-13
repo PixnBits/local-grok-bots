@@ -87,6 +87,7 @@ func TestR9Fix1_OptionalValue(t *testing.T) {
 // A branch name is allowed only when the repository says it is a commit.
 // Bare `git show HEAD` stays an ask because it prints the patch.
 func TestR9Fix2_ShowCommitish(t *testing.T) {
+	skipIfJailWrapper(t)
 	ws := r9Repo(t)
 	gitInitMain(t, ws)
 	blob := "e9aaabc9e1bc61bd99aa4617cf6ac4d72dd64915"

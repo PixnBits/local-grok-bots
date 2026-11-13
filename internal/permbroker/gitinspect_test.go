@@ -23,7 +23,15 @@ func TestGitInspectBlocksTransport(t *testing.T) {
 	}
 }
 
+func skipIfJailWrapper(t *testing.T) {
+	t.Helper()
+	if st, err := os.Stat("/lgb/bin/git"); err == nil && !st.IsDir() {
+		t.Skip("skipped in the jail, where git on PATH is the wrapper")
+	}
+}
+
 func TestGitInspectDoesNotRunUploadPack(t *testing.T) {
+	skipIfJailWrapper(t)
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Fatal("git is not installed")
 	}

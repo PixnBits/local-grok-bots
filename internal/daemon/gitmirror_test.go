@@ -22,7 +22,15 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func skipIfJailWrapper(t *testing.T) {
+	t.Helper()
+	if st, err := os.Stat("/lgb/bin/git"); err == nil && !st.IsDir() {
+		t.Skip("skipped in the jail, where git on PATH is the wrapper")
+	}
+}
+
 func TestMirrorAuthorsMatch(t *testing.T) {
+	skipIfJailWrapper(t)
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Fatal(err)
 	}
@@ -70,6 +78,7 @@ func TestMirrorAuthorsMatch(t *testing.T) {
 }
 
 func TestMirrorAuthorsIgnoreReplace(t *testing.T) {
+	skipIfJailWrapper(t)
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Fatal(err)
 	}
@@ -122,6 +131,7 @@ func TestMirrorAuthorsIgnoreReplace(t *testing.T) {
 }
 
 func TestMirrorIgnoresWorkspaceConfig(t *testing.T) {
+	skipIfJailWrapper(t)
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Fatal(err)
 	}
