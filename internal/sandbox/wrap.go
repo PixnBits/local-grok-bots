@@ -173,7 +173,7 @@ unset SSH_AUTH_SOCK http_proxy https_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY no_pr
 # Drop an inherited transport list and command paths. run sets the list for this command.
 unset GIT_ALLOW_PROTOCOL
 unset GIT_SSH GIT_SSH_COMMAND GIT_SSH_VARIANT GIT_PROXY_COMMAND GIT_EXEC_PATH GIT_TEMPLATE_DIR
-unset GIT_DIR GIT_WORK_TREE GIT_ASKPASS GIT_EXTERNAL_DIFF GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PROTOCOL
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_NAMESPACE GIT_OBJECT_DIRECTORY GIT_INDEX_FILE GIT_CEILING_DIRECTORIES GIT_ASKPASS GIT_EXTERNAL_DIFF GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PROTOCOL
 real=/lgb/bin/git
 log=/lgb/events/log
 nl='
@@ -186,6 +186,7 @@ author_email=@@EMAIL@@
 allow_file=0
 pfile=never
 vet_base=$PWD
+saw_repo_opt=
 sub=
 prev=
 for arg in "$@"; do
@@ -273,6 +274,12 @@ refuse_command_opt() {
       esac
       ;;
   esac
+  # fetch --multiple is one remote list. A shorter spelling is the same option.
+  if [ "$sub" = fetch ]; then
+    case "multiple" in
+      "$name"*) say_option ;;
+    esac
+  fi
   return 1
 }
 # A short spelling of the submodule options is refused as well.
@@ -318,7 +325,7 @@ url_assign() {
   folded=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || say_config
   key=${folded%%=*}
   case "$key" in
-    protocol.*|core.*|remote.*|url.*|include*|includeif.*|credential.*|http.*|ssh.*|filter.*)
+    protocol.*|core.*|remote.*|url.*|include*|includeif.*|credential.*|http.*|ssh.*|filter.*|alias.*)
       say_config
       ;;
   esac
@@ -362,7 +369,14 @@ scan_global() {
       --config=*|--config-env=*)
         url_assign "${arg#*=}"
         ;;
-      --git-dir|--work-tree|--namespace|--super-prefix)
+      --git-dir|--work-tree)
+        saw_repo_opt=1
+        prev=x
+        ;;
+      --git-dir=*|--work-tree=*)
+        saw_repo_opt=1
+        ;;
+      --namespace|--super-prefix)
         prev=x
         ;;
       --)
@@ -680,6 +694,32 @@ clone_short() {
   done
   return 0
 }
+# Bundled fetch short options. j and o take the rest of the word as a value.
+# An m before either of those is --multiple.
+fetch_multiple_short() {
+  case "$sub" in
+    fetch) ;;
+    *) return 1 ;;
+  esac
+  case "$1" in
+    -[A-Za-z0-9]*) ;;
+    *) return 1 ;;
+  esac
+  rest=${1#-}
+  while [ -n "$rest" ]; do
+    letter=${rest%"${rest#?}"}
+    case "$letter" in
+      j|o)
+        return 0
+        ;;
+      m)
+        say_option
+        ;;
+    esac
+    rest=${rest#?}
+  done
+  return 0
+}
 # A repository config value that names a remote command, or a config
 # file pulled in from another path. --no-includes reads every scope
 # without opening an included file. The helper read follows includes.
@@ -700,7 +740,7 @@ remote_helper_config() {
     -c core.sshCommand=/bin/false \
     -c protocol.allow=never \
     -c safe.directory='*' \
-    config --includes --get-regexp 'remote\..*\.(uploadpack|receivepack|vcs|proxy)$' 2>/dev/null) || found=
+    config --includes --get-regexp 'remote\..*\.(uploadpack|receivepack|vcs|proxy)$|^url\..*\.(insteadof|pushinsteadof)$' 2>/dev/null) || found=
   if [ -n "$found" ]; then
     say_config
   fi
@@ -965,7 +1005,33 @@ exec "$real" "${lead[@]}" "${cargs[@]}" "${tail[@]}"
     -- "$@"
 }
 scan_global "$@"
+# --git-dir and --work-tree select a repository the cwd checks did not read.
+# Read-only commands may still name one.
+if [ "$saw_repo_opt" = 1 ]; then
+  case "$sub" in
+    ""|status|diff|log|show|rev-parse|blame|ls-files|grep|version|help|describe|name-rev|cat-file|shortlog|var)
+      ;;
+    *)
+      say_option
+      ;;
+  esac
+fi
 scan_urls "$@"
+# An alias hides the command word. A different alias does not.
+# Git does not let an alias replace a builtin, so a normal command whose
+# own name is not an alias is unchanged.
+if [ -n "$sub" ]; then
+  found=$("$real" -C "$vet_base" \
+    -c core.hooksPath=/dev/null \
+    -c core.fsmonitor= \
+    -c core.sshCommand=/bin/false \
+    -c protocol.allow=never \
+    -c safe.directory='*' \
+    config --includes --get "alias.$sub" 2>/dev/null) || found=
+  if [ -n "$found" ]; then
+    say_config
+  fi
+fi
 case "$sub" in
   ""|status|diff|log|show|rev-parse|blame|ls-files|grep|version|help|describe|name-rev|cat-file|shortlog|var)
     run "$@"
@@ -1021,6 +1087,7 @@ case "$sub" in
       fi
       refuse_command_opt "$arg"
       refuse_submodule_opt "$arg"
+      fetch_multiple_short "$arg"
       if [ "$sub" = clone ] && clone_short "$arg"; then
         continue
       fi

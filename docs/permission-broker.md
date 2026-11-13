@@ -248,6 +248,15 @@ that every git invocation inside the jail has those keys forced off. Tests
 that drive git with `-c core.*` or `-c protocol.*` skip when run inside the
 jail, because the jail's git wrapper refuses those keys on purpose. Claude is
 not rewritten.
+
+The same wrapper refuses a global `--git-dir` or `--work-tree` except on a
+read-only command, refuses an invoked alias and an `alias.` key on `-c`,
+refuses `fetch --multiple` and `-m`, and refuses a repository
+`url.*.insteadOf` or `pushInsteadOf`. It unsets `GIT_COMMON_DIR`,
+`GIT_NAMESPACE`, `GIT_OBJECT_DIRECTORY`, `GIT_INDEX_FILE`, and
+`GIT_CEILING_DIRECTORIES`. Behavioral checks of the wrapper run on the host.
+In the jail, the static script checks still run.
+
 Inside-workspace checks and the git baseline use that bot's directory
 (`<workspace>/bots/<id>`), not the shared root. The shell jail binds
 that same directory at `/work`. Another bot's tree is outside. The
