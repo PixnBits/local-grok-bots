@@ -1,13 +1,16 @@
 package sandbox
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGitWrapForcesSafeConfig(t *testing.T) {
@@ -2036,6 +2039,11 @@ func commitRepo(t *testing.T, dir, file, body string) string {
 
 func installGitWrap(t *testing.T, work string) string {
 	t.Helper()
+	return installGitWrapWith(t, work, gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost"})
+}
+
+func installGitWrapWith(t *testing.T, work string, opts gitWrapOpts) string {
+	t.Helper()
 	skipIfJailWrapper(t)
 	real, err := exec.LookPath("git")
 	if err != nil {
@@ -2045,7 +2053,19 @@ func installGitWrap(t *testing.T, work string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := gitWrap(gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost"})
+	return installGitWrapReal(t, work, real, opts)
+}
+
+func installGitWrapReal(t *testing.T, work, real string, opts gitWrapOpts) string {
+	t.Helper()
+	skipIfJailWrapper(t)
+	if opts.Name == "" {
+		opts.Name = "Ada"
+	}
+	if opts.Email == "" {
+		opts.Email = "bot@localhost"
+	}
+	script := gitWrap(opts)
 	script = strings.ReplaceAll(script, "/lgb/bin/git", real)
 	script = strings.ReplaceAll(script, "/work", work)
 	wrap := filepath.Join(t.TempDir(), "gitwrap")
@@ -2053,6 +2073,56 @@ func installGitWrap(t *testing.T, work string) string {
 		t.Fatal(err)
 	}
 	return wrap
+}
+
+func hostGitAtLeast(t *testing.T, major, minor int) bool {
+	t.Helper()
+	out, err := exec.Command("git", "version").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := strings.Fields(string(out))
+	if len(fields) < 3 {
+		return false
+	}
+	parts := strings.Split(fields[2], ".")
+	if len(parts) < 2 {
+		return false
+	}
+	ma, err1 := strconv.Atoi(parts[0])
+	mi, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return ma > major || (ma == major && mi >= minor)
+}
+
+func gitLocalGet(dir, key string) (string, bool) {
+	cmd := exec.Command("git", "-C", dir, "config", "--local", "--get", key)
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"HOME=" + dir,
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_TERMINAL_PROMPT=0",
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(out)), true
+}
+
+func runWrapTimeout(t *testing.T, wrap, dir string, extra []string, d time.Duration, args ...string) (string, error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, wrap, args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GIT_ALLOW_PROTOCOL=https:ssh", "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(cmd.Env, extra...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 func runInstalledWrap(t *testing.T, wrap, dir string, extra []string, args ...string) (string, error) {
@@ -2232,17 +2302,30 @@ func TestGitWrapConfigAllowlistStaysClosed(t *testing.T) {
 	if !strings.Contains(script, `gitdir_args="$gitdir_args $(quote "$arg")"`) {
 		t.Fatal("repository options are not recorded")
 	}
+	if !strings.Contains(script, "config_key_allowed()") {
+		t.Fatal("allowlist is not a shared function")
+	}
+	if !strings.Contains(script, "config_guard()") {
+		t.Fatal("config_guard is missing")
+	}
+	if strings.Contains(script, "remote.*.promisor") || strings.Contains(script, "partialclonefilter") {
+		t.Fatal("promisor keys are still on the allowlist")
+	}
 	for _, pat := range []string{
 		"core.repositoryformatversion|core.filemode|core.bare|core.logallrefupdates|core.ignorecase|core.precomposeunicode|core.symlinks)",
 		"core.worktree)",
 		"branch.*.remote|branch.*.merge|branch.*.rebase|branch.*.description|branch.*.pushremote)",
 		"remote.*.url|remote.*.fetch)",
 		"remote.*.tagopt)",
-		"remote.*.promisor|remote.*.partialclonefilter)",
 		"remote.*.mirror)",
 		"extensions.objectformat)",
 		"user.name|user.email)",
 		"submodule.*.url|submodule.*.active|submodule.active)",
+		"core.autocrlf|core.eol|core.safecrlf)",
+		"core.sparsecheckout|core.sparsecheckoutcone|index.sparse|extensions.worktreeconfig)",
+		"pull.rebase|pull.ff)",
+		"color.*)",
+		"advice.*)",
 	} {
 		if !strings.Contains(script, pat) {
 			t.Fatalf("missing allow pattern %s", pat)
@@ -2317,7 +2400,6 @@ func TestGitWrapConfigAllowlistStaysClosed(t *testing.T) {
 		{"proxy", "http.proxy", "http://127.0.0.1:9"},
 		{"fileproto", "protocol.file.allow", "always"},
 		{"recurse", "fetch.recurseSubmodules", "yes"},
-		{"rebase", "pull.rebase", "true"},
 		{"alias-bang", "alias.x", "!echo hi"},
 		{"alias-plain", "alias.x", "status"},
 		{"alias-hook", "alias.x", "!" + hook},
@@ -2529,8 +2611,11 @@ func TestGitWrapRecordedConfigStaysAllowed(t *testing.T) {
 	gitCmd(t, work, "clone", "--separate-git-dir", sep, url, sepDest)
 	accept("clone-separate-git-dir", sepDest, false)
 	// clone --filter writes remote.*.promisor and remote.*.partialclonefilter.
-	// extensions.partialclone is not written here, so it is not allowed.
-	accept("clone-filter", clone("c-filter", "--filter=blob:none"), false)
+	filterDir := clone("c-filter", "--filter=blob:none")
+	out, err := runInstalledWrap(t, wrap, filterDir, nil, "status")
+	if err == nil || !strings.Contains(out, configDenied) {
+		t.Fatalf("clone-filter status: %v\n%s", err, out)
+	}
 
 	remoteAdd := initDir("remote-add", "-b", "main")
 	gitCmd(t, remoteAdd, "remote", "add", "origin", url)
@@ -2570,7 +2655,7 @@ func TestGitWrapRecordedConfigStaysAllowed(t *testing.T) {
 	accept("worktree-linked", linked, false)
 
 	// sparse-checkout writes extensions.worktreeConfig plus core.sparseCheckout
-	// and core.sparseCheckoutCone in the worktree config. Those keys stay refused.
+	// and core.sparseCheckoutCone in the worktree config. Those keys are allowed.
 	sparse := filepath.Join(work, "sparse")
 	commitRepo(t, sparse, "s.txt", "s\n")
 	gitCmd(t, sparse, "sparse-checkout", "init")
@@ -2581,10 +2666,7 @@ func TestGitWrapRecordedConfigStaysAllowed(t *testing.T) {
 			t.Fatalf("sparse-checkout did not write %s: %v", key, sparseKeys)
 		}
 	}
-	out, err := runInstalledWrap(t, wrap, sparse, nil, "status")
-	if err == nil || !strings.Contains(out, configDenied) {
-		t.Fatalf("sparse status: %v\n%s", err, out)
-	}
+	accept("sparse", sparse, false)
 
 	// Ordinary commands through the wrapper, in a fresh clone.
 	fileDest := filepath.Join(work, "op-file")
@@ -2649,4 +2731,630 @@ func stringListHas(keys []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func TestGitWrapR4CoreWorktreeOutsideRefused(t *testing.T) {
+	skipIfJailWrapper(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal("git is not installed")
+	}
+	base := t.TempDir()
+	work := filepath.Join(base, "work")
+	outside := filepath.Join(base, "outside")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("SECRETOUT\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wrap := installGitWrap(t, work)
+	configDenied := "configuration is not allowed"
+	refuseAndUntouched := func(dir string, args ...string) {
+		t.Helper()
+		out, err := runInstalledWrap(t, wrap, dir, nil, args...)
+		if err == nil || !strings.Contains(out, configDenied) {
+			t.Fatalf("%s %v: %v\n%s", dir, args, err, out)
+		}
+		body, readErr := os.ReadFile(secret)
+		if readErr != nil || string(body) != "SECRETOUT\n" {
+			t.Fatalf("outside file changed: %q %v\n%s", body, readErr, out)
+		}
+		if treeHas(t, dir, "SECRETOUT") {
+			t.Fatalf("outside content reached the workspace\n%s", out)
+		}
+	}
+
+	absRepo := filepath.Join(work, "abs")
+	commitRepo(t, absRepo, "a.txt", "abs\n")
+	gitCmd(t, absRepo, "config", "core.worktree", outside)
+	refuseAndUntouched(absRepo, "status")
+	refuseAndUntouched(absRepo, "fetch")
+
+	relRepo := filepath.Join(work, "rel")
+	commitRepo(t, relRepo, "r.txt", "rel\n")
+	rel, err := filepath.Rel(filepath.Join(relRepo, ".git"), outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, relRepo, "config", "core.worktree", rel)
+	refuseAndUntouched(relRepo, "status")
+	refuseAndUntouched(relRepo, "fetch")
+
+	// An absolute value must not be resolved against the git directory: a
+	// look-alike directory under .git must not make an outside path pass.
+	shadowRepo := filepath.Join(work, "shadow")
+	commitRepo(t, shadowRepo, "h.txt", "shadow\n")
+	if err := os.MkdirAll(filepath.Join(shadowRepo, ".git", outside), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, shadowRepo, "config", "core.worktree", outside)
+	refuseAndUntouched(shadowRepo, "status")
+
+	subsrc := filepath.Join(work, "subsrc")
+	commitRepo(t, subsrc, "s.txt", "s\n")
+	parent := filepath.Join(work, "parent")
+	commitRepo(t, parent, "p.txt", "p\n")
+	gitCmd(t, parent, "-c", "protocol.file.allow=always", "submodule", "add", "file://"+subsrc, "sub")
+	sub := filepath.Join(parent, "sub")
+	out, err := runInstalledWrap(t, wrap, sub, nil, "status")
+	if err != nil || strings.Contains(out, configDenied) {
+		t.Fatalf("submodule status: %v\n%s", err, out)
+	}
+	out, err = runInstalledWrap(t, wrap, parent, nil, "status")
+	if err != nil || strings.Contains(out, configDenied) {
+		t.Fatalf("parent status: %v\n%s", err, out)
+	}
+	// A submodule git directory whose worktree value points outside is refused.
+	modCfg := filepath.Join(parent, ".git", "modules", "sub")
+	modRel, err := filepath.Rel(modCfg, outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, modCfg, "config", "--file", filepath.Join(modCfg, "config"), "core.worktree", modRel)
+	refuseAndUntouched(sub, "status")
+}
+
+func TestGitWrapR4PromisorLazyFetchRefused(t *testing.T) {
+	script := gitWrap(gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost"})
+	if !strings.Contains(script, "export GIT_NO_LAZY_FETCH=1") {
+		t.Fatal("GIT_NO_LAZY_FETCH is not exported")
+	}
+	if strings.Contains(script, "remote.*.promisor") || strings.Contains(script, "partialclonefilter") {
+		t.Fatal("promisor keys are still on the allowlist")
+	}
+	skipIfJailWrapper(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal("git is not installed")
+	}
+	work := t.TempDir()
+	outside := t.TempDir()
+	outsideSHA := commitRepo(t, outside, "secret.txt", "SECRETOUT\n")
+	ok := filepath.Join(work, "ok")
+	if err := os.WriteFile(ok, []byte("ok\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Join(work, "repo")
+	commitRepo(t, repo, "r.txt", "repo\n")
+	gitCmd(t, repo, "config", "remote.p.url", "file://"+outside)
+	gitCmd(t, repo, "config", "remote.p.promisor", "true")
+	gitCmd(t, repo, "config", "remote.p.partialclonefilter", "blob:none")
+	wrap := installGitWrap(t, work)
+	repoGit := filepath.Join(repo, ".git")
+	hasNoFetch := func() bool {
+		t.Helper()
+		cmd := exec.Command("git", "--git-dir", repoGit, "cat-file", "-e", outsideSHA)
+		cmd.Env = []string{
+			"PATH=" + os.Getenv("PATH"),
+			"HOME=" + repoGit,
+			"GIT_CONFIG_GLOBAL=/dev/null",
+			"GIT_CONFIG_NOSYSTEM=1",
+			"GIT_TERMINAL_PROMPT=0",
+			"GIT_NO_LAZY_FETCH=1",
+		}
+		return cmd.Run() == nil
+	}
+	if hasNoFetch() {
+		t.Fatal("workspace already had the outside object")
+	}
+	out, err := runInstalledWrap(t, wrap, repo, nil, "show", outsideSHA, "--", "file://"+ok)
+	if err == nil || !strings.Contains(out, "configuration is not allowed") {
+		t.Fatalf("armed show: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "remote.p.promisor") {
+		t.Fatalf("denial did not name the key: %s", out)
+	}
+	if hasNoFetch() {
+		t.Fatal("outside object arrived in the workspace")
+	}
+	if treeHas(t, filepath.Join(repo, ".git"), "SECRETOUT") {
+		t.Fatal("outside content reached the workspace")
+	}
+}
+
+func TestGitWrapR4ConfigExemptionConfined(t *testing.T) {
+	script := gitWrap(gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost"})
+	if !strings.Contains(script, "config_guard()") {
+		t.Fatal("config_guard is missing")
+	}
+	if !strings.Contains(script, "config_key_allowed()") {
+		t.Fatal("config_key_allowed is missing")
+	}
+	skipIfJailWrapper(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal("git is not installed")
+	}
+	work := t.TempDir()
+	wrap := installGitWrap(t, work)
+	repo := filepath.Join(work, "repo")
+	commitRepo(t, repo, "f.txt", "f\n")
+	inside := filepath.Join(work, "inside")
+	commitRepo(t, inside, "i.txt", "i\n")
+	gitCmd(t, repo, "remote", "add", "origin", "file://"+inside)
+	foreign := filepath.Join(t.TempDir(), "x")
+	optionDenied := "option is not allowed"
+	configDenied := "configuration is not allowed"
+	refuseOption := func(args ...string) {
+		t.Helper()
+		out, err := runInstalledWrap(t, wrap, repo, nil, args...)
+		if err == nil || !strings.Contains(out, optionDenied) {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+	refuseOption("config", "--file", foreign, "a.b", "c")
+	refuseOption("config", "-f", foreign, "--list")
+	refuseOption("config", "-f"+foreign, "--list")
+	refuseOption("config", "--fi", foreign, "--list")
+	refuseOption("config", "--fil", foreign, "--list")
+	refuseOption("config", "--global", "--list")
+	refuseOption("config", "--gl", "--list")
+	refuseOption("config", "--system", "--list")
+	refuseOption("config", "--sys", "--list")
+	refuseOption("config", "--blob", "HEAD:x")
+	refuseOption("config", "--blob=HEAD:x")
+	refuseOption("config", "--bl", "HEAD:x")
+	refuseOption("config", "-e")
+	refuseOption("config", "--edit")
+	refuseOption("config", "--ed")
+	refuseWrite := func(key string, args ...string) {
+		t.Helper()
+		out, err := runInstalledWrap(t, wrap, repo, nil, args...)
+		if err == nil || !strings.Contains(out, configDenied) {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+		if !strings.Contains(out, key) {
+			t.Fatalf("%v did not name %s\n%s", args, key, out)
+		}
+		if _, ok := gitLocalGet(repo, key); ok {
+			t.Fatalf("%v wrote %s", args, key)
+		}
+	}
+	refuseWrite("alias.x", "config", "--add", "alias.x", "y")
+	refuseWrite("core.hooksPath", "config", "--replace-all", "core.hooksPath", "/x")
+	refuseWrite("core.sshCommand", "config", "core.sshCommand", "x")
+	if hostGitAtLeast(t, 2, 46) {
+		refuseWrite("core.fsmonitor", "config", "set", "core.fsmonitor", "x")
+		refuseWrite("include.path", "config", "add", "include.path", "x")
+	}
+
+	gitCmd(t, repo, "config", "alias.x", "status")
+	out, err := runInstalledWrap(t, wrap, repo, nil, "config", "--unset-all", "alias.x")
+	if err != nil || strings.Contains(out, configDenied) {
+		t.Fatalf("unset-all alias.x: %v\n%s", err, out)
+	}
+	if _, ok := gitLocalGet(repo, "alias.x"); ok {
+		t.Fatal("alias.x still set")
+	}
+	gitCmd(t, repo, "config", "alias.x", "status")
+	out, err = runInstalledWrap(t, wrap, repo, nil, "config", "--remove-section", "alias")
+	if err != nil || strings.Contains(out, configDenied) {
+		t.Fatalf("remove-section alias: %v\n%s", err, out)
+	}
+	gitCmd(t, repo, "config", "core.hooksPath", "/x")
+	out, err = runInstalledWrap(t, wrap, repo, nil, "config", "--unset", "core.hooksPath")
+	if err != nil || strings.Contains(out, configDenied) {
+		t.Fatalf("unset core.hooksPath: %v\n%s", err, out)
+	}
+	gitCmd(t, repo, "config", "core.fsmonitor", "/x")
+	gitCmd(t, repo, "config", "url.x.insteadOf", "y")
+	if hostGitAtLeast(t, 2, 46) {
+		out, err = runInstalledWrap(t, wrap, repo, nil, "config", "unset", "core.fsmonitor")
+		if err != nil || strings.Contains(out, configDenied) {
+			t.Fatalf("config unset core.fsmonitor: %v\n%s", err, out)
+		}
+		out, err = runInstalledWrap(t, wrap, repo, nil, "config", "remove-section", "url.x")
+		if err != nil || strings.Contains(out, configDenied) {
+			t.Fatalf("config remove-section url.x: %v\n%s", err, out)
+		}
+	} else {
+		out, err = runInstalledWrap(t, wrap, repo, nil, "config", "--unset", "core.fsmonitor")
+		if err != nil || strings.Contains(out, configDenied) {
+			t.Fatalf("unset core.fsmonitor: %v\n%s", err, out)
+		}
+		out, err = runInstalledWrap(t, wrap, repo, nil, "config", "--remove-section", "url.x")
+		if err != nil || strings.Contains(out, configDenied) {
+			t.Fatalf("remove-section url.x: %v\n%s", err, out)
+		}
+	}
+
+	out, err = runInstalledWrap(t, wrap, repo, nil, "config", "user.name", "x")
+	if err != nil || strings.Contains(out, configDenied) {
+		t.Fatalf("config user.name: %v\n%s", err, out)
+	}
+	if got, ok := gitLocalGet(repo, "user.name"); !ok || got != "x" {
+		t.Fatalf("user.name not written: %q %v", got, ok)
+	}
+	out, err = runInstalledWrap(t, wrap, repo, nil, "config", "pull.rebase", "true")
+	if err != nil || strings.Contains(out, configDenied) {
+		t.Fatalf("config pull.rebase: %v\n%s", err, out)
+	}
+	if got, ok := gitLocalGet(repo, "pull.rebase"); !ok || got != "true" {
+		t.Fatalf("pull.rebase not written: %q %v", got, ok)
+	}
+	out, err = runInstalledWrap(t, wrap, repo, nil, "config", "--get", "remote.origin.url")
+	if err != nil || !strings.Contains(out, "file://") {
+		t.Fatalf("config --get: %v\n%s", err, out)
+	}
+	out, err = runInstalledWrap(t, wrap, repo, nil, "config", "--list")
+	if err != nil || strings.Contains(out, configDenied) {
+		t.Fatalf("config --list: %v\n%s", err, out)
+	}
+	if hostGitAtLeast(t, 2, 46) {
+		out, err = runInstalledWrap(t, wrap, repo, nil, "config", "get", "remote.origin.url")
+		if err != nil || !strings.Contains(out, "file://") {
+			t.Fatalf("config get: %v\n%s", err, out)
+		}
+		out, err = runInstalledWrap(t, wrap, repo, nil, "config", "list")
+		if err != nil || strings.Contains(out, configDenied) {
+			t.Fatalf("config list: %v\n%s", err, out)
+		}
+		out, err = runInstalledWrap(t, wrap, repo, nil, "config", "set", "user.email", "x@x")
+		if err != nil || strings.Contains(out, configDenied) {
+			t.Fatalf("config set user.email: %v\n%s", err, out)
+		}
+	}
+	out, err = runInstalledWrap(t, wrap, repo, nil, "status")
+	if err != nil || strings.Contains(out, configDenied) {
+		t.Fatalf("status after config: %v\n%s", err, out)
+	}
+}
+
+func TestGitWrapR4FetchUpdateHeadVetsURL(t *testing.T) {
+	script := gitWrap(gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost"})
+	if strings.Contains(script, "-u) prev=skip") {
+		t.Fatal("fetch -u still skips the next word")
+	}
+	head := script
+	if i := strings.Index(script, "sub="); i >= 0 {
+		head = script[i:]
+		if j := strings.Index(head, "GHPORT="); j >= 0 {
+			head = head[:j]
+		}
+	}
+	if strings.Contains(head, "-u") && strings.Contains(head, "prev=") && strings.Contains(head, "-u)") {
+		t.Fatal("first scan loop skips a value after -u")
+	}
+	skipIfJailWrapper(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal("git is not installed")
+	}
+	work := t.TempDir()
+	inside := filepath.Join(work, "inside")
+	insideSHA := commitRepo(t, inside, "i.txt", "inside\n")
+	repo := filepath.Join(work, "repo")
+	commitRepo(t, repo, "r.txt", "repo\n")
+	gitCmd(t, repo, "remote", "add", "origin", "file://"+inside)
+	wrap := installGitWrap(t, work)
+	outside := t.TempDir()
+	out, err := runWrapTimeout(t, wrap, repo, nil, 15*time.Second, "fetch", "-u", "https://github.com/someone/else.git")
+	if err == nil || !strings.Contains(out, RepoNotAvailable) {
+		t.Fatalf("fetch -u https: %v\n%s", err, out)
+	}
+	out, err = runInstalledWrap(t, wrap, repo, nil, "fetch", "-u", outside)
+	if err == nil || !(strings.Contains(out, "local path is outside the workspace") || strings.Contains(out, RepoNotAvailable)) {
+		t.Fatalf("fetch -u outside: %v\n%s", err, out)
+	}
+	out, err = runInstalledWrap(t, wrap, repo, nil, "fetch", "-u", "origin")
+	if err != nil || strings.Contains(out, RepoNotAvailable) {
+		t.Fatalf("fetch -u origin: %v\n%s", err, out)
+	}
+	if !gitHasObject(filepath.Join(repo, ".git"), insideSHA) {
+		t.Fatal("fetch -u origin did not store the workspace commit")
+	}
+}
+
+func TestGitWrapR4CommonKeysStayAllowed(t *testing.T) {
+	skipIfJailWrapper(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal("git is not installed")
+	}
+	work := t.TempDir()
+	wrap := installGitWrap(t, work)
+	configDenied := "configuration is not allowed"
+	dir := filepath.Join(work, "allowed")
+	commitRepo(t, dir, "f.txt", "f\n")
+	for _, kv := range [][2]string{
+		{"core.autocrlf", "true"},
+		{"core.eol", "lf"},
+		{"core.safecrlf", "warn"},
+		{"core.whitespace", "trailing-space"},
+		{"core.abbrev", "7"},
+		{"core.quotepath", "false"},
+		{"core.longpaths", "true"},
+		{"core.untrackedCache", "true"},
+		{"pull.rebase", "true"},
+		{"pull.ff", "true"},
+		{"init.defaultBranch", "main"},
+		{"push.default", "simple"},
+		{"push.autoSetupRemote", "true"},
+		{"push.followTags", "true"},
+		{"fetch.prune", "true"},
+		{"fetch.pruneTags", "true"},
+		{"fetch.parallel", "1"},
+		{"merge.ff", "true"},
+		{"merge.conflictStyle", "diff3"},
+		{"rebase.autoStash", "true"},
+		{"rebase.autoSquash", "true"},
+		{"status.showUntrackedFiles", "normal"},
+		{"status.branch", "true"},
+		{"status.short", "true"},
+		{"log.date", "iso"},
+		{"diff.algorithm", "histogram"},
+		{"rerere.enabled", "true"},
+		{"branch.autoSetupMerge", "true"},
+		{"branch.autoSetupRebase", "always"},
+		{"color.ui", "false"},
+		{"color.status", "false"},
+		{"advice.detachedHead", "false"},
+		{"gc.auto", "0"},
+		{"tag.sort", "version:refname"},
+	} {
+		gitCmd(t, dir, "config", kv[0], kv[1])
+	}
+	out, err := runInstalledWrap(t, wrap, dir, nil, "status")
+	if err != nil || strings.Contains(out, configDenied) {
+		t.Fatalf("allowed keys status: %v\n%s", err, out)
+	}
+	out, err = runInstalledWrap(t, wrap, dir, nil, "log", "-1")
+	if err != nil || strings.Contains(out, configDenied) {
+		t.Fatalf("allowed keys log: %v\n%s", err, out)
+	}
+
+	for _, kv := range [][2]string{
+		{"core.fsmonitor", "/x"},
+		{"core.hooksPath", "/x"},
+		{"core.pager", "/x"},
+		{"core.editor", "/x"},
+		{"core.sshCommand", "/x"},
+		{"core.excludesFile", "/x"},
+		{"core.attributesFile", "/x"},
+		{"filter.x.clean", "/x"},
+		{"merge.x.driver", "/x"},
+		{"diff.x.textconv", "/x"},
+		{"credential.helper", "/x"},
+		{"http.proxy", "http://127.0.0.1:9"},
+		{"url.x.insteadOf", "y"},
+		{"alias.x", "status"},
+		{"include.path", "/x"},
+		{"includeIf.onbranch:main.path", "/x"},
+		{"diff.external", "/x"},
+		{"pager.log", "/x"},
+		{"sequence.editor", "/x"},
+		{"gpg.program", "/x"},
+		{"safe.directory", "/x"},
+		{"protocol.file.allow", "always"},
+		{"submodule.recurse", "true"},
+		{"fetch.recurseSubmodules", "true"},
+		{"extensions.partialclone", "origin"},
+		{"merge.tool", "vimdiff"},
+		{"mergetool.x.path", "/x"},
+		{"difftool.x.cmd", "/x"},
+		{"user.signingkey", "abc"},
+		{"commit.template", "/x"},
+		{"format.pretty", "fuller"},
+		{"help.autocorrect", "1"},
+		{"commit.gpgsign", "true"},
+		{"tag.gpgsign", "true"},
+	} {
+		t.Run("deny-"+kv[0], func(t *testing.T) {
+			d := filepath.Join(work, "deny-"+strings.ReplaceAll(kv[0], ".", "-"))
+			commitRepo(t, d, "f.txt", "f\n")
+			gitCmd(t, d, "config", kv[0], kv[1])
+			out, err := runInstalledWrap(t, wrap, d, nil, "status")
+			if err == nil || !strings.Contains(out, configDenied) {
+				t.Fatalf("%s: %v\n%s", kv[0], err, out)
+			}
+		})
+	}
+
+	sparse := filepath.Join(work, "sparse-cone")
+	commitRepo(t, sparse, "s.txt", "s\n")
+	gitCmd(t, sparse, "sparse-checkout", "init", "--cone")
+	gitCmd(t, sparse, "config", "index.sparse", "true")
+	out, err = runInstalledWrap(t, wrap, sparse, nil, "status")
+	if err != nil || strings.Contains(out, configDenied) {
+		t.Fatalf("sparse-checkout init cone: %v\n%s", err, out)
+	}
+}
+
+func TestGitWrapR4DenialNamesKey(t *testing.T) {
+	script := gitWrap(gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost"})
+	if !strings.Contains(script, "say_config_key()") {
+		t.Fatal("say_config_key is missing")
+	}
+	text := runGitWrap(t, script, "-c", "alias.x\nhostile=/secret/path", "status")
+	if !strings.Contains(text, "configuration is not allowed:") {
+		t.Fatalf("missing key prefix: %s", text)
+	}
+	if strings.Contains(text, "\nhostile") || strings.Contains(text, "/secret/path") {
+		t.Fatalf("message kept control characters or a path: %s", text)
+	}
+	if strings.Contains(text, string(rune(10))+"hostile") {
+		t.Fatalf("message kept a newline in the key: %s", text)
+	}
+	skipIfJailWrapper(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal("git is not installed")
+	}
+	work := t.TempDir()
+	repo := filepath.Join(work, "repo")
+	commitRepo(t, repo, "f.txt", "f\n")
+	gitCmd(t, repo, "config", "alias.x", "!/tmp/secret-helper")
+	wrap := installGitWrap(t, work)
+	out, err := runInstalledWrap(t, wrap, repo, nil, "status")
+	if err == nil || !strings.Contains(out, "configuration is not allowed: alias.x") {
+		t.Fatalf("alias.x: %v\n%s", err, out)
+	}
+	if strings.Contains(out, "/tmp/secret-helper") || strings.Contains(out, work) {
+		t.Fatalf("message named a path: %s", out)
+	}
+}
+
+func TestGitWrapR4AttrSourceRefused(t *testing.T) {
+	script := gitWrap(gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost"})
+	optionDenied := "option is not allowed"
+	for _, args := range [][]string{
+		{"--attr-source", "HEAD", "status"},
+		{"--attr-source=HEAD", "status"},
+		{"status", "--attr-source", "HEAD"},
+		{"status", "--attr-source=HEAD"},
+	} {
+		text := runGitWrap(t, script, args...)
+		if !strings.Contains(text, optionDenied) {
+			t.Fatalf("%v: %s", args, text)
+		}
+	}
+	skipIfJailWrapper(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal("git is not installed")
+	}
+	work := t.TempDir()
+	repo := filepath.Join(work, "repo")
+	commitRepo(t, repo, "f.txt", "f\n")
+	wrap := installGitWrap(t, work)
+	out, err := runInstalledWrap(t, wrap, repo, nil, "status")
+	if err != nil || strings.Contains(out, optionDenied) {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+}
+
+func TestGitWrapR4EditorEnvUnset(t *testing.T) {
+	script := gitWrap(gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost"})
+	if !strings.Contains(script, "unset GIT_EDITOR VISUAL EDITOR GIT_SEQUENCE_EDITOR") {
+		t.Fatal("editor variables are not unset")
+	}
+	skipIfJailWrapper(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal("git is not installed")
+	}
+	work := t.TempDir()
+	repo := filepath.Join(work, "repo")
+	commitRepo(t, repo, "f.txt", "f\n")
+	marker := filepath.Join(work, "editor-ran")
+	editor := filepath.Join(work, "editor.sh")
+	writeMarkerHook(t, editor, marker)
+	dump := filepath.Join(work, "env.dump")
+	real, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	real, err = filepath.Abs(real)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := filepath.Join(work, "real-git")
+	body := "#!/bin/sh\nenv > '" + dump + "'\nexec '" + real + "' \"$@\"\n"
+	if err := os.WriteFile(fake, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wrap := installGitWrapReal(t, work, fake, gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost"})
+	extra := []string{
+		"GIT_EDITOR=" + editor,
+		"VISUAL=" + editor,
+		"EDITOR=" + editor,
+		"GIT_SEQUENCE_EDITOR=" + editor,
+	}
+	out, err := runInstalledWrap(t, wrap, repo, extra, "config", "-e")
+	if err == nil || !strings.Contains(out, "option is not allowed") {
+		t.Fatalf("config -e: %v\n%s", err, out)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("config -e ran the editor\n%s", out)
+	}
+	out, err = runInstalledWrap(t, wrap, repo, extra, "status")
+	if err != nil {
+		t.Fatalf("status: %v\n%s", err, out)
+	}
+	dumpBody, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatal(err)
+	}
+	envText := string(dumpBody)
+	for _, name := range []string{"GIT_EDITOR=", "VISUAL=", "EDITOR=", "GIT_SEQUENCE_EDITOR="} {
+		if strings.Contains(envText, name) {
+			t.Fatalf("real git still saw %s\n%s", name, envText)
+		}
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatal("editor marker was created")
+	}
+}
+
+func TestGitWrapR4RemoteVetsEveryURLWord(t *testing.T) {
+	skipIfJailWrapper(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal("git is not installed")
+	}
+	work := t.TempDir()
+	inside := filepath.Join(work, "inside")
+	commitRepo(t, inside, "i.txt", "inside\n")
+	repo := filepath.Join(work, "repo")
+	commitRepo(t, repo, "r.txt", "repo\n")
+	gitCmd(t, repo, "remote", "add", "origin", "file://"+inside)
+	gitCmd(t, repo, "remote", "add", "e", "file://"+inside)
+	outside := t.TempDir()
+	wrap := installGitWrapWith(t, work, gitWrapOpts{
+		Grant: true, Name: "Ada", Email: "bot@localhost",
+		Repos: []string{"acme/widgets"},
+	})
+	deniedRepo := RepoNotAvailable
+	outsidePath := "local path is outside the workspace"
+	refuse := func(args ...string) {
+		t.Helper()
+		out, err := runInstalledWrap(t, wrap, repo, nil, args...)
+		if err == nil {
+			t.Fatalf("allowed %v\n%s", args, out)
+		}
+		if !strings.Contains(out, deniedRepo) && !strings.Contains(out, outsidePath) {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+	// A named remote whose url points outside is refused wherever it appears.
+	outRepo := filepath.Join(outside, "o")
+	commitRepo(t, outRepo, "o.txt", "outside\n")
+	gitCmd(t, repo, "remote", "add", "eo", "file://"+outRepo)
+	refuse("remote", "prune", "file://"+inside, "eo")
+	refuse("remote", "prune", "origin", "eo")
+	refuse("remote", "prune", "eo", "origin")
+	refuse("remote", "show", "origin", "eo")
+	refuse("remote", "update", "origin", "eo")
+	refuse("remote", "prune", "file://"+outside+"/x", "e")
+	refuse("remote", "prune", "e", "file://"+outside+"/x")
+	refuse("remote", "add", "n", "https://github.com/someone/else.git")
+	refuse("remote", "set-url", "n", outside)
+	out, err := runInstalledWrap(t, wrap, repo, nil, "remote", "-v")
+	if err != nil {
+		t.Fatalf("remote -v: %v\n%s", err, out)
+	}
+	out, err = runInstalledWrap(t, wrap, repo, nil, "remote", "prune", "origin")
+	if err != nil {
+		t.Fatalf("remote prune origin: %v\n%s", err, out)
+	}
+	out, err = runInstalledWrap(t, wrap, repo, nil, "remote", "add", "listed", "https://github.com/acme/widgets.git")
+	if err != nil || strings.Contains(out, deniedRepo) {
+		t.Fatalf("remote add listed: %v\n%s", err, out)
+	}
 }

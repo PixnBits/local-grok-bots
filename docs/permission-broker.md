@@ -255,21 +255,36 @@ refuses `fetch --multiple` and `-m`, and refuses a repository
 `url.*.insteadOf` or `pushInsteadOf`. It reads the effective repository
 configuration (`git config --includes --name-only --list`, no scope flag, so
 system, global, local, worktree, and included files are included) and refuses
-any other key on every command except `git config`. A `--git-dir` or
-`--work-tree` on a read-only command is part of that read. Allowed keys are
-the init and clone probes (`core.repositoryformatversion`, `core.filemode`,
+any other key on every command except `git config`. The denial names the key.
+A `--git-dir` or `--work-tree` on a read-only command is part of that read.
+`git config` still skips that read so a refused key can be removed. It refuses
+`--file`/`-f` and `--blob` in every form (the jail does not need them), plus
+`--global`, `--system`, `--edit`/`-e`, and unambiguous abbreviations of those
+options. A `git config` write is refused unless the key is in the same allowed
+set. Allowed keys are the init and clone probes
+(`core.repositoryformatversion`, `core.filemode`,
 `core.bare`, `core.logallrefupdates`, `core.ignorecase`,
-`core.precomposeunicode`, `core.symlinks`), `core.worktree` from a submodule
-git dir, upstream tracking (`branch.*.remote`, `branch.*.merge`,
+`core.precomposeunicode`, `core.symlinks`), `core.worktree` when the value is
+relative and resolves inside the workspace, upstream tracking
+(`branch.*.remote`, `branch.*.merge`,
 `branch.*.rebase`, `branch.*.description`, `branch.*.pushRemote`), the remote
-definition (`remote.*.url`, `remote.*.fetch`, plus `remote.*.tagopt`,
-`remote.*.promisor`, `remote.*.partialclonefilter`, and `remote.*.mirror`
-when clone wrote them), `extensions.objectformat` from a sha256 init,
-`user.name` and `user.email`, and `submodule.*.url`, `submodule.*.active`,
-and `submodule.active`. A stored `alias.*` key refuses every command except
+definition (`remote.*.url`, `remote.*.fetch`, plus `remote.*.tagopt` and
+`remote.*.mirror` when clone wrote them), `extensions.objectformat` from a
+sha256 init, `user.name` and `user.email`, `submodule.*.url`,
+`submodule.*.active`, and `submodule.active`, sparse-checkout keys
+(`extensions.worktreeConfig`, `core.sparseCheckout`, `core.sparseCheckoutCone`,
+`index.sparse`), and inert display and default keys (`core.autocrlf`,
+`core.eol`, `core.safecrlf`, `pull.rebase`, `pull.ff`, `init.defaultBranch`,
+`push.default`, `color.*`, `advice.*`, and the rest of that set).
+`remote.*.promisor` and `remote.*.partialclonefilter` are refused. For
+`fetch`, `-u` takes no value, so the following word is checked as a remote.
+`--attr-source` is refused. For `git remote`, every positional URL or path
+word is checked, and `remote prune`, `remote update`, and `remote show` also
+read and check the stored URL of every remote name they list. A stored `alias.*` key refuses every command except
 `git config`, even when that alias is not the invoked word. The wrapper unsets `GIT_COMMON_DIR`,
-`GIT_NAMESPACE`, `GIT_OBJECT_DIRECTORY`, `GIT_INDEX_FILE`, and
-`GIT_CEILING_DIRECTORIES`. Behavioral checks of the wrapper run on the host.
+`GIT_NAMESPACE`, `GIT_OBJECT_DIRECTORY`, `GIT_INDEX_FILE`,
+`GIT_CEILING_DIRECTORIES`, `GIT_EDITOR`, `VISUAL`, `EDITOR`, and
+`GIT_SEQUENCE_EDITOR`, and exports `GIT_NO_LAZY_FETCH=1`. Behavioral checks of the wrapper run on the host.
 In the jail, the static script checks still run.
 
 Inside-workspace checks and the git baseline use that bot's directory
