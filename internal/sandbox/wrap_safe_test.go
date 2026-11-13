@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,7 +21,10 @@ func TestGitWrapForcesSafeConfig(t *testing.T) {
 		"protocol.file.allow=\"$pfile\"",
 		"pfile=user",
 		"pfile=never",
-		"unset GIT_ALLOW_PROTOCOL",
+		"export GIT_ALLOW_PROTOCOL=$protos",
+		"protos=https:ssh",
+		"protos=$protos:http",
+		"protos=$protos:file",
 		"unset GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT",
 		"--no-ext-diff",
 		"--no-textconv",
@@ -31,8 +35,8 @@ func TestGitWrapForcesSafeConfig(t *testing.T) {
 			t.Fatalf("missing %s", needle)
 		}
 	}
-	if strings.Contains(script, "GIT_ALLOW_PROTOCOL=") {
-		t.Fatal("protocol allow list is still exported")
+	if !strings.Contains(script, "export GIT_ALLOW_PROTOCOL=$protos") {
+		t.Fatal("protocol allow list is not exported")
 	}
 	if strings.Contains(script, `""|file://*)`) {
 		t.Fatal("file URL is still a blanket allow")
@@ -272,6 +276,21 @@ func TestGitWrapRemoteCommandOption(t *testing.T) {
 		{"clone", "--up=" + hook, "file:///work/fixture", "dest"},
 		{"push", "--rece=" + hook},
 		{"push", "--ex=" + hook},
+		{"clone", "-qu", hook, "file:///work/fixture", "dest"},
+		{"clone", "-qu" + hook, "file:///work/fixture", "dest"},
+		{"clone", "-vu", hook, "file:///work/fixture", "dest"},
+		{"clone", "-nu", hook, "file:///work/fixture", "dest"},
+		{"clone", "-lu", hook, "file:///work/fixture", "dest"},
+		{"clone", "-su", hook, "file:///work/fixture", "dest"},
+		{"clone", "--exec", hook, "file:///work/fixture", "dest"},
+		{"clone", "--exec=" + hook, "file:///work/fixture", "dest"},
+		{"fetch", "--exec", hook, "file:///work/fixture"},
+		{"fetch", "--exec=" + hook, "file:///work/fixture"},
+		{"ls-remote", "--exec", hook, "file:///work/fixture"},
+		{"ls-remote", "--exec=" + hook, "file:///work/fixture"},
+		{"pull", "--exec", hook, "file:///work/fixture"},
+		{"pull", "--exec=" + hook, "file:///work/fixture"},
+		{"ls-remote", "--ex=" + hook, "file:///work/fixture"},
 	} {
 		text := runGitWrap(t, script, args...)
 		if !strings.Contains(text, denied) {
@@ -641,6 +660,347 @@ func TestGitWrapClonePathsStayInWorkspace(t *testing.T) {
 		}
 		if treeHas(t, dest, marker) {
 			t.Fatalf("%v has outside content", args)
+		}
+	}
+}
+
+func TestGitWrapConfigPinsStayForced(t *testing.T) {
+	script := gitWrap(gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost"})
+	configDenied := "configuration is not allowed"
+	for _, args := range [][]string{
+		{"-c", "protocol.file.allow=always", "status"},
+		{"-c", "PROTOCOL.EXT.ALLOW=always", "status"},
+		{"-cprotocol.file.allow=always", "status"},
+		{"-c", "core.sshCommand=/bin/sh", "status"},
+		{"-c", "remote.origin.uploadpack=/bin/sh", "status"},
+		{"-c", "include.path=/tmp/x", "status"},
+		{"-c", "includeIf.gitdir:/work/.path=/tmp/x", "status"},
+		{"-c", "credential.helper=osxkeychain", "status"},
+		{"-c", "http.proxy=http://127.0.0.1:9", "status"},
+		{"-c", "ssh.variant=plink", "status"},
+		{"-c", "filter.lfs.clean=/bin/sh", "status"},
+		{"--config", "url.x.insteadOf=https://example.com", "status"},
+		{"--config=protocol.allow=always", "status"},
+		{"--config-env", "core.sshCommand=VAR", "status"},
+		{"--config-env=remote.origin.proxy=VAR", "status"},
+	} {
+		text := runGitWrap(t, script, args...)
+		if !strings.Contains(text, configDenied) {
+			t.Fatalf("%v: %s", args, text)
+		}
+	}
+
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal("git is not installed")
+	}
+	work := t.TempDir()
+	outside := t.TempDir()
+	parent := filepath.Join(work, "parent")
+	if err := os.Mkdir(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := "outside-marker-content\n"
+	if err := os.WriteFile(filepath.Join(outside, "outside.txt"), []byte(marker), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(parent, "parent.txt"), []byte("parent-content\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, outside, "init", "-b", "main")
+	gitCmd(t, outside, "add", "--", "outside.txt")
+	gitCmd(t, outside, "commit", "-m", "outside")
+	gitCmd(t, parent, "init", "-b", "main")
+	gitCmd(t, parent, "add", "--", "parent.txt")
+	gitCmd(t, parent, "commit", "-m", "parent")
+	gitCmd(t, parent, "-c", "protocol.file.allow=always", "submodule", "add", "file://"+outside, "sub")
+	gitCmd(t, parent, "commit", "-m", "add sub")
+	if err := os.RemoveAll(filepath.Join(parent, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	wrap := installGitWrap(t, work)
+	out, err := runInstalledWrap(t, wrap, parent, nil, "-c", "protocol.file.allow=always", "submodule", "update", "--init", "./sub")
+	if err == nil {
+		t.Fatalf("submodule update succeeded:\n%s", out)
+	}
+	if !strings.Contains(out, configDenied) {
+		t.Fatalf("submodule: %s", out)
+	}
+	if treeHas(t, parent, marker) {
+		t.Fatal("submodule update fetched outside content")
+	}
+
+	ran := filepath.Join(work, "ext-ran")
+	hook := filepath.Join(work, "ext.sh")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\necho ran >> '"+ran+"'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out, err = runInstalledWrap(t, wrap, work, nil, "-c", "protocol.ext.allow=always", "clone", "ext::"+hook, "ext-dest")
+	if err == nil {
+		t.Fatalf("ext clone succeeded:\n%s", out)
+	}
+	if !strings.Contains(out, configDenied) {
+		t.Fatalf("ext: %s", out)
+	}
+	if _, err := os.Stat(ran); !os.IsNotExist(err) {
+		t.Fatalf("ext command ran\n%s", out)
+	}
+
+	out, err = runInstalledWrap(t, wrap, parent, nil, "-c", "user.name=Intruder", "config", "--get", "user.name")
+	if err != nil {
+		t.Fatalf("config: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Ada") || strings.Contains(out, "Intruder") {
+		t.Fatalf("caller config won: %q", out)
+	}
+}
+
+func TestGitWrapTransportHelpersStayRefused(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal("git is not installed")
+	}
+	work := t.TempDir()
+	src := filepath.Join(work, "src")
+	if err := os.Mkdir(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "f.txt"), []byte("f\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, src, "init", "-b", "main")
+	gitCmd(t, src, "add", "--", "f.txt")
+	gitCmd(t, src, "commit", "-m", "init")
+	marker := filepath.Join(work, "marker")
+	hook := filepath.Join(work, "hook.sh")
+	body := "#!/bin/sh\necho ran >> '" + marker + "'\nexec git-upload-pack \"$@\"\n"
+	if err := os.WriteFile(hook, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wrap := installGitWrap(t, work)
+	denied := "option is not allowed"
+	configDenied := "configuration is not allowed"
+	url := "file://" + src
+	check := func(dir string, want string, args ...string) {
+		t.Helper()
+		if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		out, err := runInstalledWrap(t, wrap, dir, nil, args...)
+		if err == nil {
+			t.Fatalf("%v succeeded:\n%s", args, out)
+		}
+		if !strings.Contains(out, want) {
+			t.Fatalf("%v: %s", args, out)
+		}
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatalf("%v ran the helper\n%s", args, out)
+		}
+	}
+	for _, args := range [][]string{
+		{"clone", "-qu", hook, url, "d-qu"},
+		{"clone", "-qu" + hook, url, "d-quval"},
+		{"clone", "-vu", hook, url, "d-vu"},
+		{"ls-remote", "--exec", hook, url},
+		{"ls-remote", "--exec=" + hook, url},
+		{"fetch", "--exec", hook, url},
+		{"pull", "--exec=" + hook, url},
+	} {
+		dir := work
+		if args[0] != "clone" {
+			dir = src
+		}
+		check(dir, denied, args...)
+	}
+
+	repo := filepath.Join(work, "repo")
+	if err := os.Mkdir(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo, "init", "-b", "main")
+	gitCmd(t, repo, "config", "remote.x.url", url)
+	gitCmd(t, repo, "config", "remote.x.fetch", "+refs/heads/*:refs/remotes/x/*")
+	gitCmd(t, repo, "config", "remote.x.uploadpack", hook)
+	for _, args := range [][]string{
+		{"fetch", "x"},
+		{"ls-remote", "x"},
+		{"pull", "x"},
+		{"clone", url, "from-repo"},
+	} {
+		check(repo, configDenied, args...)
+	}
+
+	out, err := runInstalledWrap(t, wrap, src, nil, "fetch", "-u")
+	if strings.Contains(out, denied) {
+		t.Fatalf("fetch -u: %v\n%s", err, out)
+	}
+	out, err = runInstalledWrap(t, wrap, src, nil, "pull", "-u")
+	if strings.Contains(out, denied) {
+		t.Fatalf("pull -u: %v\n%s", err, out)
+	}
+	out, err = runInstalledWrap(t, wrap, src, nil, "push", "-u", "origin")
+	if strings.Contains(out, denied) {
+		t.Fatalf("push -u: %v\n%s", err, out)
+	}
+	ep, err := exec.Command("git", "--exec-path").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err = runInstalledWrap(t, wrap, src, nil, "--exec-path="+strings.TrimSpace(string(ep)), "status")
+	if err != nil || strings.Contains(out, denied) {
+		t.Fatalf("exec-path: %v\n%s", err, out)
+	}
+	plain := filepath.Join(work, "plain")
+	out, err = runInstalledWrap(t, wrap, work, nil, "clone", "--no-upload-pack", url, plain)
+	if err != nil || strings.Contains(out, denied) {
+		t.Fatalf("no-upload-pack: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("clone wrote the marker")
+	}
+}
+
+func TestGitWrapScpRemoteStaysRefused(t *testing.T) {
+	script := gitWrap(gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost"})
+	for _, needle := range []string{
+		"unset GIT_SSH GIT_SSH_COMMAND GIT_SSH_VARIANT GIT_PROXY_COMMAND GIT_EXEC_PATH GIT_TEMPLATE_DIR",
+		"unset GIT_DIR GIT_WORK_TREE GIT_ASKPASS GIT_EXTERNAL_DIFF GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PROTOCOL",
+	} {
+		if !strings.Contains(script, needle) {
+			t.Fatalf("missing %s", needle)
+		}
+	}
+	for _, args := range [][]string{
+		{"clone", "localhost:/outside/x", "dest"},
+		{"clone", "host:path", "dest"},
+		{"fetch", "localhost:/outside/x"},
+	} {
+		text := runGitWrap(t, script, args...)
+		if !strings.Contains(text, RepoNotAvailable) {
+			t.Fatalf("%v: %s", args, text)
+		}
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal("git is not installed")
+	}
+	work := t.TempDir()
+	marker := filepath.Join(work, "ssh-ran")
+	hook := filepath.Join(work, "ssh.sh")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\necho ran >> '"+marker+"'\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wrap := installGitWrap(t, work)
+	out, err := runInstalledWrap(t, wrap, work, []string{"GIT_SSH_COMMAND=" + hook}, "clone", "localhost:/outside/x", "scp-dest")
+	if err == nil {
+		t.Fatalf("scp clone succeeded:\n%s", out)
+	}
+	if !strings.Contains(out, RepoNotAvailable) {
+		t.Fatalf("scp: %s", out)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("ssh helper ran\n%s", out)
+	}
+}
+
+func TestGitWrapCloneOptionPathsStayInWorkspace(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal("git is not installed")
+	}
+	work := t.TempDir()
+	outside := t.TempDir()
+	ok := filepath.Join(work, "ok")
+	tmpl := filepath.Join(work, "tmpl")
+	if err := os.Mkdir(ok, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(tmpl, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := "outside-marker-content\n"
+	want := "inside-marker-content\n"
+	if err := os.WriteFile(filepath.Join(outside, "outside.txt"), []byte(marker), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ok, "ok.txt"), []byte(want), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, outside, "init", "-b", "main")
+	gitCmd(t, outside, "add", "--", "outside.txt")
+	gitCmd(t, outside, "commit", "-m", "outside")
+	gitCmd(t, ok, "init", "-b", "main")
+	gitCmd(t, ok, "add", "--", "ok.txt")
+	gitCmd(t, ok, "commit", "-m", "ok")
+	wrap := installGitWrap(t, work)
+	okURL := "file://" + ok
+	outsideMsg := "local path is outside the workspace"
+	n := 0
+	for _, opt := range []string{"--reference", "--reference-if-able", "--separate-git-dir", "--template", "--bundle-uri"} {
+		for _, args := range [][]string{
+			{"clone", opt, outside, okURL, fmt.Sprintf("out-%s-%d", strings.TrimPrefix(opt, "--"), n)},
+			{"clone", opt + "=" + outside, okURL, fmt.Sprintf("outeq-%s-%d", strings.TrimPrefix(opt, "--"), n)},
+		} {
+			n++
+			dest := filepath.Join(work, args[len(args)-1])
+			out, err := runInstalledWrap(t, wrap, work, nil, args...)
+			if err == nil {
+				t.Fatalf("%v succeeded:\n%s", args, out)
+			}
+			if !strings.Contains(out, outsideMsg) {
+				t.Fatalf("%v: %s", args, out)
+			}
+			if treeHas(t, dest, marker) {
+				t.Fatalf("%v cloned outside content", args)
+			}
+		}
+	}
+	sep := filepath.Join(work, "sep.git")
+	sepEq := filepath.Join(work, "sep-eq.git")
+	for _, args := range [][]string{
+		{"clone", "--reference", ok, okURL, "in-reference"},
+		{"clone", "--reference=" + ok, okURL, "in-reference-eq"},
+		{"clone", "--reference-if-able", ok, okURL, "in-refable"},
+		{"clone", "--reference-if-able=" + ok, okURL, "in-refable-eq"},
+		{"clone", "--separate-git-dir", sep, okURL, "in-sep"},
+		{"clone", "--separate-git-dir=" + sepEq, okURL, "in-sep-eq"},
+		{"clone", "--template", tmpl, okURL, "in-template"},
+		{"clone", "--template=" + tmpl, okURL, "in-template-eq"},
+		{"clone", "--bundle-uri", "x", okURL, "in-bundle"},
+		{"clone", "--bundle-uri=x", okURL, "in-bundle-eq"},
+	} {
+		dest := filepath.Join(work, args[len(args)-1])
+		out, err := runInstalledWrap(t, wrap, work, nil, args...)
+		if err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+		if strings.Contains(out, outsideMsg) {
+			t.Fatalf("%v refused:\n%s", args, out)
+		}
+		body, err := os.ReadFile(filepath.Join(dest, "ok.txt"))
+		if err != nil || string(body) != want {
+			t.Fatalf("%v content %q %v\n%s", args, body, err, out)
+		}
+	}
+}
+
+func TestGitWrapBridgeProtocolPins(t *testing.T) {
+	script := gitWrap(gitWrapOpts{Grant: true, Hub: true, Bridge: true, Name: "Ada", Email: "bot@localhost"})
+	parts := strings.Split(script, `if [ -n "$GHPORT" ]; then`)
+	if len(parts) < 2 {
+		t.Fatal("missing bridge exec")
+	}
+	last := parts[len(parts)-1]
+	end := strings.Index(last, "\n  fi\n")
+	if end < 0 {
+		t.Fatal("bridge block")
+	}
+	block := last[:end]
+	for _, needle := range []string{
+		"protocol.allow=never",
+		"protocol.https.allow=always",
+		"protocol.ssh.allow=always",
+		"protocol.http.allow=always",
+		`protocol.file.allow="$pfile"`,
+	} {
+		if !strings.Contains(block, needle) {
+			t.Fatalf("bridge exec missing %s", needle)
 		}
 	}
 }

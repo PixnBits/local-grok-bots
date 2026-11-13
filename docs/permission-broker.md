@@ -241,8 +241,8 @@ environment allowlist. A rule names a command only when argv0 resolves
 to an allowlisted binary on that PATH. An assignment prefix is never
 eligible. The jail git wrapper sets a narrow config for `run_shell`,
 including an empty fsmonitor, no external diff, and a protocol list of
-https and ssh. http is added only while the loopback credential proxy
-is on. That wrapper is not treated as proof that every git invocation
+https and ssh. http is added while the loopback credential proxy is in
+use, and file is added when a local repository path was accepted. That wrapper is not treated as proof that every git invocation
 inside the jail has those keys forced off. Claude is not rewritten.
 Inside-workspace checks and the git baseline use that bot's directory
 (`<workspace>/bots/<id>`), not the shared root. The shell jail binds
