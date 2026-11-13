@@ -187,6 +187,8 @@ allow_file=0
 pfile=never
 vet_base=$PWD
 saw_repo_opt=
+# Quoted --git-dir and --work-tree words. Expanded when config is read.
+gitdir_args=
 sub=
 prev=
 for arg in "$@"; do
@@ -334,6 +336,7 @@ url_assign() {
 scan_global() {
   prev=
   base=$PWD
+  gitdir_args=
   for arg in "$@"; do
     if [ -n "$prev" ]; then
       case "$prev" in
@@ -345,6 +348,9 @@ scan_global() {
           ;;
         c|env)
           url_assign "$arg"
+          ;;
+        repo)
+          gitdir_args="$gitdir_args $(quote "$arg")"
           ;;
       esac
       prev=
@@ -371,10 +377,12 @@ scan_global() {
         ;;
       --git-dir|--work-tree)
         saw_repo_opt=1
-        prev=x
+        gitdir_args="$gitdir_args $(quote "$arg")"
+        prev=repo
         ;;
       --git-dir=*|--work-tree=*)
         saw_repo_opt=1
+        gitdir_args="$gitdir_args $(quote "$arg")"
         ;;
       --namespace|--super-prefix)
         prev=x
@@ -1017,17 +1025,96 @@ if [ "$saw_repo_opt" = 1 ]; then
   esac
 fi
 scan_urls "$@"
-# An alias hides the command word. A different alias does not.
-# Git does not let an alias replace a builtin, so a normal command whose
-# own name is not an alias is unchanged.
+# Effective config, including included files and worktree config.
+# git config stays available so a refused key can be removed.
+# Command-line pins are not repository keys and are skipped.
+# gitdir_args is expanded in a subshell so this command's arguments stay intact.
+# A missing git binary is not a repository key. The later checks still run.
+if [ "$sub" != config ] && [ -x "$real" ]; then
+  cfg_tab=$(printf '\t')
+  lines=$(
+    eval "set -- $gitdir_args"
+    "$real" -C "$vet_base" "$@" \
+      -c core.hooksPath=/dev/null \
+      -c core.fsmonitor= \
+      -c core.sshCommand=/bin/false \
+      -c protocol.allow=never \
+      -c safe.directory='*' \
+      config --includes --name-only --list --show-origin 2>/dev/null
+  ) || say_config
+  cfg_rest=$lines
+  while [ -n "$cfg_rest" ]; do
+    case "$cfg_rest" in
+      *"$nl"*)
+        cfg_line=${cfg_rest%%"$nl"*}
+        cfg_rest=${cfg_rest#*"$nl"}
+        ;;
+      *)
+        cfg_line=$cfg_rest
+        cfg_rest=
+        ;;
+    esac
+    case "$cfg_line" in
+      ""|"command line:"*)
+        continue
+        ;;
+    esac
+    cfg_key=$cfg_line
+    case "$cfg_line" in
+      *"$cfg_tab"*)
+        cfg_key=${cfg_line#*"$cfg_tab"}
+        ;;
+    esac
+    case "$cfg_key" in
+      # Repository format and filesystem probes written by init and clone.
+      core.repositoryformatversion|core.filemode|core.bare|core.logallrefupdates|core.ignorecase|core.precomposeunicode|core.symlinks)
+        ;;
+      # Written in a submodule git directory by submodule add.
+      core.worktree)
+        ;;
+      # Upstream tracking written by clone, checkout -b, and branch --set-upstream-to.
+      branch.*.remote|branch.*.merge|branch.*.rebase|branch.*.description|branch.*.pushremote)
+        ;;
+      # Remote definition. The url is checked again when a command uses it.
+      remote.*.url|remote.*.fetch)
+        ;;
+      # Written by clone --no-tags and clone --mirror.
+      remote.*.tagopt)
+        ;;
+      # Written by clone --filter.
+      remote.*.promisor|remote.*.partialclonefilter)
+        ;;
+      # Written by clone --mirror. It marks a mirror remote and does not name a command.
+      remote.*.mirror)
+        ;;
+      # Written by init --object-format=sha256.
+      extensions.objectformat)
+        ;;
+      # Author identity. Refusing these would lock the repository after git config user.name.
+      user.name|user.email)
+        ;;
+      # Written by submodule add. Submodule paths and urls are checked separately.
+      submodule.*.url|submodule.*.active|submodule.active)
+        ;;
+      *)
+        say_config
+        ;;
+    esac
+  done
+fi
+# An alias hides the command word. Git does not let an alias replace a builtin.
+# Any stored alias key is refused by the check above, including one that is not invoked.
 if [ -n "$sub" ]; then
-  found=$("$real" -C "$vet_base" \
-    -c core.hooksPath=/dev/null \
-    -c core.fsmonitor= \
-    -c core.sshCommand=/bin/false \
-    -c protocol.allow=never \
-    -c safe.directory='*' \
-    config --includes --get "alias.$sub" 2>/dev/null) || found=
+  found=$(
+    eval "set -- $gitdir_args"
+    "$real" -C "$vet_base" "$@" \
+      -c core.hooksPath=/dev/null \
+      -c core.fsmonitor= \
+      -c core.sshCommand=/bin/false \
+      -c protocol.allow=never \
+      -c safe.directory='*' \
+      config --includes --get "alias.$sub" 2>/dev/null
+  ) || found=
   if [ -n "$found" ]; then
     say_config
   fi

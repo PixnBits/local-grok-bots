@@ -252,7 +252,22 @@ not rewritten.
 The same wrapper refuses a global `--git-dir` or `--work-tree` except on a
 read-only command, refuses an invoked alias and an `alias.` key on `-c`,
 refuses `fetch --multiple` and `-m`, and refuses a repository
-`url.*.insteadOf` or `pushInsteadOf`. It unsets `GIT_COMMON_DIR`,
+`url.*.insteadOf` or `pushInsteadOf`. It reads the effective repository
+configuration (`git config --includes --name-only --list`, no scope flag, so
+system, global, local, worktree, and included files are included) and refuses
+any other key on every command except `git config`. A `--git-dir` or
+`--work-tree` on a read-only command is part of that read. Allowed keys are
+the init and clone probes (`core.repositoryformatversion`, `core.filemode`,
+`core.bare`, `core.logallrefupdates`, `core.ignorecase`,
+`core.precomposeunicode`, `core.symlinks`), `core.worktree` from a submodule
+git dir, upstream tracking (`branch.*.remote`, `branch.*.merge`,
+`branch.*.rebase`, `branch.*.description`, `branch.*.pushRemote`), the remote
+definition (`remote.*.url`, `remote.*.fetch`, plus `remote.*.tagopt`,
+`remote.*.promisor`, `remote.*.partialclonefilter`, and `remote.*.mirror`
+when clone wrote them), `extensions.objectformat` from a sha256 init,
+`user.name` and `user.email`, and `submodule.*.url`, `submodule.*.active`,
+and `submodule.active`. A stored `alias.*` key refuses every command except
+`git config`, even when that alias is not the invoked word. The wrapper unsets `GIT_COMMON_DIR`,
 `GIT_NAMESPACE`, `GIT_OBJECT_DIRECTORY`, `GIT_INDEX_FILE`, and
 `GIT_CEILING_DIRECTORIES`. Behavioral checks of the wrapper run on the host.
 In the jail, the static script checks still run.
