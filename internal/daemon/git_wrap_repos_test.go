@@ -31,7 +31,7 @@ func TestGitWrapperUsesEffectiveRepos(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 	defer cancel()
 	out, err := app.dispatchTool(ctx, bot, "run_shell", map[string]any{
-		"command": "echo WRAP_BEGIN; cat /usr/bin/git; echo WRAP_END; env",
+		"command": "echo WRAP_BEGIN; grep -E 'acme|2027' /usr/bin/git; echo WRAP_END; env",
 	})
 	if err != nil {
 		t.Fatalf("err %v\n%s", err, out)
