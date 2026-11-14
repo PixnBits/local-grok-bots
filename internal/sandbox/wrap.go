@@ -217,6 +217,10 @@ done
 GHPORT=
 need_bridge=0
 found_url=0
+contact_all=0
+sm_action=
+sm_url_set=
+sm_url_armed=
 pos=
 remote_sub=
 remote_names=
@@ -462,7 +466,7 @@ config_key_allowed() {
     core.worktree)
       ;;
     # Upstream tracking written by clone, checkout -b, and branch --set-upstream-to.
-    # remote and pushremote are plain names; the value check refuses a path or URL.
+    # remote and pushremote are "." or the name of a configured remote.
     branch.*.remote|branch.*.merge|branch.*.rebase|branch.*.description|branch.*.pushremote)
       ;;
     # Remote definition. The url is checked again when a command uses it.
@@ -546,7 +550,7 @@ config_key_allowed() {
     # commit.gpgsign is allowed only when signing is off.
     commit.gpgsign)
       ;;
-    # pack.threads is a non-negative integer. It does not name a command.
+    # pack.threads is an integer from 0 to 256. It does not name a command.
     pack.threads)
       ;;
     *)
@@ -554,6 +558,26 @@ config_key_allowed() {
       ;;
   esac
   return 0
+}
+# "." or a configured remote name. A path or URL is refused.
+branch_remote_ok() {
+  case "$1" in
+    .) return 0 ;;
+    ""|-*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  # $1 is cleared by set -- inside the command substitution, so keep the name.
+  bro_name=$1
+  bro_out=$(
+    eval "set -- $gitdir_args"
+    "$real" -C "$vet_base" "$@" \
+      -c core.hooksPath=/dev/null \
+      -c core.fsmonitor= \
+      -c core.sshCommand=/bin/false \
+      -c protocol.allow=never \
+      -c safe.directory='*' \
+      remote get-url -- "$bro_name" 2>/dev/null
+  ) || return 1
+  [ -n "$bro_out" ]
 }
 # Shared value rule for keys that are not free-form.
 # A key with no value rule is allowed. A newline in the value is refused.
@@ -566,10 +590,14 @@ config_value_allowed() {
   esac
   case "$cva_key" in
     branch.*.remote|branch.*.pushremote)
+      branch_remote_ok "$cva_val"
+      return $?
+      ;;
+    remote.*.tagopt)
       case "$cva_val" in
-        ""|-*|*[!A-Za-z0-9._-]*) return 1 ;;
+        --no-tags|--tags) return 0 ;;
       esac
-      return 0
+      return 1
       ;;
     submodule.*.url)
       case "$cva_val" in
@@ -605,15 +633,20 @@ config_value_allowed() {
       return 1
       ;;
     pack.threads)
+      # Digits only, at most three, so the comparison cannot overflow.
       case "$cva_val" in
-        ""|*[!0-9]*) return 1 ;;
+        ""|*[!0-9]*|[0-9][0-9][0-9][0-9]*) return 1 ;;
       esac
+      if [ "$cva_val" -gt 256 ]; then
+        return 1
+      fi
       return 0
       ;;
   esac
   return 0
 }
 # A relative submodule url is resolved lexically from /work and must stay there.
+# The resolved path must also be physically inside /work.
 submodule_rel_ok() {
   sru_rest=$1
   sru_path=/work
@@ -640,9 +673,12 @@ submodule_rel_ok() {
         ;;
     esac
   done
-  inside_work "$sru_path"
+  inside_work "$sru_path" || return 1
+  phys_inside "$sru_path"
 }
-# Read every stored value of a restricted key. A newline in a value is refused.
+# Read every stored value of a restricted key.
+# A newline in a stored value is translated to SOH. Refuse that before the
+# value rule. A path value can still match the path rule after translation.
 config_check_values() {
   cck_probe=$(printf '\001')
   if config_value_allowed "$1" "$cck_probe"; then
@@ -828,6 +864,15 @@ config_guard() {
         continue
         ;;
       --*)
+        # A dash-leading word after the key is a value, as with tag.sort.
+        if [ -n "$cg_key" ]; then
+          cg_npos=$((cg_npos + 1))
+          if [ -z "$cg_val_set" ]; then
+            cg_val=$arg
+            cg_val_set=1
+          fi
+          continue
+        fi
         cg_body=${arg#--}
         cg_name=${cg_body%%=*}
         # A long option is refused unless its name is an exact known form.
@@ -1159,6 +1204,11 @@ vet() {
       return 0
       ;;
   esac
+  # A slashless name that exists beside the command is a local path.
+  if [ -e "$vet_base/$1" ] || [ -L "$vet_base/$1" ]; then
+    vet_local "$1"
+    return 0
+  fi
   return 0
 }
 vet_local() {
@@ -1188,7 +1238,11 @@ check_local_arg() {
   esac
 }
 # An option value that is a repository, a destination, or another path.
+# Checked only. It does not arm the file protocol.
 vet_opt() {
+  vo_file=$allow_file
+  vo_bridge=$need_bridge
+  vo_found=$found_url
   case "$1" in
     *://*|git@*)
       vet "$1"
@@ -1197,6 +1251,9 @@ vet_opt() {
       vet_local "$1"
       ;;
   esac
+  allow_file=$vo_file
+  need_bridge=$vo_bridge
+  found_url=$vo_found
 }
 # Bundled clone short options. Digits are flags with no value.
 # A u anywhere before an argument value names a remote command.
@@ -1314,8 +1371,45 @@ resolve_remote() {
       return
       ;;
   esac
-  u=$("$real" remote get-url "$name" 2>/dev/null) || return
-  vet "$u"
+  # A configured remote is its stored URL, not a directory of the same name.
+  u=$(
+    eval "set -- $gitdir_args"
+    "$real" -C "$vet_base" "$@" \
+      -c core.hooksPath=/dev/null \
+      -c core.fsmonitor= \
+      -c core.sshCommand=/bin/false \
+      -c protocol.allow=never \
+      -c safe.directory='*' \
+      remote get-url -- "$name" 2>/dev/null
+  ) || u=
+  if [ -n "$u" ]; then
+    vet "$u"
+    return
+  fi
+  if [ -e "$vet_base/$name" ] || [ -L "$vet_base/$name" ]; then
+    vet_local "$name"
+    found_url=1
+  fi
+}
+# Same check as resolve_remote, without arming and without keeping a bridge flag.
+resolve_remote_check() {
+  rrc_file=$allow_file
+  rrc_bridge=$need_bridge
+  rrc_found=$found_url
+  resolve_remote "$1"
+  allow_file=$rrc_file
+  need_bridge=$rrc_bridge
+  found_url=$rrc_found
+}
+list_remotes() {
+  eval "set -- $gitdir_args"
+  "$real" -C "$vet_base" "$@" \
+    -c core.hooksPath=/dev/null \
+    -c core.fsmonitor= \
+    -c core.sshCommand=/bin/false \
+    -c protocol.allow=never \
+    -c safe.directory='*' \
+    remote 2>/dev/null
 }
 ensure_bridge() {
   if [ -n "$GHPORT" ]; then
@@ -1424,9 +1518,9 @@ run() {
   if [ "$allow_file" = 1 ]; then
     pfile=user
     unset GIT_ALLOW_PROTOCOL
-    # submodule add clones in a child. That child does not keep the user bit,
-    # so the vetted file URL is also named on GIT_ALLOW_PROTOCOL for this command.
-    if [ "$sub" = submodule ]; then
+    # submodule add clones in a child. That child does not keep the user bit.
+    # Name file only when this add's URL positional was the word that armed it.
+    if [ "$sub" = submodule ] && [ "$sm_action" = add ] && [ "$sm_url_armed" = 1 ]; then
       export GIT_ALLOW_PROTOCOL=file
     fi
   else
@@ -1435,6 +1529,16 @@ run() {
     if [ -n "$GHPORT" ]; then
       protos=$protos:http
     fi
+    export GIT_ALLOW_PROTOCOL=$protos
+  fi
+  # update, init, sync, foreach, and status never use the file protocol.
+  if [ "$sub" = submodule ] && [ "$sm_action" != add ]; then
+    pfile=never
+    protos=https:ssh
+    if [ -n "$GHPORT" ]; then
+      protos=$protos:http
+    fi
+    unset GIT_ALLOW_PROTOCOL
     export GIT_ALLOW_PROTOCOL=$protos
   fi
   if [ "$sub" = diff ] || [ "$sub" = log ] || [ "$sub" = show ]; then
@@ -1590,8 +1694,10 @@ qget() {
   printf '%s' "$qget_out"
 }
 # No repository word: check the branch remote the same way as a named remote.
+# --short prints heads/main when a tag shares the branch name, so the full ref is read.
+# A detached HEAD has no branch ref. Fetch then checks origin and nothing else for the branch.
 resolve_branch_remote() {
-  br_name=$(
+  br_full=$(
     eval "set -- $gitdir_args"
     "$real" -C "$vet_base" "$@" \
       -c core.hooksPath=/dev/null \
@@ -1599,33 +1705,46 @@ resolve_branch_remote() {
       -c core.sshCommand=/bin/false \
       -c protocol.allow=never \
       -c safe.directory='*' \
-      rev-parse --abbrev-ref HEAD 2>/dev/null
-  ) || br_name=
-  case "$br_name" in
-    *"$nl"*) br_name= ;;
+      symbolic-ref -q HEAD 2>/dev/null
+  ) || br_full=
+  case "$br_full" in
+    *"$nl"*) br_full= ;;
+  esac
+  br_name=
+  case "$br_full" in
+    refs/heads/*)
+      br_name=${br_full#refs/heads/}
+      ;;
   esac
   br_hit=
-  if [ -n "$br_name" ] && [ "$br_name" != HEAD ]; then
+  br_fetch=
+  if [ -n "$br_name" ]; then
     br_key=$(printf 'branch.%s.remote' "$br_name")
     br_val=$(qget "$br_key")
     if [ -n "$br_val" ]; then
       resolve_remote "$br_val"
       br_hit=1
+      br_fetch=1
     fi
     br_key=$(printf 'branch.%s.pushremote' "$br_name")
     br_val=$(qget "$br_key")
     if [ -n "$br_val" ]; then
-      resolve_remote "$br_val"
+      if [ "$sub" = push ]; then
+        resolve_remote "$br_val"
+      else
+        resolve_remote_check "$br_val"
+      fi
       br_hit=1
     fi
   fi
-  br_val=$(qget remote.pushdefault)
-  if [ -n "$br_val" ]; then
-    resolve_remote "$br_val"
-    br_hit=1
-  fi
-  if [ -z "$br_hit" ]; then
-    resolve_remote origin
+  if [ "$sub" = push ]; then
+    if [ -z "$br_hit" ]; then
+      resolve_remote origin
+    fi
+  else
+    if [ -z "$br_fetch" ]; then
+      resolve_remote origin
+    fi
   fi
 }
 # Return 0 when push already names a remote. Otherwise the branch remote is checked.
@@ -1811,28 +1930,46 @@ init_skip_name() {
   [ "$is_hits" -eq 1 ]
 }
 # An init path must stay inside /work after a physical chdir.
+# Missing parents are allowed when the nearest existing ancestor is inside.
 init_vet() {
   case "$1" in
     "") say_file ;;
     /*) iv_abs=$1 ;;
     *) iv_abs=$vet_base/$1 ;;
   esac
-  if [ -d "$iv_abs" ] || [ -L "$iv_abs" ]; then
-    iv_phys=$(cd -P -- "$iv_abs" && pwd -P) || say_file
+  iv_clean=$(clean_abs "$iv_abs") || say_file
+  if [ -d "$iv_clean" ] || [ -L "$iv_clean" ]; then
+    iv_phys=$(cd -P -- "$iv_clean" 2>/dev/null && pwd -P) || say_file
     inside_work "$iv_phys" || say_file
     return 0
   fi
-  iv_parent=$(dirname "$iv_abs")
-  iv_base=$(basename "$iv_abs")
-  case "$iv_base" in
-    ""|..) say_file ;;
-  esac
-  iv_pphys=$(cd -P -- "$iv_parent" && pwd -P) || say_file
-  inside_work "$iv_pphys" || say_file
-  case "$iv_base" in
-    .) return 0 ;;
-  esac
-  inside_work "$iv_pphys/$iv_base" || say_file
+  if [ -e "$iv_clean" ]; then
+    iv_parent=$(dirname "$iv_clean")
+    iv_phys=$(cd -P -- "$iv_parent" 2>/dev/null && pwd -P) || say_file
+    inside_work "$iv_phys" || say_file
+    return 0
+  fi
+  iv_rest=
+  iv_cur=$iv_clean
+  while [ ! -e "$iv_cur" ] && [ ! -L "$iv_cur" ]; do
+    iv_seg=$(basename "$iv_cur")
+    case "$iv_seg" in
+      ""|.|..) say_file ;;
+    esac
+    if [ -n "$iv_rest" ]; then
+      iv_rest=$iv_seg/$iv_rest
+    else
+      iv_rest=$iv_seg
+    fi
+    iv_next=$(dirname "$iv_cur")
+    if [ "$iv_next" = "$iv_cur" ]; then
+      say_file
+    fi
+    iv_cur=$iv_next
+  done
+  iv_phys=$(cd -P -- "$iv_cur" 2>/dev/null && pwd -P) || say_file
+  inside_work "$iv_phys" || say_file
+  inside_work "$iv_phys/$iv_rest" || say_file
 }
 guard_init() {
   gi_prev=
@@ -2140,6 +2277,12 @@ case "$sub" in
         --)
           continue
           ;;
+        --all)
+          if [ "$sub" = fetch ] || [ "$sub" = pull ]; then
+            contact_all=1
+          fi
+          continue
+          ;;
         --*)
           sv_body=${arg#--}
           sv_name=${sv_body%%=*}
@@ -2163,6 +2306,15 @@ case "$sub" in
         seen_sub=1
         continue
       fi
+      if [ "$sub" = submodule ] && [ -z "$sm_action" ]; then
+        sm_action=$arg
+        case "$sm_action" in
+          update|init|sync|foreach|status)
+            found_url=1
+            ;;
+        esac
+        continue
+      fi
       if [ "$sub" = remote ] && [ -z "$remote_sub" ]; then
         case "$arg" in
           add|prune|update|show|set-url|get-url|rename|remove|rm|set-head|set-branches)
@@ -2172,30 +2324,56 @@ case "$sub" in
         esac
       fi
       if colon_remote "$arg"; then
-        vet "$arg"
-        found_url=1
+        if [ "$sub" = submodule ] && [ "$sm_action" != add ]; then
+          check_skipped "$arg"
+        else
+          vet "$arg"
+          found_url=1
+        fi
         continue
       fi
       case "$arg" in
         *://*|git@*)
-          vet "$arg"
-          found_url=1
+          if [ "$sub" = submodule ] && [ "$sm_action" = add ] && [ -z "$sm_url_set" ]; then
+            sm_before=$allow_file
+            vet "$arg"
+            sm_url_set=1
+            found_url=1
+            if [ "$sm_before" != 1 ] && [ "$allow_file" = 1 ]; then
+              sm_url_armed=1
+            fi
+          elif [ "$sub" = submodule ]; then
+            check_skipped "$arg"
+          else
+            vet "$arg"
+            found_url=1
+          fi
           ;;
         *)
           if [ "$sub" = clone ]; then
             vet_local "$arg"
             found_url=1
           elif [ "$sub" = submodule ]; then
-            case "$arg" in
-              /*|./*|../*|..|*/..|*/../*|*/*|.)
-                check_local_arg "$arg"
-                ;;
-              *)
-                if [ -z "$pos" ]; then
-                  pos=$arg
-                fi
-                ;;
-            esac
+            if [ "$sm_action" = add ] && [ -z "$sm_url_set" ]; then
+              sm_before=$allow_file
+              vet "$arg"
+              sm_url_set=1
+              found_url=1
+              if [ "$sm_before" != 1 ] && [ "$allow_file" = 1 ]; then
+                sm_url_armed=1
+              fi
+            else
+              case "$arg" in
+                /*|./*|../*|..|*/..|*/../*|*/*|.)
+                  check_local_arg "$arg"
+                  ;;
+                *)
+                  if [ -e "$vet_base/$arg" ] || [ -L "$vet_base/$arg" ]; then
+                    check_local_arg "$arg"
+                  fi
+                  ;;
+              esac
+            fi
           else
             case "$arg" in
               /*|./*|../*|..|*/..|*/../*|*/*|.)
@@ -2207,6 +2385,13 @@ case "$sub" in
                 case "$sub:$remote_sub" in
                   remote:prune|remote:update|remote:show)
                     remote_names="$remote_names$arg$nl"
+                    ;;
+                  remote:add|remote:set-url)
+                    if [ -n "$pos" ]; then
+                      vet "$arg"
+                      found_url=1
+                      continue
+                    fi
                     ;;
                 esac
                 if [ -z "$pos" ]; then
@@ -2224,7 +2409,15 @@ case "$sub" in
       remote_rest=${remote_rest#*"$nl"}
       resolve_remote "$remote_one"
     done
-    if [ "$found_url" = "0" ]; then
+    if [ "$contact_all" = 1 ]; then
+      for r in $(list_remotes); do
+        resolve_remote "$r"
+      done
+    elif [ "$sub" = remote ] && [ "$remote_sub" = update ] && [ -z "$remote_names" ]; then
+      for r in $(list_remotes); do
+        resolve_remote "$r"
+      done
+    elif [ "$found_url" = "0" ]; then
       if [ -n "$pos" ]; then
         resolve_remote "$pos"
       else
@@ -2233,9 +2426,9 @@ case "$sub" in
             resolve_branch_remote
             ;;
         esac
-        if [ "$sub" = "fetch" ] || [ "$sub" = "pull" ]; then
-          for r in $("$real" remote 2>/dev/null); do
-            resolve_remote "$r"
+        if [ "$sub" = fetch ] || [ "$sub" = pull ]; then
+          for r in $(list_remotes); do
+            resolve_remote_check "$r"
           done
         fi
       fi
@@ -2264,8 +2457,162 @@ case "$sub" in
     fi
     ;;
 esac
+# Resolve a ./ or ../ submodule URL against the superproject origin URL.
+submodule_resolve_rel() {
+  srr_origin=$1
+  srr_rel=$2
+  case "$srr_origin" in
+    ""|*"$nl"*) return 1 ;;
+  esac
+  case "$srr_rel" in
+    ""|*"$nl"*|*:*|-*) return 1 ;;
+  esac
+  while :; do
+    case "$srr_origin" in
+      */) srr_origin=${srr_origin%/} ;;
+      *) break ;;
+    esac
+  done
+  srr_scheme=
+  srr_base=$srr_origin
+  case "$srr_origin" in
+    *://*)
+      srr_scheme=${srr_origin%%://*}
+      srr_base=${srr_origin#*://}
+      ;;
+  esac
+  srr_rest=$srr_rel
+  while [ -n "$srr_rest" ]; do
+    srr_seg=${srr_rest%%/*}
+    if [ "$srr_rest" = "$srr_seg" ]; then
+      srr_rest=
+    else
+      srr_rest=${srr_rest#*/}
+    fi
+    case "$srr_seg" in
+      ""|.)
+        continue
+        ;;
+      ..)
+        case "$srr_base" in
+          "") return 1 ;;
+          */*) srr_base=${srr_base%/*} ;;
+          /*) srr_base= ;;
+          *) return 1 ;;
+        esac
+        ;;
+      *)
+        if [ -z "$srr_base" ]; then
+          srr_base=/$srr_seg
+        else
+          srr_base=$srr_base/$srr_seg
+        fi
+        ;;
+    esac
+  done
+  if [ -z "$srr_base" ]; then
+    return 1
+  fi
+  if [ -n "$srr_scheme" ]; then
+    printf '%s://%s' "$srr_scheme" "$srr_base"
+  else
+    printf '%s' "$srr_base"
+  fi
+}
+# Vet one submodule URL. A relative form is resolved against origin first.
+# The check does not arm the file protocol.
+vet_one_sub_url() {
+  case "$1" in
+    "") say_deny "" ;;
+    .|..|./*|../*)
+      vsu_origin=$(qget remote.origin.url)
+      if [ -z "$vsu_origin" ]; then
+        say_file
+      fi
+      vsu_resolved=$(submodule_resolve_rel "$vsu_origin" "$1") || say_file
+      ;;
+    *)
+      vsu_resolved=$1
+      ;;
+  esac
+  vsu_file=$allow_file
+  vsu_bridge=$need_bridge
+  vsu_found=$found_url
+  vet "$vsu_resolved"
+  allow_file=$vsu_file
+  need_bridge=$vsu_bridge
+  found_url=$vsu_found
+}
+vet_url_lines() {
+  vul_rest=$1
+  while [ -n "$vul_rest" ]; do
+    case "$vul_rest" in
+      *"$nl"*)
+        vul_line=${vul_rest%%"$nl"*}
+        vul_rest=${vul_rest#*"$nl"}
+        ;;
+      *)
+        vul_line=$vul_rest
+        vul_rest=
+        ;;
+    esac
+    if [ -z "$vul_line" ]; then
+      continue
+    fi
+    case "$vul_line" in
+      *" "*)
+        vul_url=${vul_line#* }
+        ;;
+      *)
+        say_deny "$vul_line"
+        ;;
+    esac
+    vet_one_sub_url "$vul_url"
+  done
+}
+# submodule update, init, and sync copy URLs into config before they fetch.
+# Vet .gitmodules and the stored submodule.*.url values first.
+# Nested .gitmodules inside a submodule are not read here.
+vet_submodule_urls() {
+  vsu_gm=$vet_base/.gitmodules
+  if [ -e "$vsu_gm" ] || [ -L "$vsu_gm" ]; then
+    if [ -L "$vsu_gm" ] || [ ! -f "$vsu_gm" ]; then
+      say_file
+    fi
+    phys_inside "$vsu_gm" || say_file
+    vsu_lines=$(
+      eval "set -- $gitdir_args"
+      "$real" -C "$vet_base" "$@" \
+        -c core.hooksPath=/dev/null \
+        -c core.fsmonitor= \
+        -c core.sshCommand=/bin/false \
+        -c protocol.allow=never \
+        -c safe.directory='*' \
+        config -f "$vsu_gm" --get-regexp '^submodule\..*\.url$' 2>/dev/null
+    ) || vsu_lines=
+    vet_url_lines "$vsu_lines"
+  fi
+  vsu_lines=$(
+    eval "set -- $gitdir_args"
+    "$real" -C "$vet_base" "$@" \
+      -c core.hooksPath=/dev/null \
+      -c core.fsmonitor= \
+      -c core.sshCommand=/bin/false \
+      -c protocol.allow=never \
+      -c safe.directory='*' \
+      config --includes --get-regexp '^submodule\..*\.url$' 2>/dev/null
+  ) || vsu_lines=
+  vet_url_lines "$vsu_lines"
+}
 if [ "$sub" = init ]; then
   guard_init "$@"
+fi
+if [ "$sub" = submodule ]; then
+  case "$sm_action" in
+    update|init|sync)
+      vet_submodule_urls
+      ;;
+  esac
 fi
 printf '%s\n' "use git ${sub}" >> "$log"
 run "$@"

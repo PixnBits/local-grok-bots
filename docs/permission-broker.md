@@ -244,10 +244,15 @@ including an empty fsmonitor, no external diff, and a protocol list of
 https and ssh. http is added while the loopback credential proxy is in
 use. A local repository positional unsets that list and sets `protocol.file.allow=user`
 for the command; `file` is not exported. A file URL or path that is only an
-option value does not set that bit. When `fetch`, `pull`, `ls-remote`, or
-`push` has no repository positional, the wrapper also checks
-`branch.<current>.remote`, `branch.<current>.pushRemote`, and
-`remote.pushDefault`, and checks `origin` when none of those is set. That wrapper is not treated as proof
+option value is checked and does not set that bit. File protocol is armed only
+for the remote the command uses. Other remotes are checked and do not arm.
+`fetch --all` and `remote update` check every configured remote and may arm.
+`git submodule add` exports `GIT_ALLOW_PROTOCOL=file` only when its URL
+positional is a vetted file URL. `submodule update`, `init`, `sync`, `foreach`,
+and `status` do not, and keep `protocol.file.allow=never`. With no repository
+positional, `fetch`, `pull`, and `ls-remote` arm the current branch remote, or
+`origin` when the head is detached or that remote is unset. `push` checks the
+branch remote and `pushRemote`, and checks `origin` when neither is set. That wrapper is not treated as proof
 that every git invocation inside the jail has those keys forced off. Tests
 that drive git with `-c core.*` or `-c protocol.*` skip when run inside the
 jail, because the jail's git wrapper refuses those keys on purpose. Claude is
@@ -270,7 +275,10 @@ unless the key is in the same allowed set. `--unset`, `--unset-all`,
 `--remove-section`, `config unset`, and `config remove-section` still run, with
 `--git-dir` and `--work-tree` set to the git directory, including when
 `core.worktree` does not resolve. `git init` confines its target directory and
-the `--separate-git-dir` and `--template` paths to the workspace. Allowed keys
+the `--separate-git-dir` and `--template` paths to the workspace, including a
+unique-prefix spelling and a path after `--`. When parent directories do not
+exist yet, the nearest existing ancestor is resolved physically and must stay
+inside the workspace, and the missing suffix cannot contain `..`. Allowed keys
 are the init and clone probes
 (`core.repositoryformatversion`, `core.filemode`,
 `core.bare`, `core.logallrefupdates`, `core.ignorecase`,
@@ -279,26 +287,38 @@ relative and, after a physical chdir from the git directory, stays inside the
 workspace, upstream tracking
 (`branch.*.remote`, `branch.*.merge`,
 `branch.*.rebase`, `branch.*.description`, `branch.*.pushRemote`; the remote
-and pushRemote values are plain remote names only), the remote
-definition (`remote.*.url`, `remote.*.fetch`, plus `remote.*.tagopt` and
+and pushRemote values are `.` or the name of a configured remote), the remote
+definition (`remote.*.url`, `remote.*.fetch`, plus `remote.*.tagopt` exactly
+`--no-tags` or `--tags`, and
 `remote.*.mirror` when clone wrote them), `extensions.objectformat` from a
 sha256 init, `user.name` and `user.email`, `submodule.*.url` (an allowlisted
 https URL, a file URL or absolute path inside the workspace, or a relative
-`./` or `../` path that stays inside the workspace),
-`submodule.*.active`, and `submodule.active`, sparse-checkout keys
+`./` or `../` path that stays inside the workspace after a physical check),
+`submodule.*.active`, and `submodule.active`. Before `submodule update`,
+`init`, or `sync`, the wrapper vets `.gitmodules` (a regular file, not a
+symlink) and stored `submodule.*.url` values. A relative URL is resolved
+against `remote.origin.url`. An outside path, an unlisted URL, or an empty
+origin is refused before git writes the key. Nested `.gitmodules` inside a
+submodule is reachable only over an allowlisted https URL through the bridge.
+Also allowed are sparse-checkout keys
 (`extensions.worktreeConfig`, `core.sparseCheckout`, `core.sparseCheckoutCone`,
-`index.sparse`), and inert display and default keys (`core.autocrlf`,
+`index.sparse`) and inert display and default keys (`core.autocrlf`,
 `core.eol`, `core.safecrlf`, `pull.rebase`, `pull.ff`, `init.defaultBranch`,
 `push.default`, `color.*`, `advice.*`, and the rest of that set).
 `tag.sort` may start with `-`. `help.autocorrect` is allowed only for `0`,
 `never`, `false`, `no`, and `off`. `commit.gpgsign` is allowed only for
-`false`, `no`, `off`, and `0`. `pack.threads` is allowed only for a
-non-negative integer. `remote.*.promisor` and `remote.*.partialclonefilter`
+`false`, `no`, `off`, and `0`. `pack.threads` is allowed only for an integer
+from 0 to 256 with at most three digits. `remote.*.promisor` and `remote.*.partialclonefilter`
 are refused. For
 `fetch`, `-u` takes no value, so the following word is checked as a remote.
-`--attr-source` is refused. For `git remote`, every positional URL or path
-word is checked, and `remote prune`, `remote update`, and `remote show` also
-read and check the stored URL of every remote name they list. A stored `alias.*` key refuses every command except
+`--attr-source` is refused. A slashless name that exists as a path beside the
+command, including a symlink, is checked as a local path. A configured remote
+name is the stored URL, not a directory of the same name. For `git remote`,
+every positional URL or path word is checked, including the URL of
+`remote add` and `remote set-url`. `remote prune`, `remote update`, and
+`remote show` also read and check the stored URL of every remote name they
+list. A no-argument `fetch` or `pull` checks every other remote without arming
+file protocol from it. A stored `alias.*` key refuses every command except
 `git config`, even when that alias is not the invoked word. The wrapper unsets `GIT_COMMON_DIR`,
 `GIT_NAMESPACE`, `GIT_OBJECT_DIRECTORY`, `GIT_INDEX_FILE`,
 `GIT_CEILING_DIRECTORIES`, `GIT_EDITOR`, `VISUAL`, `EDITOR`, and
