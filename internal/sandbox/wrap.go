@@ -462,6 +462,7 @@ config_key_allowed() {
     core.worktree)
       ;;
     # Upstream tracking written by clone, checkout -b, and branch --set-upstream-to.
+    # remote and pushremote are plain names; the value check refuses a path or URL.
     branch.*.remote|branch.*.merge|branch.*.rebase|branch.*.description|branch.*.pushremote)
       ;;
     # Remote definition. The url is checked again when a command uses it.
@@ -479,7 +480,7 @@ config_key_allowed() {
     # Author identity. Refusing these would lock the repository after git config user.name.
     user.name|user.email)
       ;;
-    # Written by submodule add. Submodule paths and urls are checked separately.
+    # Written by submodule add. The url is checked like a remote url. active is unchanged.
     submodule.*.url|submodule.*.active|submodule.active)
       ;;
     # Line-ending settings. They do not name a command or a path.
@@ -539,13 +540,149 @@ config_key_allowed() {
     # Tag sort key. It does not name a command or a path.
     tag.sort)
       ;;
+    # help.autocorrect is allowed only for the off values.
+    help.autocorrect)
+      ;;
+    # commit.gpgsign is allowed only when signing is off.
+    commit.gpgsign)
+      ;;
+    # pack.threads is a non-negative integer. It does not name a command.
+    pack.threads)
+      ;;
     *)
       return 1
       ;;
   esac
   return 0
 }
-# core.worktree is allowed only when the value is relative and resolves inside /work.
+# Shared value rule for keys that are not free-form.
+# A key with no value rule is allowed. A newline in the value is refused.
+config_value_allowed() {
+  cva_key=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || return 1
+  cva_val=$2
+  cva_tab=$(printf '\t')
+  case "$cva_val" in
+    *"$nl"*|*"$cva_tab"*) return 1 ;;
+  esac
+  case "$cva_key" in
+    branch.*.remote|branch.*.pushremote)
+      case "$cva_val" in
+        ""|-*|*[!A-Za-z0-9._-]*) return 1 ;;
+      esac
+      return 0
+      ;;
+    submodule.*.url)
+      case "$cva_val" in
+        ./*|../*)
+          case "$cva_val" in
+            *:*) return 1 ;;
+          esac
+          submodule_rel_ok "$cva_val" || return 1
+          return 0
+          ;;
+      esac
+      if ! (
+        log=/dev/null
+        vet "$cva_val" >/dev/null 2>&1
+      ); then
+        return 1
+      fi
+      case "$cva_val" in
+        *://*|git@*|/*) return 0 ;;
+      esac
+      return 1
+      ;;
+    help.autocorrect)
+      case "$cva_val" in
+        0|never|false|no|off) return 0 ;;
+      esac
+      return 1
+      ;;
+    commit.gpgsign)
+      case "$cva_val" in
+        false|no|off|0) return 0 ;;
+      esac
+      return 1
+      ;;
+    pack.threads)
+      case "$cva_val" in
+        ""|*[!0-9]*) return 1 ;;
+      esac
+      return 0
+      ;;
+  esac
+  return 0
+}
+# A relative submodule url is resolved lexically from /work and must stay there.
+submodule_rel_ok() {
+  sru_rest=$1
+  sru_path=/work
+  while [ -n "$sru_rest" ]; do
+    sru_seg=${sru_rest%%/*}
+    if [ "$sru_rest" = "$sru_seg" ]; then
+      sru_rest=
+    else
+      sru_rest=${sru_rest#*/}
+    fi
+    case "$sru_seg" in
+      ""|.)
+        continue
+        ;;
+      ..)
+        case "$sru_path" in
+          /work) return 1 ;;
+          /work/*) sru_path=${sru_path%/*} ;;
+          *) return 1 ;;
+        esac
+        ;;
+      *)
+        sru_path=$sru_path/$sru_seg
+        ;;
+    esac
+  done
+  inside_work "$sru_path"
+}
+# Read every stored value of a restricted key. A newline in a value is refused.
+config_check_values() {
+  cck_probe=$(printf '\001')
+  if config_value_allowed "$1" "$cck_probe"; then
+    return 0
+  fi
+  cck_key=$1
+  cck_raw=$(
+    eval "set -- $gitdir_args"
+    "$real" -C "$vet_base" "$@" \
+      -c core.hooksPath=/dev/null \
+      -c core.fsmonitor= \
+      -c core.sshCommand=/bin/false \
+      -c protocol.allow=never \
+      -c safe.directory='*' \
+      config --includes --null --get-all -- "$cck_key" 2>/dev/null | tr '\000\n' '\n\001'
+  ) || say_config_key "$cck_key"
+  cck_soh=$(printf '\001')
+  case "$cck_raw" in
+    *"$cck_soh"*) say_config_key "$cck_key" ;;
+  esac
+  if [ -z "$cck_raw" ]; then
+    say_config_key "$cck_key"
+  fi
+  cck_rest=$cck_raw
+  while [ -n "$cck_rest" ]; do
+    case "$cck_rest" in
+      *"$nl"*)
+        cck_one=${cck_rest%%"$nl"*}
+        cck_rest=${cck_rest#*"$nl"}
+        ;;
+      *)
+        cck_one=$cck_rest
+        cck_rest=
+        ;;
+    esac
+    config_value_allowed "$cck_key" "$cck_one" || say_config_key "$cck_key"
+  done
+}
+# core.worktree is allowed only when the value is relative and, after a physical
+# chdir from the git directory, stays inside /work.
 check_core_worktree() {
   wt_tab=$(printf '\t')
   wt_lines=$(
@@ -607,7 +744,7 @@ check_core_worktree() {
         ;;
     esac
     wt_gitdir=$(dirname "$wt_abs")
-    wt_resolved=$(cd -- "$wt_gitdir/$wt_val" && pwd -P) || say_config_key "core.worktree"
+    wt_resolved=$(cd -P -- "$wt_gitdir/$wt_val" && pwd -P) || say_config_key "core.worktree"
     inside_work "$wt_resolved" || say_config_key "core.worktree"
   done
 }
@@ -620,6 +757,8 @@ config_guard() {
   cg_action=
   cg_subcmd=
   cg_key=
+  cg_val=
+  cg_val_set=
   cg_npos=0
   for arg in "$@"; do
     if [ -z "$cg_seen" ]; then
@@ -673,6 +812,9 @@ config_guard() {
       cg_npos=$((cg_npos + 1))
       if [ -z "$cg_key" ]; then
         cg_key=$arg
+      elif [ -z "$cg_val_set" ]; then
+        cg_val=$arg
+        cg_val_set=1
       fi
       continue
     fi
@@ -688,32 +830,15 @@ config_guard() {
       --*)
         cg_body=${arg#--}
         cg_name=${cg_body%%=*}
-        if [ -n "$cg_name" ]; then
-          case "file" in
-            "$cg_name"*) say_option ;;
-          esac
-          case "global" in
-            "$cg_name"*) say_option ;;
-          esac
-          case "system" in
-            "$cg_name"*) say_option ;;
-          esac
-          case "blob" in
-            "$cg_name"*) say_option ;;
-          esac
-          case "edit" in
-            "$cg_name"*) say_option ;;
-          esac
-          case "rename-section" in
-            "$cg_name"*) say_option ;;
-          esac
-          case "git-dir" in
-            "$cg_name"*) say_option ;;
-          esac
-          case "work-tree" in
-            "$cg_name"*) say_option ;;
-          esac
-        fi
+        # A long option is refused unless its name is an exact known form.
+        # Abbreviations of value-taking options are refused here.
+        case "$cg_name" in
+          null|comment|type|default|value|url|add|replace-all|append|unset|unset-all|remove-section|get|get-all|get-regexp|get-urlmatch|get-color|get-colorbool|list|name-only|show-origin|show-scope|includes|no-includes|local|worktree)
+            ;;
+          *)
+            say_option
+            ;;
+        esac
         case "$cg_name" in
           get|get-all|get-regexp|get-urlmatch|get-color|get-colorbool|list)
             if [ -z "$cg_action" ]; then
@@ -739,6 +864,14 @@ config_guard() {
         continue
         ;;
       -*)
+        if [ -n "$cg_key" ]; then
+          cg_npos=$((cg_npos + 1))
+          if [ -z "$cg_val_set" ]; then
+            cg_val=$arg
+            cg_val_set=1
+          fi
+          continue
+        fi
         cg_rest=${arg#-}
         while [ -n "$cg_rest" ]; do
           cg_letter=${cg_rest%"${cg_rest#?}"}
@@ -789,6 +922,9 @@ config_guard() {
     cg_npos=$((cg_npos + 1))
     if [ -z "$cg_key" ]; then
       cg_key=$arg
+    elif [ -z "$cg_val_set" ]; then
+      cg_val=$arg
+      cg_val_set=1
     fi
   done
   cg_write=
@@ -800,6 +936,9 @@ config_guard() {
   fi
   if [ "$cg_write" = 1 ] && [ -n "$cg_key" ]; then
     if config_key_allowed "$cg_key"; then
+      if [ "$cg_val_set" = 1 ]; then
+        config_value_allowed "$cg_key" "$cg_val" || say_config_key "$cg_key"
+      fi
       return 0
     fi
     say_config_key "$cg_key"
@@ -934,11 +1073,44 @@ accept_local() {
 check_local() {
   guard_local "$1" 0
 }
+# An option value is not the repository. Paths and URLs are checked and do not arm file.
+check_skipped() {
+  cs_file=$allow_file
+  cs_bridge=$need_bridge
+  cs_found=$found_url
+  case "$1" in
+    "")
+      ;;
+    *)
+      cs_prefix=$(printf '%s' "$1" | cut -c 1-7 | tr '[:upper:]' '[:lower:]') || say_file
+      if [ "$cs_prefix" = "file://" ]; then
+        cs_pth=$(file_url_path "$1") || say_file
+        check_local "$cs_pth"
+      else
+        case "$1" in
+          *://*|git@*)
+            vet "$1"
+            ;;
+          /*)
+            check_local "$1"
+            ;;
+          ./*|../*|..|*/..|*/../*)
+            check_local_arg "$1"
+            ;;
+        esac
+      fi
+      ;;
+  esac
+  allow_file=$cs_file
+  need_bridge=$cs_bridge
+  found_url=$cs_found
+}
 scan_urls() {
   for arg in "$@"; do
     prefix=$(printf '%s' "$arg" | cut -c 1-7 | tr '[:upper:]' '[:lower:]') || say_file
     if [ "$prefix" = "file://" ]; then
-      vet "$arg"
+      su_pth=$(file_url_path "$arg") || say_file
+      check_local "$su_pth"
     fi
   done
 }
@@ -1252,6 +1424,11 @@ run() {
   if [ "$allow_file" = 1 ]; then
     pfile=user
     unset GIT_ALLOW_PROTOCOL
+    # submodule add clones in a child. That child does not keep the user bit,
+    # so the vetted file URL is also named on GIT_ALLOW_PROTOCOL for this command.
+    if [ "$sub" = submodule ]; then
+      export GIT_ALLOW_PROTOCOL=file
+    fi
   else
     pfile=never
     protos=https:ssh
@@ -1384,6 +1561,362 @@ exec "$real" "${lead[@]}" "${cargs[@]}" "${tail[@]}"
     -c submodule.recurse=false \
     -- "$@"
 }
+# A long option takes a value when its name is a unique prefix of one of these.
+skip_value_name() {
+  if [ -z "$1" ]; then
+    return 1
+  fi
+  sv_hits=0
+  for sv_cand in depth branch origin server-option jobs filter shallow-since shallow-exclude revision negotiation-tip deepen refmap; do
+    case "$sv_cand" in
+      "$1"*) sv_hits=$((sv_hits + 1)) ;;
+    esac
+  done
+  [ "$sv_hits" -eq 1 ]
+}
+# Print one effective config value. Empty when the key is unset.
+qget() {
+  qget_key=$1
+  qget_out=$(
+    eval "set -- $gitdir_args"
+    "$real" -C "$vet_base" "$@" \
+      -c core.hooksPath=/dev/null \
+      -c core.fsmonitor= \
+      -c core.sshCommand=/bin/false \
+      -c protocol.allow=never \
+      -c safe.directory='*' \
+      config --includes --get -- "$qget_key" 2>/dev/null
+  ) || qget_out=
+  printf '%s' "$qget_out"
+}
+# No repository word: check the branch remote the same way as a named remote.
+resolve_branch_remote() {
+  br_name=$(
+    eval "set -- $gitdir_args"
+    "$real" -C "$vet_base" "$@" \
+      -c core.hooksPath=/dev/null \
+      -c core.fsmonitor= \
+      -c core.sshCommand=/bin/false \
+      -c protocol.allow=never \
+      -c safe.directory='*' \
+      rev-parse --abbrev-ref HEAD 2>/dev/null
+  ) || br_name=
+  case "$br_name" in
+    *"$nl"*) br_name= ;;
+  esac
+  br_hit=
+  if [ -n "$br_name" ] && [ "$br_name" != HEAD ]; then
+    br_key=$(printf 'branch.%s.remote' "$br_name")
+    br_val=$(qget "$br_key")
+    if [ -n "$br_val" ]; then
+      resolve_remote "$br_val"
+      br_hit=1
+    fi
+    br_key=$(printf 'branch.%s.pushremote' "$br_name")
+    br_val=$(qget "$br_key")
+    if [ -n "$br_val" ]; then
+      resolve_remote "$br_val"
+      br_hit=1
+    fi
+  fi
+  br_val=$(qget remote.pushdefault)
+  if [ -n "$br_val" ]; then
+    resolve_remote "$br_val"
+    br_hit=1
+  fi
+  if [ -z "$br_hit" ]; then
+    resolve_remote origin
+  fi
+}
+# Return 0 when push already names a remote. Otherwise the branch remote is checked.
+push_names_remote() {
+  pn_prev=
+  pn_seen=
+  pn_dd=
+  pn_n=0
+  for arg in "$@"; do
+    if [ -n "$pn_prev" ]; then
+      pn_prev=
+      continue
+    fi
+    case "$arg" in
+      -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path|--config|--attr-source)
+        pn_prev=1
+        continue
+        ;;
+      --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*|--config=*|--attr-source=*|-c*)
+        continue
+        ;;
+      --repo|--receive-pack|--exec|--push-option|-o)
+        pn_prev=1
+        continue
+        ;;
+      --repo=*|--recurse-submodules|--recurse-submodules=*|--receive-pack=*|--exec=*|--push-option=*|-o*)
+        continue
+        ;;
+    esac
+    if [ -z "$pn_seen" ]; then
+      case "$arg" in
+        --)
+          continue
+          ;;
+        -*)
+          continue
+          ;;
+        *)
+          pn_seen=1
+          continue
+          ;;
+      esac
+    fi
+    if [ -z "$pn_dd" ]; then
+      case "$arg" in
+        --)
+          pn_dd=1
+          continue
+          ;;
+        -*)
+          continue
+          ;;
+      esac
+    fi
+    pn_n=$((pn_n + 1))
+  done
+  [ "$pn_n" -ge 1 ]
+}
+# Locate the git directory from the filesystem. Git is not asked, so core.worktree is not used.
+find_git_dir() {
+  fg_dir=$vet_base
+  fg_i=0
+  while [ "$fg_i" -lt 40 ]; do
+    inside_work "$fg_dir" || return 1
+    if [ -e "$fg_dir/.git" ] || [ -L "$fg_dir/.git" ]; then
+      fg_phys=
+      if [ -d "$fg_dir/.git" ]; then
+        fg_phys=$(cd -P -- "$fg_dir/.git" && pwd -P) || return 1
+      elif [ -f "$fg_dir/.git" ]; then
+        IFS= read -r fg_line < "$fg_dir/.git" || return 1
+        case "$fg_line" in
+          gitdir:*) ;;
+          *) return 1 ;;
+        esac
+        fg_rest=${fg_line#gitdir:}
+        fg_tab=$(printf '\t')
+        while :; do
+          case "$fg_rest" in
+            " "*) fg_rest=${fg_rest# } ;;
+            "$fg_tab"*) fg_rest=${fg_rest#"$fg_tab"} ;;
+            *) break ;;
+          esac
+        done
+        if [ -z "$fg_rest" ]; then
+          return 1
+        fi
+        case "$fg_rest" in
+          /*) fg_target=$fg_rest ;;
+          *) fg_target=$fg_dir/$fg_rest ;;
+        esac
+        fg_phys=$(cd -P -- "$fg_target" && pwd -P) || return 1
+      else
+        return 1
+      fi
+      inside_work "$fg_phys" || return 1
+      phys_inside "$fg_phys" || return 1
+      printf '%s' "$fg_phys"
+      return 0
+    fi
+    case "$fg_dir" in
+      /work|/) return 1 ;;
+    esac
+    fg_parent=$(dirname "$fg_dir")
+    if [ "$fg_parent" = "$fg_dir" ]; then
+      return 1
+    fi
+    fg_dir=$fg_parent
+    fg_i=$((fg_i + 1))
+  done
+  return 1
+}
+# Removal forms run with --git-dir and --work-tree set to the git directory,
+# so git does not chdir through core.worktree.
+config_run_unset() {
+  cru_gd=$(find_git_dir) || {
+    run "$@"
+    return
+  }
+  cru_prev=
+  cru_seen=
+  cru_args=
+  for arg in "$@"; do
+    if [ -n "$cru_seen" ]; then
+      cru_args="$cru_args $(quote "$arg")"
+      continue
+    fi
+    if [ -n "$cru_prev" ]; then
+      cru_prev=
+      continue
+    fi
+    case "$arg" in
+      -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path|--config|--attr-source)
+        cru_prev=1
+        ;;
+      --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*|--config=*|--attr-source=*|-c*)
+        ;;
+      *)
+        cru_seen=1
+        cru_args="$cru_args $(quote "$arg")"
+        ;;
+    esac
+  done
+  cd -- "$cru_gd" || say_config
+  eval "set -- $cru_args"
+  exec_git \
+    --git-dir="$cru_gd" \
+    --work-tree="$cru_gd" \
+    -c core.hooksPath=/dev/null \
+    -c core.fsmonitor= \
+    -c core.sshCommand=/bin/false \
+    -c protocol.allow=never \
+    -c safe.directory='*' \
+    -- "$@"
+}
+# template, or separate-git-dir when that prefix is not also shared.
+init_path_name() {
+  if [ -z "$1" ]; then
+    return 1
+  fi
+  case "template" in
+    "$1"*) return 0 ;;
+  esac
+  case "separate-git-dir" in
+    "$1"*)
+      case "shared" in
+        "$1"*) return 1 ;;
+      esac
+      return 0
+      ;;
+  esac
+  return 1
+}
+init_skip_name() {
+  if [ -z "$1" ]; then
+    return 1
+  fi
+  is_hits=0
+  for is_cand in initial-branch object-format ref-format; do
+    case "$is_cand" in
+      "$1"*) is_hits=$((is_hits + 1)) ;;
+    esac
+  done
+  [ "$is_hits" -eq 1 ]
+}
+# An init path must stay inside /work after a physical chdir.
+init_vet() {
+  case "$1" in
+    "") say_file ;;
+    /*) iv_abs=$1 ;;
+    *) iv_abs=$vet_base/$1 ;;
+  esac
+  if [ -d "$iv_abs" ] || [ -L "$iv_abs" ]; then
+    iv_phys=$(cd -P -- "$iv_abs" && pwd -P) || say_file
+    inside_work "$iv_phys" || say_file
+    return 0
+  fi
+  iv_parent=$(dirname "$iv_abs")
+  iv_base=$(basename "$iv_abs")
+  case "$iv_base" in
+    ""|..) say_file ;;
+  esac
+  iv_pphys=$(cd -P -- "$iv_parent" && pwd -P) || say_file
+  inside_work "$iv_pphys" || say_file
+  case "$iv_base" in
+    .) return 0 ;;
+  esac
+  inside_work "$iv_pphys/$iv_base" || say_file
+}
+guard_init() {
+  gi_prev=
+  gi_seen=
+  gi_skip=
+  gi_path=
+  gi_dd=
+  for arg in "$@"; do
+    if [ -z "$gi_seen" ]; then
+      if [ -n "$gi_prev" ]; then
+        gi_prev=
+        continue
+      fi
+      case "$arg" in
+        -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path|--config|--attr-source)
+          gi_prev=1
+          continue
+          ;;
+        --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*|--config=*|--attr-source=*|-c*)
+          continue
+          ;;
+        --)
+          continue
+          ;;
+        -*)
+          continue
+          ;;
+        init)
+          gi_seen=1
+          continue
+          ;;
+        *)
+          gi_seen=1
+          ;;
+      esac
+    fi
+    if [ -n "$gi_path" ]; then
+      gi_path=
+      init_vet "$arg"
+      continue
+    fi
+    if [ -n "$gi_skip" ]; then
+      gi_skip=
+      continue
+    fi
+    if [ -n "$gi_dd" ]; then
+      init_vet "$arg"
+      continue
+    fi
+    case "$arg" in
+      --)
+        gi_dd=1
+        continue
+        ;;
+      --*=*)
+        gi_body=${arg#--}
+        gi_name=${gi_body%%=*}
+        if init_path_name "$gi_name"; then
+          init_vet "${arg#*=}"
+        fi
+        continue
+        ;;
+      --*)
+        gi_name=${arg#--}
+        if init_path_name "$gi_name"; then
+          gi_path=1
+        elif init_skip_name "$gi_name"; then
+          gi_skip=1
+        fi
+        continue
+        ;;
+      -b)
+        gi_skip=1
+        continue
+        ;;
+      -*)
+        continue
+        ;;
+      *)
+        init_vet "$arg"
+        ;;
+    esac
+  done
+}
 scan_global "$@"
 # --git-dir and --work-tree select a repository the cwd checks did not read.
 # Read-only commands may still name one.
@@ -1396,7 +1929,10 @@ if [ "$saw_repo_opt" = 1 ]; then
       ;;
   esac
 fi
-scan_urls "$@"
+# config values are checked after config_guard so a refused key is named.
+if [ "$sub" != config ]; then
+  scan_urls "$@"
+fi
 # Effective config, including included files and worktree config.
 # git config stays available so a refused key can be removed.
 # Command-line pins are not repository keys and are skipped.
@@ -1444,6 +1980,7 @@ if [ "$sub" != config ] && [ -x "$real" ]; then
           check_core_worktree
           ;;
       esac
+      config_check_values "$cfg_key"
       continue
     fi
     say_config_key "$cfg_key"
@@ -1451,6 +1988,11 @@ if [ "$sub" != config ] && [ -x "$real" ]; then
 fi
 if [ "$sub" = config ]; then
   config_guard "$@"
+  # An allowed config value can still be a file URL. Checked, not armed.
+  scan_urls "$@"
+  if [ "$cg_action" = unset ]; then
+    config_run_unset "$@"
+  fi
 fi
 # An alias hides the command word. Git does not let an alias replace a builtin.
 # Any stored alias key is refused by the check above, including one that is not invoked.
@@ -1483,6 +2025,7 @@ if [ "$sub" = "push" ]; then
   for arg in "$@"; do
     refuse_command_opt "$arg"
   done
+  push_names_remote "$@" || resolve_branch_remote
   if [ ! -x /lgb/bin/ghbridge ] || [ ! -S /lgb/sock/push.sock ]; then
     echo "git push denied: not sent" >&2
     printf '%s\n' "deny git push" >> "$log"
@@ -1518,6 +2061,9 @@ case "$sub" in
           path)
             vet_opt "$arg"
             ;;
+          skip)
+            check_skipped "$arg"
+            ;;
         esac
         prev=
         continue
@@ -1526,6 +2072,11 @@ case "$sub" in
       refuse_submodule_opt "$arg"
       fetch_multiple_short "$arg"
       if [ "$sub" = clone ] && clone_short "$arg"; then
+        case "$arg" in
+          -o?*) check_skipped "${arg#-o}" ;;
+          -b?*) check_skipped "${arg#-b}" ;;
+          -j?*) check_skipped "${arg#-j}" ;;
+        esac
         continue
       fi
       case "$arg" in
@@ -1571,13 +2122,37 @@ case "$sub" in
           prev=skip
           continue
           ;;
-        --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--exec-path=*|--depth=*|--branch=*|--origin=*|--server-option=*|--jobs=*|--filter=*|--shallow-since=*|--shallow-exclude=*|--revision=*)
+        --depth=*|--branch=*|--origin=*|--server-option=*|--jobs=*|--filter=*|--shallow-since=*|--shallow-exclude=*|--revision=*)
+          check_skipped "${arg#*=}"
+          continue
+          ;;
+        --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--exec-path=*)
           continue
           ;;
         -j*|-b*|-o*)
+          case "$arg" in
+            -j*) check_skipped "${arg#-j}" ;;
+            -b*) check_skipped "${arg#-b}" ;;
+            -o*) check_skipped "${arg#-o}" ;;
+          esac
           continue
           ;;
         --)
+          continue
+          ;;
+        --*)
+          sv_body=${arg#--}
+          sv_name=${sv_body%%=*}
+          if skip_value_name "$sv_name"; then
+            case "$arg" in
+              --*=*)
+                check_skipped "${arg#*=}"
+                ;;
+              *)
+                prev=skip
+                ;;
+            esac
+          fi
           continue
           ;;
         -*)
@@ -1652,10 +2227,17 @@ case "$sub" in
     if [ "$found_url" = "0" ]; then
       if [ -n "$pos" ]; then
         resolve_remote "$pos"
-      elif [ "$sub" = "fetch" ] || [ "$sub" = "pull" ]; then
-        for r in $("$real" remote 2>/dev/null); do
-          resolve_remote "$r"
-        done
+      else
+        case "$sub" in
+          fetch|pull|ls-remote)
+            resolve_branch_remote
+            ;;
+        esac
+        if [ "$sub" = "fetch" ] || [ "$sub" = "pull" ]; then
+          for r in $("$real" remote 2>/dev/null); do
+            resolve_remote "$r"
+          done
+        fi
       fi
     fi
     # remote add fetches with -f or --fetch, so it keeps the bridge then.
@@ -1682,6 +2264,9 @@ case "$sub" in
     fi
     ;;
 esac
+if [ "$sub" = init ]; then
+  guard_init "$@"
+fi
 printf '%s\n' "use git ${sub}" >> "$log"
 run "$@"
 `

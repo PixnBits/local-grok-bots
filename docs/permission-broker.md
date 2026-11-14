@@ -242,8 +242,12 @@ to an allowlisted binary on that PATH. An assignment prefix is never
 eligible. The jail git wrapper sets a narrow config for `run_shell`,
 including an empty fsmonitor, no external diff, and a protocol list of
 https and ssh. http is added while the loopback credential proxy is in
-use. A local repository path unsets that list and sets `protocol.file.allow=user`
-for the command; `file` is not exported. That wrapper is not treated as proof
+use. A local repository positional unsets that list and sets `protocol.file.allow=user`
+for the command; `file` is not exported. A file URL or path that is only an
+option value does not set that bit. When `fetch`, `pull`, `ls-remote`, or
+`push` has no repository positional, the wrapper also checks
+`branch.<current>.remote`, `branch.<current>.pushRemote`, and
+`remote.pushDefault`, and checks `origin` when none of those is set. That wrapper is not treated as proof
 that every git invocation inside the jail has those keys forced off. Tests
 that drive git with `-c core.*` or `-c protocol.*` skip when run inside the
 jail, because the jail's git wrapper refuses those keys on purpose. Claude is
@@ -259,24 +263,38 @@ any other key on every command except `git config`. The denial names the key.
 A `--git-dir` or `--work-tree` on a read-only command is part of that read.
 `git config` still skips that read so a refused key can be removed. It refuses
 `--file`/`-f` and `--blob` in every form (the jail does not need them), plus
-`--global`, `--system`, `--edit`/`-e`, and unambiguous abbreviations of those
-options. A `git config` write is refused unless the key is in the same allowed
-set. Allowed keys are the init and clone probes
+`--global`, `--system`, and `--edit`/`-e`. A long option is refused unless its
+name is an exact known form, so an abbreviation of `--comment`, `--type`,
+`--default`, `--value`, or `--url` is refused. A `git config` write is refused
+unless the key is in the same allowed set. `--unset`, `--unset-all`,
+`--remove-section`, `config unset`, and `config remove-section` still run, with
+`--git-dir` and `--work-tree` set to the git directory, including when
+`core.worktree` does not resolve. `git init` confines its target directory and
+the `--separate-git-dir` and `--template` paths to the workspace. Allowed keys
+are the init and clone probes
 (`core.repositoryformatversion`, `core.filemode`,
 `core.bare`, `core.logallrefupdates`, `core.ignorecase`,
 `core.precomposeunicode`, `core.symlinks`), `core.worktree` when the value is
-relative and resolves inside the workspace, upstream tracking
+relative and, after a physical chdir from the git directory, stays inside the
+workspace, upstream tracking
 (`branch.*.remote`, `branch.*.merge`,
-`branch.*.rebase`, `branch.*.description`, `branch.*.pushRemote`), the remote
+`branch.*.rebase`, `branch.*.description`, `branch.*.pushRemote`; the remote
+and pushRemote values are plain remote names only), the remote
 definition (`remote.*.url`, `remote.*.fetch`, plus `remote.*.tagopt` and
 `remote.*.mirror` when clone wrote them), `extensions.objectformat` from a
-sha256 init, `user.name` and `user.email`, `submodule.*.url`,
+sha256 init, `user.name` and `user.email`, `submodule.*.url` (an allowlisted
+https URL, a file URL or absolute path inside the workspace, or a relative
+`./` or `../` path that stays inside the workspace),
 `submodule.*.active`, and `submodule.active`, sparse-checkout keys
 (`extensions.worktreeConfig`, `core.sparseCheckout`, `core.sparseCheckoutCone`,
 `index.sparse`), and inert display and default keys (`core.autocrlf`,
 `core.eol`, `core.safecrlf`, `pull.rebase`, `pull.ff`, `init.defaultBranch`,
 `push.default`, `color.*`, `advice.*`, and the rest of that set).
-`remote.*.promisor` and `remote.*.partialclonefilter` are refused. For
+`tag.sort` may start with `-`. `help.autocorrect` is allowed only for `0`,
+`never`, `false`, `no`, and `off`. `commit.gpgsign` is allowed only for
+`false`, `no`, `off`, and `0`. `pack.threads` is allowed only for a
+non-negative integer. `remote.*.promisor` and `remote.*.partialclonefilter`
+are refused. For
 `fetch`, `-u` takes no value, so the following word is checked as a remote.
 `--attr-source` is refused. For `git remote`, every positional URL or path
 word is checked, and `remote prune`, `remote update`, and `remote show` also
@@ -284,7 +302,7 @@ read and check the stored URL of every remote name they list. A stored `alias.*`
 `git config`, even when that alias is not the invoked word. The wrapper unsets `GIT_COMMON_DIR`,
 `GIT_NAMESPACE`, `GIT_OBJECT_DIRECTORY`, `GIT_INDEX_FILE`,
 `GIT_CEILING_DIRECTORIES`, `GIT_EDITOR`, `VISUAL`, `EDITOR`, and
-`GIT_SEQUENCE_EDITOR`, and exports `GIT_NO_LAZY_FETCH=1`. Behavioral checks of the wrapper run on the host.
+`GIT_SEQUENCE_EDITOR`, and exports `GIT_NO_LAZY_FETCH=1`. Git honours that variable from version 2.44. Refusal of `remote.*.promisor`, `remote.*.partialclonefilter`, and `extensions.partialclone` is the primary control for a partial clone. Behavioral checks of the wrapper run on the host.
 In the jail, the static script checks still run.
 
 Inside-workspace checks and the git baseline use that bot's directory
