@@ -224,6 +224,7 @@ sm_url_armed=
 pos=
 remote_sub=
 remote_names=
+remote_npos=0
 deny_allow() {
   case "$1" in
     *"$nl"*)
@@ -258,6 +259,16 @@ say_config_key() {
 }
 say_option() {
   echo "git ${sub} denied: option is not allowed" >&2
+  printf '%s\n' "deny git ${sub}" >> "$log"
+  exit 1
+}
+say_remote_name() {
+  echo "git ${sub} denied: remote name is not allowed" >&2
+  printf '%s\n' "deny git ${sub}" >> "$log"
+  exit 1
+}
+say_sub_rel() {
+  echo "git ${sub} denied: relative submodule URL is not supported; use an absolute /work path or a file:// URL inside the workspace" >&2
   printf '%s\n' "deny git ${sub}" >> "$log"
   exit 1
 }
@@ -455,6 +466,14 @@ inside_work() {
   esac
   return 1
 }
+# A remote name is letters, digits, ".", "_", or "-".
+# "." and ".." are not names. A name does not start with "-" or contain "/".
+remote_name_ok() {
+  case "$1" in
+    ""|.|..|-*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
 # Allowed repository keys. Used by the effective-config scan and by config_guard.
 config_key_allowed() {
   ck_key=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || return 1
@@ -470,13 +489,23 @@ config_key_allowed() {
     branch.*.remote|branch.*.merge|branch.*.rebase|branch.*.description|branch.*.pushremote)
       ;;
     # Remote definition. The url is checked again when a command uses it.
+    # The name is the text between the first "remote." and the last ".".
     remote.*.url|remote.*.fetch)
+      rn=${ck_key#remote.}
+      rn=${rn%.*}
+      remote_name_ok "$rn" || return 1
       ;;
     # Written by clone --no-tags and clone --mirror.
     remote.*.tagopt)
+      rn=${ck_key#remote.}
+      rn=${rn%.*}
+      remote_name_ok "$rn" || return 1
       ;;
     # Written by clone --mirror. It marks a mirror remote and does not name a command.
     remote.*.mirror)
+      rn=${ck_key#remote.}
+      rn=${rn%.*}
+      remote_name_ok "$rn" || return 1
       ;;
     # Written by init --object-format=sha256.
     extensions.objectformat)
@@ -784,6 +813,19 @@ check_core_worktree() {
     inside_work "$wt_resolved" || say_config_key "core.worktree"
   done
 }
+# A plain path is not a URL. remote.*.url plain paths are checked on write.
+remote_url_plain() {
+  case "$1" in
+    *://*|git@*) return 1 ;;
+  esac
+  if colon_remote "$1"; then
+    return 1
+  fi
+  case "$1" in
+    /*|./*|../*|.|..|*/*) return 0 ;;
+  esac
+  return 1
+}
 # git config skips the allowlist read so a refused key can be removed.
 # --file/-f/--blob are refused in every form; the jail does not need them.
 config_guard() {
@@ -983,6 +1025,19 @@ config_guard() {
     if config_key_allowed "$cg_key"; then
       if [ "$cg_val_set" = 1 ]; then
         config_value_allowed "$cg_key" "$cg_val" || say_config_key "$cg_key"
+        cg_fold=$(printf '%s' "$cg_key" | tr '[:upper:]' '[:lower:]') || say_config_key "$cg_key"
+        case "$cg_fold" in
+          remote.*.url)
+            if remote_url_plain "$cg_val"; then
+              if ! (
+                log=/dev/null
+                vet_local "$cg_val" >/dev/null 2>&1
+              ); then
+                say_config_key "$cg_key"
+              fi
+            fi
+            ;;
+        esac
       fi
       return 0
     fi
@@ -1362,10 +1417,48 @@ resolve_remote() {
     return
   fi
   case "$name" in
-    ""|-*)
+    "")
       return
       ;;
-    *://*|git@*|file://*|/*|./*|../*|..|*/..|*/../*|*/*|.)
+    *://*|git@*)
+      vet "$name"
+      found_url=1
+      return
+      ;;
+    # A path-shaped word can still name a configured remote.
+    # Vet every stored URL, then vet the word as a path.
+    # A leading "-" is not vetted as a path. Its stored URLs are still vetted.
+    -*|/*|./*|../*|..|*/..|*/../*|*/*|.)
+      rr_urls=$(
+        eval "set -- $gitdir_args"
+        "$real" -C "$vet_base" "$@" \
+          -c core.hooksPath=/dev/null \
+          -c core.fsmonitor= \
+          -c core.sshCommand=/bin/false \
+          -c protocol.allow=never \
+          -c safe.directory='*' \
+          config --includes --get-all -- "remote.$name.url" 2>/dev/null
+      ) || rr_urls=
+      rr_rest=$rr_urls
+      while [ -n "$rr_rest" ]; do
+        case "$rr_rest" in
+          *"$nl"*)
+            rr_one=${rr_rest%%"$nl"*}
+            rr_rest=${rr_rest#*"$nl"}
+            ;;
+          *)
+            rr_one=$rr_rest
+            rr_rest=
+            ;;
+        esac
+        if [ -z "$rr_one" ]; then
+          continue
+        fi
+        vet "$rr_one"
+      done
+      case "$name" in
+        -*) return ;;
+      esac
       vet "$name"
       found_url=1
       return
@@ -1929,47 +2022,78 @@ init_skip_name() {
   done
   [ "$is_hits" -eq 1 ]
 }
-# An init path must stay inside /work after a physical chdir.
-# Missing parents are allowed when the nearest existing ancestor is inside.
+# An init path must stay inside /work.
+# Each segment is walked physically. ".." is the physical parent.
+# A missing segment starts an unborn tail. ".." in that tail is refused.
+# The physical directory and the unborn tail must stay inside /work.
 init_vet() {
   case "$1" in
     "") say_file ;;
     /*) iv_abs=$1 ;;
     *) iv_abs=$vet_base/$1 ;;
   esac
-  iv_clean=$(clean_abs "$iv_abs") || say_file
-  if [ -d "$iv_clean" ] || [ -L "$iv_clean" ]; then
-    iv_phys=$(cd -P -- "$iv_clean" 2>/dev/null && pwd -P) || say_file
-    inside_work "$iv_phys" || say_file
-    return 0
-  fi
-  if [ -e "$iv_clean" ]; then
-    iv_parent=$(dirname "$iv_clean")
-    iv_phys=$(cd -P -- "$iv_parent" 2>/dev/null && pwd -P) || say_file
-    inside_work "$iv_phys" || say_file
-    return 0
-  fi
+  case "$iv_abs" in
+    /*) ;;
+    *) say_file ;;
+  esac
+  iv_cur=/
   iv_rest=
-  iv_cur=$iv_clean
-  while [ ! -e "$iv_cur" ] && [ ! -L "$iv_cur" ]; do
-    iv_seg=$(basename "$iv_cur")
-    case "$iv_seg" in
-      ""|.|..) say_file ;;
-    esac
-    if [ -n "$iv_rest" ]; then
-      iv_rest=$iv_seg/$iv_rest
+  iv_tail=
+  iv_walk=${iv_abs#/}
+  while [ -n "$iv_walk" ]; do
+    iv_seg=${iv_walk%%/*}
+    if [ "$iv_walk" = "$iv_seg" ]; then
+      iv_walk=
     else
-      iv_rest=$iv_seg
+      iv_walk=${iv_walk#*/}
     fi
-    iv_next=$(dirname "$iv_cur")
-    if [ "$iv_next" = "$iv_cur" ]; then
+    iv_last=
+    if [ -z "$iv_walk" ]; then
+      iv_last=1
+    fi
+    if [ -n "$iv_tail" ]; then
+      case "$iv_seg" in
+        ""|.) continue ;;
+        ..) say_file ;;
+      esac
+      iv_rest=$iv_rest/$iv_seg
+      continue
+    fi
+    case "$iv_seg" in
+      ""|.) continue ;;
+      ..)
+        iv_cur=$(cd -P -- "$iv_cur/.." 2>/dev/null && pwd -P) || say_file
+        continue
+        ;;
+    esac
+    if [ "$iv_cur" = / ]; then
+      iv_next=/$iv_seg
+    else
+      iv_next=$iv_cur/$iv_seg
+    fi
+    if [ -e "$iv_next" ] || [ -L "$iv_next" ]; then
+      if [ -d "$iv_next" ]; then
+        iv_cur=$(cd -P -- "$iv_next" 2>/dev/null && pwd -P) || say_file
+        continue
+      fi
+      if [ -n "$iv_last" ] && [ ! -L "$iv_next" ]; then
+        iv_cur=$(cd -P -- "$iv_cur" 2>/dev/null && pwd -P) || say_file
+        inside_work "$iv_cur" || say_file
+        return 0
+      fi
       say_file
     fi
-    iv_cur=$iv_next
+    iv_tail=1
+    iv_rest=$iv_seg
   done
-  iv_phys=$(cd -P -- "$iv_cur" 2>/dev/null && pwd -P) || say_file
-  inside_work "$iv_phys" || say_file
-  inside_work "$iv_phys/$iv_rest" || say_file
+  inside_work "$iv_cur" || say_file
+  if [ -n "$iv_rest" ]; then
+    if [ "$iv_cur" = / ]; then
+      inside_work "/$iv_rest" || say_file
+    else
+      inside_work "$iv_cur/$iv_rest" || say_file
+    fi
+  fi
 }
 guard_init() {
   gi_prev=
@@ -2189,6 +2313,7 @@ case "$sub" in
     remote_helper_config
     prev=
     seen_sub=
+    arg_dd=
     for arg in "$@"; do
       if [ -n "$prev" ]; then
         case "$prev" in
@@ -2275,6 +2400,7 @@ case "$sub" in
           continue
           ;;
         --)
+          arg_dd=1
           continue
           ;;
         --all)
@@ -2299,7 +2425,9 @@ case "$sub" in
           continue
           ;;
         -*)
-          continue
+          if [ "$arg_dd" != 1 ] || [ "$sub" != remote ] || [ -z "$remote_sub" ]; then
+            continue
+          fi
           ;;
       esac
       if [ -z "$seen_sub" ]; then
@@ -2323,6 +2451,31 @@ case "$sub" in
             ;;
         esac
       fi
+      if [ "$sub" = remote ] && [ -n "$remote_sub" ]; then
+        remote_npos=$((remote_npos + 1))
+        case "$remote_sub" in
+          prune|update|show)
+            remote_name_ok "$arg" || say_remote_name
+            ;;
+          rename)
+            if [ "$remote_npos" -le 2 ]; then
+              remote_name_ok "$arg" || say_remote_name
+            fi
+            ;;
+          add|set-url|get-url|remove|rm|set-head|set-branches)
+            if [ "$remote_npos" -eq 1 ]; then
+              remote_name_ok "$arg" || say_remote_name
+            fi
+            ;;
+        esac
+        case "$remote_sub" in
+          set-head|set-branches)
+            if [ "$remote_npos" -gt 1 ]; then
+              continue
+            fi
+            ;;
+        esac
+      fi
       if colon_remote "$arg"; then
         if [ "$sub" = submodule ] && [ "$sm_action" != add ]; then
           check_skipped "$arg"
@@ -2335,6 +2488,9 @@ case "$sub" in
       case "$arg" in
         *://*|git@*)
           if [ "$sub" = submodule ] && [ "$sm_action" = add ] && [ -z "$sm_url_set" ]; then
+            case "$arg" in
+              .|..|./*|../*) say_sub_rel ;;
+            esac
             sm_before=$allow_file
             vet "$arg"
             sm_url_set=1
@@ -2355,6 +2511,9 @@ case "$sub" in
             found_url=1
           elif [ "$sub" = submodule ]; then
             if [ "$sm_action" = add ] && [ -z "$sm_url_set" ]; then
+              case "$arg" in
+                .|..|./*|../*) say_sub_rel ;;
+              esac
               sm_before=$allow_file
               vet "$arg"
               sm_url_set=1
@@ -2377,8 +2536,7 @@ case "$sub" in
           else
             case "$arg" in
               /*|./*|../*|..|*/..|*/../*|*/*|.)
-                vet "$arg"
-                found_url=1
+                resolve_remote "$arg"
                 ;;
               *)
                 # remote prune, update and show contact every named remote, so each name is read.

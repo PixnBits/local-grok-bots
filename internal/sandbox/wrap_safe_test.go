@@ -3343,6 +3343,7 @@ func TestGitWrapR4RemoteVetsEveryURLWord(t *testing.T) {
 	})
 	deniedRepo := RepoNotAvailable
 	outsidePath := "local path is outside the workspace"
+	nameDenied := "remote name is not allowed"
 	refuse := func(args ...string) {
 		t.Helper()
 		out, err := runInstalledWrap(t, wrap, repo, nil, args...)
@@ -3353,11 +3354,20 @@ func TestGitWrapR4RemoteVetsEveryURLWord(t *testing.T) {
 			t.Fatalf("%v: %v\n%s", args, err, out)
 		}
 	}
+	refuseName := func(args ...string) {
+		t.Helper()
+		out, err := runInstalledWrap(t, wrap, repo, nil, args...)
+		if err == nil || !strings.Contains(out, nameDenied) {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
 	// A named remote whose url points outside is refused wherever it appears.
+	// prune treats every positional as a remote name. An inside file URL is refused as a name.
+	// An outside file URL is refused as a path before that name check.
 	outRepo := filepath.Join(outside, "o")
 	commitRepo(t, outRepo, "o.txt", "outside\n")
 	gitCmd(t, repo, "remote", "add", "eo", "file://"+outRepo)
-	refuse("remote", "prune", "file://"+inside, "eo")
+	refuseName("remote", "prune", "file://"+inside, "eo")
 	refuse("remote", "prune", "origin", "eo")
 	refuse("remote", "prune", "eo", "origin")
 	refuse("remote", "show", "origin", "eo")
@@ -5560,4 +5570,518 @@ func TestGitWrapR6SiblingArmsAndFetchAll(t *testing.T) {
 			t.Fatalf("slash remote name: %v\n%s", err, out)
 		}
 	})
+}
+
+func TestGitWrapR7RemotePathName(t *testing.T) {
+	rr := between(t, gitWrapScript, "resolve_remote() {", "\nresolve_remote_check() {")
+	requirePins(t, "resolve_remote", rr, []string{
+		`config --includes --get-all -- "remote.$name.url"`,
+		`eval "set -- $gitdir_args"`,
+		`-C "$vet_base"`,
+		`-c core.hooksPath=/dev/null`,
+		`-c core.fsmonitor=`,
+		`-c core.sshCommand=/bin/false`,
+		`-c protocol.allow=never`,
+		`-c safe.directory='*'`,
+	})
+	if strings.Count(gitWrapScript, `remote_name_ok "$rn"`) != 3 {
+		t.Fatal("remote name rule is not applied to url, fetch, tagopt, and mirror")
+	}
+	cg := between(t, gitWrapScript, "config_guard() {", "\nphys_inside() {")
+	if !strings.Contains(cg, `remote_url_plain "$cg_val"`) || !strings.Contains(cg, `vet_local "$cg_val"`) {
+		t.Fatal("plain-path remote url is not checked on write")
+	}
+	skipIfJailWrapper(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal("git is not installed")
+	}
+	base := t.TempDir()
+	work := filepath.Join(base, "work")
+	outside := filepath.Join(base, "outside")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	insideA := filepath.Join(work, "inside-a")
+	shaA := commitRepo(t, insideA, "a.txt", "INSIDEA\n")
+	insideB := filepath.Join(work, "inside-b")
+	shaB := commitRepo(t, insideB, "b.txt", "INSIDEB\n")
+	outsideRepo := filepath.Join(outside, "repo")
+	outsideSHA := commitRepo(t, outsideRepo, "f.txt", "SECRETOUT\n")
+	wrap := installGitWrap(t, work)
+	run := func(dir string, args ...string) (string, error) {
+		t.Helper()
+		return runWrapTimeout(t, wrap, dir, nil, 20*time.Second, args...)
+	}
+	unchanged := func(dir, needle string, args ...string) {
+		t.Helper()
+		path := filepath.Join(dir, ".git", "config")
+		before, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out, err := run(dir, args...)
+		if err == nil || !strings.Contains(out, needle) {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+		after, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(before) != string(after) {
+			t.Fatalf("%v wrote config\n%s", args, after)
+		}
+	}
+	names := filepath.Join(work, "names")
+	commitRepo(t, names, "n.txt", "n\n")
+	nameDenied := "remote name is not allowed"
+	configDenied := "configuration is not allowed"
+	for _, args := range [][]string{
+		{"remote", "add", "a/b", insideA},
+		{"remote", "add", "./x", insideA},
+		{"remote", "add", ".", insideA},
+		{"remote", "add", "..", insideA},
+		{"remote", "add", "--", "-x", insideA},
+		{"remote", "add", "--", "-x", "good", insideA},
+		{"remote", "prune", "a/b"},
+		{"remote", "update", "./x"},
+		{"remote", "show", ".."},
+		{"remote", "rename", "a/b", "origin"},
+		{"remote", "set-url", "a/b", insideA},
+		{"remote", "set-head", "./x", "main"},
+		{"config", "remote.a/b.url", insideA},
+		{"config", "remote.a/b.fetch", "+refs/heads/*:refs/remotes/a/b/*"},
+		{"config", "remote...url", insideA},
+		{"config", "remote....url", insideA},
+		{"config", "remote.-x.url", insideA},
+		{"config", "remote..url", insideA},
+		{"config", "remote.a.b/c.url", insideA},
+		{"config", "remote.a.b/c.fetch", "+refs/heads/*:refs/remotes/x/*"},
+	} {
+		needle := nameDenied
+		if args[0] == "config" {
+			needle = configDenied
+		}
+		unchanged(names, needle, args...)
+	}
+	unchanged(names, "local path is outside the workspace", "remote", "add", "origin", outsideRepo)
+	unchanged(names, configDenied, "config", "remote.origin.url", outsideRepo)
+
+	keys := filepath.Join(work, "keys")
+	commitRepo(t, keys, "k.txt", "k\n")
+	acceptKey := func(key, val string) {
+		t.Helper()
+		out, err := run(keys, "config", key, val)
+		if err != nil || strings.Contains(out, configDenied) || strings.Contains(out, nameDenied) {
+			t.Fatalf("write %s: %v\n%s", key, err, out)
+		}
+		got, ok := gitLocalGet(keys, key)
+		if !ok || got != val {
+			t.Fatalf("%s=%q ok=%v", key, got, ok)
+		}
+		out, err = run(keys, "status")
+		if err != nil || strings.Contains(out, configDenied) {
+			t.Fatalf("status after %s: %v\n%s", key, err, out)
+		}
+	}
+	acceptKey("remote.origin.url", insideA)
+	acceptKey("remote.my-up.url", insideA)
+	acceptKey("remote.x.y.url", insideA)
+	out, err := run(keys, "fetch", "x.y")
+	if err != nil {
+		t.Fatalf("fetch x.y: %v\n%s", err, out)
+	}
+	if !gitHasObject(filepath.Join(keys, ".git"), shaA) {
+		t.Fatal("fetch x.y did not read the inside remote")
+	}
+	acceptKey("remote.origin.url", "https://example.com/repo.git")
+	acceptKey("remote.keep.url", "example.com:repo.git")
+	acceptKey("remote.keep2.url", "example.com:org/repo.git")
+
+	writes := filepath.Join(work, "writes")
+	commitRepo(t, writes, "w.txt", "w\n")
+	out, err = run(writes, "remote", "add", "origin", insideA)
+	if err != nil {
+		t.Fatalf("remote add inside: %v\n%s", err, out)
+	}
+	if got, ok := gitLocalGet(writes, "remote.origin.url"); !ok || got != insideA {
+		t.Fatalf("origin url %q ok=%v", got, ok)
+	}
+	out, err = run(writes, "remote", "prune", "origin")
+	if err != nil || strings.Contains(out, nameDenied) {
+		t.Fatalf("prune origin: %v\n%s", err, out)
+	}
+	unchanged(writes, "local path is outside the workspace", "remote", "set-url", "origin", outsideRepo)
+	if got, ok := gitLocalGet(writes, "remote.origin.url"); !ok || got != insideA {
+		t.Fatalf("set-url outside changed origin to %q", got)
+	}
+	out, err = run(writes, "remote", "set-url", "origin", insideB)
+	if err != nil {
+		t.Fatalf("set-url inside: %v\n%s", err, out)
+	}
+	if got, ok := gitLocalGet(writes, "remote.origin.url"); !ok || got != insideB {
+		t.Fatalf("origin url after set-url %q ok=%v", got, ok)
+	}
+	out, err = run(writes, "fetch", "origin")
+	if err != nil {
+		t.Fatalf("fetch origin: %v\n%s", err, out)
+	}
+	if !gitHasObject(filepath.Join(writes, ".git"), shaB) {
+		t.Fatal("fetch origin did not read the inside remote")
+	}
+	if gitHasObject(filepath.Join(writes, ".git"), outsideSHA) {
+		t.Fatal("outside commit arrived")
+	}
+	out, err = run(writes, "remote", "set-branches", "origin", "release/1.0")
+	if err != nil || strings.Contains(out, nameDenied) {
+		t.Fatalf("set-branches: %v\n%s", err, out)
+	}
+	if got, ok := gitLocalGet(writes, "remote.origin.fetch"); !ok || !strings.Contains(got, "release/1.0") {
+		t.Fatalf("fetch refspec %q ok=%v", got, ok)
+	}
+	unchanged(writes, nameDenied, "remote", "rename", "origin", "a/b")
+	if gitCmdOut(t, writes, "remote") != "origin" {
+		t.Fatal("rename wrote a slash name")
+	}
+	out, err = run(writes, "remote", "set-branches", "origin", "../x")
+	if strings.Contains(out, "local path is outside the workspace") || strings.Contains(out, nameDenied) {
+		t.Fatalf("set-branches vetted a branch name\n%s", out)
+	}
+
+	// The key scan refuses a stored remote.a/b.url or remote...url before fetch.
+	// fetch . on a repo without those keys is what reaches resolve_remote.
+	bad := filepath.Join(work, "badscan")
+	commitRepo(t, bad, "r.txt", "r\n")
+	head := gitCmdOut(t, bad, "rev-parse", "HEAD")
+	gitCmd(t, bad, "config", "remote.a/b.url", outsideRepo)
+	gitCmd(t, bad, "config", "remote...url", outsideRepo)
+	for _, args := range [][]string{
+		{"fetch", "a/b"},
+		{"fetch", "--", "a/b"},
+		{"ls-remote", "a/b"},
+		{"pull", "a/b", "main"},
+		{"fetch", "."},
+	} {
+		out, err = run(bad, args...)
+		if err == nil || !strings.Contains(out, configDenied) {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+	}
+	if gitCmdOut(t, bad, "rev-parse", "HEAD") != head {
+		t.Fatal("HEAD moved")
+	}
+	if gitHasObject(filepath.Join(bad, ".git"), outsideSHA) {
+		t.Fatal("outside commit arrived")
+	}
+	if treeHas(t, bad, "SECRETOUT") {
+		t.Fatal("outside content arrived")
+	}
+	if got, ok := gitLocalGet(bad, "remote.a/b.url"); !ok || got != outsideRepo {
+		t.Fatalf("stored slash remote changed: %q %v", got, ok)
+	}
+
+	real := r6RealGit(t)
+	logPath := filepath.Join(base, "fetch-dot.log")
+	fake := filepath.Join(base, "fetch-dot-git")
+	fakeBody := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + logPath + "'\nexec '" + real + "' \"$@\"\n"
+	if err := os.WriteFile(fake, []byte(fakeBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fw := installGitWrapReal(t, work, fake, gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost"})
+	dot := filepath.Join(work, "fetchdot")
+	commitRepo(t, dot, "r.txt", "r\n")
+	if err := os.WriteFile(logPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err = runWrapTimeout(t, fw, dot, nil, 20*time.Second, "fetch", ".")
+	if err != nil {
+		t.Fatalf("fetch .: %v\n%s", err, out)
+	}
+	logged, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logged), "config --includes --get-all -- remote...url") {
+		t.Fatalf("resolve_remote did not read the configured url\n%s", logged)
+	}
+
+	// Plain-path forms are checked when written, relative forms from the working directory.
+	rootRepo := work
+	commitRepo(t, rootRepo, "root.txt", "root\n")
+	for _, val := range []string{"..", "../outside/repo", "../outside", "./../outside/repo"} {
+		unchanged(rootRepo, configDenied, "config", "remote.p.url", val)
+	}
+	for _, val := range []string{".", "./names", "inside-a"} {
+		out, err = run(rootRepo, "config", "remote.p.url", val)
+		if err != nil || strings.Contains(out, configDenied) {
+			t.Fatalf("config remote.p.url %q: %v\n%s", val, err, out)
+		}
+	}
+
+	// With the key scan hidden, resolve_remote alone must vet the stored URLs of a path-shaped name.
+	hide := filepath.Join(base, "hide-scan-git")
+	hideBody := "#!/bin/sh\ncase \" $* \" in *\" --name-only \"*) exit 0 ;; esac\nexec '" + real + "' \"$@\"\n"
+	if err := os.WriteFile(hide, []byte(hideBody), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hw := installGitWrapReal(t, work, hide, gitWrapOpts{Grant: true, Name: "Ada", Email: "bot@localhost"})
+	stored := filepath.Join(work, "stored")
+	commitRepo(t, stored, "s.txt", "s\n")
+	gitCmd(t, stored, "config", "remote.a/b.url", outsideRepo)
+	gitCmd(t, stored, "config", "remote.a/b.fetch", "+refs/heads/*:refs/remotes/zz/*")
+	gitCmd(t, stored, "config", "remote...url", outsideRepo)
+	gitCmd(t, stored, "config", "remote...fetch", "+refs/heads/*:refs/remotes/dot/*")
+	for _, args := range [][]string{
+		{"fetch", "a/b"},
+		{"fetch", "--", "a/b"},
+		{"ls-remote", "a/b"},
+		{"pull", "a/b", "main"},
+		{"fetch", "."},
+	} {
+		out, err = runWrapTimeout(t, hw, stored, nil, 20*time.Second, args...)
+		if err == nil || !strings.Contains(out, "local path is outside the workspace") {
+			t.Fatalf("stored outside url %v: %v\n%s", args, err, out)
+		}
+	}
+	if gitHasObject(filepath.Join(stored, ".git"), outsideSHA) {
+		t.Fatal("outside commit arrived through a stored url")
+	}
+	gitCmd(t, stored, "config", "remote.a/b.url", insideA)
+	out, err = runWrapTimeout(t, hw, stored, nil, 20*time.Second, "fetch", "a/b")
+	if err != nil {
+		t.Fatalf("fetch a/b with an inside url: %v\n%s", err, out)
+	}
+	if !gitHasObject(filepath.Join(stored, ".git"), shaA) {
+		t.Fatal("inside stored url was not fetched")
+	}
+}
+
+func TestGitWrapR7SubmoduleAddRelativeURL(t *testing.T) {
+	if strings.Count(gitWrapScript, ".|..|./*|../*) say_sub_rel") != 2 {
+		t.Fatal("relative submodule URL check is missing")
+	}
+	if !strings.Contains(gitWrapScript, "relative submodule URL is not supported") {
+		t.Fatal("missing relative submodule denial")
+	}
+	skipIfJailWrapper(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal("git is not installed")
+	}
+	base := t.TempDir()
+	work := filepath.Join(base, "work")
+	outside := filepath.Join(base, "outside")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	leaf := filepath.Join(outside, "sub")
+	commitRepo(t, leaf, "f.txt", "SUBOUT\n")
+	inside := filepath.Join(work, "src")
+	commitRepo(t, inside, "o.txt", "ok\n")
+	real := r6RealGit(t)
+	dump := filepath.Join(base, "env.dump")
+	argsPath := filepath.Join(base, "git.args")
+	fake := filepath.Join(base, "real-git")
+	r6FakeGit(t, fake, real, dump, argsPath)
+	wrap := installGitWrapReal(t, work, fake, gitWrapOpts{
+		Grant: true, Hub: true, Bridge: true, Name: "Ada", Email: "bot@localhost",
+		Repos: []string{"acme/widgets"},
+	})
+	r6ArmBridge(t, wrap)
+	run := func(dir string, args ...string) (string, string, string, error) {
+		t.Helper()
+		os.Remove(dump)
+		os.Remove(argsPath)
+		out, err := runWrapTimeout(t, wrap, dir, nil, 30*time.Second, args...)
+		envText, _ := os.ReadFile(dump)
+		argText, _ := os.ReadFile(argsPath)
+		return string(envText), string(argText), out, err
+	}
+	notFile := func(envText, argText string) {
+		t.Helper()
+		if strings.Contains(envText, "GIT_ALLOW_PROTOCOL=file") {
+			t.Fatalf("exported file\n%s\n%s", envText, argText)
+		}
+		if strings.Contains(argText, "protocol.file.allow=user") {
+			t.Fatalf("file protocol was armed\n%s", argText)
+		}
+	}
+	rel := "relative submodule URL is not supported"
+	n := 0
+	denyRel := func(origin string, args ...string) {
+		t.Helper()
+		n++
+		dir := filepath.Join(work, "deny-"+strconv.Itoa(n))
+		commitRepo(t, dir, "s.txt", "s\n")
+		if origin != "" {
+			gitCmd(t, dir, "config", "remote.origin.url", origin)
+		}
+		envText, argText, out, err := run(dir, args...)
+		if err == nil || !strings.Contains(out, rel) {
+			t.Fatalf("%v origin=%s: %v\n%s", args, origin, err, out)
+		}
+		notFile(envText, argText)
+		if _, err := os.Stat(filepath.Join(dir, "sm")); !os.IsNotExist(err) {
+			t.Fatalf("%v created sm: %v", args, err)
+		}
+		if treeHas(t, dir, "SUBOUT") {
+			t.Fatalf("%v brought outside content", args)
+		}
+	}
+	for _, origin := range []string{outside, inside, ""} {
+		denyRel(origin, "submodule", "add", "./sub", "sm")
+		denyRel(origin, "submodule", "add", "../sub", "sm")
+		denyRel(origin, "submodule", "add", ".", "sm")
+		denyRel(origin, "submodule", "add", "..", "sm")
+	}
+
+	super := filepath.Join(work, "abs-super")
+	commitRepo(t, super, "s.txt", "s\n")
+	_, argText, out, err := run(super, "submodule", "add", inside, "sm")
+	if err != nil {
+		t.Fatalf("absolute add: %v\n%s\n%s", err, out, argText)
+	}
+	if _, err := os.Stat(filepath.Join(super, "sm", "o.txt")); err != nil {
+		t.Fatalf("absolute submodule missing: %v\n%s", err, out)
+	}
+	super2 := filepath.Join(work, "file-super")
+	commitRepo(t, super2, "s.txt", "s\n")
+	_, _, out, err = run(super2, "submodule", "add", "file://"+inside, "./dir/sub")
+	if err != nil {
+		t.Fatalf("file url add: %v\n%s", err, out)
+	}
+	if _, err := os.Stat(filepath.Join(super2, "dir", "sub", "o.txt")); err != nil {
+		t.Fatalf("file url path positional missing: %v\n%s", err, out)
+	}
+	super3 := filepath.Join(work, "https-super")
+	commitRepo(t, super3, "s.txt", "s\n")
+	envText, argText, out, err := run(super3, "submodule", "add", "https://github.com/acme/widgets.git", "sm")
+	if err != nil || strings.Contains(out, rel) {
+		t.Fatalf("https add: %v\n%s", err, out)
+	}
+	notFile(envText, argText)
+}
+
+func TestGitWrapR7InitDotDot(t *testing.T) {
+	iv := between(t, gitWrapScript, "init_vet() {", "\nguard_init() {")
+	if strings.Contains(iv, "clean_abs") {
+		t.Fatal("init_vet still uses clean_abs")
+	}
+	if !strings.Contains(iv, `cd -P -- "$iv_cur/.."`) {
+		t.Fatal("init_vet does not walk .. physically")
+	}
+	skipIfJailWrapper(t)
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Fatal("git is not installed")
+	}
+	base := t.TempDir()
+	jail := filepath.Join(base, "jailroot")
+	work := filepath.Join(jail, "work")
+	if err := os.MkdirAll(work, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(work, "sub")
+	proj := filepath.Join(work, "proj")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(proj, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wrap := installGitWrap(t, work)
+	run := func(dir string, args ...string) (string, error) {
+		t.Helper()
+		return runInstalledWrap(t, wrap, dir, []string{"GIT_TERMINAL_PROMPT=0"}, args...)
+	}
+	quiet := func(out string) {
+		t.Helper()
+		if strings.Contains(out, "cd:") || strings.Contains(out, "can't cd") {
+			t.Fatalf("shell noise: %s", out)
+		}
+	}
+	inside := func(path string) {
+		t.Helper()
+		rel, err := filepath.Rel(work, path)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			t.Fatalf("%s is outside %s (%s)", path, work, rel)
+		}
+	}
+	gitDir := func(path string) {
+		t.Helper()
+		inside(path)
+		if _, err := os.Stat(filepath.Join(path, ".git", "HEAD")); err != nil {
+			t.Fatalf("%s missing .git: %v", path, err)
+		}
+	}
+	okRun := func(dir string, args ...string) {
+		t.Helper()
+		out, err := run(dir, args...)
+		if err != nil {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+		quiet(out)
+	}
+	refuse := func(dir string, args ...string) {
+		t.Helper()
+		out, err := run(dir, args...)
+		if err == nil || !strings.Contains(out, "local path is outside the workspace") {
+			t.Fatalf("%v: %v\n%s", args, err, out)
+		}
+		quiet(out)
+	}
+	absent := func(path string) {
+		t.Helper()
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s exists: %v", path, err)
+		}
+	}
+
+	okRun(sub, "init", "../newproj")
+	gitDir(filepath.Join(work, "newproj"))
+	okRun(sub, "init", "../newproj/x")
+	gitDir(filepath.Join(work, "newproj", "x"))
+	okRun(sub, "init", "../proj")
+	gitDir(proj)
+	okRun(sub, "init", "../proj/x")
+	gitDir(filepath.Join(proj, "x"))
+	okRun(sub, "init", "./../np2")
+	gitDir(filepath.Join(work, "np2"))
+	okRun(sub, "init", "-q", "../newq")
+	gitDir(filepath.Join(work, "newq"))
+	okRun(sub, "init", "..")
+	gitDir(work)
+	okRun(work, "init", work+"/sub/../proj/y")
+	gitDir(filepath.Join(work, "proj", "y"))
+
+	refuse(sub, "init", "../../outside")
+	absent(filepath.Join(jail, "outside"))
+	refuse(work, "init", work+"/../tmp-outside/x")
+	absent(filepath.Join(jail, "tmp-outside"))
+	linked := filepath.Join(jail, "linked")
+	if err := os.MkdirAll(linked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(linked, filepath.Join(sub, "link")); err != nil {
+		t.Fatal(err)
+	}
+	refuse(sub, "init", "link/../x")
+	absent(filepath.Join(jail, "x"))
+	absent(filepath.Join(sub, "x"))
+	refuse(sub, "init", "zz/../x")
+	absent(filepath.Join(sub, "x"))
+	absent(filepath.Join(sub, "zz"))
+	refuse(work, "init", work+"/sub/../../..")
+	absent(filepath.Join(base, ".git"))
+	absent(filepath.Join(jail, ".git"))
+	if err := os.Symlink(filepath.Join(jail, "nowhere"), filepath.Join(sub, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	refuse(sub, "init", "dangling")
+	absent(filepath.Join(jail, "nowhere"))
+	if err := os.WriteFile(filepath.Join(jail, "afile"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	refuse(sub, "init", filepath.Join(jail, "afile"))
+	refuse(sub, "init", "../../afile")
 }
