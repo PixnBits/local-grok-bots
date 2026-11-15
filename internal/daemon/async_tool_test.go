@@ -32,6 +32,11 @@ type asyncModel struct {
 	interimText string
 	toolName    string
 	finalText   string
+	// tokensFirst emits interimText before blocking on ctx cancel.
+	tokensFirst bool
+	// tokensOut is closed once those tokens have been handed to onToken.
+	tokensOut  chan struct{}
+	tokensOnce sync.Once
 }
 
 // joinSnap is what a Tools != nil call observed about earlier interims.
@@ -112,6 +117,12 @@ func (m *asyncModel) interim(ctx context.Context, onToken func(string)) (model.C
 		return model.ChatResponse{}, ctx.Err()
 	}
 	if m.block {
+		if m.tokensFirst && ctx.Err() == nil {
+			if onToken != nil && m.interimText != "" {
+				onToken(m.interimText)
+			}
+			m.signalTokens()
+		}
 		select {
 		case <-ctx.Done():
 			m.markReturned(n)
@@ -123,11 +134,18 @@ func (m *asyncModel) interim(ctx context.Context, onToken func(string)) (model.C
 		m.markReturned(n)
 		return model.ChatResponse{}, err
 	}
-	if onToken != nil && m.interimText != "" {
+	if onToken != nil && m.interimText != "" && !m.tokensFirst {
 		onToken(m.interimText)
 	}
 	m.markReturned(n)
 	return model.ChatResponse{Content: m.interimText}, nil
+}
+
+func (m *asyncModel) signalTokens() {
+	if m == nil || m.tokensOut == nil {
+		return
+	}
+	m.tokensOnce.Do(func() { close(m.tokensOut) })
 }
 
 func (m *asyncModel) markReturned(n int) {
@@ -196,13 +214,14 @@ func cloneChatRequest(req model.ChatRequest) model.ChatRequest {
 
 // gateTool blocks in the tool until letGo or ctx cancel. No timers.
 type gateTool struct {
-	mu      sync.Mutex
-	ctx     context.Context
-	started chan struct{}
-	release chan struct{}
-	once    sync.Once
-	result  string
-	done    chan struct{}
+	mu          sync.Mutex
+	ctx         context.Context
+	started     chan struct{}
+	release     chan struct{}
+	once        sync.Once
+	result      string
+	done        chan struct{}
+	afterCancel time.Duration
 }
 
 func newGateTool(result string) *gateTool {
@@ -226,6 +245,9 @@ func (g *gateTool) exec(ctx context.Context, _ store.Bot, _ string, _ map[string
 		close(g.done)
 		return g.result, nil
 	case <-ctx.Done():
+		if g.afterCancel > 0 {
+			time.Sleep(g.afterCancel)
+		}
 		close(g.done)
 		return "", ctx.Err()
 	}
@@ -349,6 +371,96 @@ func waitBatchRows(t *testing.T, app *App, botID string, n int) []int {
 		runtime.Gosched()
 	}
 	t.Fatalf("event_loop_batch rows %d, want %d (%v)", len(got), n, got)
+	return got
+}
+
+type interimLogRow struct {
+	OK         bool `json:"ok"`
+	Superseded bool `json:"superseded"`
+}
+
+func eventLoopInterimRows(t *testing.T, app *App, botID string) []interimLogRow {
+	t.Helper()
+	ev, err := app.st.ListLog(botID, "event_loop_interim", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]interimLogRow, 0, len(ev))
+	for i := len(ev) - 1; i >= 0; i-- {
+		var p interimLogRow
+		if err := json.Unmarshal(ev[i].Detail, &p); err != nil {
+			t.Fatalf("interim detail %s: %v", ev[i].Detail, err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func waitInterimRows(t *testing.T, app *App, botID string, n int) []interimLogRow {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var got []interimLogRow
+	for time.Now().Before(deadline) {
+		got = eventLoopInterimRows(t, app, botID)
+		if len(got) >= n {
+			return got
+		}
+		runtime.Gosched()
+	}
+	t.Fatalf("event_loop_interim rows %d, want %d (%v)", len(got), n, got)
+	return got
+}
+
+type interimCapRow struct {
+	RunID string `json:"run_id"`
+	Count int    `json:"count"`
+	Cap   int    `json:"cap"`
+}
+
+func eventLoopInterimCaps(t *testing.T, app *App, botID string) []interimCapRow {
+	t.Helper()
+	ev, err := app.st.ListLog(botID, "event_loop_interim_capped", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]interimCapRow, 0, len(ev))
+	for i := len(ev) - 1; i >= 0; i-- {
+		var p interimCapRow
+		if err := json.Unmarshal(ev[i].Detail, &p); err != nil {
+			t.Fatalf("cap detail %s: %v", ev[i].Detail, err)
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func waitInterimCaps(t *testing.T, app *App, botID string, n int) []interimCapRow {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var got []interimCapRow
+	for time.Now().Before(deadline) {
+		got = eventLoopInterimCaps(t, app, botID)
+		if len(got) >= n {
+			return got
+		}
+		runtime.Gosched()
+	}
+	t.Fatalf("event_loop_interim_capped rows %d, want %d (%v)", len(got), n, got)
+	return got
+}
+
+func waitTokenText(t *testing.T, app *App, runID, sub string) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var got string
+	for time.Now().Before(deadline) {
+		got = tokenText(app, runID)
+		if strings.Contains(got, sub) {
+			return got
+		}
+		runtime.Gosched()
+	}
+	t.Fatalf("stream %q, want substring %q", got, sub)
 	return got
 }
 
@@ -479,6 +591,10 @@ func TestAsyncShellInterimWhileToolRuns(t *testing.T) {
 	if n := waitN(t, m.entered, "interim"); n != 1 {
 		t.Fatalf("interim index %d", n)
 	}
+	batches := eventLoopBatchCounts(t, app, bot.ID)
+	if len(batches) != 1 || batches[0] != 1 {
+		t.Fatalf("event_loop_batch %#v, want [1]", batches)
+	}
 	reqs := m.snapshot()
 	if len(reqs) != 2 {
 		t.Fatalf("model calls = %d, want 2", len(reqs))
@@ -519,13 +635,23 @@ func TestAsyncShellInterimWhileToolRuns(t *testing.T) {
 	if tool.finished() {
 		t.Fatal("tool finished when the interim returned")
 	}
-	if !strings.Contains(tokenText(app, runID), "still going") {
-		t.Fatalf("stream %q", tokenText(app, runID))
+	rows := waitInterimRows(t, app, bot.ID, 1)
+	if len(rows) != 1 || !rows[0].OK || rows[0].Superseded {
+		t.Fatalf("clean interim log %+v", rows)
+	}
+	if got := waitTokenText(t, app, runID, "still going\n\n"); strings.Contains(got, "final answer") {
+		t.Fatalf("final reply streamed before the tool finished: %q", got)
+	}
+	if tool.finished() {
+		t.Fatal("tool finished before the interim separator")
 	}
 	tool.letGo()
 	waitIdle(t, base, bot.ID, "")
 	if !strings.Contains(tokenText(app, runID), "still going\n\n") {
 		t.Fatalf("separator missing in %q", tokenText(app, runID))
+	}
+	if reasons := resetReasons(app, runID); len(reasons) != 0 {
+		t.Fatalf("reset %#v", reasons)
 	}
 	got := fetchBot(t, base, bot.ID)
 	if got.LastRunStatus != "done" {
@@ -591,6 +717,10 @@ func TestAsyncShellSupersedeCancelsInterimOnly(t *testing.T) {
 	reasons := resetReasons(app, runID)
 	if len(reasons) != 1 || reasons[0] != "interim_superseded" {
 		t.Fatalf("reset %#v", reasons)
+	}
+	rows := waitInterimRows(t, app, bot.ID, 1)
+	if rows[0].OK || !rows[0].Superseded {
+		t.Fatalf("superseded interim log %+v", rows)
 	}
 	tool.letGo()
 	waitIdle(t, base, bot.ID, "")
@@ -697,6 +827,9 @@ func TestAsyncShellStopCancelsToolAndInterim(t *testing.T) {
 		t.Fatalf("interim ctx %#v", ctxs)
 	}
 	waitRunID(t, app, runID, "cancelled")
+	if reasons := resetReasons(app, runID); len(reasons) != 0 {
+		t.Fatalf("reset %#v", reasons)
+	}
 }
 
 func TestAsyncShellFlagOffMatchesSync(t *testing.T) {
@@ -747,12 +880,14 @@ func runFlagOff(t *testing.T, clock bool) ([]model.ChatRequest, []string) {
 			t.Fatalf("request %d looks like an interim %#v", i, req.Messages)
 		}
 	}
-	ev, err := app.st.ListLog(bot.ID, "event_loop_batch", "", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(ev) != 0 {
-		t.Fatalf("event_loop_batch rows %d", len(ev))
+	for _, kind := range []string{"event_loop_batch", "event_loop_interim", "event_loop_interim_capped"} {
+		ev, err := app.st.ListLog(bot.ID, kind, "", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(ev) != 0 {
+			t.Fatalf("%s rows %d", kind, len(ev))
+		}
 	}
 	return reqs, eventNames(app, runID)
 }
@@ -981,7 +1116,7 @@ func TestAsyncShellToolFinishJoinsPendingInterim(t *testing.T) {
 	m := newAsyncModel("run_shell", "still going", "final answer", true)
 	tool := newGateTool("shell-ok")
 	clk := newManualClock()
-	_, base, bot, _ := startShellRun(t, "Join", true, clk, m, tool)
+	app, base, bot, runID := startShellRun(t, "Join", true, clk, m, tool)
 	waitCh(t, tool.started, "tool start")
 	postUser(t, base, bot.ID, "one")
 	clk.Advance(500 * time.Millisecond)
@@ -1013,6 +1148,9 @@ func TestAsyncShellToolFinishJoinsPendingInterim(t *testing.T) {
 	got := fetchBot(t, base, bot.ID)
 	if got.LastRunStatus != "done" {
 		t.Fatalf("status %s %s", got.LastRunStatus, got.LastRunError)
+	}
+	if reasons := resetReasons(app, runID); len(reasons) != 0 {
+		t.Fatalf("reset %#v", reasons)
 	}
 }
 
@@ -1100,5 +1238,382 @@ func TestAsyncShellStopWhileOnlyToolRunning(t *testing.T) {
 	}
 	if len(m.contexts()) != 0 {
 		t.Fatalf("interim calls %d", len(m.contexts()))
+	}
+}
+
+func TestAsyncShellMaxInterimDefaults(t *testing.T) {
+	var none *App
+	if none.maxInterim() != defaultEventLoopMaxInterim {
+		t.Fatalf("nil app %d", none.maxInterim())
+	}
+	app := &App{}
+	if app.maxInterim() != defaultEventLoopMaxInterim {
+		t.Fatalf("default %d", app.maxInterim())
+	}
+	app.eventLoopMaxInterim = 2
+	if app.maxInterim() != 2 {
+		t.Fatalf("override %d", app.maxInterim())
+	}
+	app.eventLoopMaxInterim = -1
+	if app.maxInterim() != defaultEventLoopMaxInterim {
+		t.Fatalf("negative %d", app.maxInterim())
+	}
+}
+
+func TestAsyncShellInterimCap(t *testing.T) {
+	m := newAsyncModel("run_shell", "mid", "final answer", true)
+	tool := newGateTool("shell-ok")
+	clk := newManualClock()
+	app := newApp(t, "", m)
+	app.editPol(func(p *policy.Policy) { p.EventLoop = true })
+	if !app.pol().EventLoopEnabled() {
+		t.Fatal("event loop flag did not publish")
+	}
+	app.eventClk = clk
+	app.eventLoopMaxInterim = 2
+	app.toolExec = tool.exec
+	t.Cleanup(tool.letGo)
+	srv := serve(t, app)
+	base := srv.URL
+	bot := createBot(t, base, "Cap")
+	runID := postUser(t, base, bot.ID, "go")
+	if runID == "" {
+		t.Fatal("no run")
+	}
+	waitCh(t, tool.started, "tool start")
+
+	postUser(t, base, bot.ID, "one")
+	clk.Advance(500 * time.Millisecond)
+	if n := waitN(t, m.entered, "first interim"); n != 1 {
+		t.Fatalf("first interim %d", n)
+	}
+	postUser(t, base, bot.ID, "two")
+	clk.Advance(500 * time.Millisecond)
+	if n := waitN(t, m.entered, "second interim"); n != 2 {
+		t.Fatalf("second interim %d", n)
+	}
+	if n := waitN(t, m.returned, "first interim joined"); n != 1 {
+		t.Fatalf("first join %d", n)
+	}
+
+	postUser(t, base, bot.ID, "three")
+	clk.Advance(500 * time.Millisecond)
+	caps := waitInterimCaps(t, app, bot.ID, 1)
+	if batches := eventLoopBatchCounts(t, app, bot.ID); len(batches) != 3 {
+		t.Fatalf("batches %#v, want 3", batches)
+	}
+	// A second skipped batch cannot be logged until the first cap path
+	// has returned, so a cancel in that path is visible here.
+	wake, gotRun, gen := installedWake(app, bot.ID)
+	if wake == nil || gotRun != runID {
+		t.Fatalf("wake=%v run=%s", wake != nil, gotRun)
+	}
+	wake(runID, gen)
+	clk.Advance(500 * time.Millisecond)
+	caps = waitInterimCaps(t, app, bot.ID, 2)
+	hit := false
+	for _, row := range caps {
+		if row.Cap == 2 && row.Count == 2 && row.RunID == runID {
+			hit = true
+		}
+	}
+	if !hit {
+		t.Fatalf("cap rows %+v", caps)
+	}
+	if got := toolsNilReqs(m.snapshot()); len(got) != 2 {
+		t.Fatalf("interim calls %d", len(got))
+	}
+	ctxs := m.contexts()
+	if len(ctxs) != 2 || ctxs[1].Err() != nil {
+		t.Fatalf("in-flight interim cancelled at the cap: %v", ctxErrs(ctxs))
+	}
+	select {
+	case n := <-m.returned:
+		t.Fatalf("cap cancelled in-flight interim %d", n)
+	default:
+	}
+	select {
+	case n := <-m.entered:
+		t.Fatalf("cap started interim %d", n)
+	default:
+	}
+
+	tool.letGo()
+	waitIdle(t, base, bot.ID, "")
+	if got := toolsNilReqs(m.snapshot()); len(got) != 2 {
+		t.Fatalf("interim calls after finish %d", len(got))
+	}
+	reqs := m.snapshot()
+	last := reqs[len(reqs)-1]
+	if last.Tools == nil {
+		t.Fatal("final request has no tools")
+	}
+	assertUsersAfterTool(t, last.Messages, "shell-ok", "one", "two", "three")
+}
+
+func ctxErrs(ctxs []context.Context) []error {
+	out := make([]error, len(ctxs))
+	for i, c := range ctxs {
+		if c != nil {
+			out[i] = c.Err()
+		}
+	}
+	return out
+}
+
+func assertUsersAfterTool(t *testing.T, msgs []model.Message, result string, users ...string) {
+	t.Helper()
+	idx := -1
+	for i, m := range msgs {
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			idx = i
+		}
+	}
+	if idx < 0 || idx+1+len(users) >= len(msgs) {
+		t.Fatalf("tail missing from %#v", msgs)
+	}
+	tool := msgs[idx+1]
+	if tool.Role != "tool" || tool.ToolName != "run_shell" || tool.Content != result {
+		t.Fatalf("tool message %#v", tool)
+	}
+	for i, u := range users {
+		m := msgs[idx+2+i]
+		if m.Role != "user" || m.Content != u {
+			t.Fatalf("user %d %#v", i, m)
+		}
+	}
+	if hasPlaceholder(msgs) {
+		t.Fatalf("placeholder in %#v", msgs)
+	}
+}
+
+func newStreamingInterim(interim, final string) *asyncModel {
+	m := newAsyncModel("run_shell", interim, final, true)
+	m.tokensFirst = true
+	m.tokensOut = make(chan struct{})
+	return m
+}
+
+func tokenIndex(frames []frame, text string) int {
+	for i, f := range frames {
+		if f.event != "token" {
+			continue
+		}
+		var p struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(f.data, &p) == nil && strings.Contains(p.Text, text) {
+			return i
+		}
+	}
+	return -1
+}
+
+func resetIndex(frames []frame, reason string) int {
+	for i, f := range frames {
+		if f.event != "stream_reset" {
+			continue
+		}
+		var p struct {
+			Reason string `json:"reason"`
+		}
+		if json.Unmarshal(f.data, &p) == nil && p.Reason == reason {
+			return i
+		}
+	}
+	return -1
+}
+
+func TestAsyncShellToolFinishMidInterimResetsStream(t *testing.T) {
+	const interim = "partial reply"
+	const final = "final answer"
+	m := newStreamingInterim(interim, final)
+	tool := newGateTool("shell-ok")
+	clk := newManualClock()
+	app, base, bot, runID := startShellRun(t, "ResetFinish", true, clk, m, tool)
+	waitCh(t, tool.started, "tool start")
+	postUser(t, base, bot.ID, "one")
+	clk.Advance(500 * time.Millisecond)
+	if n := waitN(t, m.entered, "interim"); n != 1 {
+		t.Fatalf("interim %d", n)
+	}
+	waitCh(t, m.tokensOut, "interim tokens")
+	if !strings.Contains(tokenText(app, runID), interim) {
+		t.Fatalf("stream before finish %q", tokenText(app, runID))
+	}
+	tool.letGo()
+	waitIdle(t, base, bot.ID, "")
+
+	reasons := resetReasons(app, runID)
+	if strings.Contains(strings.Join(reasons, ","), "interim_superseded") {
+		t.Fatalf("reset %#v", reasons)
+	}
+	frames := runFrames(app, runID)
+	resetAt := resetIndex(frames, "interim_cancelled")
+	partialAt := tokenIndex(frames, interim)
+	finalAt := tokenIndex(frames, final)
+	if resetAt < 0 || partialAt < 0 || finalAt < 0 || partialAt > resetAt || finalAt < resetAt {
+		t.Fatalf("partial %d reset %d final %d reasons %#v", partialAt, resetAt, finalAt, reasons)
+	}
+	for i, f := range frames {
+		if f.event != "token" || i > resetAt {
+			continue
+		}
+		var p struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(f.data, &p) == nil && strings.Contains(p.Text, final) {
+			t.Fatalf("final token before reset at %d", i)
+		}
+	}
+
+	msgs, err := app.st.ListMessages(bot.ID, "user", "", 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bots := 0
+	for _, msg := range msgs {
+		if strings.Contains(msg.Content, interim) || strings.Contains(msg.Content, shellStillRunning) {
+			t.Fatalf("stored %#v", msg)
+		}
+		if msg.Role == "bot" {
+			bots++
+			if msg.Content != final {
+				t.Fatalf("bot reply %q", msg.Content)
+			}
+		}
+	}
+	if bots != 1 {
+		t.Fatalf("bot messages %d", bots)
+	}
+	reqs := m.snapshot()
+	last := reqs[len(reqs)-1]
+	if last.Tools == nil || hasPlaceholder(last.Messages) {
+		t.Fatalf("final request tools-nil %v placeholder %v", last.Tools == nil, hasPlaceholder(last.Messages))
+	}
+	for _, msg := range last.Messages {
+		if strings.Contains(msg.Content, interim) || msg.Content == final {
+			t.Fatalf("final request contains interim or the reply %#v", msg)
+		}
+	}
+	if separatorToken(frames) {
+		t.Fatal("blank-line separator published with interim_cancelled")
+	}
+}
+
+func TestAsyncShellStopMidInterimResetsStream(t *testing.T) {
+	const interim = "partial reply"
+	m := newStreamingInterim(interim, "final answer")
+	tool := newGateTool("shell-ok")
+	clk := newManualClock()
+	app, base, bot, runID := startShellRun(t, "ResetStop", true, clk, m, tool)
+	waitCh(t, tool.started, "tool start")
+	postUser(t, base, bot.ID, "one")
+	clk.Advance(500 * time.Millisecond)
+	if n := waitN(t, m.entered, "interim"); n != 1 {
+		t.Fatalf("interim %d", n)
+	}
+	waitCh(t, m.tokensOut, "interim tokens")
+	res, body := do(t, "POST", base+"/api/bots/"+bot.ID+"/runs/"+runID+"/cancel", nil, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("cancel %d %s", res.StatusCode, body)
+	}
+	waitCh(t, tool.done, "tool join")
+	if n := waitN(t, m.returned, "interim join"); n != 1 {
+		t.Fatalf("interim join %d", n)
+	}
+	waitRunID(t, app, runID, "cancelled")
+	if tool.context().Err() == nil {
+		t.Fatal("tool ctx still live after stop")
+	}
+	ctxs := m.contexts()
+	if len(ctxs) != 1 || ctxs[0].Err() == nil {
+		t.Fatalf("interim ctx %#v", ctxs)
+	}
+	reasons := resetReasons(app, runID)
+	if resetIndex(runFrames(app, runID), "interim_cancelled") < 0 {
+		t.Fatalf("reset %#v", reasons)
+	}
+	for _, reason := range reasons {
+		if reason == "interim_superseded" {
+			t.Fatalf("reset %#v", reasons)
+		}
+	}
+	partialAt := tokenIndex(runFrames(app, runID), interim)
+	resetAt := resetIndex(runFrames(app, runID), "interim_cancelled")
+	if partialAt < 0 || resetAt < 0 || partialAt > resetAt {
+		t.Fatalf("partial %d reset %d", partialAt, resetAt)
+	}
+	if separatorToken(runFrames(app, runID)) {
+		t.Fatal("blank-line separator published with interim_cancelled")
+	}
+}
+
+func separatorToken(frames []frame) bool {
+	for _, f := range frames {
+		if f.event != "token" {
+			continue
+		}
+		var p struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(f.data, &p) == nil && p.Text == "\n\n" {
+			return true
+		}
+	}
+	return false
+}
+
+func TestAsyncShellStopJoinsTool(t *testing.T) {
+	m := newAsyncModel("run_shell", "should-not-run", "final answer", false)
+	tool := newGateTool("shell-ok")
+	tool.afterCancel = 150 * time.Millisecond
+	clk := newManualClock()
+	app, base, bot, runID := startShellRun(t, "JoinTool", true, clk, m, tool)
+	waitCh(t, tool.started, "tool start")
+	res, body := do(t, "POST", base+"/api/bots/"+bot.ID+"/runs/"+runID+"/cancel", nil, "")
+	if res.StatusCode != 200 {
+		t.Fatalf("cancel %d %s", res.StatusCode, body)
+	}
+	waitRunID(t, app, runID, "cancelled")
+	if !tool.finished() {
+		t.Fatal("run cancelled before the tool returned")
+	}
+}
+
+func TestAsyncShellInterimFreshSkipsSeen(t *testing.T) {
+	app := newApp(t, "", nil)
+	bot, err := app.st.CreateBot("Fresh", "", nil, "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seenMsg, err := app.st.AddMessage(store.Message{BotID: bot.ID, Thread: "user", Role: "user", Content: "already seen"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshMsg, err := app.st.AddMessage(store.Message{BotID: bot.ID, Thread: "user", Role: "user", Content: "still fresh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgs, ids := app.interimFresh(bot.ID, "", map[string]bool{seenMsg.ID: true})
+	for _, id := range ids {
+		if id == seenMsg.ID {
+			t.Fatalf("seen id returned in %v", ids)
+		}
+	}
+	if msgHas(msgs, "user", "already seen") {
+		t.Fatalf("seen message in %#v", msgs)
+	}
+	if !msgHas(msgs, "user", "still fresh") {
+		t.Fatalf("fresh message missing from %#v", msgs)
+	}
+	found := false
+	for _, id := range ids {
+		if id == freshMsg.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("fresh id missing from %v", ids)
 	}
 }

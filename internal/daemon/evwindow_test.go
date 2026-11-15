@@ -321,3 +321,62 @@ func TestQuietWindowConcurrentNotify(t *testing.T) {
 		t.Fatalf("concurrent batch = %d ok %v, want %d", n, ok, goroutines*each)
 	}
 }
+
+func TestTesterEvWindowMaxCeilingAfterReset(t *testing.T) {
+	clk := newManualClock()
+	w := newQuietWindow(clk, 500*time.Millisecond, 2*time.Second)
+	for round := 0; round < 3; round++ {
+		w.Notify()
+		var elapsed time.Duration
+		for elapsed+300*time.Millisecond < 2*time.Second {
+			clk.Advance(300 * time.Millisecond)
+			elapsed += 300 * time.Millisecond
+			w.Notify()
+			if _, ok := pollBatch(w); ok {
+				t.Fatalf("round %d early batch at %v", round, elapsed)
+			}
+		}
+		clk.Advance(2*time.Second - elapsed)
+		if _, ok := pollBatch(w); !ok {
+			t.Fatalf("round %d: no max batch at 2s after first notify (elapsed %v)", round, elapsed)
+		}
+	}
+	w.Stop()
+}
+
+func TestTesterEvWindowMaxCeilingExact(t *testing.T) {
+	clk := newManualClock()
+	w := newQuietWindow(clk, 500*time.Millisecond, 2*time.Second)
+	w.Notify()
+	var elapsed time.Duration
+	for elapsed < 2*time.Second-499*time.Millisecond {
+		clk.Advance(499 * time.Millisecond)
+		elapsed += 499 * time.Millisecond
+		w.Notify()
+		if _, ok := pollBatch(w); ok {
+			t.Fatalf("batch fired early at %v", elapsed)
+		}
+	}
+	clk.Advance(2*time.Second - elapsed - time.Nanosecond)
+	if _, ok := pollBatch(w); ok {
+		t.Fatal("fired at 2s-1ns")
+	}
+	clk.Advance(time.Nanosecond)
+	n, ok := pollBatch(w)
+	if !ok {
+		t.Fatal("no batch at exactly 2s")
+	}
+	if n < 4 {
+		t.Fatalf("coalesced count %d", n)
+	}
+	w.Notify()
+	clk.Advance(500*time.Millisecond - time.Nanosecond)
+	if _, ok := pollBatch(w); ok {
+		t.Fatal("quiet fired at 500ms-1ns after reset")
+	}
+	clk.Advance(time.Nanosecond)
+	if n, ok := pollBatch(w); !ok || n != 1 {
+		t.Fatalf("quiet batch after reset %d %v", n, ok)
+	}
+	w.Stop()
+}

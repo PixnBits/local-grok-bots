@@ -197,6 +197,10 @@ type App struct {
 	// eventClk is the quiet-window clock. Nil uses the process clock.
 	// Tests set it before a run starts.
 	eventClk windowClock
+	// eventLoopMaxInterim, when > 0, overrides the per-run cap on interim
+	// model calls. Tests set it before a run starts. Production leaves it 0,
+	// which uses defaultEventLoopMaxInterim. This is not a policy key.
+	eventLoopMaxInterim int
 	// githubGitBase and githubAPIBase replace the GitHub upstreams. Tests set them.
 	githubGitBase string
 	githubAPIBase string
