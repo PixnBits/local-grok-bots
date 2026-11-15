@@ -254,6 +254,7 @@ func TestMirrorIgnoresWorkspaceConfig(t *testing.T) {
 }
 
 func TestWorkspaceConfigRefusesHostileKeys(t *testing.T) {
+	skipIfJailWrapper(t)
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Fatal(err)
 	}
