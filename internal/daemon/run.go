@@ -282,7 +282,15 @@ func (a *App) execute(botID, runID string) {
 			a.bus.Publish(runID, "tool_call", map[string]any{
 				"name": tc.Name, "arguments": redacted,
 			})
-			result, terr := a.execTool(ctx, bot, tc.Name, tc.Arguments)
+			var result string
+			var terr error
+			if turnPol.EventLoopEnabled() && tc.Name == "run_shell" {
+				result, terr = a.execShellAsync(ctx, bot, runID, tc.Name, tc.Arguments, i, msgs, through, seen, modelName, turnPol)
+			} else if a.toolExec != nil {
+				result, terr = a.toolExec(ctx, bot, tc.Name, tc.Arguments)
+			} else {
+				result, terr = a.execTool(ctx, bot, tc.Name, tc.Arguments)
+			}
 			var wait *approvalWaitError
 			if errors.As(terr, &wait) {
 				// Suspend instead of handing the retry sentence back to the model.

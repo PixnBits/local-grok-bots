@@ -119,6 +119,15 @@ stall_retries = 1
 # Ollama keep_alive on every /api/chat. A Go duration, an integer number of
 # seconds (0 unloads), or -1 (keep loaded). Default "30m".
 keep_alive = "30m"
+# event_loop (default false) lets a user message that arrives during
+# run_shell wake one tool-less interim model call. The reply is streamed
+# and not stored. event_loop_quiet (default 500ms) is the quiet window.
+# event_loop_max_wait (default 2s) caps the wait after the first wake-up
+# in a batch. quiet must be > 0 and max_wait must be >= quiet. Off keeps
+# the synchronous tool path.
+# event_loop = false
+# event_loop_quiet = "500ms"
+# event_loop_max_wait = "2s"
 # max_run_timeout = "1h"           # managed only
 # max_model_timeout = "10m"        # managed only
 # max_first_output_timeout = "15m" # managed only
@@ -183,6 +192,8 @@ A `first_output_timeout` or `stall_timeout` while the run is still alive and
 Tools run only after a complete response, so a failed call has not executed
 any tool. The retry publishes `status` `retrying` and a `stream_reset` event
 so the page drops the live partial. The attempt is logged with `retry: true`.
+
+`ollama.event_loop` (default off) is separate from those timeouts. While it is on, a user message that arrives during `run_shell` is coalesced for `ollama.event_loop_quiet` (default 500ms) or until `ollama.event_loop_max_wait` (default 2s) after the first wake-up, whichever is first. The run then makes one tool-less model call over a transcript copy and streams the reply. That reply is not stored. A newer batch cancels only the interim call (`stream_reset` reason `interim_superseded`) and never the shell. Stop, the run deadline, and shutdown cancel both. Quiet must be positive and the max wait must be at least the quiet window. Off leaves `run_shell` on the synchronous path. Like the other Ollama keys here, this is not one of the voice settings a running daemon copies on reload.
 
 A timeout that is not retried (retries used up, `model_timeout`, or
 `run_timeout`) keeps the longest partial text seen across that call's

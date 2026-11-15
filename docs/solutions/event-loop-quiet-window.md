@@ -1,0 +1,9 @@
+# Event-loop interim calls stay off the stored transcript
+
+`ollama.event_loop` defaults off. While a `run_shell` call is in flight and the flag is on, user messages only wake a quiet window. The window is armed before the tool goroutine starts, under `rtMu`, and the closure checks run id and loop generation so a stale run cannot notify it.
+
+The quiet timer and the max-wait timer need separate generations. A later wake-up restarts only the quiet timer. Bumping one generation for both lets a stale quiet callback drop the max-wait timer, or fire a window that `Notify` just re-armed.
+
+The interim model call reads a copy. It does not call `MarkRunInput` and does not change `seen` or `through`. `foldInput` on the next real model call appends those user messages after the real tool result. A newer batch cancels only the interim context and publishes `stream_reset` reason `interim_superseded`. When the shell finishes, or the run context is cancelled, the helper still cancels a running interim so the goroutine can be joined. That join is not a supersede: do not publish `interim_superseded`.
+
+The system prompt's `Current time:` line uses the wall clock, not the injected window clock. Two flag-off runs are not byte-identical until that line is normalized. `holdTurn` snapshots policy when `execute` starts, so a test must publish the flag before the POST that starts the run. These keys are not in the hot-reload subset (voice and `claude_transport` only). A bad duration fail-closes through `Warnings`; a bool of the wrong TOML type names the Go field `EventLoop`.
