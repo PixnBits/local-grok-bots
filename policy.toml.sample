@@ -76,6 +76,15 @@ model = "llama3.1"
 # stall_retries = 1
 # keep_alive = "30m"
 # model_timeout = "10m"
+# event_loop (default false) lets a user message that arrives during
+# run_shell wake one tool-less interim model call. The reply is streamed
+# and not stored. event_loop_quiet (default 500ms) is the quiet window.
+# event_loop_max_wait (default 2s) caps the wait after the first wake-up
+# in a batch. quiet must be > 0 and max_wait must be >= quiet. Off keeps
+# the synchronous tool path.
+# event_loop = false
+# event_loop_quiet = "500ms"
+# event_loop_max_wait = "2s"
 
 [cli]
 # Only consulted when backend = "claude" or "grok"

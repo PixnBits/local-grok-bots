@@ -48,6 +48,12 @@ type loopState struct {
 	// status goes idle before that, so a waiter on status can still
 	// observe the loop running.
 	released chan struct{}
+	// wake is set only while an async run_shell is in flight. It notifies
+	// that run's quiet window. wakeRun and wakeGen keep a stale clear
+	// from dropping a newer run's hook.
+	wake    func(runID string, gen uint64)
+	wakeRun string
+	wakeGen uint64
 }
 
 // App is the daemon: HTTP API, turn queue, timers, and the model loop.
@@ -185,6 +191,12 @@ type App struct {
 	clampSeen map[string]struct{}
 	// shellDial, when set, is the sandbox proxy's outbound dial. Tests use it.
 	shellDial func(context.Context, string, string) (net.Conn, error)
+	// toolExec, when set, replaces execTool for the run loop. Tests set it
+	// before a run starts. Production leaves it nil.
+	toolExec func(ctx context.Context, bot store.Bot, name string, args map[string]any) (string, error)
+	// eventClk is the quiet-window clock. Nil uses the process clock.
+	// Tests set it before a run starts.
+	eventClk windowClock
 	// githubGitBase and githubAPIBase replace the GitHub upstreams. Tests set them.
 	githubGitBase string
 	githubAPIBase string
@@ -769,6 +781,9 @@ func (a *App) kickLocked(botID string) string {
 	}
 	if st.running {
 		st.again = true
+		if st.wake != nil {
+			st.wake(st.runID, st.gen)
+		}
 		return st.runID
 	}
 	// A suspended run stays the latest run until a person decides or

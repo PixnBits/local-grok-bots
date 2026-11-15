@@ -103,6 +103,17 @@ type Policy struct {
 	// Unset means DefaultOllamaKeepAlive.
 	OllamaKeepAlive    any
 	OllamaKeepAliveSet bool
+	// EventLoop, when true, lets a user message that arrives during run_shell
+	// wake one tool-less interim model call. Default false. The reply is
+	// streamed and not stored. EventLoopQuiet is the quiet window and
+	// EventLoopMaxWait is the cap from the first wake-up in a batch.
+	// Zero durations mean the defaults. eventQuietSet and eventMaxSet
+	// record that a file set the key, so a zero is not stored.
+	EventLoop        bool
+	EventLoopQuiet   time.Duration
+	EventLoopMaxWait time.Duration
+	eventQuietSet    bool
+	eventMaxSet      bool
 	// Max* are ceilings only managed policy sets. Zero means no ceiling.
 	// The effective timeout is min(setting or default, ceiling).
 	MaxTurnTimeout              time.Duration
@@ -652,6 +663,10 @@ const (
 	DefaultOllamaKeepAlive          = "30m"
 	DefaultOllamaToolRounds         = 8
 	DefaultOllamaShellTimeout       = 30 * time.Second
+	// DefaultEventLoopQuiet is the quiet window for ollama.event_loop.
+	// DefaultEventLoopMaxWait is the longest a batch waits after its first wake-up.
+	DefaultEventLoopQuiet   = 500 * time.Millisecond
+	DefaultEventLoopMaxWait = 2 * time.Second
 	// maxStallRetries is the fail-closed upper bound for stall_retries.
 	maxStallRetries = 5
 	minToolRounds   = 1
@@ -890,6 +905,29 @@ func (p Policy) EffectiveOllamaKeepAlive() any {
 		return DefaultOllamaKeepAlive
 	}
 	return p.OllamaKeepAlive
+}
+
+// EventLoopEnabled reports whether a run_shell call may make an interim
+// model call when user input arrives. The default is off.
+func (p Policy) EventLoopEnabled() bool {
+	return p.EventLoop
+}
+
+// EffectiveEventLoopQuiet is the quiet window. Zero means DefaultEventLoopQuiet.
+func (p Policy) EffectiveEventLoopQuiet() time.Duration {
+	if p.EventLoopQuiet <= 0 {
+		return DefaultEventLoopQuiet
+	}
+	return p.EventLoopQuiet
+}
+
+// EffectiveEventLoopMaxWait is the cap from the first un-fired wake-up.
+// Zero means DefaultEventLoopMaxWait.
+func (p Policy) EffectiveEventLoopMaxWait() time.Duration {
+	if p.EventLoopMaxWait <= 0 {
+		return DefaultEventLoopMaxWait
+	}
+	return p.EventLoopMaxWait
 }
 
 // Permission returns tool-approval settings. A non-positive prompt timeout
@@ -1641,6 +1679,10 @@ type ollamaDoc struct {
 	MaxToolRounds         flexText  `toml:"max_tool_rounds" json:"max_tool_rounds"`
 	ShellTimeout          flexText  `toml:"shell_timeout" json:"shell_timeout"`
 	MaxShellTimeout       flexText  `toml:"max_shell_timeout" json:"max_shell_timeout"`
+	// EventLoop is the interim-reply flag. Quiet and MaxWait are durations.
+	EventLoop        *bool    `toml:"event_loop" json:"event_loop"`
+	EventLoopQuiet   flexText `toml:"event_loop_quiet" json:"event_loop_quiet"`
+	EventLoopMaxWait flexText `toml:"event_loop_max_wait" json:"event_loop_max_wait"`
 }
 
 type cliDoc struct {
@@ -1944,6 +1986,28 @@ func (p *Policy) apply(doc document, trusted bool) error {
 		}
 		p.OllamaKeepAlive = v
 		p.OllamaKeepAliveSet = true
+	}
+	if doc.Ollama.EventLoop != nil {
+		p.EventLoop = *doc.Ollama.EventLoop
+	}
+	if doc.Ollama.EventLoopQuiet.Set {
+		d, err := parseEventLoopDuration("ollama.event_loop_quiet", doc.Ollama.EventLoopQuiet.Value)
+		if err != nil {
+			return err
+		}
+		p.EventLoopQuiet = d
+		p.eventQuietSet = true
+	}
+	if doc.Ollama.EventLoopMaxWait.Set {
+		d, err := parseEventLoopDuration("ollama.event_loop_max_wait", doc.Ollama.EventLoopMaxWait.Value)
+		if err != nil {
+			return err
+		}
+		p.EventLoopMaxWait = d
+		p.eventMaxSet = true
+	}
+	if err := p.checkEventLoopWindows(); err != nil {
+		return err
 	}
 	if doc.CLI.PermissionMode != nil {
 		p.setMode(*doc.CLI.PermissionMode, trusted)
@@ -2295,6 +2359,35 @@ func parseKeepAlive(s string) (any, error) {
 		return nil, fmt.Errorf("must be -1, a number of seconds, or a Go duration")
 	}
 	return s, nil
+}
+
+// parseEventLoopDuration accepts the same forms as the other Ollama
+// durations. Empty and non-positive values are rejected: the quiet window
+// has to be a real wait, and the max wait is checked against it.
+func parseEventLoopDuration(key, s string) (time.Duration, error) {
+	d, err := parseTurnTimeout(key, s)
+	if err != nil {
+		return 0, err
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%s must be positive", key)
+	}
+	return d, nil
+}
+
+// checkEventLoopWindows rejects a max wait shorter than the quiet window.
+// Unset keys use their defaults, so a file that sets only one side is
+// still checked against the other side's default.
+func (p *Policy) checkEventLoopWindows() error {
+	if p == nil || (!p.eventQuietSet && !p.eventMaxSet) {
+		return nil
+	}
+	q := p.EffectiveEventLoopQuiet()
+	m := p.EffectiveEventLoopMaxWait()
+	if m < q {
+		return fmt.Errorf("ollama.event_loop_max_wait must be >= ollama.event_loop_quiet")
+	}
+	return nil
 }
 
 func parseTurnTimeout(key, s string) (time.Duration, error) {
