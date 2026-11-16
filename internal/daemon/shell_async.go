@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/PixnBits/local-grok-bots/internal/model"
@@ -13,20 +14,30 @@ import (
 // finished. It exists only on the interim transcript copy.
 const shellStillRunning = "run_shell is still running; no result yet."
 
-// defaultEventLoopMaxInterim is how many interim model calls one run_shell
+// defaultEventLoopMaxInterim is how many interim model calls one run
 // may start. It is a constant, not a policy key. A non-positive value is
 // not "unlimited".
 const defaultEventLoopMaxInterim = 5
 
+// interimBudget is the per-run cap on interim starts and the throttle for
+// capped audit rows. One run loop owns one of these and passes it into
+// every execShellAsync.
+type interimBudget struct {
+	starts       int
+	cappedLogged bool
+	suppressed   int
+}
+
 // interimCall is one tool-less model call. Its reply is streamed and not
 // stored: a later final answer is the one that stays on the thread.
 type interimCall struct {
-	cancel context.CancelFunc
-	ready  chan struct{}
-	done   chan struct{}
-	text   string
-	err    error
-	tokens int
+	cancel      context.CancelFunc
+	ready       chan struct{}
+	done        chan struct{}
+	text        string
+	err         error
+	tokens      int
+	interrupted bool
 }
 
 func (ic *interimCall) stop() {
@@ -59,9 +70,23 @@ func (ic *interimCall) finished() bool {
 // wake an interim model call without cancelling the shell. Stop, the run
 // deadline, and shutdown cancel both. The tool goroutine and any interim
 // goroutine are joined before this returns.
-func (a *App) execShellAsync(ctx context.Context, bot store.Bot, runID, name string, args map[string]any, callIndex int, msgs []model.Message, through string, seen map[string]bool, modelName string, turnPol policy.Policy) (string, error) {
+func (a *App) execShellAsync(ctx context.Context, bot store.Bot, runID, name string, args map[string]any, callIndex int, msgs []model.Message, through string, seen map[string]bool, modelName string, turnPol policy.Policy, budget *interimBudget) (string, error) {
+	if budget == nil {
+		budget = &interimBudget{}
+	}
 	toolCtx, toolCancel := context.WithCancel(ctx)
 	defer toolCancel()
+	defer func() {
+		if budget.suppressed > 0 {
+			a.log(bot.ID, "event_loop_interim_capped_suppressed", map[string]any{
+				"run_id":     runID,
+				"suppressed": budget.suppressed,
+				"count":      budget.starts,
+				"cap":        a.maxInterim(),
+			})
+			budget.suppressed = 0
+		}
+	}()
 
 	type toolOut struct {
 		result string
@@ -81,7 +106,6 @@ func (a *App) execShellAsync(ctx context.Context, bot store.Bot, runID, name str
 
 	covered := map[string]bool{}
 	var pending *interimCall
-	interimStarts := 0
 	retire := func(superseded bool) {
 		if pending == nil {
 			return
@@ -120,13 +144,20 @@ func (a *App) execShellAsync(ctx context.Context, bot store.Bot, runID, name str
 			// A batch past the cap is audited and dropped. Do not cancel
 			// an interim that is already running just to refuse a new one.
 			// A non-positive cap is not unlimited: it refuses the start.
+			// The first capped batch of the run writes one row; later
+			// ones only count toward a suppressed row at shell end.
 			capN := a.maxInterim()
-			if capN <= 0 || interimStarts >= capN {
-				a.log(bot.ID, "event_loop_interim_capped", map[string]any{
-					"run_id": runID,
-					"count":  interimStarts,
-					"cap":    capN,
-				})
+			if capN <= 0 || budget.starts >= capN {
+				if !budget.cappedLogged {
+					a.log(bot.ID, "event_loop_interim_capped", map[string]any{
+						"run_id": runID,
+						"count":  budget.starts,
+						"cap":    capN,
+					})
+					budget.cappedLogged = true
+				} else {
+					budget.suppressed++
+				}
 				continue
 			}
 			superseded := pending != nil && !pending.finished()
@@ -135,7 +166,7 @@ func (a *App) execShellAsync(ctx context.Context, bot store.Bot, runID, name str
 				covered[id] = true
 			}
 			pending = a.startInterim(ctx, bot, runID, modelName, turnPol, msgs, callIndex, fresh)
-			interimStarts++
+			budget.starts++
 		}
 	}
 }
@@ -315,16 +346,19 @@ func (a *App) startInterim(ctx context.Context, bot store.Bot, runID, modelName 
 		ic.text = streamed
 		ic.err = err
 		ic.tokens = resp.PromptTokens + resp.OutputTokens
+		ic.interrupted = ctx.Err() != nil || errors.Is(mctx.Err(), context.Canceled)
 	}()
 	return ic
 }
 
 // retireInterim joins the call. Nothing it streamed is stored.
 // A superseded call publishes stream_reset reason interim_superseded.
-// A call that ended with an error after streaming text publishes
-// stream_reset reason interim_cancelled and no blank line, so those
-// tokens do not run into the final reply. A clean finish with text
-// publishes the blank line and no reset. An empty stream publishes neither.
+// A call interrupted by the shell finishing, Stop, the run deadline, or
+// shutdown after streaming text publishes stream_reset reason
+// interim_cancelled and no blank line. A genuine model error after
+// streaming text publishes stream_reset reason interim_error and no
+// blank line. A clean finish with text publishes the blank line and no
+// reset. An empty stream publishes neither.
 func (a *App) retireInterim(botID, runID string, ic *interimCall, superseded bool) {
 	if ic == nil {
 		return
@@ -351,7 +385,11 @@ func (a *App) retireInterim(botID, runID string, ic *interimCall, superseded boo
 	}
 	if ic.err != nil {
 		if streamed {
-			a.bus.Publish(runID, "stream_reset", map[string]any{"run_id": runID, "reason": "interim_cancelled"})
+			reason := "interim_cancelled"
+			if !ic.interrupted {
+				reason = "interim_error"
+			}
+			a.bus.Publish(runID, "stream_reset", map[string]any{"run_id": runID, "reason": reason})
 		}
 		return
 	}
