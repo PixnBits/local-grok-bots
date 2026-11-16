@@ -80,7 +80,12 @@ model = "llama3.1"
 # run_shell wake one tool-less interim model call. The reply is streamed
 # and not stored. event_loop_quiet (default 500ms) is the quiet window.
 # event_loop_max_wait (default 2s) caps the wait after the first wake-up
-# in a batch. quiet must be > 0 and max_wait must be >= quiet. Off keeps
+# in a batch. quiet must be > 0 and max_wait must be >= quiet. One run
+# starts at most 5 interim calls; a skipped batch is an
+# event_loop_interim_capped audit row, not a policy key. A newer batch
+# publishes stream_reset reason interim_superseded. A mid-stream cancel
+# when the shell finishes or the run is cancelled publishes stream_reset reason
+# interim_cancelled. A clean finish keeps a blank-line separator. Off keeps
 # the synchronous tool path.
 # event_loop = false
 # event_loop_quiet = "500ms"

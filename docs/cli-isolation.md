@@ -123,7 +123,12 @@ keep_alive = "30m"
 # run_shell wake one tool-less interim model call. The reply is streamed
 # and not stored. event_loop_quiet (default 500ms) is the quiet window.
 # event_loop_max_wait (default 2s) caps the wait after the first wake-up
-# in a batch. quiet must be > 0 and max_wait must be >= quiet. Off keeps
+# in a batch. quiet must be > 0 and max_wait must be >= quiet. One run
+# starts at most 5 interim calls; a skipped batch is an
+# event_loop_interim_capped audit row, not a policy key. A newer batch
+# publishes stream_reset reason interim_superseded. A mid-stream cancel
+# when the shell finishes or the run is cancelled publishes stream_reset reason
+# interim_cancelled. A clean finish keeps a blank-line separator. Off keeps
 # the synchronous tool path.
 # event_loop = false
 # event_loop_quiet = "500ms"
@@ -193,7 +198,7 @@ Tools run only after a complete response, so a failed call has not executed
 any tool. The retry publishes `status` `retrying` and a `stream_reset` event
 so the page drops the live partial. The attempt is logged with `retry: true`.
 
-`ollama.event_loop` (default off) is separate from those timeouts. While it is on, a user message that arrives during `run_shell` is coalesced for `ollama.event_loop_quiet` (default 500ms) or until `ollama.event_loop_max_wait` (default 2s) after the first wake-up, whichever is first. The run then makes one tool-less model call over a transcript copy and streams the reply. That reply is not stored. A newer batch cancels only the interim call (`stream_reset` reason `interim_superseded`) and never the shell. Stop, the run deadline, and shutdown cancel both. Quiet must be positive and the max wait must be at least the quiet window. Off leaves `run_shell` on the synchronous path. Like the other Ollama keys here, this is not one of the voice settings a running daemon copies on reload.
+`ollama.event_loop` (default off) is separate from those timeouts. While it is on, a user message that arrives during `run_shell` is coalesced for `ollama.event_loop_quiet` (default 500ms) or until `ollama.event_loop_max_wait` (default 2s) after the first wake-up, whichever is first. The run then makes one tool-less model call over a transcript copy and streams the reply. That reply is not stored. A newer batch cancels only the interim call (`stream_reset` reason `interim_superseded`) and never the shell. A cleanly finished interim appends a blank-line separator. A mid-stream cancel when the shell finishes, or when Stop, the run deadline, or shutdown cancels the run, publishes `stream_reset` reason `interim_cancelled` so partial tokens do not run into the final reply. One run starts at most 5 interim calls; a skipped batch logs `event_loop_interim_capped` and does not cancel an in-flight interim. That cap is not a policy key. Stop, the run deadline, and shutdown cancel both. Quiet must be positive and the max wait must be at least the quiet window. Off leaves `run_shell` on the synchronous path. Like the other Ollama keys here, this is not one of the voice settings a running daemon copies on reload.
 
 A timeout that is not retried (retries used up, `model_timeout`, or
 `run_timeout`) keeps the longest partial text seen across that call's

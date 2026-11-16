@@ -13,6 +13,11 @@ import (
 // finished. It exists only on the interim transcript copy.
 const shellStillRunning = "run_shell is still running; no result yet."
 
+// defaultEventLoopMaxInterim is how many interim model calls one run_shell
+// may start. It is a constant, not a policy key. A non-positive value is
+// not "unlimited".
+const defaultEventLoopMaxInterim = 5
+
 // interimCall is one tool-less model call. Its reply is streamed and not
 // stored: a later final answer is the one that stays on the thread.
 type interimCall struct {
@@ -76,6 +81,7 @@ func (a *App) execShellAsync(ctx context.Context, bot store.Bot, runID, name str
 
 	covered := map[string]bool{}
 	var pending *interimCall
+	interimStarts := 0
 	retire := func(superseded bool) {
 		if pending == nil {
 			return
@@ -93,8 +99,9 @@ func (a *App) execShellAsync(ctx context.Context, bot store.Bot, runID, name str
 		select {
 		case out := <-toolCh:
 			// The shell's result is the one that stays. Cancel a still-running
-			// interim so this helper can join it. That is not a supersede:
-			// tokens already streamed stay, and no stream_reset is published.
+			// interim so this helper can join it. That is not a supersede.
+			// retireInterim clears already-streamed tokens when the call
+			// ended with an error.
 			retire(false)
 			return out.result, out.err
 		case <-ctx.Done():
@@ -110,14 +117,41 @@ func (a *App) execShellAsync(ctx context.Context, bot store.Bot, runID, name str
 			if countUncovered(ids, covered) == 0 {
 				continue
 			}
+			// A batch past the cap is audited and dropped. Do not cancel
+			// an interim that is already running just to refuse a new one.
+			// A non-positive cap is not unlimited: it refuses the start.
+			capN := a.maxInterim()
+			if capN <= 0 || interimStarts >= capN {
+				a.log(bot.ID, "event_loop_interim_capped", map[string]any{
+					"run_id": runID,
+					"count":  interimStarts,
+					"cap":    capN,
+				})
+				continue
+			}
 			superseded := pending != nil && !pending.finished()
 			retire(superseded)
 			for _, id := range ids {
 				covered[id] = true
 			}
 			pending = a.startInterim(ctx, bot, runID, modelName, turnPol, msgs, callIndex, fresh)
+			interimStarts++
 		}
 	}
+}
+
+// maxInterim is the per-run cap on interim starts. A positive test override
+// wins. Zero, negative, and a nil app resolve to defaultEventLoopMaxInterim.
+// A non-positive result is not "unlimited": the caller refuses another start.
+func (a *App) maxInterim() int {
+	n := defaultEventLoopMaxInterim
+	if a != nil && a.eventLoopMaxInterim > 0 {
+		n = a.eventLoopMaxInterim
+	}
+	if n <= 0 {
+		n = defaultEventLoopMaxInterim
+	}
+	return n
 }
 
 func (a *App) eventClock() windowClock {
@@ -285,9 +319,12 @@ func (a *App) startInterim(ctx context.Context, bot store.Bot, runID, modelName 
 	return ic
 }
 
-// retireInterim joins the call. A superseded call's tokens are dropped
-// from the live stream. A finished call with text gets a blank line so
-// the later real reply does not run into it. Neither path is stored.
+// retireInterim joins the call. Nothing it streamed is stored.
+// A superseded call publishes stream_reset reason interim_superseded.
+// A call that ended with an error after streaming text publishes
+// stream_reset reason interim_cancelled and no blank line, so those
+// tokens do not run into the final reply. A clean finish with text
+// publishes the blank line and no reset. An empty stream publishes neither.
 func (a *App) retireInterim(botID, runID string, ic *interimCall, superseded bool) {
 	if ic == nil {
 		return
@@ -307,11 +344,18 @@ func (a *App) retireInterim(botID, runID string, ic *interimCall, superseded boo
 		"tokens":     ic.tokens,
 		"error":      errText,
 	})
+	streamed := strings.TrimSpace(ic.text) != ""
 	if superseded {
 		a.bus.Publish(runID, "stream_reset", map[string]any{"run_id": runID, "reason": "interim_superseded"})
 		return
 	}
-	if ic.err == nil && strings.TrimSpace(ic.text) != "" {
+	if ic.err != nil {
+		if streamed {
+			a.bus.Publish(runID, "stream_reset", map[string]any{"run_id": runID, "reason": "interim_cancelled"})
+		}
+		return
+	}
+	if streamed {
 		a.bus.Publish(runID, "token", map[string]string{"text": "\n\n"})
 	}
 }
