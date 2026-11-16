@@ -113,6 +113,7 @@ func (a *App) execute(botID, runID string) {
 	parseRetried := false
 	schemaRetried := false
 	sawToolCall := false
+	var interimRun interimBudget
 	retriesLeft := turnPol.EffectiveOllamaStallRetries()
 	retried := 0
 	var lastFirst time.Duration
@@ -285,7 +286,7 @@ func (a *App) execute(botID, runID string) {
 			var result string
 			var terr error
 			if turnPol.EventLoopEnabled() && tc.Name == "run_shell" {
-				result, terr = a.execShellAsync(ctx, bot, runID, tc.Name, tc.Arguments, i, msgs, through, seen, modelName, turnPol)
+				result, terr = a.execShellAsync(ctx, bot, runID, tc.Name, tc.Arguments, i, msgs, through, seen, modelName, turnPol, &interimRun)
 			} else if a.toolExec != nil {
 				result, terr = a.toolExec(ctx, bot, tc.Name, tc.Arguments)
 			} else {
