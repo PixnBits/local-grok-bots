@@ -5194,9 +5194,12 @@ func TestGitWrapR6InitNonexistentParents(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(outside, "child")); !os.IsNotExist(err) {
 		t.Fatalf("symlink child was created: %v", err)
 	}
-	refuse(g, "init", "a/../../x")
-	if _, err := os.Stat(filepath.Join(work, "x")); !os.IsNotExist(err) {
-		t.Fatalf("dotdot target was created: %v", err)
+	// a/../../x from work/g resolves to work/x. The missing "a" is not a symlink,
+	// so ".." removes it and the walk stays inside the workspace.
+	okRun(g, "init", "a/../../x")
+	gitDir(filepath.Join(work, "x"))
+	if _, err := os.Stat(filepath.Join(outside, "x")); !os.IsNotExist(err) {
+		t.Fatalf("outside x was created: %v", err)
 	}
 }
 
@@ -5859,7 +5862,7 @@ func TestGitWrapR7RemotePathName(t *testing.T) {
 }
 
 func TestGitWrapR7SubmoduleAddRelativeURL(t *testing.T) {
-	if strings.Count(gitWrapScript, ".|..|./*|../*) say_sub_rel") != 2 {
+	if strings.Count(gitWrapScript, ".|..|./*|../*) say_sub_rel") != 3 {
 		t.Fatal("relative submodule URL check is missing")
 	}
 	if !strings.Contains(gitWrapScript, "relative submodule URL is not supported") {
@@ -6068,16 +6071,19 @@ func TestGitWrapR7InitDotDot(t *testing.T) {
 	refuse(sub, "init", "link/../x")
 	absent(filepath.Join(jail, "x"))
 	absent(filepath.Join(sub, "x"))
-	refuse(sub, "init", "zz/../x")
-	absent(filepath.Join(sub, "x"))
-	absent(filepath.Join(sub, "zz"))
+	okRun(sub, "init", "zz/../x")
+	gitDir(filepath.Join(sub, "x"))
 	refuse(work, "init", work+"/sub/../../..")
 	absent(filepath.Join(base, ".git"))
 	absent(filepath.Join(jail, ".git"))
 	if err := os.Symlink(filepath.Join(jail, "nowhere"), filepath.Join(sub, "dangling")); err != nil {
 		t.Fatal(err)
 	}
-	refuse(sub, "init", "dangling")
+	out, err := run(sub, "init", "dangling")
+	if err == nil || !strings.Contains(out, "local path cannot be resolved inside the workspace") || strings.Contains(out, "local path is outside the workspace") {
+		t.Fatalf("dangling: %v\n%s", err, out)
+	}
+	quiet(out)
 	absent(filepath.Join(jail, "nowhere"))
 	if err := os.WriteFile(filepath.Join(jail, "afile"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)

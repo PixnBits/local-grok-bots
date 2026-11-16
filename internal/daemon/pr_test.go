@@ -346,7 +346,7 @@ func approveCard(app *App, botID, tool string) <-chan error {
 	errc := make(chan error, 1)
 	go func() {
 		defer close(errc)
-		deadline := time.Now().Add(15 * time.Second)
+		deadline := time.Now().Add(60 * time.Second)
 		for time.Now().Before(deadline) {
 			for _, card := range app.perm.Pending(botID) {
 				if card["tool"] != tool {

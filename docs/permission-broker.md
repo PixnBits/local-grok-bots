@@ -248,11 +248,15 @@ option value is checked and does not set that bit. File protocol is armed only
 for the remote the command uses. Other remotes are checked and do not arm.
 `fetch --all` and `remote update` check every configured remote and may arm.
 `git submodule add` exports `GIT_ALLOW_PROTOCOL=file` only when its URL
-positional is a vetted file URL. `git submodule add` refuses a relative URL
-positional (`.`, `..`, a word that starts with `./`, or a word that starts with
-`../`). Git resolves that URL against the default remote, and that resolution
-cannot be reproduced soundly for every remote URL shape. The path positional
-may still be relative. `submodule update`, `init`, `sync`, `foreach`,
+positional is a vetted file URL. `git submodule add` consumes the values of `--name`, `--ref-format`, `-b`,
+`--branch`, `--reference`, `--reference-if-able`, `--depth`, `-j`, and `--jobs`,
+including a `=` form, so those values are not the URL or the path. It refuses a
+relative form (`.`, `..`, a word that starts with `./`, or a word that starts
+with `../`) on the URL positional and on any positional before that URL has been
+seen, in the plain arm, the `://` and `git@` arm, and the colon-shaped arm. Git
+resolves that URL against the default remote, and that resolution cannot be
+reproduced soundly for every remote URL shape. The path positional after the URL
+may still be relative and is checked to stay inside the workspace. `submodule update`, `init`, `sync`, `foreach`,
 and `status` do not export file, and keep `protocol.file.allow=never`. With no repository
 positional, `fetch`, `pull`, and `ls-remote` arm the current branch remote, or
 `origin` when the head is detached or that remote is unset. `push` checks the
@@ -285,8 +289,13 @@ physically: `..` is the physical parent, and a directory reached through a
 symlink is the physical target. A destination that stays inside the workspace
 is allowed even when the spelling contains `..`. When parent directories do not
 exist yet, the nearest existing ancestor is resolved physically and must stay
-inside the workspace, and the missing suffix cannot contain `..`. A path that
-resolves outside the workspace is refused. Allowed keys
+inside the workspace. A `..` in that missing suffix removes the previous missing
+segment, because a missing segment is not a symlink. When the suffix is empty,
+the walk continues physically from that ancestor, and `..` is the physical
+parent. The sentence `local path is outside the workspace` is used only when the
+destination resolves outside the workspace. A component that cannot be walked is
+refused with the sentence `local path cannot be resolved inside the workspace`.
+A path that resolves outside the workspace is refused. Allowed keys
 are the init and clone probes
 (`core.repositoryformatversion`, `core.filemode`,
 `core.bare`, `core.logallrefupdates`, `core.ignorecase`,
@@ -302,8 +311,11 @@ definition (`remote.*.url`, `remote.*.fetch`, plus `remote.*.tagopt` exactly
 between the first `remote.` and the last `.`. It is allowed only when it
 matches `[A-Za-z0-9._-]+`, is not `.` or `..`, does not start with `-`, and
 does not contain `/`. A plain-path `remote.*.url` value is checked when it is
-written and must stay inside the workspace. A URL-shaped value is not checked
-by that write rule. Stored values are not re-checked by that write rule on
+written and must stay inside the workspace. That check includes a trailing-slash
+relative path and a slashless name that already exists beside the command. A
+slashless name that does not exist is left unchanged. A word that starts with
+`~` is refused on `remote add`, `remote set-url`, and `remote.*.url`. A
+URL-shaped value is not checked by that write rule. Stored values are not re-checked by that write rule on
 read. Also allowed is `extensions.objectformat` from a
 sha256 init, `user.name` and `user.email`, `submodule.*.url` (an allowlisted
 https URL, a file URL or absolute path inside the workspace, or a relative
@@ -312,9 +324,10 @@ https URL, a file URL or absolute path inside the workspace, or a relative
 `init`, or `sync`, the wrapper vets `.gitmodules` (a regular file, not a
 symlink) and stored `submodule.*.url` values. A relative URL is resolved
 against `remote.origin.url`. An outside path, an unlisted URL, or an empty
-origin is refused before git writes the key. `git submodule add` refuses a
-relative URL positional, because resolution against the default remote cannot
-be reproduced soundly. Nested `.gitmodules` inside a
+origin is refused before git writes the key. `git submodule add` consumes option values such as `--name` and `-b` and refuses
+a relative form on the URL positional and on any positional before that URL has
+been seen. The path positional after the URL may still be relative. Resolution
+of a relative URL against the default remote cannot be reproduced soundly. Nested `.gitmodules` inside a
 submodule is reachable only over an allowlisted https URL through the bridge.
 Also allowed are sparse-checkout keys
 (`extensions.worktreeConfig`, `core.sparseCheckout`, `core.sparseCheckoutCone`,
@@ -328,7 +341,8 @@ from 0 to 256 with at most three digits. `remote.*.promisor` and `remote.*.parti
 are refused. For
 `fetch`, `-u` takes no value, so the following word is checked as a remote.
 `--attr-source` is refused. A slashless name that exists as a path beside the
-command, including a symlink, is checked as a local path. A configured remote
+command, including a symlink, is checked as a local path. A word that starts
+with `~` is refused wherever a URL or path word is checked. A configured remote
 name is the stored URL, not a directory of the same name. A word that contains
 `/`, is `.` or `..`, or starts with `-` is still checked as a path, and every
 configured `remote.<that word>.url` value is checked too. For `git remote`,
@@ -337,7 +351,11 @@ every positional URL or path word is checked, including the URL of
 `show`, `set-url`, `get-url`, `rename`, `remove`, `rm`, `set-head`, and
 `set-branches` uses the same `[A-Za-z0-9._-]+` rule (not `.` or `..`, no
 leading `-`, no `/`). `prune`, `update`, and `show` check every positional
-name. `rename` checks the first two. The others check the first. Later words
+name. `rename` checks the first two, including a new name that is a lone `-` or another
+word that starts with `-`. The others check the first. `remote add` consumes the
+values of `-t`, `-m`, `--track`, and `--master`, including an attached value and
+a `=` form, before that name check. `clone -o`, `--origin`, `--origin=`, and an
+attached `-o` value are checked with the same rule. Later words
 of `set-head` and `set-branches` are branch names and may contain `/`.
 `remote prune`, `remote update`, and
 `remote show` also read and check the stored URL of every remote name they
@@ -346,7 +364,7 @@ file protocol from it. A stored `alias.*` key refuses every command except
 `git config`, even when that alias is not the invoked word. The wrapper unsets `GIT_COMMON_DIR`,
 `GIT_NAMESPACE`, `GIT_OBJECT_DIRECTORY`, `GIT_INDEX_FILE`,
 `GIT_CEILING_DIRECTORIES`, `GIT_EDITOR`, `VISUAL`, `EDITOR`, and
-`GIT_SEQUENCE_EDITOR`, and exports `GIT_NO_LAZY_FETCH=1`. Git honours that variable from version 2.44. Refusal of `remote.*.promisor`, `remote.*.partialclonefilter`, and `extensions.partialclone` is the primary control for a partial clone. Behavioral checks of the wrapper run on the host.
+`GIT_SEQUENCE_EDITOR`, and exports `GIT_NO_LAZY_FETCH=1`. It exports `HOME` as the workspace root. Git honours that variable from version 2.44. Refusal of `remote.*.promisor`, `remote.*.partialclonefilter`, and `extensions.partialclone` is the primary control for a partial clone. Behavioral checks of the wrapper run on the host.
 In the jail, the static script checks still run.
 
 Inside-workspace checks and the git baseline use that bot's directory
