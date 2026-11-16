@@ -185,7 +185,8 @@ func TestGitHubRound2(t *testing.T) {
 			p.GitHub.Repos = []string{"acme/widgets"}
 			p.GitHub.TokenFile = "/etc/local-grok-bots/github.token"
 			p.UIPrompts = true
-			p.PromptTimeout = 15 * time.Second
+			// Outlast approveCard so a slow card is answered before the prompt expires.
+			p.PromptTimeout = 90 * time.Second
 		})
 		auditPath := filepath.Join(t.TempDir(), "audit.log")
 		lg, err := audit.Open(auditPath)

@@ -176,6 +176,8 @@ unset GIT_SSH GIT_SSH_COMMAND GIT_SSH_VARIANT GIT_PROXY_COMMAND GIT_EXEC_PATH GI
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_NAMESPACE GIT_OBJECT_DIRECTORY GIT_INDEX_FILE GIT_CEILING_DIRECTORIES GIT_ASKPASS GIT_EXTERNAL_DIFF GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PROTOCOL
 unset GIT_EDITOR VISUAL EDITOR GIT_SEQUENCE_EDITOR
 export GIT_NO_LAZY_FETCH=1
+# Git expands a leading "~" against HOME. The workspace root is the only home.
+export HOME=/work
 real=/lgb/bin/git
 log=/lgb/events/log
 nl='
@@ -224,6 +226,7 @@ sm_url_armed=
 pos=
 remote_sub=
 remote_names=
+remote_npos=0
 deny_allow() {
   case "$1" in
     *"$nl"*)
@@ -244,20 +247,44 @@ say_file() {
   printf '%s\n' "deny git ${sub}" >> "$log"
   exit 1
 }
+# The path could not be walked to a directory inside the workspace.
+# This is not the outside-workspace refusal.
+say_file_path() {
+  echo "git ${sub} denied: local path cannot be resolved inside the workspace" >&2
+  printf '%s\n' "deny git ${sub}" >> "$log"
+  exit 1
+}
+# A leading "~" is not a workspace path. Git expands it in a transport URL.
+say_tilde() {
+  echo "git ${sub} denied: a ~ path is not supported" >&2
+  printf '%s\n' "deny git ${sub}" >> "$log"
+  exit 1
+}
 say_config() {
   echo "git ${sub} denied: configuration is not allowed" >&2
   printf '%s\n' "deny git ${sub}" >> "$log"
   exit 1
 }
 say_config_key() {
-  sk_key=$(printf '%s' "$1" | tr -cd 'A-Za-z0-9._*-')
-  sk_key=$(printf '%s' "$sk_key" | cut -c 1-100)
+  # Keep the safe characters. Every other byte becomes "?", including controls.
+  # The length of the printed key stays the same, up to 100 bytes.
+  sk_key=$(printf '%s' "$1" | LC_ALL=C tr -c 'A-Za-z0-9._*-' '?' | LC_ALL=C cut -c 1-100)
   echo "git ${sub} denied: configuration is not allowed: ${sk_key}" >&2
   printf '%s\n' "deny git ${sub}" >> "$log"
   exit 1
 }
 say_option() {
   echo "git ${sub} denied: option is not allowed" >&2
+  printf '%s\n' "deny git ${sub}" >> "$log"
+  exit 1
+}
+say_remote_name() {
+  echo "git ${sub} denied: remote name is not allowed" >&2
+  printf '%s\n' "deny git ${sub}" >> "$log"
+  exit 1
+}
+say_sub_rel() {
+  echo "git ${sub} denied: relative submodule URL is not supported; use an absolute /work path or a file:// URL inside the workspace" >&2
   printf '%s\n' "deny git ${sub}" >> "$log"
   exit 1
 }
@@ -455,6 +482,14 @@ inside_work() {
   esac
   return 1
 }
+# A remote name is letters, digits, ".", "_", or "-".
+# "." and ".." are not names. A name does not start with "-" or contain "/".
+remote_name_ok() {
+  case "$1" in
+    ""|.|..|-*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  return 0
+}
 # Allowed repository keys. Used by the effective-config scan and by config_guard.
 config_key_allowed() {
   ck_key=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || return 1
@@ -470,13 +505,23 @@ config_key_allowed() {
     branch.*.remote|branch.*.merge|branch.*.rebase|branch.*.description|branch.*.pushremote)
       ;;
     # Remote definition. The url is checked again when a command uses it.
+    # The name is the text between the first "remote." and the last ".".
     remote.*.url|remote.*.fetch)
+      rn=${ck_key#remote.}
+      rn=${rn%.*}
+      remote_name_ok "$rn" || return 1
       ;;
     # Written by clone --no-tags and clone --mirror.
     remote.*.tagopt)
+      rn=${ck_key#remote.}
+      rn=${rn%.*}
+      remote_name_ok "$rn" || return 1
       ;;
     # Written by clone --mirror. It marks a mirror remote and does not name a command.
     remote.*.mirror)
+      rn=${ck_key#remote.}
+      rn=${rn%.*}
+      remote_name_ok "$rn" || return 1
       ;;
     # Written by init --object-format=sha256.
     extensions.objectformat)
@@ -784,6 +829,19 @@ check_core_worktree() {
     inside_work "$wt_resolved" || say_config_key "core.worktree"
   done
 }
+# A plain path is not a URL. remote.*.url plain paths are checked on write.
+remote_url_plain() {
+  case "$1" in
+    *://*|git@*) return 1 ;;
+  esac
+  if colon_remote "$1"; then
+    return 1
+  fi
+  case "$1" in
+    ~*|/*|./*|../*|.|..|*/*) return 0 ;;
+  esac
+  return 1
+}
 # git config skips the allowlist read so a refused key can be removed.
 # --file/-f/--blob are refused in every form; the jail does not need them.
 config_guard() {
@@ -983,6 +1041,35 @@ config_guard() {
     if config_key_allowed "$cg_key"; then
       if [ "$cg_val_set" = 1 ]; then
         config_value_allowed "$cg_key" "$cg_val" || say_config_key "$cg_key"
+        cg_fold=$(printf '%s' "$cg_key" | tr '[:upper:]' '[:lower:]') || say_config_key "$cg_key"
+        case "$cg_fold" in
+          remote.*.url)
+            # A plain path, a trailing-slash relative path, a leading "~",
+            # and a slashless name that exists beside the command are local paths.
+            # A slashless name that does not exist is left unchanged.
+            cg_as_path=
+            if remote_url_plain "$cg_val"; then
+              cg_as_path=1
+            elif [ -e "$vet_base/$cg_val" ] || [ -L "$vet_base/$cg_val" ]; then
+              case "$cg_val" in
+                */*) ;;
+                *)
+                  if ! colon_remote "$cg_val"; then
+                    cg_as_path=1
+                  fi
+                  ;;
+              esac
+            fi
+            if [ "$cg_as_path" = 1 ]; then
+              if ! (
+                log=/dev/null
+                vet_local "$cg_val" >/dev/null 2>&1
+              ); then
+                say_config_key "$cg_key"
+              fi
+            fi
+            ;;
+        esac
       fi
       return 0
     fi
@@ -1172,6 +1259,7 @@ colon_remote() {
 }
 vet() {
   case "$1" in
+    ~*) say_tilde ;;
     *"$nl"*)
       say_deny "$1"
       ;;
@@ -1212,6 +1300,9 @@ vet() {
   return 0
 }
 vet_local() {
+  case "$1" in
+    ~*) say_tilde ;;
+  esac
   if colon_remote "$1"; then
     say_deny "$1"
   fi
@@ -1225,6 +1316,9 @@ vet_local() {
   esac
 }
 check_local_arg() {
+  case "$1" in
+    ~*) say_tilde ;;
+  esac
   if colon_remote "$1"; then
     say_deny "$1"
   fi
@@ -1283,9 +1377,17 @@ clone_short() {
             fi
             return 0
             ;;
-          b|j|o)
+          b|j)
             if [ -z "$rest" ]; then
               prev=skip
+            fi
+            return 0
+            ;;
+          o)
+            if [ -n "$rest" ]; then
+              remote_name_ok "$rest" || say_remote_name
+            else
+              prev=origin
             fi
             return 0
             ;;
@@ -1362,10 +1464,48 @@ resolve_remote() {
     return
   fi
   case "$name" in
-    ""|-*)
+    "")
       return
       ;;
-    *://*|git@*|file://*|/*|./*|../*|..|*/..|*/../*|*/*|.)
+    *://*|git@*)
+      vet "$name"
+      found_url=1
+      return
+      ;;
+    # A path-shaped word can still name a configured remote.
+    # Vet every stored URL, then vet the word as a path.
+    # A leading "-" is not vetted as a path. Its stored URLs are still vetted.
+    -*|/*|./*|../*|..|*/..|*/../*|*/*|.)
+      rr_urls=$(
+        eval "set -- $gitdir_args"
+        "$real" -C "$vet_base" "$@" \
+          -c core.hooksPath=/dev/null \
+          -c core.fsmonitor= \
+          -c core.sshCommand=/bin/false \
+          -c protocol.allow=never \
+          -c safe.directory='*' \
+          config --includes --get-all -- "remote.$name.url" 2>/dev/null
+      ) || rr_urls=
+      rr_rest=$rr_urls
+      while [ -n "$rr_rest" ]; do
+        case "$rr_rest" in
+          *"$nl"*)
+            rr_one=${rr_rest%%"$nl"*}
+            rr_rest=${rr_rest#*"$nl"}
+            ;;
+          *)
+            rr_one=$rr_rest
+            rr_rest=
+            ;;
+        esac
+        if [ -z "$rr_one" ]; then
+          continue
+        fi
+        vet "$rr_one"
+      done
+      case "$name" in
+        -*) return ;;
+      esac
       vet "$name"
       found_url=1
       return
@@ -1929,47 +2069,97 @@ init_skip_name() {
   done
   [ "$is_hits" -eq 1 ]
 }
-# An init path must stay inside /work after a physical chdir.
-# Missing parents are allowed when the nearest existing ancestor is inside.
+# An init path must stay inside /work.
+# Each existing segment is walked physically. ".." is the physical parent.
+# A missing segment starts an unborn tail. ".." in that tail removes the last
+# tail segment. A missing segment is not a symlink. When the tail is empty,
+# the walk continues from the physical directory, and ".." is the physical
+# parent. The physical directory and any remaining tail must stay inside /work.
+# "local path is outside the workspace" is only for a path that resolves outside.
+# A component that cannot be walked uses say_file_path.
 init_vet() {
   case "$1" in
-    "") say_file ;;
+    "") say_file_path ;;
     /*) iv_abs=$1 ;;
     *) iv_abs=$vet_base/$1 ;;
   esac
-  iv_clean=$(clean_abs "$iv_abs") || say_file
-  if [ -d "$iv_clean" ] || [ -L "$iv_clean" ]; then
-    iv_phys=$(cd -P -- "$iv_clean" 2>/dev/null && pwd -P) || say_file
-    inside_work "$iv_phys" || say_file
-    return 0
-  fi
-  if [ -e "$iv_clean" ]; then
-    iv_parent=$(dirname "$iv_clean")
-    iv_phys=$(cd -P -- "$iv_parent" 2>/dev/null && pwd -P) || say_file
-    inside_work "$iv_phys" || say_file
-    return 0
-  fi
+  case "$iv_abs" in
+    /*) ;;
+    *) say_file_path ;;
+  esac
+  iv_cur=/
   iv_rest=
-  iv_cur=$iv_clean
-  while [ ! -e "$iv_cur" ] && [ ! -L "$iv_cur" ]; do
-    iv_seg=$(basename "$iv_cur")
-    case "$iv_seg" in
-      ""|.|..) say_file ;;
-    esac
-    if [ -n "$iv_rest" ]; then
-      iv_rest=$iv_seg/$iv_rest
+  iv_tail=
+  iv_walk=${iv_abs#/}
+  while [ -n "$iv_walk" ]; do
+    iv_seg=${iv_walk%%/*}
+    if [ "$iv_walk" = "$iv_seg" ]; then
+      iv_walk=
     else
-      iv_rest=$iv_seg
+      iv_walk=${iv_walk#*/}
     fi
-    iv_next=$(dirname "$iv_cur")
-    if [ "$iv_next" = "$iv_cur" ]; then
-      say_file
+    iv_last=
+    if [ -z "$iv_walk" ]; then
+      iv_last=1
     fi
-    iv_cur=$iv_next
+    if [ -n "$iv_tail" ]; then
+      case "$iv_seg" in
+        ""|.) continue ;;
+        ..)
+          case "$iv_rest" in
+            */*)
+              iv_rest=${iv_rest%/*}
+              ;;
+            *)
+              iv_rest=
+              iv_tail=
+              ;;
+          esac
+          continue
+          ;;
+      esac
+      if [ -z "$iv_rest" ]; then
+        iv_rest=$iv_seg
+      else
+        iv_rest=$iv_rest/$iv_seg
+      fi
+      continue
+    fi
+    case "$iv_seg" in
+      ""|.) continue ;;
+      ..)
+        iv_cur=$(cd -P -- "$iv_cur/.." 2>/dev/null && pwd -P) || say_file_path
+        continue
+        ;;
+    esac
+    if [ "$iv_cur" = / ]; then
+      iv_next=/$iv_seg
+    else
+      iv_next=$iv_cur/$iv_seg
+    fi
+    if [ -e "$iv_next" ] || [ -L "$iv_next" ]; then
+      if [ -d "$iv_next" ]; then
+        iv_cur=$(cd -P -- "$iv_next" 2>/dev/null && pwd -P) || say_file_path
+        continue
+      fi
+      if [ -n "$iv_last" ] && [ ! -L "$iv_next" ]; then
+        iv_cur=$(cd -P -- "$iv_cur" 2>/dev/null && pwd -P) || say_file_path
+        inside_work "$iv_cur" || say_file
+        return 0
+      fi
+      say_file_path
+    fi
+    iv_tail=1
+    iv_rest=$iv_seg
   done
-  iv_phys=$(cd -P -- "$iv_cur" 2>/dev/null && pwd -P) || say_file
-  inside_work "$iv_phys" || say_file
-  inside_work "$iv_phys/$iv_rest" || say_file
+  inside_work "$iv_cur" || say_file
+  if [ -n "$iv_rest" ]; then
+    if [ "$iv_cur" = / ]; then
+      inside_work "/$iv_rest" || say_file
+    else
+      inside_work "$iv_cur/$iv_rest" || say_file
+    fi
+  fi
 }
 guard_init() {
   gi_prev=
@@ -2189,6 +2379,7 @@ case "$sub" in
     remote_helper_config
     prev=
     seen_sub=
+    arg_dd=
     for arg in "$@"; do
       if [ -n "$prev" ]; then
         case "$prev" in
@@ -2199,6 +2390,10 @@ case "$sub" in
             vet_opt "$arg"
             ;;
           skip)
+            check_skipped "$arg"
+            ;;
+          origin)
+            remote_name_ok "$arg" || say_remote_name
             check_skipped "$arg"
             ;;
         esac
@@ -2255,11 +2450,26 @@ case "$sub" in
           fi
           continue
           ;;
-        -C|--git-dir|--work-tree|--namespace|--super-prefix|--exec-path|--depth|--branch|-b|--origin|-o|--server-option|--jobs|-j|--filter|--shallow-since|--shallow-exclude|--revision)
+        --origin|-o)
+          if [ "$sub" = clone ]; then
+            prev=origin
+          else
+            prev=skip
+          fi
+          continue
+          ;;
+        -C|--git-dir|--work-tree|--namespace|--super-prefix|--exec-path|--depth|--branch|-b|--server-option|--jobs|-j|--filter|--shallow-since|--shallow-exclude|--revision)
           prev=skip
           continue
           ;;
-        --depth=*|--branch=*|--origin=*|--server-option=*|--jobs=*|--filter=*|--shallow-since=*|--shallow-exclude=*|--revision=*)
+        --origin=*)
+          if [ "$sub" = clone ]; then
+            remote_name_ok "${arg#*=}" || say_remote_name
+          fi
+          check_skipped "${arg#*=}"
+          continue
+          ;;
+        --depth=*|--branch=*|--server-option=*|--jobs=*|--filter=*|--shallow-since=*|--shallow-exclude=*|--revision=*)
           check_skipped "${arg#*=}"
           continue
           ;;
@@ -2275,6 +2485,7 @@ case "$sub" in
           continue
           ;;
         --)
+          arg_dd=1
           continue
           ;;
         --all)
@@ -2286,6 +2497,36 @@ case "$sub" in
         --*)
           sv_body=${arg#--}
           sv_name=${sv_body%%=*}
+          # remote add: the value of --track and --master is not the remote name.
+          if [ "$sub" = remote ] && [ "$remote_sub" = add ] && [ "$arg_dd" != 1 ]; then
+            case "$sv_name" in
+              track|master)
+                case "$arg" in
+                  --*=*) ;;
+                  *) prev=skip ;;
+                esac
+                continue
+                ;;
+              mirror|fetch|tags|no-tags|no-fetch|no-track|no-master)
+                continue
+                ;;
+            esac
+          fi
+          # submodule add: --name and --ref-format take a value. It is not the URL.
+          # -b, --branch, --depth, -j, --jobs, --reference, and --reference-if-able
+          # are consumed by the shared option lists above. A "=" form does not
+          # take the next word.
+          if [ "$sub" = submodule ] && [ "$sm_action" = add ]; then
+            case "$sv_name" in
+              name|ref-format)
+                case "$arg" in
+                  --*=*) check_skipped "${arg#*=}" ;;
+                  *) prev=skip ;;
+                esac
+                continue
+                ;;
+            esac
+          fi
           if skip_value_name "$sv_name"; then
             case "$arg" in
               --*=*)
@@ -2299,7 +2540,26 @@ case "$sub" in
           continue
           ;;
         -*)
-          continue
+          # remote add: -t and -m take the next word. -f does not.
+          if [ "$sub" = remote ] && [ "$remote_sub" = add ] && [ "$arg_dd" != 1 ]; then
+            case "$arg" in
+              -t|-m)
+                prev=skip
+                continue
+                ;;
+              -t*|-m*|-f)
+                continue
+                ;;
+            esac
+          fi
+          # A new name on rename, and a lone "-" in a name slot, is a name.
+          # remote_name_ok refuses a word that starts with "-".
+          if [ "$sub" = remote ] && [ "$remote_sub" = rename ] && [ "$arg_dd" != 1 ] && [ "$remote_npos" -ge 1 ]; then
+            remote_name_ok "$arg" || say_remote_name
+          fi
+          if [ "$arg_dd" != 1 ] || [ "$sub" != remote ] || [ -z "$remote_sub" ]; then
+            continue
+          fi
           ;;
       esac
       if [ -z "$seen_sub" ]; then
@@ -2323,8 +2583,44 @@ case "$sub" in
             ;;
         esac
       fi
+      if [ "$sub" = remote ] && [ -n "$remote_sub" ]; then
+        remote_npos=$((remote_npos + 1))
+        case "$remote_sub" in
+          prune|update|show)
+            remote_name_ok "$arg" || say_remote_name
+            ;;
+          rename)
+            if [ "$remote_npos" -le 2 ]; then
+              remote_name_ok "$arg" || say_remote_name
+            fi
+            ;;
+          add|set-url|get-url|remove|rm|set-head|set-branches)
+            if [ "$remote_npos" -eq 1 ]; then
+              remote_name_ok "$arg" || say_remote_name
+            fi
+            ;;
+        esac
+        case "$remote_sub" in
+          set-head|set-branches)
+            if [ "$remote_npos" -gt 1 ]; then
+              continue
+            fi
+            ;;
+        esac
+      fi
       if colon_remote "$arg"; then
-        if [ "$sub" = submodule ] && [ "$sm_action" != add ]; then
+        if [ "$sub" = submodule ] && [ "$sm_action" = add ] && [ -z "$sm_url_set" ]; then
+          case "$arg" in
+            .|..|./*|../*) say_sub_rel ;;
+          esac
+          sm_before=$allow_file
+          vet "$arg"
+          sm_url_set=1
+          found_url=1
+          if [ "$sm_before" != 1 ] && [ "$allow_file" = 1 ]; then
+            sm_url_armed=1
+          fi
+        elif [ "$sub" = submodule ] && [ "$sm_action" != add ]; then
           check_skipped "$arg"
         else
           vet "$arg"
@@ -2335,6 +2631,9 @@ case "$sub" in
       case "$arg" in
         *://*|git@*)
           if [ "$sub" = submodule ] && [ "$sm_action" = add ] && [ -z "$sm_url_set" ]; then
+            case "$arg" in
+              .|..|./*|../*) say_sub_rel ;;
+            esac
             sm_before=$allow_file
             vet "$arg"
             sm_url_set=1
@@ -2355,6 +2654,9 @@ case "$sub" in
             found_url=1
           elif [ "$sub" = submodule ]; then
             if [ "$sm_action" = add ] && [ -z "$sm_url_set" ]; then
+              case "$arg" in
+                .|..|./*|../*) say_sub_rel ;;
+              esac
               sm_before=$allow_file
               vet "$arg"
               sm_url_set=1
@@ -2377,8 +2679,7 @@ case "$sub" in
           else
             case "$arg" in
               /*|./*|../*|..|*/..|*/../*|*/*|.)
-                vet "$arg"
-                found_url=1
+                resolve_remote "$arg"
                 ;;
               *)
                 # remote prune, update and show contact every named remote, so each name is read.
