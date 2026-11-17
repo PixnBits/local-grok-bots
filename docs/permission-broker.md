@@ -314,8 +314,8 @@ does not contain `/`. A plain-path `remote.*.url` value is checked when it is
 written and must stay inside the workspace. That check includes a trailing-slash
 relative path and a slashless name that already exists beside the command. A
 slashless name that does not exist is left unchanged. A word that starts with
-`~` is refused on `remote add`, `remote set-url`, and `remote.*.url`. A
-URL-shaped value is not checked by that write rule. Stored values are not re-checked by that write rule on
+`~` is refused on `remote add`, `remote set-url`, and `remote.*.url`, including
+a slashless word. A URL-shaped value is not checked by that write rule. Stored values are not re-checked by that write rule on
 read. Also allowed is `extensions.objectformat` from a
 sha256 init, `user.name` and `user.email`, `submodule.*.url` (an allowlisted
 https URL, a file URL or absolute path inside the workspace, or a relative
@@ -341,8 +341,10 @@ from 0 to 256 with at most three digits. `remote.*.promisor` and `remote.*.parti
 are refused. For
 `fetch`, `-u` takes no value, so the following word is checked as a remote.
 `--attr-source` is refused. A slashless name that exists as a path beside the
-command, including a symlink, is checked as a local path. A word that starts
-with `~` is refused wherever a URL or path word is checked. A configured remote
+command, including a symlink, is checked as a local path. A word that starts with `~` is refused on every positional of `clone`,
+`fetch`, `pull`, `push`, `ls-remote`, `remote add`, `remote set-url`, and
+`submodule add`, including a slashless word and a word after `--`. A word that
+only contains `~` later in the word is unchanged. A configured remote
 name is the stored URL, not a directory of the same name. A word that contains
 `/`, is `.` or `..`, or starts with `-` is still checked as a path, and every
 configured `remote.<that word>.url` value is checked too. For `git remote`,
@@ -352,10 +354,19 @@ every positional URL or path word is checked, including the URL of
 `set-branches` uses the same `[A-Za-z0-9._-]+` rule (not `.` or `..`, no
 leading `-`, no `/`). `prune`, `update`, and `show` check every positional
 name. `rename` checks the first two, including a new name that is a lone `-` or another
-word that starts with `-`. The others check the first. `remote add` consumes the
-values of `-t`, `-m`, `--track`, and `--master`, including an attached value and
-a `=` form, before that name check. `clone -o`, `--origin`, `--origin=`, and an
-attached `-o` value are checked with the same rule. Later words
+word that starts with `-`. The others check the first. `remote add` accepts
+only the options git accepts for that command. Short options are `f` (no
+value) and `t` and `m` (a value, either attached or the next word), including
+a cluster. Long options are `fetch`, `tags`, `track`, `master`, and `mirror`,
+plus the `no-` forms git accepts. `track` and `master` take a value as the
+next word or as `=value`. `mirror` takes only an optional `=value`. A unique
+prefix is the same option. Any other short cluster or long option is refused
+before a name is read. After `--`, every remaining word is a positional and is
+checked as a name, including a word that starts with `-`. `clone -o`,
+`--origin`, `--origin=`, and an attached `-o` value are checked with the same
+name rule. A long option whose name is a prefix of `origin`, other than the
+exact spelling `--origin`, is refused. `--no-origin` does not take a name.
+Later words
 of `set-head` and `set-branches` are branch names and may contain `/`.
 `remote prune`, `remote update`, and
 `remote show` also read and check the stored URL of every remote name they

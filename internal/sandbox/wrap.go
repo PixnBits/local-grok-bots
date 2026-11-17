@@ -2343,6 +2343,151 @@ case "$sub" in
     run "$@"
     ;;
 esac
+# remote add long options, matched the way git matches a unique prefix.
+# track and master take a value (the next word, or the text after "=").
+# mirror takes only an optional "=value". The next word is not that value.
+# fetch, tags, and the no- forms take no value. Any other spelling is refused.
+remote_add_long() {
+  ra_body=${1#--}
+  ra_name=${ra_body%%=*}
+  ra_eq=0
+  case "$1" in
+    --*=*) ra_eq=1 ;;
+  esac
+  case "$ra_name" in
+    ""|*[!A-Za-z0-9-]*) say_option ;;
+  esac
+  ra_hits=0
+  ra_kind=
+  for ra_cand in fetch:flag tags:flag track:value master:value mirror:mirror no-fetch:flag no-tags:flag no-track:flag no-master:flag no-mirror:flag; do
+    ra_opt=${ra_cand%%:*}
+    ra_k=${ra_cand#*:}
+    case "$ra_opt" in
+      "$ra_name"*)
+        ra_hits=$((ra_hits + 1))
+        ra_kind=$ra_k
+        ;;
+    esac
+  done
+  if [ "$ra_hits" -ne 1 ]; then
+    say_option
+  fi
+  case "$ra_kind" in
+    value)
+      if [ "$ra_eq" != 1 ]; then
+        prev=skip
+      fi
+      ;;
+    flag)
+      if [ "$ra_eq" = 1 ]; then
+        say_option
+      fi
+      ;;
+    mirror)
+      ;;
+    *)
+      say_option
+      ;;
+  esac
+  return 0
+}
+# remote add short options. f takes no value. t and m take a value.
+# The value is the rest of the cluster, or the next word when nothing remains.
+# Return 1 when the word is not a short cluster.
+remote_add_short() {
+  case "$1" in
+    -[A-Za-z]*) ;;
+    *) return 1 ;;
+  esac
+  ra_rest=${1#-}
+  while [ -n "$ra_rest" ]; do
+    ra_letter=${ra_rest%"${ra_rest#?}"}
+    ra_rest=${ra_rest#?}
+    case "$ra_letter" in
+      f)
+        ;;
+      t|m)
+        if [ -z "$ra_rest" ]; then
+          prev=skip
+        fi
+        return 0
+        ;;
+      *)
+        say_option
+        ;;
+    esac
+  done
+  return 0
+}
+# push positionals, and the repository named by --repo, can be a URL.
+# A leading "~" is refused before git expands it.
+push_tilde() {
+  pt_prev=
+  pt_seen=
+  pt_dd=
+  pt_repo=
+  for arg in "$@"; do
+    if [ -n "$pt_prev" ]; then
+      if [ "$pt_repo" = 1 ]; then
+        case "$arg" in
+          ~*) say_tilde ;;
+        esac
+      fi
+      pt_prev=
+      pt_repo=
+      continue
+    fi
+    if [ "$pt_dd" = 1 ]; then
+      case "$arg" in
+        ~*) say_tilde ;;
+      esac
+      continue
+    fi
+    case "$arg" in
+      -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path|--config|--attr-source)
+        pt_prev=1
+        continue
+        ;;
+      --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*|--config=*|--attr-source=*|-c*)
+        continue
+        ;;
+      --repo)
+        pt_prev=1
+        pt_repo=1
+        continue
+        ;;
+      --repo=*)
+        case "${arg#--repo=}" in
+          ~*) say_tilde ;;
+        esac
+        continue
+        ;;
+      --receive-pack|--exec|--push-option|-o)
+        pt_prev=1
+        continue
+        ;;
+      --receive-pack=*|--exec=*|--push-option=*|-o*)
+        continue
+        ;;
+      --)
+        if [ -n "$pt_seen" ]; then
+          pt_dd=1
+        fi
+        continue
+        ;;
+      -*)
+        continue
+        ;;
+    esac
+    if [ -z "$pt_seen" ]; then
+      pt_seen=1
+      continue
+    fi
+    case "$arg" in
+      ~*) say_tilde ;;
+    esac
+  done
+}
 if [ "$grant" != "1" ]; then
   echo "git ${sub} denied: missing git grant" >&2
   printf '%s\n' "deny git ${sub}" >> "$log"
@@ -2352,6 +2497,7 @@ if [ "$sub" = "push" ]; then
   for arg in "$@"; do
     refuse_command_opt "$arg"
   done
+  push_tilde "$@"
   push_names_remote "$@" || resolve_branch_remote
   if [ ! -x /lgb/bin/ghbridge ] || [ ! -S /lgb/sock/push.sock ]; then
     echo "git push denied: not sent" >&2
@@ -2400,6 +2546,28 @@ case "$sub" in
         prev=
         continue
       fi
+      # After "--", every word is a positional, including a word that starts with "-".
+      if [ "$arg_dd" != 1 ]; then
+      # remote add: only the options git accepts. A unique prefix is that option.
+      # Anything else that is a short cluster or a long option is refused here,
+      # before a name is read. A word that is not an option, including a lone "-",
+      # is a positional and is checked as a name below.
+      if [ "$sub" = remote ] && [ "$remote_sub" = add ]; then
+        case "$arg" in
+          --)
+            arg_dd=1
+            continue
+            ;;
+          --*)
+            remote_add_long "$arg"
+            continue
+            ;;
+          -[A-Za-z]*)
+            remote_add_short "$arg" || say_option
+            continue
+            ;;
+        esac
+      else
       refuse_command_opt "$arg"
       refuse_submodule_opt "$arg"
       fetch_multiple_short "$arg"
@@ -2497,18 +2665,15 @@ case "$sub" in
         --*)
           sv_body=${arg#--}
           sv_name=${sv_body%%=*}
-          # remote add: the value of --track and --master is not the remote name.
-          if [ "$sub" = remote ] && [ "$remote_sub" = add ] && [ "$arg_dd" != 1 ]; then
+          # A long option that is a prefix of --origin is that option.
+          # Only the exact --origin spelling is handled above. --no-origin is not a prefix.
+          if [ "$sub" = clone ]; then
             case "$sv_name" in
-              track|master)
-                case "$arg" in
-                  --*=*) ;;
-                  *) prev=skip ;;
+              ""|origin|*[!A-Za-z0-9-]*) ;;
+              *)
+                case "origin" in
+                  "$sv_name"*) say_option ;;
                 esac
-                continue
-                ;;
-              mirror|fetch|tags|no-tags|no-fetch|no-track|no-master)
-                continue
                 ;;
             esac
           fi
@@ -2540,28 +2705,15 @@ case "$sub" in
           continue
           ;;
         -*)
-          # remote add: -t and -m take the next word. -f does not.
-          if [ "$sub" = remote ] && [ "$remote_sub" = add ] && [ "$arg_dd" != 1 ]; then
-            case "$arg" in
-              -t|-m)
-                prev=skip
-                continue
-                ;;
-              -t*|-m*|-f)
-                continue
-                ;;
-            esac
-          fi
-          # A new name on rename, and a lone "-" in a name slot, is a name.
-          # remote_name_ok refuses a word that starts with "-".
-          if [ "$sub" = remote ] && [ "$remote_sub" = rename ] && [ "$arg_dd" != 1 ] && [ "$remote_npos" -ge 1 ]; then
+          # A new name on rename that starts with "-" is still a name.
+          if [ "$sub" = remote ] && [ "$remote_sub" = rename ] && [ "$remote_npos" -ge 1 ]; then
             remote_name_ok "$arg" || say_remote_name
           fi
-          if [ "$arg_dd" != 1 ] || [ "$sub" != remote ] || [ -z "$remote_sub" ]; then
-            continue
-          fi
+          continue
           ;;
       esac
+      fi
+      fi
       if [ -z "$seen_sub" ]; then
         seen_sub=1
         continue
@@ -2649,6 +2801,11 @@ case "$sub" in
           fi
           ;;
         *)
+          # A leading "~" on a positional is not a workspace path.
+          # This includes a slashless word and a word after "--".
+          case "$arg" in
+            ~*) say_tilde ;;
+          esac
           if [ "$sub" = clone ]; then
             vet_local "$arg"
             found_url=1
