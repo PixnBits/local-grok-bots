@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 
+	"github.com/PixnBits/local-grok-bots/internal/audit"
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"github.com/PixnBits/local-grok-bots/internal/store"
@@ -20,13 +21,19 @@ const shellStillRunning = "run_shell is still running; no result yet."
 const defaultEventLoopMaxInterim = 5
 
 // interimBudget is the per-run cap on interim starts and the throttle for
-// capped audit rows. One run loop owns one of these and passes it into
-// every execShellAsync.
+// capped audit rows. One run id owns one of these on the bot's loop state.
+// The run goroutine is the only writer of its counters.
+// refuseAll is set only when a caller passes a nil budget. That refuses
+// every interim start and does not write the capped or suppressed rows.
 type interimBudget struct {
 	starts       int
 	cappedLogged bool
 	suppressed   int
+	refuseAll    bool
 }
+
+// interimErrorLimit is how much of a redacted interim error the audit row keeps.
+const interimErrorLimit = 200
 
 // interimCall is one tool-less model call. Its reply is streamed and not
 // stored: a later final answer is the one that stays on the thread.
@@ -71,20 +78,25 @@ func (ic *interimCall) finished() bool {
 // deadline, and shutdown cancel both. The tool goroutine and any interim
 // goroutine are joined before this returns.
 func (a *App) execShellAsync(ctx context.Context, bot store.Bot, runID, name string, args map[string]any, callIndex int, msgs []model.Message, through string, seen map[string]bool, modelName string, turnPol policy.Policy, budget *interimBudget) (string, error) {
+	// A nil budget is not a fresh cap. Refuse every interim start and do
+	// not write the capped or suppressed rows a normal budget would write.
 	if budget == nil {
-		budget = &interimBudget{}
+		budget = &interimBudget{refuseAll: true}
 	}
 	toolCtx, toolCancel := context.WithCancel(ctx)
 	defer toolCancel()
 	defer func() {
-		if budget.suppressed > 0 {
+		if budget.refuseAll {
+			return
+		}
+		n, starts := a.takeSuppressed(budget)
+		if n > 0 {
 			a.log(bot.ID, "event_loop_interim_capped_suppressed", map[string]any{
 				"run_id":     runID,
-				"suppressed": budget.suppressed,
-				"count":      budget.starts,
+				"suppressed": n,
+				"count":      starts,
 				"cap":        a.maxInterim(),
 			})
-			budget.suppressed = 0
 		}
 	}()
 
@@ -136,28 +148,34 @@ func (a *App) execShellAsync(ctx context.Context, bot store.Bot, runID, name str
 		case <-interimDone:
 			retire(false)
 		case n := <-w.C():
-			a.log(bot.ID, "event_loop_batch", map[string]any{"run_id": runID, "count": n})
-			fresh, ids := a.interimFresh(bot.ID, through, seen)
-			if countUncovered(ids, covered) == 0 {
+			if budget.refuseAll {
+				a.noteNilRefusal(bot.ID)
 				continue
 			}
-			// A batch past the cap is audited and dropped. Do not cancel
-			// an interim that is already running just to refuse a new one.
-			// A non-positive cap is not unlimited: it refuses the start.
-			// The first capped batch of the run writes one row; later
-			// ones only count toward a suppressed row at shell end.
+			fresh, ids := a.interimFresh(bot.ID, through, seen)
+			uncovered := countUncovered(ids, covered)
+			// A batch past the cap is dropped. Do not cancel an interim
+			// that is already running just to refuse a new one. A
+			// non-positive cap is not unlimited: it refuses the start.
+			// Once the cap is reached, the window is not an
+			// event_loop_batch row. Each such window counts toward the
+			// suppressed row written when the shell ends. The first one
+			// also writes the single capped row.
 			capN := a.maxInterim()
-			if capN <= 0 || budget.starts >= capN {
-				if !budget.cappedLogged {
+			if capN <= 0 || budget.starts >= capN || budget.cappedLogged {
+				if uncovered > 0 && !budget.cappedLogged {
 					a.log(bot.ID, "event_loop_interim_capped", map[string]any{
 						"run_id": runID,
 						"count":  budget.starts,
 						"cap":    capN,
 					})
 					budget.cappedLogged = true
-				} else {
-					budget.suppressed++
 				}
+				a.addSuppressed(budget)
+				continue
+			}
+			a.log(bot.ID, "event_loop_batch", map[string]any{"run_id": runID, "count": n})
+			if uncovered == 0 {
 				continue
 			}
 			superseded := pending != nil && !pending.finished()
@@ -169,6 +187,152 @@ func (a *App) execShellAsync(ctx context.Context, bot store.Bot, runID, name str
 			budget.starts++
 		}
 	}
+}
+
+// interimBudgetFor returns the cap state for this run id. The same id,
+// including an approval resume, keeps the counters. A different run id
+// replaces them. The run goroutine is the only writer of those fields.
+func (a *App) interimBudgetFor(botID, runID string) *interimBudget {
+	if a == nil || runID == "" {
+		return &interimBudget{refuseAll: true}
+	}
+	a.rtMu.Lock()
+	defer a.rtMu.Unlock()
+	st := a.loops[botID]
+	if st == nil {
+		st = &loopState{}
+		a.loops[botID] = st
+	}
+	if st.interim == nil || st.interimRunID != runID {
+		st.interim = &interimBudget{}
+		st.interimRunID = runID
+	}
+	return st.interim
+}
+
+func (a *App) addSuppressed(budget *interimBudget) {
+	if budget == nil || budget.refuseAll {
+		return
+	}
+	if a != nil {
+		a.rtMu.Lock()
+		defer a.rtMu.Unlock()
+	}
+	budget.suppressed++
+}
+
+func (a *App) takeSuppressed(budget *interimBudget) (n, starts int) {
+	if budget == nil || budget.refuseAll {
+		return 0, 0
+	}
+	if a != nil {
+		a.rtMu.Lock()
+		defer a.rtMu.Unlock()
+	}
+	n = budget.suppressed
+	starts = budget.starts
+	budget.suppressed = 0
+	return n, starts
+}
+
+func (a *App) noteNilRefusal(botID string) {
+	if a == nil {
+		return
+	}
+	a.rtMu.Lock()
+	defer a.rtMu.Unlock()
+	st := a.loops[botID]
+	if st == nil {
+		return
+	}
+	st.nilRefused++
+}
+
+// interimAuditError is the class and the short message stored on an
+// event_loop_interim row. The stream_reset payload does not include either.
+func interimAuditError(err error) (class, msg string) {
+	if err == nil {
+		return "", ""
+	}
+	class = "model_error"
+	var te *model.TimeoutError
+	switch {
+	case errors.As(err, &te):
+		class = "timeout"
+	case errors.Is(err, context.DeadlineExceeded):
+		class = "timeout"
+	case errors.Is(err, context.Canceled):
+		class = "cancelled"
+	}
+	return class, clip(redactInterimErrorText(err.Error()), interimErrorLimit)
+}
+
+func redactInterimErrorText(s string) string {
+	return stripAbsPaths(audit.RedactText(s))
+}
+
+func isPathBoundary(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\r', '"', '\'', '`', '=', '(', ',', ':', '[', '<':
+		return true
+	default:
+		return false
+	}
+}
+
+func isPathEnd(c byte) bool {
+	switch c {
+	case ' ', '\t', '\n', '\r', '"', '\'', '`', ',', ';', ')', ']', '>', '|':
+		return true
+	default:
+		return false
+	}
+}
+
+func isDrivePath(s string, i int) bool {
+	if i+2 >= len(s) {
+		return false
+	}
+	if i > 0 && !isPathBoundary(s[i-1]) {
+		return false
+	}
+	c := s[i]
+	if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') {
+		return false
+	}
+	return s[i+1] == ':' && (s[i+2] == '\\' || s[i+2] == '/')
+}
+
+// stripAbsPaths replaces absolute paths. A token that begins with a slash,
+// or a drive letter and a slash, is one path.
+func stripAbsPaths(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if isDrivePath(s, i) {
+			j := i + 3
+			for j < len(s) && !isPathEnd(s[j]) {
+				j++
+			}
+			b.WriteString("[path]")
+			i = j
+			continue
+		}
+		if s[i] == '/' && (i == 0 || isPathBoundary(s[i-1])) {
+			j := i + 1
+			for j < len(s) && !isPathEnd(s[j]) {
+				j++
+			}
+			if j > i+1 {
+				b.WriteString("[path]")
+				i = j
+				continue
+			}
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
 }
 
 // maxInterim is the per-run cap on interim starts. A positive test override
@@ -368,15 +532,13 @@ func (a *App) retireInterim(botID, runID string, ic *interimCall, superseded boo
 	if superseded && ic.err == nil {
 		superseded = false
 	}
-	errText := ""
-	if ic.err != nil {
-		errText = clip(ic.err.Error(), 500)
-	}
+	class, errText := interimAuditError(ic.err)
 	a.log(botID, "event_loop_interim", map[string]any{
-		"ok":         ic.err == nil && !superseded,
-		"superseded": superseded,
-		"tokens":     ic.tokens,
-		"error":      errText,
+		"ok":          ic.err == nil && !superseded,
+		"superseded":  superseded,
+		"tokens":      ic.tokens,
+		"error_class": class,
+		"error":       errText,
 	})
 	streamed := strings.TrimSpace(ic.text) != ""
 	if superseded {
