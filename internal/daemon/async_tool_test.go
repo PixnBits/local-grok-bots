@@ -534,6 +534,41 @@ func waitInterimSuppressed(t *testing.T, app *App, botID string, n int) []interi
 	return got
 }
 
+func budgetSuppressed(app *App, botID string) int {
+	app.rtMu.Lock()
+	defer app.rtMu.Unlock()
+	st := app.loops[botID]
+	if st == nil || st.interim == nil {
+		return 0
+	}
+	return st.interim.suppressed
+}
+
+func waitBudgetSuppressed(t *testing.T, app *App, botID string, n int) int {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var got int
+	for time.Now().Before(deadline) {
+		got = budgetSuppressed(app, botID)
+		if got >= n {
+			return got
+		}
+		runtime.Gosched()
+	}
+	t.Fatalf("in-run suppressed %d, want >= %d", got, n)
+	return got
+}
+
+func nilRefusedCount(app *App, botID string) int {
+	app.rtMu.Lock()
+	defer app.rtMu.Unlock()
+	st := app.loops[botID]
+	if st == nil {
+		return 0
+	}
+	return st.nilRefused
+}
+
 type resetFrame struct {
 	RunID  string
 	Reason string
@@ -1448,8 +1483,11 @@ func TestAsyncShellInterimCap(t *testing.T) {
 	postUser(t, base, bot.ID, "three")
 	clk.Advance(500 * time.Millisecond)
 	caps := waitInterimCaps(t, app, bot.ID, 1)
-	if batches := eventLoopBatchCounts(t, app, bot.ID); len(batches) != 3 {
-		t.Fatalf("batches %#v, want 3", batches)
+	if batches := eventLoopBatchCounts(t, app, bot.ID); len(batches) != 2 {
+		t.Fatalf("batches %#v, want 2", batches)
+	}
+	if got := waitBudgetSuppressed(t, app, bot.ID, 1); got != 1 {
+		t.Fatalf("suppressed in run %d, want 1", got)
 	}
 	if len(eventLoopInterimSuppressed(t, app, bot.ID)) != 0 {
 		t.Fatal("suppressed row before the shell ended")
@@ -1462,8 +1500,11 @@ func TestAsyncShellInterimCap(t *testing.T) {
 	}
 	wake(runID, gen)
 	clk.Advance(500 * time.Millisecond)
-	if batches := waitBatchRows(t, app, bot.ID, 4); len(batches) != 4 {
-		t.Fatalf("batches %#v, want 4", batches)
+	if got := waitBudgetSuppressed(t, app, bot.ID, 2); got != 2 {
+		t.Fatalf("suppressed in run %d, want 2", got)
+	}
+	if batches := eventLoopBatchCounts(t, app, bot.ID); len(batches) != 2 {
+		t.Fatalf("batches after cap %#v, want 2", batches)
 	}
 	caps = eventLoopInterimCaps(t, app, bot.ID)
 	if len(caps) != 1 {
@@ -1493,7 +1534,7 @@ func TestAsyncShellInterimCap(t *testing.T) {
 		t.Fatalf("interim calls after finish %d", len(got))
 	}
 	supp := waitInterimSuppressed(t, app, bot.ID, 1)
-	if len(supp) != 1 || supp[0].Suppressed != 1 || supp[0].Count != 2 || supp[0].Cap != 2 || supp[0].RunID != runID {
+	if len(supp) != 1 || supp[0].Suppressed != 2 || supp[0].Count != 2 || supp[0].Cap != 2 || supp[0].RunID != runID {
 		t.Fatalf("suppressed %+v", supp)
 	}
 	if got := eventLoopInterimCaps(t, app, bot.ID); len(got) != 1 {
@@ -1807,8 +1848,11 @@ func TestAsyncShellInterimCapSpansShells(t *testing.T) {
 	fireInterim(t, base, bot.ID, "s2b", clk, m.entered, 5)
 	postUser(t, base, bot.ID, "s2c")
 	clk.Advance(500 * time.Millisecond)
-	if batches := waitBatchRows(t, app, bot.ID, 6); len(batches) != 6 {
-		t.Fatalf("batches %#v, want 6", batches)
+	if batches := eventLoopBatchCounts(t, app, bot.ID); len(batches) != 5 {
+		t.Fatalf("batches %#v, want 5", batches)
+	}
+	if got := waitBudgetSuppressed(t, app, bot.ID, 1); got != 1 {
+		t.Fatalf("suppressed in run %d, want 1", got)
 	}
 	caps := waitInterimCaps(t, app, bot.ID, 1)
 	if caps[0].Count != 5 || caps[0].Cap != 5 || caps[0].RunID != runID {
@@ -1857,7 +1901,12 @@ func TestTesterEvR2DefaultCapExactlyFive(t *testing.T) {
 				t.Fatalf("interim %d at msg %d", n, i)
 			}
 		} else {
-			waitBatchRows(t, app, bot.ID, i)
+			if got := waitBudgetSuppressed(t, app, bot.ID, i-5); got != i-5 {
+				t.Fatalf("suppressed in run %d at msg %d", got, i)
+			}
+			if batches := eventLoopBatchCounts(t, app, bot.ID); len(batches) != 5 {
+				t.Fatalf("batches after cap %#v", batches)
+			}
 			if i == 6 {
 				waitInterimCaps(t, app, bot.ID, 1)
 			}
@@ -1887,7 +1936,7 @@ func TestTesterEvR2DefaultCapExactlyFive(t *testing.T) {
 	tool.letGo()
 	waitIdle(t, base, bot.ID, "")
 	supp := waitInterimSuppressed(t, app, bot.ID, 1)
-	if len(supp) != 1 || supp[0].Suppressed != 2 || supp[0].Count != 5 || supp[0].Cap != 5 || supp[0].RunID != runID {
+	if len(supp) != 1 || supp[0].Suppressed != 3 || supp[0].Count != 5 || supp[0].Cap != 5 || supp[0].RunID != runID {
 		t.Fatalf("suppressed %+v", supp)
 	}
 	if got := eventLoopInterimCaps(t, app, bot.ID); len(got) != 1 {
@@ -1933,8 +1982,9 @@ func TestAsyncShellCappedRowThrottle(t *testing.T) {
 	})
 
 	t.Run("flood-one-shell", func(t *testing.T) {
-		// N=4 batches past the cap: first writes the capped row, the
-		// remaining N-1 are counted on the suppressed row.
+		// N=4 batches past the cap. Each one, including the batch that
+		// writes the capped row, is counted on the suppressed row.
+		// None of them add an event_loop_batch row.
 		const past = 4
 		m := newAsyncModel("run_shell", "mid", "final answer", true)
 		tool := newGateTool("shell-ok")
@@ -1954,7 +2004,12 @@ func TestAsyncShellCappedRowThrottle(t *testing.T) {
 		for i := 0; i < past; i++ {
 			postUser(t, srv.URL, bot.ID, fmt.Sprintf("x%d", i))
 			clk.Advance(500 * time.Millisecond)
-			waitBatchRows(t, app, bot.ID, 2+i+1)
+			if got := waitBudgetSuppressed(t, app, bot.ID, i+1); got != i+1 {
+				t.Fatalf("suppressed in run %d", got)
+			}
+			if batches := eventLoopBatchCounts(t, app, bot.ID); len(batches) != 2 {
+				t.Fatalf("batches after cap %#v", batches)
+			}
 		}
 		caps := waitInterimCaps(t, app, bot.ID, 1)
 		// Refusal only happens when starts >= cap, so count always equals cap.
@@ -1971,7 +2026,7 @@ func TestAsyncShellCappedRowThrottle(t *testing.T) {
 			t.Fatalf("capped rows after finish %d", len(got))
 		}
 		supp := waitInterimSuppressed(t, app, bot.ID, 1)
-		if len(supp) != 1 || supp[0].Suppressed != past-1 || supp[0].Count != 2 || supp[0].Cap != 2 || supp[0].RunID != runID {
+		if len(supp) != 1 || supp[0].Suppressed != past || supp[0].Count != 2 || supp[0].Cap != 2 || supp[0].RunID != runID {
 			t.Fatalf("suppressed %+v", supp)
 		}
 	})
@@ -1998,7 +2053,12 @@ func TestAsyncShellCappedRowThrottle(t *testing.T) {
 		for i := 0; i < 3; i++ {
 			postUser(t, srv.URL, bot.ID, fmt.Sprintf("c%d", i))
 			clk.Advance(500 * time.Millisecond)
-			waitBatchRows(t, app, bot.ID, 2+i+1)
+			if got := waitBudgetSuppressed(t, app, bot.ID, i+1); got != i+1 {
+				t.Fatalf("shell 1 suppressed in run %d", got)
+			}
+			if batches := eventLoopBatchCounts(t, app, bot.ID); len(batches) != 2 {
+				t.Fatalf("batches after cap %#v", batches)
+			}
 		}
 		caps := waitInterimCaps(t, app, bot.ID, 1)
 		if len(caps) != 1 || caps[0].Count != 2 || caps[0].Cap != 2 || caps[0].RunID != runID {
@@ -2007,13 +2067,18 @@ func TestAsyncShellCappedRowThrottle(t *testing.T) {
 		t1.letGo()
 		waitCh(t, t2.started, "shell 2")
 		supp1 := waitInterimSuppressed(t, app, bot.ID, 1)
-		if len(supp1) != 1 || supp1[0].Suppressed != 2 || supp1[0].RunID != runID {
+		if len(supp1) != 1 || supp1[0].Suppressed != 3 || supp1[0].RunID != runID {
 			t.Fatalf("shell 1 suppressed %+v", supp1)
 		}
 		for i := 0; i < 4; i++ {
 			postUser(t, srv.URL, bot.ID, fmt.Sprintf("d%d", i))
 			clk.Advance(500 * time.Millisecond)
-			waitBatchRows(t, app, bot.ID, 5+i+1)
+			if got := waitBudgetSuppressed(t, app, bot.ID, i+1); got != i+1 {
+				t.Fatalf("shell 2 suppressed in run %d", got)
+			}
+			if batches := eventLoopBatchCounts(t, app, bot.ID); len(batches) != 2 {
+				t.Fatalf("batches after cap %#v", batches)
+			}
 		}
 		if got := eventLoopInterimCaps(t, app, bot.ID); len(got) != 1 {
 			t.Fatalf("capped rows during shell 2: %d", len(got))
@@ -2031,7 +2096,7 @@ func TestAsyncShellCappedRowThrottle(t *testing.T) {
 		if len(supp) != 2 {
 			t.Fatalf("suppressed rows %d, want 2 (%+v)", len(supp), supp)
 		}
-		if supp[0].Suppressed != 2 || supp[0].Count != 2 || supp[0].Cap != 2 || supp[0].RunID != runID {
+		if supp[0].Suppressed != 3 || supp[0].Count != 2 || supp[0].Cap != 2 || supp[0].RunID != runID {
 			t.Fatalf("shell 1 suppressed %+v", supp[0])
 		}
 		if supp[1].Suppressed != 4 || supp[1].Count != 2 || supp[1].Cap != 2 || supp[1].RunID != runID {

@@ -54,6 +54,14 @@ type loopState struct {
 	wake    func(runID string, gen uint64)
 	wakeRun string
 	wakeGen uint64
+	// interim is the event-loop start cap for interimRunID. It stays when
+	// endLoop clears runID for an approval wait. A different run id replaces
+	// it. The run goroutine is the only writer of the budget fields.
+	interimRunID string
+	interim      *interimBudget
+	// nilRefused counts quiet windows dropped because execShellAsync was
+	// called with a nil budget. Those windows are not audit rows.
+	nilRefused int
 }
 
 // App is the daemon: HTTP API, turn queue, timers, and the model loop.
