@@ -365,7 +365,10 @@ cluster or long option is refused before a name is read. A unique prefix of
 `fetch`, and a short cluster that includes `f`, counts as a fetch for the
 bridge decision, the same as `--fetch` and `-f`. Some `remote set-head` and
 `archive` option forms that contact a GitHub remote are treated as a fetch
-for the grant/bridge decision, including unique prefixes. After `--`,
+for the grant/bridge decision, including unique prefixes. An `archive`
+remote value, including a configured remote name, is checked without enabling
+the file protocol; the archive `exec` option is refused; global options count
+only before the `archive` word. After `--`,
 `remote add` and `remote rename` treat every remaining word as a name,
 including a word that starts with `-`. `remote remove` still checks that name. Other option-checked
 commands, including `pull` and `remote update`, still refuse a word that

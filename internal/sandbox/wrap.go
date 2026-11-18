@@ -2663,8 +2663,9 @@ set_head_queries() {
 }
 # Sets ar_canon and ar_kind. Returns 1 when $1 is unknown or ambiguous.
 # An exact option name wins. kind remote contacts that repository.
-# The local parser consumes only remote, output, and exec. Other options
-# are left where they are, so a following remote option is still seen.
+# The local parser consumes remote, and output when the name is exact.
+# exec is refused. Other options are left where they are, so a following
+# remote option is still seen.
 archive_resolve() {
   ar_canon=
   ar_kind=
@@ -2698,15 +2699,95 @@ archive_resolve() {
   done
   [ "$ar_hits" -eq 1 ]
 }
+# Check one archive remote value. Do not arm the file protocol. Keep need_bridge.
+# A slashless name is resolved, not refused: every stored remote.<name>.url is checked.
+archive_vet() {
+  av_file=$allow_file
+  av_found=$found_url
+  case "$1" in
+    ""|*"$nl"*|*://*|git@*|/*|./*|../*|..|*/..|*/../*|*/*|~*|.)
+      vet "$1"
+      ;;
+    *)
+      if colon_remote "$1"; then
+        vet "$1"
+      else
+        av_name=$1
+        av_urls=$(
+          eval "set -- $gitdir_args"
+          "$real" -C "$vet_base" "$@" \
+            -c core.hooksPath=/dev/null \
+            -c core.fsmonitor= \
+            -c core.sshCommand=/bin/false \
+            -c protocol.allow=never \
+            -c safe.directory='*' \
+            config --includes --get-all -- "remote.$av_name.url" 2>/dev/null
+        ) || av_urls=
+        if [ -n "$av_urls" ]; then
+          av_rest=$av_urls
+          while [ -n "$av_rest" ]; do
+            case "$av_rest" in
+              *"$nl"*)
+                av_one=${av_rest%%"$nl"*}
+                av_rest=${av_rest#*"$nl"}
+                ;;
+              *)
+                av_one=$av_rest
+                av_rest=
+                ;;
+            esac
+            if [ -z "$av_one" ]; then
+              continue
+            fi
+            vet "$av_one"
+          done
+        elif [ -e "$vet_base/$av_name" ] || [ -L "$vet_base/$av_name" ]; then
+          vet_local "$av_name"
+        fi
+      fi
+      ;;
+  esac
+  allow_file=$av_file
+  found_url=$av_found
+}
 # archive --remote names a repository. A unique prefix is the same option.
-# That form is a fetch for the grant decision.
-# output and exec take the next word only when their name is exact.
+# That form is a fetch for the grant decision and does not arm the file protocol.
+# exec is refused, including a unique prefix. --no-exec is left in place.
+# output takes the next word only when its name is exact.
+# Global options are skipped only before the archive word.
 archive_remote() {
+  ar_skip=
+  ar_seen=
   ar_prev=
   for arg in "$@"; do
+    if [ -z "$ar_seen" ]; then
+      if [ -n "$ar_skip" ]; then
+        ar_skip=
+        continue
+      fi
+      case "$arg" in
+        -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path|--config|--attr-source)
+          ar_skip=1
+          continue
+          ;;
+        --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*|--config=*|--attr-source=*)
+          continue
+          ;;
+        --)
+          continue
+          ;;
+        -*)
+          continue
+          ;;
+        *)
+          ar_seen=1
+          continue
+          ;;
+      esac
+    fi
     if [ -n "$ar_prev" ]; then
       if [ "$ar_prev" = remote ]; then
-        vet "$arg"
+        archive_vet "$arg"
       fi
       ar_prev=
       continue
@@ -2714,13 +2795,6 @@ archive_remote() {
     case "$arg" in
       --)
         break
-        ;;
-      -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path|--config|--attr-source)
-        ar_prev=skip
-        continue
-        ;;
-      --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*|--config=*|--attr-source=*|-c*)
-        continue
         ;;
       -o)
         ar_prev=skip
@@ -2732,13 +2806,21 @@ archive_remote() {
       --*=*)
         ar_body=${arg#--}
         ar_name=${ar_body%%=*}
-        if archive_resolve "$ar_name" && [ "$ar_kind" = remote ]; then
-          vet "${arg#*=}"
+        if archive_resolve "$ar_name"; then
+          if [ "$ar_canon" = exec ]; then
+            say_option
+          fi
+          if [ "$ar_kind" = remote ]; then
+            archive_vet "${arg#*=}"
+          fi
         fi
         ;;
       --*)
         ar_name=${arg#--}
         if archive_resolve "$ar_name"; then
+          if [ "$ar_canon" = exec ]; then
+            say_option
+          fi
           case "$ar_kind" in
             remote) ar_prev=remote ;;
             value)

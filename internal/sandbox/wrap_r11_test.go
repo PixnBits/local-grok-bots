@@ -25,6 +25,23 @@ func r11Text(t *testing.T, script string, args ...string) string {
 	return runGitWrap(t, script, args...)
 }
 
+// r11Output returns combined output and allows exit 0.
+// archive --list exits 0 once git runs, in a repository and outside one.
+func r11Output(t *testing.T, script string, args ...string) (string, error) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gitwrap")
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("sh", "-n", path).CombinedOutput(); err != nil {
+		t.Fatalf("sh -n: %v\n%s", err, out)
+	}
+	cmd := exec.Command(path, args...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 // Exact option names win. The listed spellings are accepted. A unique
 // prefix still resolves, and an unknown or ambiguous spelling is refused.
 func TestGitWrapR11ExactNames(t *testing.T) {
@@ -210,21 +227,39 @@ func TestGitWrapR11ArchiveRemote(t *testing.T) {
 	if !strings.Contains(text, GitHubBridgeDown) {
 		t.Fatalf("bridge: %s", text)
 	}
-	text = r11Text(t, script, "archive", "--list")
+	text, listErr := r11Output(t, script, "archive", "--list")
 	if strings.Contains(text, GitHubGrantOff) {
-		t.Fatalf("list: %s", text)
+		t.Fatalf("list: %v %s", listErr, text)
 	}
-	// A prefix of output or exec is not the exact name, so the next word is still scanned.
-	for _, args := range [][]string{
-		{"archive", "--out", "--remote", url, "HEAD"},
-		{"archive", "--ex", "--remote", url, "HEAD"},
-	} {
-		text = r11Text(t, script, args...)
-		if !strings.Contains(text, GitHubGrantOff) {
-			t.Fatalf("%v: %s", args, text)
+	// The same list run, with a real git, from inside a repository. Exit 0 is success.
+	if _, lookErr := exec.LookPath("git"); lookErr == nil {
+		if st, statErr := os.Stat("/lgb/bin/git"); statErr != nil || st.IsDir() {
+			work := t.TempDir()
+			repo := filepath.Join(work, "repo")
+			commitRepo(t, repo, "r.txt", "R\n")
+			wrap := installGitWrapWith(t, work, gitWrapOpts{
+				Grant: true, Hub: false, Bridge: true,
+				Repos: []string{"acme/widgets"},
+				Name:  "Ada", Email: "bot@localhost",
+			})
+			out, runErr := runWrapTimeout(t, wrap, repo, nil, 20*time.Second, "archive", "--list")
+			if runErr != nil || strings.Contains(out, GitHubGrantOff) {
+				t.Fatalf("list in repo: %v\n%s", runErr, out)
+			}
 		}
 	}
-	// output and exec take the next word. That word is not a remote.
+	// A prefix of output is not the exact name, so the next word is still scanned.
+	text = r11Text(t, script, "archive", "--out", "--remote", url, "HEAD")
+	if !strings.Contains(text, GitHubGrantOff) {
+		t.Fatalf("out: %s", text)
+	}
+	// A unique prefix of exec is that option and is refused.
+	text = r11Text(t, script, "archive", "--ex", "--remote", url, "HEAD")
+	if !strings.Contains(text, "option is not allowed") {
+		t.Fatalf("ex: %s", text)
+	}
+	// Exact output takes the next word, so that word is not a remote.
+	// Exact exec is refused, so it is not a grant decision.
 	for _, args := range [][]string{
 		{"archive", "--output", "--remote", url, "HEAD"},
 		{"archive", "--exec", "--remote", url, "HEAD"},
