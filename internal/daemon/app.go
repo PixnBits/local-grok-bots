@@ -59,8 +59,8 @@ type loopState struct {
 	// it. The run goroutine is the only writer of the budget fields.
 	interimRunID string
 	interim      *interimBudget
-	// nilRefused counts quiet windows dropped because execShellAsync was
-	// called with a nil budget. Those windows are not audit rows.
+	// nilRefused counts quiet windows dropped because the interim budget
+	// was nil or refuse-all. Each drop also writes event_loop_interim_refused.
 	nilRefused int
 }
 
@@ -209,6 +209,11 @@ type App struct {
 	// model calls. Tests set it before a run starts. Production leaves it 0,
 	// which uses defaultEventLoopMaxInterim. This is not a policy key.
 	eventLoopMaxInterim int
+	// interimCapSeen, when set, runs after a quiet window that is already
+	// past the interim cap. The capped and suppressed counters for that
+	// window are already updated. Tests set it before the run starts.
+	// Production leaves it nil.
+	interimCapSeen func(uncovered int)
 	// githubGitBase and githubAPIBase replace the GitHub upstreams. Tests set them.
 	githubGitBase string
 	githubAPIBase string

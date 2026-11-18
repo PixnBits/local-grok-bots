@@ -82,15 +82,19 @@ model = "llama3.1"
 # event_loop_max_wait (default 2s) caps the wait after the first wake-up
 # in a batch. quiet must be > 0 and max_wait must be >= quiet. One run
 # starts at most 5 interim calls. Once the cap is reached, later batches do
-# not log event_loop_batch. Each skipped batch, including the first, is
+# not log event_loop_batch. A window with no new input is not counted and
+# does not write a row. The first skipped batch that has new input writes
+# one event_loop_interim_capped audit row and is counted. Later ones are
 # counted on one event_loop_interim_capped_suppressed row when the shell
-# ends. The first also writes one event_loop_interim_capped audit row. That
-# cap is not a policy key. A newer batch publishes stream_reset reason
-# interim_superseded. A mid-stream cancel when the shell finishes, or when
-# Stop, the run deadline, or shutdown cancels the run, publishes stream_reset
-# reason interim_cancelled. A
-# genuine model error after streamed text publishes interim_error. A clean
-# finish keeps a blank-line separator. Off keeps the synchronous tool path.
+# ends. That cap is not a policy key. It is kept in memory for the run id.
+# A daemon restart clears it, so approving a restored checkpoint starts a
+# fresh count, and a continue starts a fresh count because it is a new run
+# id. A newer batch publishes stream_reset reason interim_superseded. A
+# mid-stream cancel when the shell finishes, or when Stop, the run deadline,
+# or shutdown cancels the run, publishes stream_reset reason
+# interim_cancelled. A genuine model error after streamed text publishes
+# interim_error. A clean finish keeps a blank-line separator. Off keeps the
+# synchronous tool path.
 # event_loop = false
 # event_loop_quiet = "500ms"
 # event_loop_max_wait = "2s"
