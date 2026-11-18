@@ -467,7 +467,7 @@ const lgbHelp = `lgb: daemon tools for this bot. Output is text; exit 0 on succe
   lgb coi <name> [args...]      run a granted host CLI; credentials stay on the host
   coi <name> [args...]          same command, from .lgb/bin
 
-A timer's prompt comes back to you as a [scheduled] message.
+A timer's prompt comes back to you as a [scheduled] message. A finished background shell comes back as a [job] message.
 Run each lgb command as its own shell call; a chained command (;, &&, |) asks for approval.`
 
 // lgbUsage appends the bot-timer limits that are actually in force.

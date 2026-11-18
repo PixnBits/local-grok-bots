@@ -28,7 +28,7 @@ func TestShellPushThenSleepIsCapped(t *testing.T) {
 		gitPushHook = prevHook
 	})
 
-	app := newApp(t, "", fakeModel{})
+	app := newApp(t, "", quietModel())
 	srv := serve(t, app)
 	bot := createGrantedBot(t, srv.URL, "Ada", []string{"git", "github"})
 	var hits atomic.Int32
@@ -72,17 +72,21 @@ func TestShellPushThenSleepIsCapped(t *testing.T) {
 		if hits.Load() != 1 {
 			t.Fatalf("push hook calls=%d elapsed=%s\n%s", hits.Load(), elapsed, got)
 		}
-		if runErr == nil || !(strings.Contains(runErr.Error(), "shell timed out") || strings.Contains(runErr.Error(), "stopped after")) {
+		if runErr != nil || !strings.Contains(got, "running in the background") {
 			t.Fatalf("err=%v elapsed=%s\n%s", runErr, elapsed, got)
 		}
-		if strings.Contains(got, "SLEPT") || strings.Contains(runErr.Error(), "SLEPT") {
-			t.Fatalf("sleep finished after the push: elapsed=%s\n%s", elapsed, got)
-		}
-		if !strings.Contains(got, "git push sent") {
-			t.Fatalf("push output missing: %s", got)
+		if strings.Contains(got, "SLEPT") {
+			t.Fatalf("sleep finished in the tool result: elapsed=%s\n%s", elapsed, got)
 		}
 		if elapsed >= capD+12*time.Second || elapsed >= sleepFor {
 			t.Fatalf("slept for %s, cap %s", elapsed, capD)
+		}
+		id := jobIDFrom(got)
+		if !strings.Contains(readJobLog(t, app, bot.ID, id), "git push sent") {
+			t.Fatalf("push output missing from the log")
+		}
+		if job := stopJobAndWait(t, app, bot, id); job.Status != store.JobStopped {
+			t.Fatalf("status %s", job.Status)
 		}
 	})
 
@@ -95,14 +99,21 @@ func TestShellPushThenSleepIsCapped(t *testing.T) {
 		if hits.Load() != 1 {
 			t.Fatalf("push hook calls=%d elapsed=%s\n%s", hits.Load(), elapsed, got)
 		}
-		if runErr == nil || !(strings.Contains(runErr.Error(), "shell timed out") || strings.Contains(runErr.Error(), "stopped after")) {
+		if runErr != nil || !strings.Contains(got, "running in the background") {
 			t.Fatalf("err=%v elapsed=%s\n%s", runErr, elapsed, got)
 		}
-		if strings.Contains(got, "SLEPT") || !strings.Contains(got, "git push denied: no") {
-			t.Fatalf("denied-then-sleep output elapsed=%s\n%s", elapsed, got)
+		if strings.Contains(got, "SLEPT") {
+			t.Fatalf("sleep finished in the tool result: elapsed=%s\n%s", elapsed, got)
 		}
 		if elapsed >= capD+12*time.Second || elapsed >= sleepFor {
 			t.Fatalf("slept for %s, cap %s", elapsed, capD)
+		}
+		id := jobIDFrom(got)
+		if !strings.Contains(readJobLog(t, app, bot.ID, id), "git push denied: no") {
+			t.Fatalf("denied output missing from the log")
+		}
+		if job := stopJobAndWait(t, app, bot, id); job.Status != store.JobStopped {
+			t.Fatalf("status %s", job.Status)
 		}
 	})
 

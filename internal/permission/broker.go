@@ -69,6 +69,10 @@ type Request struct {
 	// bypass mode, managed allow, durable user allow, and a session grant
 	// do not skip it. ui_prompts off still denies.
 	ForceAsk bool
+	// Persist keeps the card until it is approved, denied, or the context
+	// is cancelled. The prompt timeout is not armed. Foreground cards
+	// leave this false.
+	Persist bool
 	// Workspace is the bot directory used to classify paths.
 	Workspace string
 	// GrokHome is the bot GROK_HOME. Empty skips the home-path floor.
@@ -484,15 +488,19 @@ func (b *Broker) canUseTool(ctx context.Context, pol policy.Permission, req Requ
 		questions: qs,
 		ch:        make(chan string, 1),
 	}
-	deadline := b.now().Add(timeout)
 	fields := map[string]any{
 		"id":              req.ID,
 		"run_id":          req.RunID,
 		"bot_id":          req.BotID,
 		"tool":            req.Tool,
 		"arguments":       cardArguments(req.Tool, req.Args),
-		"deadline":        deadline.UTC().Format(time.RFC3339Nano),
 		"session_allowed": sessionOK,
+	}
+	if req.Persist {
+		fields["persistent"] = true
+	} else {
+		deadline := b.now().Add(timeout)
+		fields["deadline"] = deadline.UTC().Format(time.RFC3339Nano)
 	}
 	if question {
 		fields["kind"] = "question"
@@ -508,6 +516,13 @@ func (b *Broker) canUseTool(ctx context.Context, pol policy.Permission, req Requ
 	waitCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	go func() {
+		if req.Persist {
+			<-waitCtx.Done()
+			if ctx.Err() != nil {
+				b.finishWait(w, "cancel")
+			}
+			return
+		}
 		timer := time.NewTimer(timeout)
 		defer timer.Stop()
 		select {

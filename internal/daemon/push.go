@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"os"
@@ -138,11 +139,32 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	if err != nil {
 		return a.pushDenied(bot, owner, repo, claimedFrom, "mirror")
 	}
-	ectx, cancel := context.WithTimeout(parent, turnPol.EffectivePromptTimeout())
+	jobID, isJob := a.shellIsJob(pctx)
+	if isJob && a != nil && a.broker != nil && a.effPol(bot.ID).BrokerHook(bot.ID) {
+		raw, merr := json.Marshal(map[string]any{
+			"repo":   owner + "/" + repo,
+			"branch": strings.Join(branches, ","),
+			"remote": github.RemoteURL(owner, repo),
+		})
+		if merr != nil || a.askJobStep(pctx, bot, jobID, "git_push", raw) != nil {
+			return a.pushDenied(bot, owner, repo, claimedFrom, "not approved")
+		}
+	}
+	var ectx context.Context
+	var cancel context.CancelFunc
+	if isJob {
+		ectx = pctx
+		if ectx == nil {
+			ectx = context.Background()
+		}
+		cancel = func() {}
+	} else {
+		ectx, cancel = context.WithTimeout(parent, turnPol.EffectivePromptTimeout())
+	}
 	defer cancel()
 	stop := context.AfterFunc(pctx, cancel)
 	defer stop()
-	out := a.perm.Evaluate(ectx, turnPol.Permission(), a.withUserRules(bot.ID, permission.Request{
+	req := a.withUserRules(bot.ID, permission.Request{
 		RunID:     a.loopRunID(bot.ID),
 		BotID:     bot.ID,
 		Tool:      "git_push",
@@ -154,7 +176,11 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 			"remote":  github.RemoteURL(owner, repo),
 			"commits": gitPushCardCommits(commits),
 		},
-	}))
+	})
+	if isJob {
+		req.Persist = true
+	}
+	out := a.perm.Evaluate(ectx, turnPol.Permission(), req)
 	if out.Behavior != "allow" {
 		reason := "not approved"
 		if out.Source == "no_ui" {

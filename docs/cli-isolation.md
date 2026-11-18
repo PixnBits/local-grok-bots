@@ -98,6 +98,11 @@ tool_rounds = 8
 # extend the command as described in the run_shell notes.
 # Where pidfd signalling is unavailable the effective ceiling is 30s.
 shell_timeout = "30s"
+# How long a background shell may run after it is adopted. Default 2h.
+# Whole seconds, at least 1s, up to 24h. max_job_lifetime is managed only
+# and cannot raise the 24h ceiling.
+# job_lifetime = "2h"
+# max_job_lifetime = "24h"         # managed only
 # Optional hard cap on one model call. Unset means the effective run
 # timeout, so only run_timeout bounds the call. An explicit value stays a
 # hard per-call cap (and is not retried). Configs that set the old 3m
@@ -148,7 +153,9 @@ keep_alive = "30m"
 
 `run_timeout` bounds the whole run. `tool_rounds` bounds how many
 model rounds that run may use (default 8). `shell_timeout` bounds one
-`run_shell` call (default 30s). A bot may set `run_timeout`,
+`run_shell` call (default 30s). A command still running at that timeout, or
+started with `background` true, keeps running until it exits, `stop_job`
+stops it, or `job_lifetime` elapses (default 2h, at most 24h). A bot may set `run_timeout`,
 `tool_rounds`, and `shell_timeout` below these effective values;
 it cannot raise them. For a CLI bot, `run_timeout` also narrows
 `cli.turn_timeout`. Empty bot values inherit the policy (or the

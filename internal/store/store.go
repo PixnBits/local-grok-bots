@@ -601,6 +601,19 @@ CREATE TABLE IF NOT EXISTS perm_suggestions (
   decided_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_perm_suggestions_bot ON perm_suggestions(bot_id, status, created_at);
+CREATE TABLE IF NOT EXISTS jobs (
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  command TEXT NOT NULL,
+  status TEXT NOT NULL,
+  log_path TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  exit_code INTEGER,
+  reason TEXT NOT NULL DEFAULT '',
+  pgid INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, bot_id);
 `)
 	if err != nil {
 		return err

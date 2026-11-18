@@ -9,10 +9,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
-	"github.com/PixnBits/local-grok-bots/internal/github"
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 	"github.com/PixnBits/local-grok-bots/internal/store"
@@ -96,8 +94,15 @@ func toolDefs() []model.Tool {
 			}, "path", "old_string")},
 		{Name: "delete_file", Description: "Delete one regular file inside the workspace. Directories and symlinks are refused.",
 			Parameters: schemaObj(map[string]any{"path": prop("string", "Path relative to the workspace. Example: \"notes/old.md\".")}, "path")},
-		{Name: "run_shell", Description: "Run a shell command inside the workspace jail and return its output. Paths outside the workspace are rejected. Network and SSH fail unless the user granted them. git push is an approval: the jail does not send it, and the daemon sends it only after the approval card.",
-			Parameters: schemaObj(map[string]any{"command": prop("string", "A bash command line. Example: \"ls -la && go version\".")}, "command")},
+		{Name: "run_shell", Description: "Run a shell command inside the workspace jail and return its output. Paths outside the workspace are rejected. Network and SSH fail unless the user granted them. git push is an approval: the jail does not send it, and the daemon sends it only after the approval card. A command still running at the shell timeout keeps going in the background. Pass background true to background it immediately. stop_job ends that job. The log is .lgb/jobs/<id>.log.",
+			Parameters: schemaObj(map[string]any{
+				"command":    prop("string", "A bash command line. Example: \"ls -la && go version\"."),
+				"background": prop("boolean", "Start in the background and return a job id. Omit to wait until the shell timeout. Example: true."),
+			}, "command")},
+		{Name: "stop_job", Description: "Stop one of your background shell jobs by id. A finished, lost, or unknown job is an error. The log stays at .lgb/jobs/<id>.log.",
+			Parameters: schemaObj(map[string]any{
+				"id": prop("string", "The job id returned by run_shell. Example: \"9b1c\"."),
+			}, "id")},
 		{Name: "create_pr", Description: "Open a pull request on an allowlisted GitHub repository. The daemon asks for approval on a card and sends it from the host. draft defaults to true. head cannot be the repository default branch.",
 			Parameters: schemaObj(map[string]any{
 				"repo":  prop("string", "Repository as owner/repo. Example: \"acme/widgets\"."),
@@ -282,8 +287,6 @@ func (a *App) execTool(ctx context.Context, bot store.Bot, name string, args map
 }
 
 func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args map[string]any) (string, error) {
-	turnPol := a.effPol(bot.ID)
-
 	switch name {
 	case "list_bots":
 		bots, err := a.st.ListBots()
@@ -493,253 +496,9 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 	case "create_comment":
 		return a.toolCreateComment(ctx, bot, args)
 	case "run_shell":
-		command, err := shellCommandArg(args)
-		if err != nil {
-			return "", err
-		}
-		current := bot
-		if fresh, err := a.st.GetBot(bot.ID); err == nil {
-			current = fresh
-		}
-		shellCtx, shellCancel := context.WithCancel(ctx)
-		defer shellCancel()
-		guard := &sandbox.ShellGuard{}
-		guard.OnRefused = func(pid int, reason string) {
-			a.noteShellSignalRefused(current, pid, reason)
-		}
-		defer guard.Close()
-		var timerMu sync.Mutex
-		var shellTimer *time.Timer
-		var pushTimer *time.Timer
-		var timerFired bool
-		var capHeld bool
-		var capMissed bool
-		var pushDepth int
-		var pushSnips []string
-		var shellStart time.Time
-		var shellBudget time.Duration
-		var shellLeft time.Duration
-		var resumeShell func(time.Duration)
-		armShell := func(d time.Duration) {
-			if shellTimer != nil {
-				shellTimer.Stop()
-			}
-			shellStart = time.Now()
-			shellBudget = d
-			shellTimer = time.AfterFunc(d, func() {
-				timerMu.Lock()
-				timerFired = true
-				depth := pushDepth
-				timerMu.Unlock()
-				if depth == 0 {
-					shellCancel()
-					return
-				}
-				if guard.Trim() {
-					timerMu.Lock()
-					capHeld = true
-					timerMu.Unlock()
-					return
-				}
-				timerMu.Lock()
-				left := shellLeft
-				ended := pushDepth == 0
-				if !ended {
-					capMissed = true
-				}
-				timerMu.Unlock()
-				if ended {
-					resumeShell(left)
-				}
-			})
-		}
-		// resumeShell arms the budget recorded when the push started.
-		// A non-positive budget cancels. A short positive one uses a
-		// small floor so the command after the push can still start.
-		resumeShell = func(left time.Duration) {
-			if left <= 0 {
-				shellCancel()
-				return
-			}
-			if left < time.Second {
-				left = time.Second
-			}
-			timerMu.Lock()
-			armShell(left)
-			timerMu.Unlock()
-		}
-		cap := a.shellCap(current)
-		timerMu.Lock()
-		armShell(cap)
-		timerMu.Unlock()
-		defer func() {
-			timerMu.Lock()
-			if shellTimer != nil {
-				shellTimer.Stop()
-			}
-			if pushTimer != nil {
-				pushTimer.Stop()
-			}
-			timerMu.Unlock()
-		}()
-		ghSock := ""
-		ghRepos := turnPol.EffectiveGitHubRepos(current.GitHubAllow)
-		author, email, aerr := github.CommitAuthor(current.Name, turnPol.GitHub.AuthorName, turnPol.GitHub.AuthorEmail)
-		if aerr != nil {
-			author, email = "", ""
-		}
-		var px *github.Proxy
-		if granted(current.Grants, "github") {
-			opened, perr := a.openGitHubProxy(current)
-			if perr != nil || opened == nil {
-				a.auditGitHubDecision(current, "github_proxy_denied", "", "", "deny", "proxy unavailable")
-			} else {
-				px = opened
-				defer px.Close()
-				ghSock = px.Sock()
-				a.noteGitHubSock(current.ID, ghSock)
-				defer a.noteGitHubSock(current.ID, "")
-			}
-		}
-		gate := &gitHubGate{px: px}
-		a.observeProtectBaseline()
-		protect := a.shellProtectBot(current.ID)
-		binds := a.cfg.BuildBinds
-		if granted(current.Grants, "build") {
-			var blocked []sandbox.Event
-			binds, blocked = guardBuildBinds(protect, binds)
-			for _, ev := range blocked {
-				a.recordSandbox(current.ID, ev)
-			}
-		}
-		cleanBash, gerr := a.gateShell(shellCtx, current, command)
-		if gerr != nil {
-			return "", gerr
-		}
-		shellWS, werr := a.shellWorkspace(current.ID)
-		if werr != nil {
-			a.clearShellPlan(current.ID)
-			return "", werr
-		}
-		// Re-resolve immediately before exec. The broker already saw one
-		// resolution; a symlink swapped in since then must not run.
-		rel, rerr := a.shellExecRel(current.ID, shellWS)
-		if rerr != nil {
-			a.clearShellPlan(current.ID)
-			return "", rerr
-		}
-		goEnv := turnPol.EffectiveGoEnv()
-		res, err := sandbox.Run(shellCtx, sandbox.Request{
-			Workspace:       shellWS,
-			Command:         command,
-			Chdir:           rel,
-			CleanBash:       cleanBash,
-			Grants:          current.Grants,
-			NetAllow:        current.NetAllow,
-			SSHAllow:        current.SSHAllow,
-			BuildBinds:      binds,
-			Protect:         protect,
-			ProtectInodes:   a.protectInodes(),
-			ProtectTripped:  a.protectBlockReason(),
-			SSHKey:          a.sshKeyPath(),
-			GitHubSock:      ghSock,
-			GitHubRepos:     ghRepos,
-			GitAuthor:       author,
-			GitAuthorEmail:  email,
-			GitAuthorRefuse: aerr != nil,
-			BotGoRoot:       goRootForBot(a.cfg.DataDir, current.ID),
-			GoProxy:         goEnv.Proxy,
-			GoToolchain:     goEnv.Toolchain,
-			GoFlags:         goEnv.Flags,
-			GoSumDB:         goEnv.SumDB,
-			Guard:           guard,
-			OnPushStart: func() {
-				// The shell cap is not paused. Record the budget left so it
-				// can be armed again if this push ends with nothing else
-				// stopped. A separate timer bounds the push.
-				timerMu.Lock()
-				defer timerMu.Unlock()
-				if pushDepth == 0 {
-					if pushTimer != nil {
-						pushTimer.Stop()
-					}
-					d := turnPol.EffectivePromptTimeout() + 15*time.Second
-					pushTimer = time.AfterFunc(d, func() {
-						timerMu.Lock()
-						timerFired = true
-						timerMu.Unlock()
-						shellCancel()
-					})
-					shellLeft = shellBudget - time.Since(shellStart)
-				}
-				pushDepth++
-			},
-			OnPushEnd: func() {
-				timerMu.Lock()
-				if pushDepth > 0 {
-					pushDepth--
-				}
-				if pushDepth == 0 && pushTimer != nil {
-					pushTimer.Stop()
-					pushTimer = nil
-				}
-				held := capHeld && pushDepth == 0
-				missed := capMissed && pushDepth == 0
-				left := shellLeft
-				if pushDepth == 0 {
-					capMissed = false
-				}
-				timerMu.Unlock()
-				if held {
-					shellCancel()
-					return
-				}
-				if missed {
-					resumeShell(left)
-				}
-			},
-			OnPush: func(pctx context.Context, cwd string, pushArgs []string) sandbox.PushResult {
-				var res sandbox.PushResult
-				if gitPushHook != nil {
-					res = gitPushHook(pctx, current, cwd, pushArgs)
-				} else {
-					res = a.handleGitPush(pctx, ctx, current, gate, cwd, pushArgs)
-				}
-				if res.Stdout != "" || res.Stderr != "" {
-					timerMu.Lock()
-					pushSnips = append(pushSnips, res.Stdout, res.Stderr)
-					timerMu.Unlock()
-				}
-				return res
-			},
-			Dial: a.shellDial,
-		})
-		a.recordSandboxEvents(current.ID, res.Events)
-		summary := formatShell(res.Stdout, res.Stderr)
-		timerMu.Lock()
-		fired := timerFired
-		snips := append([]string{}, pushSnips...)
-		timerMu.Unlock()
-		for _, snip := range snips {
-			if snip == "" || strings.Contains(summary, snip) {
-				continue
-			}
-			summary += snip
-			if !strings.HasSuffix(snip, "\n") {
-				summary += "\n"
-			}
-		}
-		err = adjustShellStop(ctx, fired, err)
-		if err != nil {
-			a.clearShellPlan(current.ID)
-			msg := err.Error()
-			if msg == "shell timed out" {
-				msg = a.shellCapMessage(current, cap)
-			}
-			return summary, fmt.Errorf("%s\n%s", msg, summary)
-		}
-		a.commitShellPlan(current.ID, shellWS)
-		return summary, nil
+		return a.execRunShell(ctx, bot, args)
+	case "stop_job":
+		return a.toolStopJob(bot, args)
 	default:
 		return "", fmt.Errorf("unknown tool %s", name)
 	}

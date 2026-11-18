@@ -92,7 +92,7 @@ func launch(ctx context.Context, p *prepared) (string, string, error) {
 	if p.cleanBash {
 		cmd.Env = dropEnvKeys(cmd.Env, "BASH_ENV", "ENV")
 	}
-	return capture(ctx, cmd)
+	return captureStream(ctx, cmd, nil, nil, p.stream)
 }
 
 func darwinPATH() string {

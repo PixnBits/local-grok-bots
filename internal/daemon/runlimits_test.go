@@ -346,7 +346,7 @@ func TestToolRoundsErrorCode(t *testing.T) {
 }
 
 func TestRunShellUsesBotShellTimeout(t *testing.T) {
-	app := newApp(t, "", fakeModel{})
+	app := newApp(t, "", quietModel())
 	srv := serve(t, app)
 	bot := createBot(t, srv.URL, "Sh")
 	root := app.botWorkspace(bot.ID)
@@ -367,11 +367,15 @@ func TestRunShellUsesBotShellTimeout(t *testing.T) {
 	defer cancel()
 	out, runErr := app.dispatchTool(ctx, bot, "run_shell", map[string]any{"command": "sleep 5"})
 	elapsed := time.Since(start)
-	if runErr == nil || !strings.Contains(runErr.Error(), "stopped after 1s (shell timeout set on this bot)") {
-		t.Fatalf("err=%v out=%s", runErr, out)
+	if runErr != nil || !strings.Contains(out, "running in the background") {
+		t.Fatalf("err=%v out=%s elapsed=%s", runErr, out, elapsed)
 	}
 	if elapsed >= 4*time.Second {
 		t.Fatalf("slept %s", elapsed)
+	}
+	id := jobIDFrom(out)
+	if job := stopJobAndWait(t, app, bot, id); job.Status != store.JobStopped {
+		t.Fatalf("status %s", job.Status)
 	}
 }
 

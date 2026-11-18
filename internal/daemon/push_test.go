@@ -516,6 +516,62 @@ git push https://github.com/acme/widgets.git feature-packed
 echo PUSH_DONE
 `, "replace")
 	})
+
+	t.Run("background card stays", func(t *testing.T) {
+		app, evals, auditPath := newPushApp(t)
+		app.editPol(func(p *policy.Policy) { p.PromptTimeout = 200 * time.Millisecond })
+		srv := serve(t, app)
+		bot := createGrantedBot(t, srv.URL, "Ada", []string{"git", "github"})
+		res, body := do(t, "PATCH", srv.URL+"/api/bots/"+bot.ID, map[string]any{"github_allow": []string{"acme/widgets"}}, "")
+		if res.StatusCode != 200 {
+			t.Fatalf("allow %d %s", res.StatusCode, body)
+		}
+		out, err := app.dispatchTool(t.Context(), bot, "run_shell", map[string]any{
+			"command":    feature("feature-bg", "note-bg", "git push https://github.com/acme/widgets.git feature-bg"),
+			"background": true,
+		})
+		if err != nil || !strings.Contains(out, "running in the background") {
+			t.Fatalf("start: %v\n%s", err, out)
+		}
+		id := jobIDFrom(out)
+		deadline := time.Now().Add(90 * time.Second)
+		var card map[string]any
+		for time.Now().Before(deadline) {
+			list := app.perm.Pending(bot.ID)
+			if len(list) > 0 {
+				card = list[0]
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if card == nil || card["tool"] != "git_push" {
+			t.Fatalf("card %#v", card)
+		}
+		if card["persistent"] != true {
+			t.Fatalf("persistent %#v", card["persistent"])
+		}
+		if _, ok := card["deadline"]; ok {
+			t.Fatalf("deadline %#v", card["deadline"])
+		}
+		time.Sleep(500 * time.Millisecond)
+		if len(app.perm.Pending(bot.ID)) != 1 {
+			t.Fatal("background card expired with the prompt timeout")
+		}
+		cid, _ := card["id"].(string)
+		runID, _ := card["run_id"].(string)
+		if err := app.perm.DecideFor(bot.ID, runID, cid, permission.AllowOnce); err != nil {
+			t.Fatal(err)
+		}
+		job := waitJobDone(t, app, id)
+		log := readJobLog(t, app, bot.ID, id)
+		if job.Status != store.JobExited || job.ExitCode == nil || *job.ExitCode != 0 || !strings.Contains(log, "git push sent") || !strings.Contains(log, "PUSH_DONE") {
+			t.Fatalf("job %+v\n%s", job, log)
+		}
+		if evals.Load() == 0 {
+			t.Fatal("card path did not call Evaluate")
+		}
+		assertNoPushSecret(t, app, auditPath, out+"\n"+log, logBody(t, srv.URL))
+	})
 }
 
 func approveGitPush(app *App, botID string) <-chan error {

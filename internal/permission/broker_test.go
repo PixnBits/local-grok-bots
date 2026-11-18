@@ -196,6 +196,50 @@ func TestTimeoutDenies(t *testing.T) {
 	}
 }
 
+func TestPersistCardOutlivesPromptTimeout(t *testing.T) {
+	b := New(Options{UIPresent: func(string) bool { return true }})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan Outcome, 1)
+	go func() {
+		done <- b.Evaluate(ctx, policy.Permission{UIPrompts: true, PromptTimeout: 40 * time.Millisecond}, Request{
+			RunID: "run", BotID: "bot", Tool: "git_push", ForceAsk: true, Persist: true,
+		})
+	}()
+	var id string
+	deadline := time.Now().Add(2 * time.Second)
+	for id == "" && time.Now().Before(deadline) {
+		for _, item := range b.Pending("bot") {
+			if item["persistent"] != true {
+				t.Errorf("persistent %#v", item["persistent"])
+			}
+			if _, ok := item["deadline"]; ok {
+				t.Errorf("deadline %#v", item["deadline"])
+			}
+			id, _ = item["id"].(string)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if id == "" {
+		t.Fatal("no card")
+	}
+	time.Sleep(120 * time.Millisecond)
+	if len(b.Pending("bot")) != 1 {
+		t.Fatal("persistent card expired")
+	}
+	if err := b.DecideFor("bot", "run", id, AllowOnce); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case out := <-done:
+		if out.Decision != AllowOnce || out.Behavior != "allow" {
+			t.Fatalf("%+v", out)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("evaluate did not return")
+	}
+}
+
 func TestCancelDenies(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
