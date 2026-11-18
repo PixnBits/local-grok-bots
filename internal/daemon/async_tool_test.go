@@ -1061,7 +1061,7 @@ func runFlagOff(t *testing.T, clock bool) ([]model.ChatRequest, []string) {
 			t.Fatalf("request %d looks like an interim %#v", i, req.Messages)
 		}
 	}
-	for _, kind := range []string{"event_loop_batch", "event_loop_interim", "event_loop_interim_capped", "event_loop_interim_capped_suppressed"} {
+	for _, kind := range []string{"event_loop_batch", "event_loop_interim", "event_loop_interim_capped", "event_loop_interim_capped_suppressed", "event_loop_interim_refused"} {
 		ev, err := app.st.ListLog(bot.ID, kind, "", 10)
 		if err != nil {
 			t.Fatal(err)

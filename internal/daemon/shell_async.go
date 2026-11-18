@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"errors"
+	"net"
+	"regexp"
 	"strings"
 
 	"github.com/PixnBits/local-grok-bots/internal/audit"
@@ -149,7 +151,7 @@ func (a *App) execShellAsync(ctx context.Context, bot store.Bot, runID, name str
 			retire(false)
 		case n := <-w.C():
 			if budget.refuseAll {
-				a.noteNilRefusal(bot.ID)
+				a.noteNilRefusal(bot.ID, runID)
 				continue
 			}
 			fresh, ids := a.interimFresh(bot.ID, through, seen)
@@ -158,20 +160,28 @@ func (a *App) execShellAsync(ctx context.Context, bot store.Bot, runID, name str
 			// that is already running just to refuse a new one. A
 			// non-positive cap is not unlimited: it refuses the start.
 			// Once the cap is reached, the window is not an
-			// event_loop_batch row. Each such window counts toward the
-			// suppressed row written when the shell ends. The first one
-			// also writes the single capped row.
+			// event_loop_batch row. A window with no new input is not a
+			// skipped batch: it does not write the capped row and it does
+			// not count toward the suppressed row. The first skipped batch
+			// that has new input writes the single capped row and is counted.
+			// Later ones only count. The suppressed row is written when the
+			// shell ends, and only if a capped row was written.
 			capN := a.maxInterim()
 			if capN <= 0 || budget.starts >= capN || budget.cappedLogged {
-				if uncovered > 0 && !budget.cappedLogged {
-					a.log(bot.ID, "event_loop_interim_capped", map[string]any{
-						"run_id": runID,
-						"count":  budget.starts,
-						"cap":    capN,
-					})
-					budget.cappedLogged = true
+				if uncovered > 0 {
+					if !budget.cappedLogged {
+						a.log(bot.ID, "event_loop_interim_capped", map[string]any{
+							"run_id": runID,
+							"count":  budget.starts,
+							"cap":    capN,
+						})
+						budget.cappedLogged = true
+					}
+					a.addSuppressed(budget)
 				}
-				a.addSuppressed(budget)
+				if a.interimCapSeen != nil {
+					a.interimCapSeen(uncovered)
+				}
 				continue
 			}
 			a.log(bot.ID, "event_loop_batch", map[string]any{"run_id": runID, "count": n})
@@ -192,6 +202,8 @@ func (a *App) execShellAsync(ctx context.Context, bot store.Bot, runID, name str
 // interimBudgetFor returns the cap state for this run id. The same id,
 // including an approval resume, keeps the counters. A different run id
 // replaces them. The run goroutine is the only writer of those fields.
+// An empty run id is not a fresh cap. It returns a refuse-all budget
+// that is not stored on the bot.
 func (a *App) interimBudgetFor(botID, runID string) *interimBudget {
 	if a == nil || runID == "" {
 		return &interimBudget{refuseAll: true}
@@ -235,17 +247,21 @@ func (a *App) takeSuppressed(budget *interimBudget) (n, starts int) {
 	return n, starts
 }
 
-func (a *App) noteNilRefusal(botID string) {
+func (a *App) noteNilRefusal(botID, runID string) {
 	if a == nil {
 		return
 	}
+	count := 0
 	a.rtMu.Lock()
-	defer a.rtMu.Unlock()
-	st := a.loops[botID]
-	if st == nil {
-		return
+	if st := a.loops[botID]; st != nil {
+		st.nilRefused++
+		count = st.nilRefused
 	}
-	st.nilRefused++
+	a.rtMu.Unlock()
+	a.log(botID, "event_loop_interim_refused", map[string]any{
+		"run_id": runID,
+		"count":  count,
+	})
 }
 
 // interimAuditError is the class and the short message stored on an
@@ -264,16 +280,37 @@ func interimAuditError(err error) (class, msg string) {
 	case errors.Is(err, context.Canceled):
 		class = "cancelled"
 	}
-	return class, clip(redactInterimErrorText(err.Error()), interimErrorLimit)
+	return class, clipUTF8(redactInterimErrorText(err.Error()), interimErrorLimit)
 }
 
 func redactInterimErrorText(s string) string {
-	return stripAbsPaths(audit.RedactText(s))
+	s = audit.RedactText(s)
+	s = normalizeInterimPaths(s)
+	s = stripInterimHosts(s)
+	return stripAbsPaths(s)
+}
+
+// normalizeInterimPaths turns JSON-escaped and percent-encoded separators
+// into the separators stripAbsPaths already scans.
+func normalizeInterimPaths(s string) string {
+	s = strings.ReplaceAll(s, `\/`, `/`)
+	s = strings.ReplaceAll(s, "%2F", "/")
+	s = strings.ReplaceAll(s, "%2f", "/")
+	s = strings.ReplaceAll(s, "%5C", `\`)
+	s = strings.ReplaceAll(s, "%5c", `\`)
+	return s
 }
 
 func isPathBoundary(c byte) bool {
 	switch c {
-	case ' ', '\t', '\n', '\r', '"', '\'', '`', '=', '(', ',', ':', '[', '<':
+	case ' ', '\t', '\n', '\r',
+		'"', '\'', '`',
+		'=', '(', ')',
+		',', ';', ':',
+		'[', ']', '<', '>',
+		'{', '}',
+		'|', '!', '.',
+		'/', '\\', '@':
 		return true
 	default:
 		return false
@@ -303,22 +340,21 @@ func isDrivePath(s string, i int) bool {
 	return s[i+1] == ':' && (s[i+2] == '\\' || s[i+2] == '/')
 }
 
-// stripAbsPaths replaces absolute paths. A token that begins with a slash,
-// or a drive letter and a slash, is one path.
+// stripAbsPaths replaces absolute paths, UNC paths, tilde paths, and a
+// relative home/… path. A token that begins with a slash, or a drive
+// letter and a slash, is one path. '.' starts a path and does not end
+// one, so a dotted absolute path stays one token.
 func stripAbsPaths(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
-		if isDrivePath(s, i) {
-			j := i + 3
-			for j < len(s) && !isPathEnd(s[j]) {
-				j++
-			}
+		switch {
+		case isDrivePath(s, i), isUNC(s, i), isTildePath(s, i), isHomeRel(s, i):
+			j := consumePath(s, i)
 			b.WriteString("[path]")
 			i = j
 			continue
-		}
-		if s[i] == '/' && (i == 0 || isPathBoundary(s[i-1])) {
+		case s[i] == '/' && (i == 0 || isPathBoundary(s[i-1])):
 			j := i + 1
 			for j < len(s) && !isPathEnd(s[j]) {
 				j++
@@ -333,6 +369,141 @@ func stripAbsPaths(s string) string {
 		i++
 	}
 	return b.String()
+}
+
+func consumePath(s string, i int) int {
+	j := i
+	for j < len(s) && !isPathEnd(s[j]) {
+		j++
+	}
+	if j == i {
+		return i + 1
+	}
+	return j
+}
+
+func isUNC(s string, i int) bool {
+	if i+2 >= len(s) || s[i] != '\\' || s[i+1] != '\\' {
+		return false
+	}
+	if i > 0 && !isPathBoundary(s[i-1]) {
+		return false
+	}
+	return !isPathEnd(s[i+2]) && s[i+2] != '\\'
+}
+
+func isTildePath(s string, i int) bool {
+	if i+2 >= len(s) || s[i] != '~' {
+		return false
+	}
+	if i > 0 && !isPathBoundary(s[i-1]) {
+		return false
+	}
+	if s[i+1] != '/' && s[i+1] != '\\' {
+		return false
+	}
+	return !isPathEnd(s[i+2])
+}
+
+func isHomeRel(s string, i int) bool {
+	if i > 0 && !isPathBoundary(s[i-1]) {
+		return false
+	}
+	rest := s[i:]
+	sep := 0
+	switch {
+	case strings.HasPrefix(rest, "home/"):
+		sep = len("home/")
+	case strings.HasPrefix(rest, `home\`):
+		sep = len(`home\`)
+	default:
+		return false
+	}
+	return sep < len(rest) && !isPathEnd(rest[sep])
+}
+
+var (
+	dialHostRe    = regexp.MustCompile(`(?i)\bdial\s+(?:tcp|udp)6?\s+(\[[^\]]+\]|[A-Za-z0-9._-]+)(:\d+)?`)
+	lookupHostRe  = regexp.MustCompile(`(?i)(\blookup\s+)(\S+)`)
+	atHostRe      = regexp.MustCompile(`@([A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)`)
+	ipv4Re        = regexp.MustCompile(`(?:^|[^\d])((?:\d{1,3}\.){3}\d{1,3})(?:[^\d]|$)`)
+	ipv6BracketRe = regexp.MustCompile(`(?i)\[((?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4})\]`)
+	ipv6Re        = regexp.MustCompile(`(?i)(?:^|[^0-9a-f:])((?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4})(?:[^0-9a-f:]|$)`)
+)
+
+// stripInterimHosts replaces IP literals and the host in lookup, dial, and
+// user@host with [host]. Paths are stripped afterwards.
+func stripInterimHosts(s string) string {
+	s = stripDialHosts(s)
+	s = replaceGroup(s, lookupHostRe, 2, func(string) bool { return true })
+	s = replaceGroup(s, atHostRe, 1, func(string) bool { return true })
+	s = replaceGroup(s, ipv4Re, 1, isIPv4Literal)
+	s = replaceGroup(s, ipv6BracketRe, 0, func(tok string) bool {
+		inner := strings.Trim(tok, "[]")
+		return isIPv6Literal(inner)
+	})
+	s = replaceGroup(s, ipv6Re, 1, isIPv6Literal)
+	return s
+}
+
+func stripDialHosts(s string) string {
+	return dialHostRe.ReplaceAllStringFunc(s, func(m string) string {
+		sub := dialHostRe.FindStringSubmatch(m)
+		if len(sub) < 2 || sub[1] == "" {
+			return m
+		}
+		port := ""
+		if len(sub) > 2 {
+			port = sub[2]
+		}
+		prefix := strings.TrimSuffix(m, sub[1]+port)
+		return prefix + "[host]" + port
+	})
+}
+
+func replaceGroup(s string, re *regexp.Regexp, group int, keep func(string) bool) string {
+	idxs := re.FindAllStringSubmatchIndex(s, -1)
+	if len(idxs) == 0 {
+		return s
+	}
+	var b strings.Builder
+	last := 0
+	wrote := false
+	for _, loc := range idxs {
+		if group*2+1 >= len(loc) {
+			continue
+		}
+		g0, g1 := loc[group*2], loc[group*2+1]
+		if g0 < 0 || g1 < g0 || g0 < last {
+			continue
+		}
+		tok := s[g0:g1]
+		if keep != nil && !keep(tok) {
+			continue
+		}
+		b.WriteString(s[last:g0])
+		b.WriteString("[host]")
+		last = g1
+		wrote = true
+	}
+	if !wrote {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+func isIPv4Literal(tok string) bool {
+	ip := net.ParseIP(tok)
+	return ip != nil && ip.To4() != nil
+}
+
+func isIPv6Literal(tok string) bool {
+	if i := strings.IndexByte(tok, '%'); i >= 0 {
+		tok = tok[:i]
+	}
+	ip := net.ParseIP(tok)
+	return ip != nil && ip.To4() == nil
 }
 
 // maxInterim is the per-run cap on interim starts. A positive test override
