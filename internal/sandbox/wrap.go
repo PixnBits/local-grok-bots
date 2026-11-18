@@ -227,6 +227,7 @@ pos=
 remote_sub=
 remote_names=
 remote_npos=0
+remote_queries=0
 deny_allow() {
   case "$1" in
     *"$nl"*)
@@ -2346,6 +2347,11 @@ case "$sub" in
     run "$@"
     ;;
 esac
+# Both the option parse and the later remote-add scan call this.
+# Either mark is enough for the grant decision.
+mark_remote_fetch() {
+  remote_fetches=1
+}
 # remote add long options, matched the way git matches a unique prefix.
 # track and master take a value (the next word, or the text after "=").
 # mirror takes only an optional "=value". The next word is not that value.
@@ -2389,7 +2395,7 @@ remote_add_long() {
       fi
       # A unique prefix of fetch is a fetch for the bridge decision.
       if [ "$ra_hit" = fetch ]; then
-        remote_fetches=1
+        mark_remote_fetch
       fi
       ;;
     mirror)
@@ -2410,7 +2416,7 @@ remote_add_short() {
   esac
   # A short cluster that contains f counts as a fetch, including -tf and -ft.
   case "$1" in
-    *f*) remote_fetches=1 ;;
+    *f*) mark_remote_fetch ;;
   esac
   ra_rest=${1#-}
   while [ -n "$ra_rest" ]; do
@@ -2434,32 +2440,33 @@ remote_add_short() {
 }
 # Long options for one subcommand, from that command's git help.
 # kind is flag, value, or opt. opt takes only an attached "=value".
-# A unique prefix selects one option. Unknown and ambiguous spellings do not.
+# An exact name wins. A unique prefix selects one option. Unknown and ambiguous spellings do not.
 long_candidates() {
   case "$1" in
     clone)
-      printf '%s' 'verbose:flag no-verbose:flag quiet:flag no-quiet:flag progress:flag no-progress:flag reject-shallow:flag no-reject-shallow:flag no-checkout:flag checkout:flag bare:flag no-bare:flag mirror:flag no-mirror:flag local:flag no-local:flag no-hardlinks:flag hardlinks:flag shared:flag no-shared:flag recurse-submodules:opt no-recurse-submodules:flag recursive:opt no-recursive:flag jobs:value no-jobs:flag template:value no-template:flag reference:value no-reference:flag reference-if-able:value no-reference-if-able:flag dissociate:flag no-dissociate:flag origin:value no-origin:flag branch:value no-branch:flag revision:value no-revision:flag upload-pack:value no-upload-pack:flag depth:value no-depth:flag shallow-since:value no-shallow-since:flag shallow-exclude:value no-shallow-exclude:flag single-branch:flag no-single-branch:flag tags:flag no-tags:flag shallow-submodules:flag no-shallow-submodules:flag separate-git-dir:value no-separate-git-dir:flag ref-format:value no-ref-format:flag config:value no-config:flag server-option:value no-server-option:flag ipv4:flag ipv6:flag filter:value no-filter:flag also-filter-submodules:flag no-also-filter-submodules:flag remote-submodules:flag no-remote-submodules:flag sparse:flag no-sparse:flag bundle-uri:value no-bundle-uri:flag'
+      printf '%s' 'verbose:flag no-verbose:flag quiet:flag no-quiet:flag progress:flag no-progress:flag reject-shallow:flag no-reject-shallow:flag no-checkout:flag checkout:flag bare:flag no-bare:flag naked:flag no-naked:flag mirror:flag no-mirror:flag local:flag no-local:flag no-hardlinks:flag hardlinks:flag shared:flag no-shared:flag recurse-submodules:opt no-recurse-submodules:flag recursive:opt no-recursive:flag jobs:value no-jobs:flag template:value no-template:flag reference:value no-reference:flag reference-if-able:value no-reference-if-able:flag dissociate:flag no-dissociate:flag origin:value no-origin:flag branch:value no-branch:flag revision:value no-revision:flag upload-pack:value no-upload-pack:flag depth:value no-depth:flag shallow-since:value no-shallow-since:flag shallow-exclude:value no-shallow-exclude:flag single-branch:flag no-single-branch:flag tags:flag no-tags:flag shallow-submodules:flag no-shallow-submodules:flag separate-git-dir:value no-separate-git-dir:flag ref-format:value no-ref-format:flag config:value no-config:flag server-option:value no-server-option:flag ipv4:flag ipv6:flag filter:value no-filter:flag also-filter-submodules:flag no-also-filter-submodules:flag remote-submodules:flag no-remote-submodules:flag sparse:flag no-sparse:flag bundle-uri:value no-bundle-uri:flag'
       ;;
     fetch)
       printf '%s' 'verbose:flag no-verbose:flag quiet:flag no-quiet:flag all:flag no-all:flag set-upstream:flag no-set-upstream:flag append:flag no-append:flag atomic:flag no-atomic:flag upload-pack:value no-upload-pack:flag force:flag no-force:flag multiple:flag no-multiple:flag tags:flag no-tags:flag jobs:value no-jobs:flag prefetch:flag no-prefetch:flag prune:flag no-prune:flag prune-tags:flag no-prune-tags:flag recurse-submodules:opt no-recurse-submodules:flag dry-run:flag no-dry-run:flag porcelain:flag no-porcelain:flag write-fetch-head:flag no-write-fetch-head:flag keep:flag no-keep:flag update-head-ok:flag no-update-head-ok:flag progress:flag no-progress:flag depth:value no-depth:flag shallow-since:value no-shallow-since:flag shallow-exclude:value no-shallow-exclude:flag deepen:value no-deepen:flag unshallow:flag refetch:flag update-shallow:flag no-update-shallow:flag refmap:value server-option:value no-server-option:flag ipv4:flag ipv6:flag negotiation-tip:value no-negotiation-tip:flag negotiate-only:flag no-negotiate-only:flag filter:value no-filter:flag auto-maintenance:flag no-auto-maintenance:flag auto-gc:flag no-auto-gc:flag show-forced-updates:flag no-show-forced-updates:flag write-commit-graph:flag no-write-commit-graph:flag stdin:flag no-stdin:flag'
       ;;
     pull)
-      printf '%s' 'verbose:flag no-verbose:flag quiet:flag no-quiet:flag progress:flag no-progress:flag recurse-submodules:opt no-recurse-submodules:flag rebase:opt no-rebase:flag stat:flag no-stat:flag compact-summary:flag no-compact-summary:flag log:opt no-log:flag signoff:opt no-signoff:flag squash:flag no-squash:flag commit:flag no-commit:flag edit:flag no-edit:flag cleanup:value no-cleanup:flag ff:flag no-ff:flag ff-only:flag verify:flag no-verify:flag verify-signatures:flag no-verify-signatures:flag autostash:flag no-autostash:flag strategy:value no-strategy:flag strategy-option:value no-strategy-option:flag gpg-sign:opt no-gpg-sign:flag allow-unrelated-histories:flag no-allow-unrelated-histories:flag all:flag no-all:flag append:flag no-append:flag upload-pack:value no-upload-pack:flag force:flag no-force:flag tags:flag no-tags:flag prune:flag no-prune:flag jobs:opt no-jobs:flag dry-run:flag no-dry-run:flag keep:flag no-keep:flag depth:value no-depth:flag shallow-since:value no-shallow-since:flag shallow-exclude:value no-shallow-exclude:flag deepen:value no-deepen:flag unshallow:flag update-shallow:flag no-update-shallow:flag refmap:value server-option:value no-server-option:flag ipv4:flag no-ipv4:flag ipv6:flag no-ipv6:flag negotiation-tip:value no-negotiation-tip:flag show-forced-updates:flag no-show-forced-updates:flag set-upstream:flag no-set-upstream:flag'
+      printf '%s' 'verbose:flag no-verbose:flag quiet:flag no-quiet:flag progress:flag no-progress:flag recurse-submodules:opt no-recurse-submodules:flag rebase:opt no-rebase:flag stat:flag no-stat:flag summary:flag no-summary:flag compact-summary:flag no-compact-summary:flag log:opt no-log:flag signoff:opt no-signoff:flag squash:flag no-squash:flag commit:flag no-commit:flag edit:flag no-edit:flag cleanup:value no-cleanup:flag ff:flag no-ff:flag ff-only:flag verify:flag no-verify:flag verify-signatures:flag no-verify-signatures:flag autostash:flag no-autostash:flag strategy:value no-strategy:flag strategy-option:value no-strategy-option:flag gpg-sign:opt no-gpg-sign:flag allow-unrelated-histories:flag no-allow-unrelated-histories:flag all:flag no-all:flag append:flag no-append:flag upload-pack:value no-upload-pack:flag force:flag no-force:flag tags:flag no-tags:flag prune:flag no-prune:flag jobs:opt no-jobs:flag dry-run:flag no-dry-run:flag keep:flag no-keep:flag depth:value no-depth:flag shallow-since:value no-shallow-since:flag shallow-exclude:value no-shallow-exclude:flag deepen:value no-deepen:flag unshallow:flag update-shallow:flag no-update-shallow:flag refmap:value server-option:value no-server-option:flag ipv4:flag no-ipv4:flag ipv6:flag no-ipv6:flag negotiation-tip:value no-negotiation-tip:flag show-forced-updates:flag no-show-forced-updates:flag set-upstream:flag no-set-upstream:flag'
       ;;
     ls-remote)
-      printf '%s' 'quiet:flag no-quiet:flag upload-pack:value no-upload-pack:flag tags:flag no-tags:flag branches:flag no-branches:flag refs:flag no-refs:flag get-url:flag no-get-url:flag sort:value no-sort:flag exit-code:flag no-exit-code:flag symref:flag no-symref:flag server-option:value no-server-option:flag'
+      printf '%s' 'quiet:flag no-quiet:flag upload-pack:value no-upload-pack:flag tags:flag no-tags:flag branches:flag no-branches:flag heads:flag no-heads:flag refs:flag no-refs:flag get-url:flag no-get-url:flag sort:value no-sort:flag exit-code:flag no-exit-code:flag symref:flag no-symref:flag server-option:value no-server-option:flag'
       ;;
     sm-add)
-      printf '%s' 'branch:value force:flag quiet:flag progress:flag reference:value ref-format:value dissociate:flag name:value depth:value'
+      printf '%s' 'branch:value no-branch:flag force:flag no-force:flag quiet:flag no-quiet:flag progress:flag no-progress:flag reference:value no-reference:flag ref-format:value no-ref-format:flag dissociate:flag no-dissociate:flag name:value no-name:flag depth:value no-depth:flag'
       ;;
     sm-update)
-      printf '%s' 'quiet:flag verbose:flag progress:flag init:flag require-init:flag remote:flag no-fetch:flag force:flag rebase:flag ref-format:value reference:value dissociate:flag merge:flag recursive:flag checkout:flag recommend-shallow:flag no-recommend-shallow:flag depth:value jobs:value single-branch:flag no-single-branch:flag filter:value'
+      printf '%s' 'quiet:flag no-quiet:flag verbose:flag progress:flag no-progress:flag init:flag no-init:flag require-init:flag no-require-init:flag remote:flag no-remote:flag fetch:flag no-fetch:flag force:flag no-force:flag rebase:flag no-rebase:flag ref-format:value no-ref-format:flag reference:value no-reference:flag dissociate:flag no-dissociate:flag merge:flag no-merge:flag recursive:flag no-recursive:flag checkout:flag no-checkout:flag recommend-shallow:flag no-recommend-shallow:flag depth:value no-depth:flag jobs:value no-jobs:flag single-branch:flag no-single-branch:flag filter:value no-filter:flag'
       ;;
     *)
       ;;
   esac
 }
 # Sets lr_canon and lr_kind. Returns 1 when $2 is unknown or ambiguous.
+# An exact option name wins, including when that name is a prefix of another.
 long_resolve() {
   lr_canon=
   lr_kind=
@@ -2479,6 +2486,11 @@ long_resolve() {
     lr_opt=${lr_cand%%:*}
     lr_k=${lr_cand#*:}
     case "$lr_opt" in
+      "$2")
+        lr_canon=$lr_opt
+        lr_kind=$lr_k
+        return 0
+        ;;
       "$2"*)
         lr_hits=$((lr_hits + 1))
         lr_canon=$lr_opt
@@ -2489,19 +2501,9 @@ long_resolve() {
   [ "$lr_hits" -eq 1 ]
 }
 # Apply one resolved long option. arg, sv_name, sv_eq, lr_canon, and lr_kind are set.
+# upload-pack, exec, and multiple are refused by refuse_command_opt.
+# recurse-submodules, recursive, and shallow-submodules are refused by refuse_submodule_opt.
 long_apply() {
-  case "$lr_canon" in
-    upload-pack|exec|multiple)
-      say_option
-      ;;
-    recurse-submodules|recursive|shallow-submodules)
-      if [ "$sub" = clone ] || [ "$sub" = fetch ] || [ "$sub" = pull ]; then
-        echo "git ${sub} denied: submodule path is outside the workspace" >&2
-        printf '%s\n' "deny git ${sub}" >> "$log"
-        exit 1
-      fi
-      ;;
-  esac
   case "$lr_canon" in
     config|config-env)
       if [ "$sv_eq" = 1 ]; then
@@ -2602,6 +2604,7 @@ long_closed() {
   if [ "$la_cmd" = clone ] && [ "$sv_name" = object-format ]; then
     return 0
   fi
+  # A long option name is letters, digits, and "-".
   case "$sv_name" in
     *[!A-Za-z0-9-]*)
       say_option
@@ -2612,6 +2615,145 @@ long_closed() {
   fi
   long_apply
   return 0
+}
+# 0 when set-head will query the named remote.
+# -a, a short cluster that contains a, and a unique prefix of --auto do.
+# --delete and --no-auto do not.
+set_head_queries() {
+  case "$1" in
+    -a)
+      return 0
+      ;;
+    -[A-Za-z]*)
+      case "$1" in
+        *a*) return 0 ;;
+      esac
+      return 1
+      ;;
+    --*=*)
+      return 1
+      ;;
+    --*)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  sh_name=${1#--}
+  case "$sh_name" in
+    ""|*[!A-Za-z0-9-]*) return 1 ;;
+  esac
+  for sh_cand in auto no-auto delete no-delete; do
+    if [ "$sh_cand" = "$sh_name" ]; then
+      [ "$sh_cand" = auto ]
+      return
+    fi
+  done
+  sh_hits=0
+  sh_hit=
+  for sh_cand in auto no-auto delete no-delete; do
+    case "$sh_cand" in
+      "$sh_name"*)
+        sh_hits=$((sh_hits + 1))
+        sh_hit=$sh_cand
+        ;;
+    esac
+  done
+  [ "$sh_hits" -eq 1 ] && [ "$sh_hit" = auto ]
+}
+# Sets ar_canon and ar_kind. Returns 1 when $1 is unknown or ambiguous.
+# An exact option name wins. kind remote contacts that repository.
+# The local parser consumes only remote, output, and exec. Other options
+# are left where they are, so a following remote option is still seen.
+archive_resolve() {
+  ar_canon=
+  ar_kind=
+  ar_hits=0
+  ar_rest='output:value no-output:flag exec:value no-exec:flag remote:remote no-remote:flag'
+  while [ -n "$ar_rest" ]; do
+    case "$ar_rest" in
+      *" "*)
+        ar_cand=${ar_rest%% *}
+        ar_rest=${ar_rest#* }
+        ;;
+      *)
+        ar_cand=$ar_rest
+        ar_rest=
+        ;;
+    esac
+    ar_opt=${ar_cand%%:*}
+    ar_k=${ar_cand#*:}
+    case "$ar_opt" in
+      "$1")
+        ar_canon=$ar_opt
+        ar_kind=$ar_k
+        return 0
+        ;;
+      "$1"*)
+        ar_hits=$((ar_hits + 1))
+        ar_canon=$ar_opt
+        ar_kind=$ar_k
+        ;;
+    esac
+  done
+  [ "$ar_hits" -eq 1 ]
+}
+# archive --remote names a repository. A unique prefix is the same option.
+# That form is a fetch for the grant decision.
+# output and exec take the next word only when their name is exact.
+archive_remote() {
+  ar_prev=
+  for arg in "$@"; do
+    if [ -n "$ar_prev" ]; then
+      if [ "$ar_prev" = remote ]; then
+        vet "$arg"
+      fi
+      ar_prev=
+      continue
+    fi
+    case "$arg" in
+      --)
+        break
+        ;;
+      -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path|--config|--attr-source)
+        ar_prev=skip
+        continue
+        ;;
+      --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*|--config=*|--attr-source=*|-c*)
+        continue
+        ;;
+      -o)
+        ar_prev=skip
+        continue
+        ;;
+      -o*)
+        continue
+        ;;
+      --*=*)
+        ar_body=${arg#--}
+        ar_name=${ar_body%%=*}
+        if archive_resolve "$ar_name" && [ "$ar_kind" = remote ]; then
+          vet "${arg#*=}"
+        fi
+        ;;
+      --*)
+        ar_name=${arg#--}
+        if archive_resolve "$ar_name"; then
+          case "$ar_kind" in
+            remote) ar_prev=remote ;;
+            value)
+              if [ "$ar_name" = "$ar_canon" ]; then
+                ar_prev=skip
+              fi
+              ;;
+          esac
+        fi
+        ;;
+    esac
+  done
+  if [ "$need_bridge" = 1 ]; then
+    ensure_bridge || exit 1
+  fi
 }
 # 0 when $1 is a unique prefix of the remote-add option fetch.
 remote_add_is_fetch() {
@@ -2760,6 +2902,7 @@ case "$sub" in
     prev=
     seen_sub=
     arg_dd=
+    # end_opts starts clear so an earlier word cannot end option parsing.
     end_opts=
     for arg in "$@"; do
       if [ -n "$prev" ]; then
@@ -2784,6 +2927,12 @@ case "$sub" in
       # After "--", remote add, remote rename, and remote remove treat later words as names.
       # Every other command still refuses a word that starts with "-".
       if [ "$arg_dd" != 1 ]; then
+      # set-head --auto queries the named remote. That is a fetch for the grant decision.
+      if [ "$sub" = remote ] && [ "$remote_sub" = set-head ]; then
+        if set_head_queries "$arg"; then
+          remote_queries=1
+        fi
+      fi
       # remote add: only the options git accepts. A unique prefix is that option.
       # Anything else that is a short cluster or a long option is refused here,
       # before a name is read. A word that is not an option, including a lone "-",
@@ -2918,18 +3067,6 @@ case "$sub" in
           fi
           sv_body=${arg#--}
           sv_name=${sv_body%%=*}
-          # A long option that is a prefix of --origin is that option.
-          # Only the exact --origin spelling is handled above. --no-origin is not a prefix.
-          if [ "$sub" = clone ]; then
-            case "$sv_name" in
-              ""|origin|*[!A-Za-z0-9-]*) ;;
-              *)
-                case "origin" in
-                  "$sv_name"*) say_option ;;
-                esac
-                ;;
-            esac
-          fi
           # submodule add: --name and --ref-format take a value. It is not the URL.
           # -b, --branch, --depth, -j, --jobs, --reference, and --reference-if-able
           # are consumed by the shared option lists above. A "=" form does not
@@ -3156,14 +3293,14 @@ case "$sub" in
                 ""|*[!A-Za-z0-9-]*) ;;
                 *)
                   if remote_add_is_fetch "$rf_name"; then
-                    remote_fetches=1
+                    mark_remote_fetch
                   fi
                   ;;
               esac
               ;;
             -[A-Za-z]*)
               case "$arg" in
-                *f*) remote_fetches=1 ;;
+                *f*) mark_remote_fetch ;;
               esac
               ;;
           esac
@@ -3172,7 +3309,13 @@ case "$sub" in
           need_bridge=0
         fi
         ;;
-      set-url|remove|rm|rename|get-url|set-head|set-branches)
+      set-head)
+        # Without --auto the command does not contact the remote.
+        if [ "$remote_queries" != 1 ]; then
+          need_bridge=0
+        fi
+        ;;
+      set-url|remove|rm|rename|get-url|set-branches)
         need_bridge=0
         ;;
     esac
@@ -3181,6 +3324,9 @@ case "$sub" in
     fi
     ;;
 esac
+if [ "$sub" = archive ]; then
+  archive_remote "$@"
+fi
 # Resolve a ./ or ../ submodule URL against the superproject origin URL.
 submodule_resolve_rel() {
   srr_origin=$1

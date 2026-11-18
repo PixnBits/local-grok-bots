@@ -363,13 +363,20 @@ next word or as `=value`. `mirror` takes only an optional `=value`. A unique
 prefix is the same option. A flag does not accept `=value`. Any other short
 cluster or long option is refused before a name is read. A unique prefix of
 `fetch`, and a short cluster that includes `f`, counts as a fetch for the
-bridge decision, the same as `--fetch` and `-f`. After `--`, `remote add` and
-`remote rename` treat every remaining word as a name, including a word that
-starts with `-`. `remote remove` still checks that name. Other option-checked
+bridge decision, the same as `--fetch` and `-f`. Some `remote set-head` and
+`archive` option forms that contact a GitHub remote are treated as a fetch
+for the grant/bridge decision, including unique prefixes. After `--`,
+`remote add` and `remote rename` treat every remaining word as a name,
+including a word that starts with `-`. `remote remove` still checks that name. Other option-checked
 commands, including `pull` and `remote update`, still refuse a word that
 starts with `-` after `--`. `clone`, `fetch`, `pull`, `ls-remote`, and
-`submodule add` and `submodule update` resolve a long option by unique prefix
-against that command's options. An unknown or ambiguous spelling is refused.
+`submodule add` and `submodule update` resolve a long option against that
+command's options. An exact option name wins. A unique prefix of one option
+is that option. An unknown or ambiguous spelling is refused. Those lists
+include the negations and aliases the command accepts, including
+`fetch --prune`, `pull --ff`, `pull --summary`, `ls-remote --heads`,
+`clone --no-reference`, the `--no-*` forms of `submodule add` and
+`submodule update`, and `submodule update --fetch`.
 A resolved `config` option uses the same assignment check as `--config`.
 `clone -o`, `--origin`, `--origin=`, and an attached `-o` value are checked
 with the same name rule. A long option whose name is a prefix of `origin`,
