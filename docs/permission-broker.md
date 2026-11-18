@@ -360,14 +360,22 @@ value) and `t` and `m` (a value, either attached or the next word), including
 a cluster. Long options are `fetch`, `tags`, `track`, `master`, and `mirror`,
 plus the `no-` forms git accepts. `track` and `master` take a value as the
 next word or as `=value`. `mirror` takes only an optional `=value`. A unique
-prefix is the same option. Any other short cluster or long option is refused
-before a name is read. After `--`, every remaining word is a positional and is
-checked as a name, including a word that starts with `-`. `clone -o`,
-`--origin`, `--origin=`, and an attached `-o` value are checked with the same
-name rule. A long option whose name is a prefix of `origin`, other than the
-exact spelling `--origin`, is refused. `--no-origin` does not take a name.
-Later words
-of `set-head` and `set-branches` are branch names and may contain `/`.
+prefix is the same option. A flag does not accept `=value`. Any other short
+cluster or long option is refused before a name is read. A unique prefix of
+`fetch`, and a short cluster that includes `f`, counts as a fetch for the
+bridge decision, the same as `--fetch` and `-f`. After `--`, `remote add` and
+`remote rename` treat every remaining word as a name, including a word that
+starts with `-`. `remote remove` still checks that name. Other option-checked
+commands, including `pull` and `remote update`, still refuse a word that
+starts with `-` after `--`. `clone`, `fetch`, `pull`, `ls-remote`, and
+`submodule add` and `submodule update` resolve a long option by unique prefix
+against that command's options. An unknown or ambiguous spelling is refused.
+A resolved `config` option uses the same assignment check as `--config`.
+`clone -o`, `--origin`, `--origin=`, and an attached `-o` value are checked
+with the same name rule. A long option whose name is a prefix of `origin`,
+other than the exact spelling `--origin`, is refused. `--no-origin` does not
+take a name. A unique prefix of `push`'s `repo` option is checked for a
+leading `~` the same way as `--repo` and `--repo=`. Later words of `set-head` and `set-branches` are branch names and may contain `/`.
 `remote prune`, `remote update`, and
 `remote show` also read and check the stored URL of every remote name they
 list. A no-argument `fetch` or `pull` checks every other remote without arming

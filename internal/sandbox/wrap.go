@@ -1259,6 +1259,7 @@ colon_remote() {
 }
 vet() {
   case "$1" in
+    # Kept beside the positional and --repo checks.
     ~*) say_tilde ;;
     *"$nl"*)
       say_deny "$1"
@@ -1301,6 +1302,7 @@ vet() {
 }
 vet_local() {
   case "$1" in
+    # Kept beside the positional and --repo checks.
     ~*) say_tilde ;;
   esac
   if colon_remote "$1"; then
@@ -1317,6 +1319,7 @@ vet_local() {
 }
 check_local_arg() {
   case "$1" in
+    # Kept beside the positional and --repo checks.
     ~*) say_tilde ;;
   esac
   if colon_remote "$1"; then
@@ -2359,6 +2362,7 @@ remote_add_long() {
   esac
   ra_hits=0
   ra_kind=
+  ra_hit=
   for ra_cand in fetch:flag tags:flag track:value master:value mirror:mirror no-fetch:flag no-tags:flag no-track:flag no-master:flag no-mirror:flag; do
     ra_opt=${ra_cand%%:*}
     ra_k=${ra_cand#*:}
@@ -2366,6 +2370,7 @@ remote_add_long() {
       "$ra_name"*)
         ra_hits=$((ra_hits + 1))
         ra_kind=$ra_k
+        ra_hit=$ra_opt
         ;;
     esac
   done
@@ -2381,6 +2386,10 @@ remote_add_long() {
     flag)
       if [ "$ra_eq" = 1 ]; then
         say_option
+      fi
+      # A unique prefix of fetch is a fetch for the bridge decision.
+      if [ "$ra_hit" = fetch ]; then
+        remote_fetches=1
       fi
       ;;
     mirror)
@@ -2398,6 +2407,10 @@ remote_add_short() {
   case "$1" in
     -[A-Za-z]*) ;;
     *) return 1 ;;
+  esac
+  # A short cluster that contains f counts as a fetch, including -tf and -ft.
+  case "$1" in
+    *f*) remote_fetches=1 ;;
   esac
   ra_rest=${1#-}
   while [ -n "$ra_rest" ]; do
@@ -2418,6 +2431,217 @@ remote_add_short() {
     esac
   done
   return 0
+}
+# Long options for one subcommand, from that command's git help.
+# kind is flag, value, or opt. opt takes only an attached "=value".
+# A unique prefix selects one option. Unknown and ambiguous spellings do not.
+long_candidates() {
+  case "$1" in
+    clone)
+      printf '%s' 'verbose:flag no-verbose:flag quiet:flag no-quiet:flag progress:flag no-progress:flag reject-shallow:flag no-reject-shallow:flag no-checkout:flag checkout:flag bare:flag no-bare:flag mirror:flag no-mirror:flag local:flag no-local:flag no-hardlinks:flag hardlinks:flag shared:flag no-shared:flag recurse-submodules:opt no-recurse-submodules:flag recursive:opt no-recursive:flag jobs:value no-jobs:flag template:value no-template:flag reference:value no-reference:flag reference-if-able:value no-reference-if-able:flag dissociate:flag no-dissociate:flag origin:value no-origin:flag branch:value no-branch:flag revision:value no-revision:flag upload-pack:value no-upload-pack:flag depth:value no-depth:flag shallow-since:value no-shallow-since:flag shallow-exclude:value no-shallow-exclude:flag single-branch:flag no-single-branch:flag tags:flag no-tags:flag shallow-submodules:flag no-shallow-submodules:flag separate-git-dir:value no-separate-git-dir:flag ref-format:value no-ref-format:flag config:value no-config:flag server-option:value no-server-option:flag ipv4:flag ipv6:flag filter:value no-filter:flag also-filter-submodules:flag no-also-filter-submodules:flag remote-submodules:flag no-remote-submodules:flag sparse:flag no-sparse:flag bundle-uri:value no-bundle-uri:flag'
+      ;;
+    fetch)
+      printf '%s' 'verbose:flag no-verbose:flag quiet:flag no-quiet:flag all:flag no-all:flag set-upstream:flag no-set-upstream:flag append:flag no-append:flag atomic:flag no-atomic:flag upload-pack:value no-upload-pack:flag force:flag no-force:flag multiple:flag no-multiple:flag tags:flag no-tags:flag jobs:value no-jobs:flag prefetch:flag no-prefetch:flag prune:flag no-prune:flag prune-tags:flag no-prune-tags:flag recurse-submodules:opt no-recurse-submodules:flag dry-run:flag no-dry-run:flag porcelain:flag no-porcelain:flag write-fetch-head:flag no-write-fetch-head:flag keep:flag no-keep:flag update-head-ok:flag no-update-head-ok:flag progress:flag no-progress:flag depth:value no-depth:flag shallow-since:value no-shallow-since:flag shallow-exclude:value no-shallow-exclude:flag deepen:value no-deepen:flag unshallow:flag refetch:flag update-shallow:flag no-update-shallow:flag refmap:value server-option:value no-server-option:flag ipv4:flag ipv6:flag negotiation-tip:value no-negotiation-tip:flag negotiate-only:flag no-negotiate-only:flag filter:value no-filter:flag auto-maintenance:flag no-auto-maintenance:flag auto-gc:flag no-auto-gc:flag show-forced-updates:flag no-show-forced-updates:flag write-commit-graph:flag no-write-commit-graph:flag stdin:flag no-stdin:flag'
+      ;;
+    pull)
+      printf '%s' 'verbose:flag no-verbose:flag quiet:flag no-quiet:flag progress:flag no-progress:flag recurse-submodules:opt no-recurse-submodules:flag rebase:opt no-rebase:flag stat:flag no-stat:flag compact-summary:flag no-compact-summary:flag log:opt no-log:flag signoff:opt no-signoff:flag squash:flag no-squash:flag commit:flag no-commit:flag edit:flag no-edit:flag cleanup:value no-cleanup:flag ff:flag no-ff:flag ff-only:flag verify:flag no-verify:flag verify-signatures:flag no-verify-signatures:flag autostash:flag no-autostash:flag strategy:value no-strategy:flag strategy-option:value no-strategy-option:flag gpg-sign:opt no-gpg-sign:flag allow-unrelated-histories:flag no-allow-unrelated-histories:flag all:flag no-all:flag append:flag no-append:flag upload-pack:value no-upload-pack:flag force:flag no-force:flag tags:flag no-tags:flag prune:flag no-prune:flag jobs:opt no-jobs:flag dry-run:flag no-dry-run:flag keep:flag no-keep:flag depth:value no-depth:flag shallow-since:value no-shallow-since:flag shallow-exclude:value no-shallow-exclude:flag deepen:value no-deepen:flag unshallow:flag update-shallow:flag no-update-shallow:flag refmap:value server-option:value no-server-option:flag ipv4:flag no-ipv4:flag ipv6:flag no-ipv6:flag negotiation-tip:value no-negotiation-tip:flag show-forced-updates:flag no-show-forced-updates:flag set-upstream:flag no-set-upstream:flag'
+      ;;
+    ls-remote)
+      printf '%s' 'quiet:flag no-quiet:flag upload-pack:value no-upload-pack:flag tags:flag no-tags:flag branches:flag no-branches:flag refs:flag no-refs:flag get-url:flag no-get-url:flag sort:value no-sort:flag exit-code:flag no-exit-code:flag symref:flag no-symref:flag server-option:value no-server-option:flag'
+      ;;
+    sm-add)
+      printf '%s' 'branch:value force:flag quiet:flag progress:flag reference:value ref-format:value dissociate:flag name:value depth:value'
+      ;;
+    sm-update)
+      printf '%s' 'quiet:flag verbose:flag progress:flag init:flag require-init:flag remote:flag no-fetch:flag force:flag rebase:flag ref-format:value reference:value dissociate:flag merge:flag recursive:flag checkout:flag recommend-shallow:flag no-recommend-shallow:flag depth:value jobs:value single-branch:flag no-single-branch:flag filter:value'
+      ;;
+    *)
+      ;;
+  esac
+}
+# Sets lr_canon and lr_kind. Returns 1 when $2 is unknown or ambiguous.
+long_resolve() {
+  lr_canon=
+  lr_kind=
+  lr_hits=0
+  lr_rest=$(long_candidates "$1")
+  while [ -n "$lr_rest" ]; do
+    case "$lr_rest" in
+      *" "*)
+        lr_cand=${lr_rest%% *}
+        lr_rest=${lr_rest#* }
+        ;;
+      *)
+        lr_cand=$lr_rest
+        lr_rest=
+        ;;
+    esac
+    lr_opt=${lr_cand%%:*}
+    lr_k=${lr_cand#*:}
+    case "$lr_opt" in
+      "$2"*)
+        lr_hits=$((lr_hits + 1))
+        lr_canon=$lr_opt
+        lr_kind=$lr_k
+        ;;
+    esac
+  done
+  [ "$lr_hits" -eq 1 ]
+}
+# Apply one resolved long option. arg, sv_name, sv_eq, lr_canon, and lr_kind are set.
+long_apply() {
+  case "$lr_canon" in
+    upload-pack|exec|multiple)
+      say_option
+      ;;
+    recurse-submodules|recursive|shallow-submodules)
+      if [ "$sub" = clone ] || [ "$sub" = fetch ] || [ "$sub" = pull ]; then
+        echo "git ${sub} denied: submodule path is outside the workspace" >&2
+        printf '%s\n' "deny git ${sub}" >> "$log"
+        exit 1
+      fi
+      ;;
+  esac
+  case "$lr_canon" in
+    config|config-env)
+      if [ "$sv_eq" = 1 ]; then
+        url_assign "${arg#*=}"
+      else
+        prev=cfg
+      fi
+      return 0
+      ;;
+    origin)
+      if [ "$sv_name" != origin ]; then
+        say_option
+      fi
+      if [ "$sv_eq" = 1 ]; then
+        remote_name_ok "${arg#*=}" || say_remote_name
+        check_skipped "${arg#*=}"
+      else
+        prev=origin
+      fi
+      return 0
+      ;;
+    reference|reference-if-able|separate-git-dir|template|bundle-uri)
+      if [ "$lr_kind" = flag ]; then
+        if [ "$sv_eq" = 1 ]; then
+          say_option
+        fi
+        return 0
+      fi
+      if [ "$sv_eq" = 1 ]; then
+        vet_opt "${arg#*=}"
+      else
+        prev=path
+      fi
+      return 0
+      ;;
+  esac
+  case "$lr_kind" in
+    flag)
+      if [ "$sv_eq" = 1 ]; then
+        say_option
+      fi
+      if [ "$lr_canon" = all ]; then
+        if [ "$sub" = fetch ] || [ "$sub" = pull ]; then
+          contact_all=1
+        fi
+      fi
+      ;;
+    value)
+      if [ "$sv_eq" = 1 ]; then
+        check_skipped "${arg#*=}"
+      else
+        prev=skip
+      fi
+      ;;
+    opt)
+      if [ "$sv_eq" = 1 ]; then
+        check_skipped "${arg#*=}"
+      fi
+      ;;
+    *)
+      say_option
+      ;;
+  esac
+  return 0
+}
+# 0 when this long option belongs to a closed list and has been handled.
+# 1 when this command has no closed list, so the caller keeps its own rules.
+# An empty option name is left for git. clone has no object-format option;
+# that exact spelling is left for git as well.
+long_closed() {
+  sv_body=${1#--}
+  sv_name=${sv_body%%=*}
+  sv_eq=0
+  case "$1" in
+    --*=*) sv_eq=1 ;;
+  esac
+  la_cmd=
+  case "$sub" in
+    clone) la_cmd=clone ;;
+    fetch) la_cmd=fetch ;;
+    pull) la_cmd=pull ;;
+    ls-remote) la_cmd=ls-remote ;;
+    submodule)
+      case "$sm_action" in
+        add) la_cmd=sm-add ;;
+        update) la_cmd=sm-update ;;
+      esac
+      ;;
+  esac
+  if [ -z "$la_cmd" ]; then
+    return 1
+  fi
+  case "$sv_name" in
+    "")
+      return 0
+      ;;
+  esac
+  if [ "$la_cmd" = clone ] && [ "$sv_name" = object-format ]; then
+    return 0
+  fi
+  case "$sv_name" in
+    *[!A-Za-z0-9-]*)
+      say_option
+      ;;
+  esac
+  if ! long_resolve "$la_cmd" "$sv_name"; then
+    say_option
+  fi
+  long_apply
+  return 0
+}
+# 0 when $1 is a unique prefix of the remote-add option fetch.
+remote_add_is_fetch() {
+  rf_hits=0
+  rf_hit=
+  for rf_cand in fetch tags track master mirror no-fetch no-tags no-track no-master no-mirror; do
+    case "$rf_cand" in
+      "$1"*)
+        rf_hits=$((rf_hits + 1))
+        rf_hit=$rf_cand
+        ;;
+    esac
+  done
+  [ "$rf_hits" -eq 1 ] && [ "$rf_hit" = fetch ]
+}
+# 0 when $1 is a unique prefix of push's repo option.
+push_is_repo() {
+  pr_hits=0
+  pr_repo=0
+  for pr_cand in verbose no-verbose quiet no-quiet repo no-repo all no-all branches no-branches mirror no-mirror delete no-delete tags no-tags dry-run no-dry-run porcelain no-porcelain force no-force force-with-lease no-force-with-lease force-if-includes no-force-if-includes recurse-submodules no-recurse-submodules thin no-thin receive-pack no-receive-pack exec no-exec set-upstream no-set-upstream progress no-progress prune no-prune no-verify verify follow-tags no-follow-tags signed no-signed atomic no-atomic push-option no-push-option ipv4 ipv6; do
+    case "$pr_cand" in
+      "$1"*)
+        pr_hits=$((pr_hits + 1))
+        if [ "$pr_cand" = repo ]; then
+          pr_repo=1
+        fi
+        ;;
+    esac
+  done
+  [ "$pr_hits" -eq 1 ] && [ "$pr_repo" = 1 ]
 }
 # push positionals, and the repository named by --repo, can be a URL.
 # A leading "~" is refused before git expands it.
@@ -2444,22 +2668,32 @@ push_tilde() {
       continue
     fi
     case "$arg" in
+      --*)
+        # Only a unique prefix of --repo names a repository. Other "re" options do not.
+        pt_body=${arg#--}
+        pt_name=${pt_body%%=*}
+        if push_is_repo "$pt_name"; then
+          case "$arg" in
+            --*=*)
+              case "${arg#*=}" in
+                ~*) say_tilde ;;
+              esac
+              ;;
+            *)
+              pt_prev=1
+              pt_repo=1
+              ;;
+          esac
+          continue
+        fi
+        ;;
+    esac
+    case "$arg" in
       -C|-c|--git-dir|--work-tree|--namespace|--super-prefix|--config-env|--exec-path|--config|--attr-source)
         pt_prev=1
         continue
         ;;
       --git-dir=*|--work-tree=*|--namespace=*|--super-prefix=*|--config-env=*|--exec-path=*|--config=*|--attr-source=*|-c*)
-        continue
-        ;;
-      --repo)
-        pt_prev=1
-        pt_repo=1
-        continue
-        ;;
-      --repo=*)
-        case "${arg#--repo=}" in
-          ~*) say_tilde ;;
-        esac
         continue
         ;;
       --receive-pack|--exec|--push-option|-o)
@@ -2526,6 +2760,7 @@ case "$sub" in
     prev=
     seen_sub=
     arg_dd=
+    end_opts=
     for arg in "$@"; do
       if [ -n "$prev" ]; then
         case "$prev" in
@@ -2546,7 +2781,8 @@ case "$sub" in
         prev=
         continue
       fi
-      # After "--", every word is a positional, including a word that starts with "-".
+      # After "--", remote add, remote rename, and remote remove treat later words as names.
+      # Every other command still refuses a word that starts with "-".
       if [ "$arg_dd" != 1 ]; then
       # remote add: only the options git accepts. A unique prefix is that option.
       # Anything else that is a short cluster or a long option is refused here,
@@ -2565,6 +2801,15 @@ case "$sub" in
           -[A-Za-z]*)
             remote_add_short "$arg" || say_option
             continue
+            ;;
+        esac
+      elif [ "$end_opts" = 1 ]; then
+        case "$arg" in
+          -*)
+            refuse_command_opt "$arg"
+            refuse_submodule_opt "$arg"
+            fetch_multiple_short "$arg"
+            say_option
             ;;
         esac
       else
@@ -2653,7 +2898,12 @@ case "$sub" in
           continue
           ;;
         --)
-          arg_dd=1
+          # remote remove still checks the name after "--". remote update does not.
+          if [ "$sub" = remote ] && { [ "$remote_sub" = rename ] || [ "$remote_sub" = remove ] || [ "$remote_sub" = rm ]; }; then
+            arg_dd=1
+          else
+            end_opts=1
+          fi
           continue
           ;;
         --all)
@@ -2663,6 +2913,9 @@ case "$sub" in
           continue
           ;;
         --*)
+          if long_closed "$arg"; then
+            continue
+          fi
           sv_body=${arg#--}
           sv_name=${sv_body%%=*}
           # A long option that is a prefix of --origin is that option.
@@ -2891,14 +3144,27 @@ case "$sub" in
         fi
       fi
     fi
-    # remote add fetches with -f or --fetch, so it keeps the bridge then.
+    # remote add fetches with -f, --fetch, a unique prefix of fetch, or a short cluster that contains f.
     case "$remote_sub" in
       add)
-        remote_fetches=
         for arg in "$@"; do
           case "$arg" in
-            --fetch|--fetch=*|-f|-[A-Za-z]*f*)
-              remote_fetches=1
+            --*)
+              rf_body=${arg#--}
+              rf_name=${rf_body%%=*}
+              case "$rf_name" in
+                ""|*[!A-Za-z0-9-]*) ;;
+                *)
+                  if remote_add_is_fetch "$rf_name"; then
+                    remote_fetches=1
+                  fi
+                  ;;
+              esac
+              ;;
+            -[A-Za-z]*)
+              case "$arg" in
+                *f*) remote_fetches=1 ;;
+              esac
               ;;
           esac
         done
