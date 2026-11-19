@@ -327,9 +327,10 @@ func (w *walker) field(key string, val any) any {
 			return s
 		}
 	}
-	// A body digest is 64 hex characters, which is also the shape of an
-	// admin token. Keep that one field when the value is exactly that shape.
-	if key == "body_sha256" {
+	// A body digest or a command digest is 64 hex characters, which is also
+	// the shape of an admin token. Keep those fields when the value is
+	// exactly that shape. Any other value is still redacted.
+	if key == "body_sha256" || key == "command_sha256" {
 		if s, ok := val.(string); ok && sha256Hex(s) {
 			return s
 		}

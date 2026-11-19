@@ -55,10 +55,11 @@ func TestRedactValueHidesKeysAndTokens(t *testing.T) {
 	}
 	digest := strings.Repeat("ab", 32)
 	kept := RedactDetail(map[string]any{
-		"body_sha256": digest,
-		"token":       digest,
+		"body_sha256":    digest,
+		"command_sha256": digest,
+		"token":          digest,
 	}).(map[string]any)
-	if kept["body_sha256"] != digest || kept["token"] != "[redacted]" {
+	if kept["body_sha256"] != digest || kept["command_sha256"] != digest || kept["token"] != "[redacted]" {
 		t.Fatalf("digest %#v", kept)
 	}
 }

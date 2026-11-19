@@ -68,8 +68,13 @@ model = "llama3.1"
 # a Go duration, seconds, or -1. tool_rounds (default 8, 1..100) is how
 # many model rounds one run may use. shell_timeout (default 30s, 1s..24h)
 # bounds one run_shell call. A bot may only narrow these. See docs/cli-isolation.md.
+# jobs (default false) lets a shell keep running after the shell timeout,
+# and registers stop_job. Only this file or managed policy can set it.
+# A bot cannot turn it on. When it is false, a shell is killed at
+# shell_timeout and no .lgb/jobs directory is created.
 # job_lifetime (default 2h, 1s..24h) is how long a background shell may run
 # after it is adopted. max_job_lifetime is a managed ceiling, at most 24h.
+# jobs = false
 # run_timeout = "10m"
 # tool_rounds = 8
 # shell_timeout = "30s"

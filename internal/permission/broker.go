@@ -73,6 +73,9 @@ type Request struct {
 	// is cancelled. The prompt timeout is not armed. Foreground cards
 	// leave this false.
 	Persist bool
+	// JobID is set for a card that belongs to a background job. The UI
+	// shows it. Empty for a foreground card.
+	JobID string
 	// Workspace is the bot directory used to classify paths.
 	Workspace string
 	// GrokHome is the bot GROK_HOME. Empty skips the home-path floor.
@@ -342,6 +345,25 @@ func (b *Broker) PendingCounts() map[string]int {
 	return out
 }
 
+// DenyRun denies every pending card for botID whose run id is runID.
+// A persistent job card ends here when the job is stopped.
+func (b *Broker) DenyRun(botID, runID string) {
+	if b == nil || botID == "" || runID == "" {
+		return
+	}
+	b.mu.Lock()
+	var hits []*wait
+	for _, w := range b.pending {
+		if w.botID == botID && w.runID == runID {
+			hits = append(hits, w)
+		}
+	}
+	b.mu.Unlock()
+	for _, w := range hits {
+		b.finishWait(w, "deny")
+	}
+}
+
 // DecideFor records a UI answer. allow_session is refused when the request
 // was opened without a managed session-grant policy. An unknown id, or an id
 // that belongs to another bot or run, does not allow the tool.
@@ -495,6 +517,9 @@ func (b *Broker) canUseTool(ctx context.Context, pol policy.Permission, req Requ
 		"tool":            req.Tool,
 		"arguments":       cardArguments(req.Tool, req.Args),
 		"session_allowed": sessionOK,
+	}
+	if req.JobID != "" {
+		fields["job_id"] = req.JobID
 	}
 	if req.Persist {
 		fields["persistent"] = true

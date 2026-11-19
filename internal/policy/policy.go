@@ -82,6 +82,9 @@ type Policy struct {
 	// OllamaJobLifetime bounds one background shell after it is adopted.
 	// Zero means DefaultJobLifetime. It is clamped to MaxJobLifetime.
 	OllamaJobLifetime time.Duration
+	// OllamaJobs enables background shells. Default false. Only host or
+	// managed policy sets it. A bot cannot turn it on.
+	OllamaJobs bool
 	// OllamaStallRetriesSet is false when stall_retries was not set. Zero
 	// retries is a real setting and is distinct from the default.
 	OllamaStallRetries    int
@@ -728,6 +731,11 @@ func (p Policy) EffectiveToolRounds() int {
 func (p Policy) EffectiveShellTimeout() time.Duration {
 	d, _ := p.ShellTimeoutCeiling()
 	return d
+}
+
+// JobsEnabled reports whether background shells are on. The default is off.
+func (p Policy) JobsEnabled() bool {
+	return p.OllamaJobs
 }
 
 // EffectiveJobLifetime is how long a background shell may run after it is
@@ -1707,6 +1715,8 @@ type ollamaDoc struct {
 	MaxShellTimeout       flexText  `toml:"max_shell_timeout" json:"max_shell_timeout"`
 	JobLifetime           flexText  `toml:"job_lifetime" json:"job_lifetime"`
 	MaxJobLifetime        flexText  `toml:"max_job_lifetime" json:"max_job_lifetime"`
+	// Jobs is the background-shell flag. Nil means the file did not set it.
+	Jobs *bool `toml:"jobs" json:"jobs"`
 	// EventLoop is the interim-reply flag. Quiet and MaxWait are durations.
 	EventLoop        *bool    `toml:"event_loop" json:"event_loop"`
 	EventLoopQuiet   flexText `toml:"event_loop_quiet" json:"event_loop_quiet"`
@@ -2019,6 +2029,9 @@ func (p *Policy) apply(doc document, trusted bool) error {
 	}
 	if doc.Ollama.EventLoop != nil {
 		p.EventLoop = *doc.Ollama.EventLoop
+	}
+	if doc.Ollama.Jobs != nil {
+		p.OllamaJobs = *doc.Ollama.Jobs
 	}
 	if doc.Ollama.EventLoopQuiet.Set {
 		d, err := parseEventLoopDuration("ollama.event_loop_quiet", doc.Ollama.EventLoopQuiet.Value)

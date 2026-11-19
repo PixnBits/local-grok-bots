@@ -241,6 +241,9 @@ type App struct {
 	jobs     map[string]*liveJob
 	jobWait  map[string]chan error
 	jobEarly map[string]error
+	// jobHalt is set while a bot's jobs are being stopped. addLive refuses
+	// a job that arrives during that window.
+	jobHalt map[string]string
 
 	stt STT
 	// sttSlot is a capacity-1 semaphore. Sending takes the one transcription.

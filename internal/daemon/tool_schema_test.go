@@ -65,18 +65,42 @@ func TestToolSchemasComplete(t *testing.T) {
 			t.Errorf("update_bot omits the unchanged rule: %s", desc)
 		}
 	}
-	for _, want := range []string{"set_timer", "list_timers", "clear_timer", "write_memory", "delete_memory", "read_file", "write_file", "edit_file", "delete_file", "run_shell", "stop_job", "create_pr", "pr_status", "list_issues", "read_issue", "read_pr", "create_issue", "create_comment", "list_bots", "read_bot", "send_dm", "create_bot", "update_bot"} {
+	for _, want := range []string{"set_timer", "list_timers", "clear_timer", "write_memory", "delete_memory", "read_file", "write_file", "edit_file", "delete_file", "run_shell", "create_pr", "pr_status", "list_issues", "read_issue", "read_pr", "create_issue", "create_comment", "list_bots", "read_bot", "send_dm", "create_bot", "update_bot"} {
 		if !seen[want] {
 			t.Errorf("tool %s missing", want)
 		}
+	}
+	if seen["stop_job"] {
+		t.Error("stop_job is registered while jobs are off")
 	}
 	for _, tool := range toolDefs() {
 		if tool.Name != "run_shell" {
 			continue
 		}
-		if !strings.Contains(tool.Description, "approval card") || strings.Contains(tool.Description, "git push, and SSH") {
+		if tool.Description != runShellDescOff || strings.Contains(tool.Description, "background") {
 			t.Errorf("run_shell description %q", tool.Description)
 		}
+		props, _ := tool.Parameters["properties"].(map[string]any)
+		if props["background"] != nil || props["command"] == nil {
+			t.Errorf("run_shell properties %#v", props)
+		}
+	}
+	on := map[string]bool{}
+	for _, tool := range toolDefsFor(true) {
+		on[tool.Name] = true
+		if tool.Name != "run_shell" {
+			continue
+		}
+		if !strings.Contains(tool.Description, "approval card") || !strings.Contains(tool.Description, "background") || strings.Contains(tool.Description, "git push, and SSH") {
+			t.Errorf("jobs run_shell description %q", tool.Description)
+		}
+		props, _ := tool.Parameters["properties"].(map[string]any)
+		if props["background"] == nil {
+			t.Error("jobs run_shell missing background")
+		}
+	}
+	if !on["stop_job"] {
+		t.Error("stop_job missing while jobs are on")
 	}
 	timer := toolDefs()[2]
 	props := timer.Parameters["properties"].(map[string]any)

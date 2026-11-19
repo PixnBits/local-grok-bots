@@ -948,6 +948,7 @@ async function openBot(id, push = true) {
   await loadThread();
   loadState().catch(() => {});
   const b = currentBot();
+  loadPendingPermissions(b && b.active_run_id ? b.active_run_id : "").catch(() => {});
   if (b && b.active_run_id) follow(b.active_run_id);
 }
 async function refreshBot() {
@@ -1895,6 +1896,9 @@ function showPermissionRequest(payload, runId) {
   const tool = el("div", "perm-tool");
   const titleText = (typeof cardTitle === "function") ? cardTitle(payload) : toolName;
   tool.textContent = titleText;
+  if (payload && payload.job_id) {
+    main.append(el("div", "card-job", "job " + String(payload.job_id)));
+  }
   if (toolName && String(titleText).indexOf(toolName) < 0) {
     const raw = el("span", "sr");
     raw.textContent = toolName;
@@ -2345,12 +2349,15 @@ function stopStream() {
 }
 // loadPendingPermissions shows open requests the stream did not replay
 // (the page opened later, or the run's event history was trimmed).
+// A job card stays visible while the bot is idle.
 async function loadPendingPermissions(runId) {
-  if (!state.botId || !runId) return;
+  if (!state.botId) return;
   const data = await api("/api/bots/" + state.botId + "/permissions");
-  if (state.streaming !== runId) return;
+  const streaming = !!(runId && state.streaming === runId);
   for (const p of (data && data.pending) || []) {
-    if (p && p.run_id === runId) showPermissionRequest(p, runId);
+    if (!p) continue;
+    const jobCard = p.persistent === true || (typeof p.run_id === "string" && p.run_id.indexOf("job:") === 0);
+    if (jobCard || (streaming && p.run_id === runId)) showPermissionRequest(p, p.run_id || runId);
   }
 }
 async function follow(runId) {
@@ -8004,6 +8011,8 @@ function renderApprovalCard(item, mode) {
     if (cwd) meta.title = cwd;
     argv.append(meta);
   }
+  const jobID = item.job_id || (String(item.session_id || "").indexOf("job:") === 0 ? String(item.session_id).slice(4) : "");
+  if (jobID) argv.append(el("div", "appr-meta", "job " + jobID));
   if (cwd) {
     const details = document.createElement("details");
     details.className = "appr-details";

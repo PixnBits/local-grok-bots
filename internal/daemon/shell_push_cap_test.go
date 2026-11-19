@@ -29,6 +29,7 @@ func TestShellPushThenSleepIsCapped(t *testing.T) {
 	})
 
 	app := newApp(t, "", quietModel())
+	enableJobs(t, app)
 	srv := serve(t, app)
 	bot := createGrantedBot(t, srv.URL, "Ada", []string{"git", "github"})
 	var hits atomic.Int32

@@ -347,6 +347,7 @@ func TestToolRoundsErrorCode(t *testing.T) {
 
 func TestRunShellUsesBotShellTimeout(t *testing.T) {
 	app := newApp(t, "", quietModel())
+	enableJobs(t, app)
 	srv := serve(t, app)
 	bot := createBot(t, srv.URL, "Sh")
 	root := app.botWorkspace(bot.ID)

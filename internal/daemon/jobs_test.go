@@ -8,14 +8,21 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/model"
 	"github.com/PixnBits/local-grok-bots/internal/permbroker"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 )
+
+func enableJobs(t *testing.T, app *App) {
+	t.Helper()
+	app.editPol(func(p *policy.Policy) { p.OllamaJobs = true })
+}
 
 func quietModel() fakeModel {
 	return fakeModel{fn: func(model.ChatRequest) (model.ChatResponse, error) {
@@ -76,7 +83,7 @@ func waitJobDone(t *testing.T, app *App, id string) store.Job {
 
 func stopJobAndWait(t *testing.T, app *App, bot store.Bot, id string) store.Job {
 	t.Helper()
-	out, err := app.dispatchTool(context.Background(), bot, "stop_job", map[string]any{"id": id})
+	out, err := app.execTool(context.Background(), bot, "stop_job", map[string]any{"id": id})
 	if err != nil {
 		t.Fatalf("stop: %v %s", err, out)
 	}
@@ -193,6 +200,7 @@ func TestJobBookkeeping(t *testing.T) {
 	}
 
 	app := newApp(t, "", quietModel())
+	enableJobs(t, app)
 	bot := jobBot(t, app, "Book")
 	_, err := app.dispatchTool(context.Background(), bot, "run_shell", map[string]any{
 		"command": "true", "background": "yes",
@@ -251,18 +259,19 @@ func TestJobBookkeeping(t *testing.T) {
 	}
 	sink := &jobSink{}
 	chunk := make([]byte, 1<<20)
-	for i := 0; i < 65; i++ {
+	for i := 0; i < 3; i++ {
 		n, werr := sink.Write(chunk)
 		if n != len(chunk) || werr != nil {
 			t.Fatalf("write %d: %d %v", i, n, werr)
 		}
 	}
-	sink.Adopt(f)
-	if !sink.truncatedNow() {
-		t.Fatal("pending past the cap was kept")
+	if len(sink.pending) > maxShellCapture || !sink.truncatedNow() {
+		t.Fatalf("pending %d truncated %v", len(sink.pending), sink.truncatedNow())
 	}
-	n, werr := sink.Write(chunk)
-	if n != len(chunk) || werr != nil {
+	sink.Adopt(f)
+	big := make([]byte, maxJobLog)
+	n, werr := sink.Write(big)
+	if n != len(big) || werr != nil {
 		t.Fatalf("after adopt: %d %v", n, werr)
 	}
 	if err := f.Sync(); err != nil {
@@ -280,6 +289,7 @@ func TestJobBookkeeping(t *testing.T) {
 
 func TestJobForegroundStillReturnsOutput(t *testing.T) {
 	app := newApp(t, "", quietModel())
+	enableJobs(t, app)
 	bot := jobBot(t, app, "Fg")
 	warmShell(t, app, bot)
 	out, err, elapsed := runShell(t, app, bot, map[string]any{"command": "echo hello-fg"})
@@ -293,6 +303,7 @@ func TestJobForegroundStillReturnsOutput(t *testing.T) {
 
 func TestJobAutoBackgroundOnShellTimeout(t *testing.T) {
 	app := newApp(t, "", quietModel())
+	enableJobs(t, app)
 	bot := jobBot(t, app, "Auto")
 	warmShell(t, app, bot)
 	prev := shellRunCap
@@ -334,6 +345,7 @@ func TestJobAutoBackgroundOnShellTimeout(t *testing.T) {
 
 func TestJobBackgroundFlag(t *testing.T) {
 	app := newApp(t, "", quietModel())
+	enableJobs(t, app)
 	bot := jobBot(t, app, "Imm")
 	warmShell(t, app, bot)
 	var id string
@@ -376,6 +388,7 @@ func TestJobBackgroundFlag(t *testing.T) {
 
 func TestJobStopWakesStopped(t *testing.T) {
 	app := newApp(t, "", quietModel())
+	enableJobs(t, app)
 	bot := jobBot(t, app, "Stop")
 	warmShell(t, app, bot)
 	var id string
@@ -385,9 +398,21 @@ func TestJobStopWakesStopped(t *testing.T) {
 		t.Fatalf("err=%v\n%s", err, out)
 	}
 	id = jobIDFrom(out)
+	running, err := app.st.GetJob(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pgid := running.PGID
+	stoppedAt := time.Now()
 	job := stopJobAndWait(t, app, bot, id)
 	if job.Status != store.JobStopped {
 		t.Fatalf("status %s", job.Status)
+	}
+	if time.Since(stoppedAt) >= 5*time.Second {
+		t.Fatalf("stop took %s", time.Since(stoppedAt))
+	}
+	if pgid > 1 && syscall.Kill(pgid, 0) == nil {
+		t.Fatalf("pgid %d still live", pgid)
 	}
 	line := userJobLine(t, app, bot.ID, id)
 	if !strings.Contains(line, "stopped") || !strings.Contains(line, jobLogRel(id)) {
@@ -397,6 +422,7 @@ func TestJobStopWakesStopped(t *testing.T) {
 
 func TestJobSlotLimits(t *testing.T) {
 	app := newApp(t, "", quietModel())
+	enableJobs(t, app)
 	a := jobBot(t, app, "SlotA")
 	b := jobBot(t, app, "SlotB")
 	c := jobBot(t, app, "SlotC")
@@ -451,6 +477,7 @@ func TestJobLogCapInJail(t *testing.T) {
 		t.Skip("bwrap is required")
 	}
 	app := newApp(t, "", quietModel())
+	enableJobs(t, app)
 	bot := jobBot(t, app, "Cap")
 	warmShell(t, app, bot)
 	var id string
@@ -510,6 +537,7 @@ func TestJobLifetimeExpires(t *testing.T) {
 	t.Cleanup(func() { jobLifetimeOverride = prev })
 	jobLifetimeOverride = 2 * time.Second
 	app := newApp(t, "", quietModel())
+	enableJobs(t, app)
 	bot := jobBot(t, app, "Life")
 	warmShell(t, app, bot)
 	var id string
@@ -544,6 +572,7 @@ func TestJobStepCardOutlivesApprovalTTL(t *testing.T) {
 	prevHook := gitPushHook
 	t.Cleanup(func() { gitPushHook = prevHook })
 	app := newApp(t, "", quietModel())
+	enableJobs(t, app)
 	srv := serve(t, app)
 	bot := createGrantedBot(t, srv.URL, "Ada", []string{"git", "github"})
 	warmShell(t, app, bot)

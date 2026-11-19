@@ -179,6 +179,12 @@ func (a *App) handleGitPush(pctx, parent context.Context, bot store.Bot, gate *g
 	})
 	if isJob {
 		req.Persist = true
+		req.RunID = "job:" + jobID
+		req.SessionID = "job:" + jobID
+		req.JobID = jobID
+		a.auditJob("job_approval_requested", map[string]any{
+			"bot_id": bot.ID, "job_id": jobID, "tool": "git_push",
+		})
 	}
 	out := a.perm.Evaluate(ectx, turnPol.Permission(), req)
 	if out.Behavior != "allow" {

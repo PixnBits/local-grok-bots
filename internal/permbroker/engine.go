@@ -185,6 +185,7 @@ type Pending struct {
 	CritReason string        `json:"critical_reason"`
 	GitReason  string        `json:"git_reason,omitempty"`
 	Origin     string        `json:"origin,omitempty"`
+	JobID      string        `json:"job_id,omitempty"`
 }
 
 // PendingPart is one command inside a pending card.
@@ -1376,6 +1377,10 @@ func (e *Engine) cancelSessionLocked(bot, session string) {
 		if session != "" && item.SessionID != session {
 			continue
 		}
+		// A sticky mid-job card ends with the job, not with the session.
+		if item.Sticky {
+			continue
+		}
 		e.dead[id] = struct{}{}
 		delete(e.byID, id)
 		delete(e.byKey, collapseKey(item))
@@ -1404,6 +1409,10 @@ func (e *Engine) cancelSessionLocked(bot, session string) {
 func (e *Engine) endTaskLocked(bot, keepTask string) {
 	for id, item := range e.byID {
 		if item.BotID == bot && item.TaskID != keepTask {
+			// A sticky mid-job card stays until the job ends.
+			if item.Sticky {
+				continue
+			}
 			e.dead[id] = struct{}{}
 			delete(e.byID, id)
 			delete(e.byKey, collapseKey(item))
@@ -1422,6 +1431,9 @@ func (e *Engine) endTaskLocked(bot, keepTask string) {
 func (e *Engine) dropTaskLocked(bot, session, keepTask string) {
 	for id, item := range e.byID {
 		if item.BotID == bot && item.SessionID == session && item.TaskID != "" && item.TaskID != keepTask {
+			if item.Sticky {
+				continue
+			}
 			e.dead[id] = struct{}{}
 			delete(e.byID, id)
 			delete(e.byKey, collapseKey(item))
@@ -1704,6 +1716,9 @@ func (e *Engine) pendingView(item *pendingItem) Pending {
 		TaskText:  item.TaskText, Suggest: e.suggestAlways(item),
 		CritReason: item.CritReason, GitReason: item.GitReason,
 		Origin: item.Origin,
+	}
+	if strings.HasPrefix(item.SessionID, "job:") {
+		view.JobID = strings.TrimPrefix(item.SessionID, "job:")
 	}
 	if item.Origin == OriginHook && item.Level == LevelCritical {
 		view.Allowed = withoutScope(view.Allowed, ScopeOnce)

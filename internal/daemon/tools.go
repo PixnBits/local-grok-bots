@@ -49,10 +49,40 @@ func schemaObj(props map[string]any, req ...string) map[string]any {
 	return map[string]any{"type": "object", "properties": props, "required": req}
 }
 
-// toolDefs is the full tool list sent to Ollama on every model call: name,
-// description, and a JSON Schema with a description (and example) for every
-// argument. The model is not asked to discover signatures; it gets them here.
+// runShellDescOff is the run_shell description used when background jobs
+// are off. It matches the tool list from before jobs existed.
+const runShellDescOff = "Run a shell command inside the workspace jail and return its output. Paths outside the workspace are rejected. Network and SSH fail unless the user granted them. git push is an approval: the jail does not send it, and the daemon sends it only after the approval card."
+
+// toolDefs is the tool list when background jobs are off.
 func toolDefs() []model.Tool {
+	return toolDefsFor(false)
+}
+
+// toolDefsFor is the tool list sent to Ollama. jobs adds stop_job and the
+// background argument. The model is not asked to discover signatures.
+func toolDefsFor(jobs bool) []model.Tool {
+	tools := toolDefsOn()
+	if jobs {
+		return tools
+	}
+	out := make([]model.Tool, 0, len(tools)-1)
+	for _, tool := range tools {
+		if tool.Name == "stop_job" {
+			continue
+		}
+		if tool.Name == "run_shell" {
+			tool.Description = runShellDescOff
+			tool.Parameters = schemaObj(map[string]any{
+				"command": prop("string", "A bash command line. Example: \"ls -la && go version\"."),
+			}, "command")
+		}
+		out = append(out, tool)
+	}
+	return out
+}
+
+// toolDefsOn is the full tool list, including background jobs.
+func toolDefsOn() []model.Tool {
 	name := func(what string) map[string]any { return prop("string", what+" Example: \"Ada\".") }
 	// The system prompt names every tool in this list via attachedToolsLine.
 	return []model.Tool{
@@ -225,7 +255,7 @@ func badArgs(format string, a ...any) error { return argError{fmt.Sprintf(format
 
 // checkRequired rejects a call missing a required argument before dispatch.
 func checkRequired(name string, args map[string]any) error {
-	for _, t := range toolDefs() {
+	for _, t := range toolDefsFor(true) {
 		if t.Name != name {
 			continue
 		}
@@ -498,6 +528,9 @@ func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args
 	case "run_shell":
 		return a.execRunShell(ctx, bot, args)
 	case "stop_job":
+		if !a.jobsEnabled() {
+			return "", fmt.Errorf("unknown tool %s", name)
+		}
 		return a.toolStopJob(bot, args)
 	default:
 		return "", fmt.Errorf("unknown tool %s", name)

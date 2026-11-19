@@ -2,11 +2,11 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/github"
@@ -82,6 +82,10 @@ func (a *App) execRunShell(ctx context.Context, bot store.Bot, args map[string]a
 	immediate, err := shellBackgroundArg(args)
 	if err != nil {
 		return "", err
+	}
+	jobsOn := a.jobsEnabled()
+	if immediate && !jobsOn {
+		return "", errors.New("run_shell: background jobs are off")
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -166,7 +170,7 @@ func (a *App) execRunShell(ctx context.Context, bot store.Bot, args map[string]a
 			}
 			timerMu.Unlock()
 			if depth == 0 {
-				if spent {
+				if spent || !jobsOn {
 					shellCancel()
 					return
 				}
@@ -270,13 +274,23 @@ func (a *App) execRunShell(ctx context.Context, bot store.Bot, args map[string]a
 
 	logRel := jobLogRel(marker.id)
 	reserved := false
+	var sink *jobSink
+	var pidfd atomic.Int32
+	if jobsOn {
+		sink = &jobSink{}
+	}
 	if immediate {
 		if err := a.reserveJob(current, marker.id, command, logRel); err != nil {
 			return "", err
 		}
 		reserved = true
+		logFile, lerr := openJobLog(shellWS, marker.id)
+		if lerr != nil {
+			a.dropReserved(true, marker.id, lerr)
+			return "", lerr
+		}
+		sink.Adopt(logFile)
 	}
-	sink := &jobSink{}
 	started := make(chan int, 1)
 	done := make(chan shellOut, 1)
 	goEnv := turnPol.EffectiveGoEnv()
@@ -307,6 +321,12 @@ func (a *App) execRunShell(ctx context.Context, bot store.Bot, args map[string]a
 			Guard:           guard,
 			Output:          sink,
 			OnStart: func(pgid int) {
+				if !jobsOn {
+					return
+				}
+				if fd := openJobPidfd(pgid); fd > 0 {
+					pidfd.Store(int32(fd))
+				}
 				if immediate {
 					if state.CompareAndSwap(0, 1) {
 						marker.adopted.Store(true)
@@ -315,6 +335,7 @@ func (a *App) execRunShell(ctx context.Context, bot store.Bot, args map[string]a
 				select {
 				case started <- pgid:
 				default:
+					closeJobPidfd(int(pidfd.Swap(0)))
 				}
 			},
 			OnPushStart: func() {
@@ -392,6 +413,10 @@ func (a *App) execRunShell(ctx context.Context, bot store.Bot, args map[string]a
 	}()
 
 	finish := func(out shellOut) (string, error) {
+		closeJobPidfd(int(pidfd.Swap(0)))
+		if sink != nil {
+			sink.close()
+		}
 		a.dropReserved(reserved, marker.id, out.err)
 		timerMu.Lock()
 		fired := timerFired
@@ -438,41 +463,55 @@ func (a *App) execRunShell(ctx context.Context, bot store.Bot, args map[string]a
 		return finish(out)
 	default:
 	}
-	if !reserved {
-		if err := a.reserveJob(current, marker.id, command, logRel); err != nil {
+	if !sink.isAdopted() {
+		if !reserved {
+			if err := a.reserveJob(current, marker.id, command, logRel); err != nil {
+				runCancel()
+				<-done
+				closeJobPidfd(int(pidfd.Swap(0)))
+				sink.close()
+				return "", err
+			}
+			reserved = true
+		}
+		logFile, lerr := openJobLog(shellWS, marker.id)
+		if lerr != nil {
 			runCancel()
 			<-done
-			return "", err
+			closeJobPidfd(int(pidfd.Swap(0)))
+			sink.close()
+			_, _ = a.st.FinishJob(marker.id, store.JobError, nil, "log")
+			reserved = false
+			return "", lerr
 		}
-		reserved = true
+		sink.Adopt(logFile)
 	}
-	logFile, lerr := openJobLog(shellWS, marker.id)
-	if lerr != nil {
-		runCancel()
-		<-done
-		_, _ = a.st.FinishJob(marker.id, store.JobError, nil, "log")
-		reserved = false
-		return "", lerr
-	}
-	sink.Adopt(logFile)
 	notifyAdopted()
 	_ = a.st.SetJobPGID(marker.id, pgid)
 	live := &liveJob{
-		id: marker.id, botID: current.ID, pgid: pgid, logPath: logRel,
+		id: marker.id, botID: current.ID, command: command, pgid: pgid,
+		pidfd: int(pidfd.Swap(0)), logPath: logRel,
 		shellWS: shellWS, sink: sink, lease: lease, cancel: runCancel,
+		started: time.Now(),
 	}
 	life := a.jobLifetime(current)
 	live.timer = time.AfterFunc(life, func() {
 		if !live.claim(store.JobExpired) {
 			return
 		}
-		if pgid > 0 {
-			_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		}
+		live.killGroup()
+		a.denyJobCards(live)
 		runCancel()
 	})
-	a.addLive(live)
+	if !a.addLive(live) {
+		if live.claim(store.JobStopped) {
+			live.killGroup()
+		}
+		a.denyJobCards(live)
+		runCancel()
+	}
 	handed = true
+	a.noteJobStarted(live)
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
