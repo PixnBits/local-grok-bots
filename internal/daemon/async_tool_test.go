@@ -1493,12 +1493,13 @@ func TestAsyncShellInterimCap(t *testing.T) {
 		t.Fatal("suppressed row before the shell ended")
 	}
 	// A second skipped batch cannot start an interim until the first cap
-	// path has returned, so a cancel in that path is visible here.
+	// path has returned, so a cancel in that path is visible here. The
+	// second skip needs new input; a wake with none is not counted.
 	wake, gotRun, gen := installedWake(app, bot.ID)
-	if wake == nil || gotRun != runID {
-		t.Fatalf("wake=%v run=%s", wake != nil, gotRun)
+	if wake == nil || gotRun != runID || gen == 0 {
+		t.Fatalf("wake=%v run=%s gen=%d", wake != nil, gotRun, gen)
 	}
-	wake(runID, gen)
+	postUser(t, base, bot.ID, "four")
 	clk.Advance(500 * time.Millisecond)
 	if got := waitBudgetSuppressed(t, app, bot.ID, 2); got != 2 {
 		t.Fatalf("suppressed in run %d, want 2", got)
@@ -1545,7 +1546,7 @@ func TestAsyncShellInterimCap(t *testing.T) {
 	if last.Tools == nil {
 		t.Fatal("final request has no tools")
 	}
-	assertUsersAfterTool(t, last.Messages, "shell-ok", "one", "two", "three")
+	assertUsersAfterTool(t, last.Messages, "shell-ok", "one", "two", "three", "four")
 }
 
 func ctxErrs(ctxs []context.Context) []error {

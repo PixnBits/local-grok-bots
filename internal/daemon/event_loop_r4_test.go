@@ -185,7 +185,11 @@ func TestAsyncShellApprovalResumeKeepsBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	app.afterBrokerDecision(run.WaitingPendingID, "approve", snap)
-	waitCh(t, gate2.started, "shell after approve")
+	select {
+	case <-gate2.started:
+	case <-time.After(30 * time.Second):
+		t.Fatal("timed out waiting for shell after approve")
+	}
 	same, err := app.st.GetRun(runID)
 	if err != nil {
 		t.Fatal(err)
