@@ -164,8 +164,10 @@ func (a *App) execShellAsync(ctx context.Context, bot store.Bot, runID, name str
 			// skipped batch: it does not write the capped row and it does
 			// not count toward the suppressed row. The first skipped batch
 			// that has new input writes the single capped row and is counted.
-			// Later ones only count. The suppressed row is written when the
-			// shell ends, and only if a capped row was written.
+			// Later ones only count. Those counted ids are marked covered
+			// so a later wake with no new input is uncovered 0. The
+			// suppressed row is written when the shell ends, and only if
+			// a capped row was written.
 			capN := a.maxInterim()
 			if capN <= 0 || budget.starts >= capN || budget.cappedLogged {
 				if uncovered > 0 {
@@ -178,6 +180,9 @@ func (a *App) execShellAsync(ctx context.Context, bot store.Bot, runID, name str
 						budget.cappedLogged = true
 					}
 					a.addSuppressed(budget)
+					for _, id := range ids {
+						covered[id] = true
+					}
 				}
 				if a.interimCapSeen != nil {
 					a.interimCapSeen(uncovered)
@@ -280,24 +285,40 @@ func interimAuditError(err error) (class, msg string) {
 	case errors.Is(err, context.Canceled):
 		class = "cancelled"
 	}
-	return class, clipUTF8(redactInterimErrorText(err.Error()), interimErrorLimit)
+	msg = strings.ToValidUTF8(redactInterimErrorText(err.Error()), "\uFFFD")
+	return class, clipUTF8(msg, interimErrorLimit)
 }
 
 func redactInterimErrorText(s string) string {
 	s = audit.RedactText(s)
 	s = normalizeInterimPaths(s)
-	s = stripInterimHosts(s)
-	return stripAbsPaths(s)
+	s = stripAbsPaths(s)
+	return stripInterimHosts(s)
 }
 
+const interimNormalizePasses = 8
+
 // normalizeInterimPaths turns JSON-escaped and percent-encoded separators
-// into the separators stripAbsPaths already scans.
+// into the separators stripAbsPaths already scans. Encoded separators are
+// unfolded until the text is stable, with a hard pass cap.
 func normalizeInterimPaths(s string) string {
 	s = strings.ReplaceAll(s, `\/`, `/`)
-	s = strings.ReplaceAll(s, "%2F", "/")
-	s = strings.ReplaceAll(s, "%2f", "/")
-	s = strings.ReplaceAll(s, "%5C", `\`)
-	s = strings.ReplaceAll(s, "%5c", `\`)
+	for n := 0; n < interimNormalizePasses; n++ {
+		next := s
+		next = strings.ReplaceAll(next, "%2525", "%25")
+		next = strings.ReplaceAll(next, "%252F", "%2F")
+		next = strings.ReplaceAll(next, "%252f", "%2f")
+		next = strings.ReplaceAll(next, "%255C", "%5C")
+		next = strings.ReplaceAll(next, "%255c", "%5c")
+		next = strings.ReplaceAll(next, "%2F", "/")
+		next = strings.ReplaceAll(next, "%2f", "/")
+		next = strings.ReplaceAll(next, "%5C", `\`)
+		next = strings.ReplaceAll(next, "%5c", `\`)
+		if next == s {
+			return s
+		}
+		s = next
+	}
 	return s
 }
 
@@ -326,6 +347,15 @@ func isPathEnd(c byte) bool {
 	}
 }
 
+func isHardPathEnd(c byte) bool {
+	switch c {
+	case '\n', '\r', '"', '\'', '`', ',', ';', ')', ']', '>', '|':
+		return true
+	default:
+		return false
+	}
+}
+
 func isDrivePath(s string, i int) bool {
 	if i+2 >= len(s) {
 		return false
@@ -340,10 +370,11 @@ func isDrivePath(s string, i int) bool {
 	return s[i+1] == ':' && (s[i+2] == '\\' || s[i+2] == '/')
 }
 
-// stripAbsPaths replaces absolute paths, UNC paths, tilde paths, and a
-// relative home/… path. A token that begins with a slash, or a drive
-// letter and a slash, is one path. '.' starts a path and does not end
-// one, so a dotted absolute path stays one token.
+// stripAbsPaths replaces absolute paths, UNC paths, tilde paths (including
+// ~user/…), and a relative home/… path. A token that begins with a slash,
+// or a drive letter and a slash, is one path. A space inside a path is
+// kept when the next token still has a slash or backslash. '.' starts a
+// path and does not end one, so a dotted absolute path stays one token.
 func stripAbsPaths(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -355,10 +386,7 @@ func stripAbsPaths(s string) string {
 			i = j
 			continue
 		case s[i] == '/' && (i == 0 || isPathBoundary(s[i-1])):
-			j := i + 1
-			for j < len(s) && !isPathEnd(s[j]) {
-				j++
-			}
+			j := consumePath(s, i)
 			if j > i+1 {
 				b.WriteString("[path]")
 				i = j
@@ -373,13 +401,36 @@ func stripAbsPaths(s string) string {
 
 func consumePath(s string, i int) int {
 	j := i
-	for j < len(s) && !isPathEnd(s[j]) {
+	for j < len(s) {
+		c := s[j]
+		if (c == ' ' || c == '\t') && pathContinuesAfterSpace(s, j+1) {
+			j++
+			continue
+		}
+		if isPathEnd(c) {
+			break
+		}
 		j++
 	}
 	if j == i {
 		return i + 1
 	}
 	return j
+}
+
+func pathContinuesAfterSpace(s string, i int) bool {
+	hasSep := false
+	for i < len(s) {
+		c := s[i]
+		if c == ' ' || c == '\t' || isHardPathEnd(c) {
+			break
+		}
+		if c == '/' || c == '\\' {
+			hasSep = true
+		}
+		i++
+	}
+	return hasSep
 }
 
 func isUNC(s string, i int) bool {
@@ -393,16 +444,36 @@ func isUNC(s string, i int) bool {
 }
 
 func isTildePath(s string, i int) bool {
-	if i+2 >= len(s) || s[i] != '~' {
+	if i >= len(s) || s[i] != '~' {
 		return false
 	}
 	if i > 0 && !isPathBoundary(s[i-1]) {
 		return false
 	}
-	if s[i+1] != '/' && s[i+1] != '\\' {
+	if i+2 >= len(s) {
 		return false
 	}
-	return !isPathEnd(s[i+2])
+	if s[i+1] == '/' || s[i+1] == '\\' {
+		return !isPathEnd(s[i+2])
+	}
+	j := i + 1
+	for j < len(s) && isTildeUserChar(s[j]) {
+		j++
+	}
+	if j == i+1 || j+1 >= len(s) {
+		return false
+	}
+	if s[j] != '/' && s[j] != '\\' {
+		return false
+	}
+	return !isPathEnd(s[j+1])
+}
+
+func isTildeUserChar(c byte) bool {
+	return c == '-' || c == '_' || c == '.' ||
+		(c >= '0' && c <= '9') ||
+		(c >= 'A' && c <= 'Z') ||
+		(c >= 'a' && c <= 'z')
 }
 
 func isHomeRel(s string, i int) bool {
@@ -426,24 +497,44 @@ var (
 	dialHostRe    = regexp.MustCompile(`(?i)\bdial\s+(?:tcp|udp)6?\s+(\[[^\]]+\]|[A-Za-z0-9._-]+)(:\d+)?`)
 	lookupHostRe  = regexp.MustCompile(`(?i)(\blookup\s+)(\S+)`)
 	atHostRe      = regexp.MustCompile(`@([A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?)`)
+	ipv4MappedRe  = regexp.MustCompile(`(?i)::ffff:((?:\d{1,3}\.){3}\d{1,3})`)
 	ipv4Re        = regexp.MustCompile(`(?:^|[^\d])((?:\d{1,3}\.){3}\d{1,3})(?:[^\d]|$)`)
-	ipv6BracketRe = regexp.MustCompile(`(?i)\[((?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4})\]`)
-	ipv6Re        = regexp.MustCompile(`(?i)(?:^|[^0-9a-f:])((?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4})(?:[^0-9a-f:]|$)`)
+	ipv6BracketRe = regexp.MustCompile(`(?i)\[((?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4})(?:%[A-Za-z0-9._-]+)?\]`)
+	ipv6Re        = regexp.MustCompile(`(?i)(?:^|[^0-9a-f:])((?:[0-9a-f]{0,4}:){2,7}[0-9a-f]{0,4}(?:%[A-Za-z0-9._-]+)?)(?:[^0-9a-f:]|$)`)
+	hostNameRe    = regexp.MustCompile(`(?i)\b([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+)\b`)
 )
 
-// stripInterimHosts replaces IP literals and the host in lookup, dial, and
-// user@host with [host]. Paths are stripped afterwards.
+const interimHostStripPasses = 8
+
+// stripInterimHosts replaces IP literals and the host in lookup, dial,
+// user@host, and a dotted host name with [host]. Paths are stripped first
+// so a URL keeps a single [path] mark.
 func stripInterimHosts(s string) string {
+	for n := 0; n < interimHostStripPasses; n++ {
+		next := stripInterimHostsOnce(s)
+		if next == s {
+			return s
+		}
+		s = next
+	}
+	return s
+}
+
+func stripInterimHostsOnce(s string) string {
 	s = stripDialHosts(s)
-	s = replaceGroup(s, lookupHostRe, 2, func(string) bool { return true })
+	s = stripLookupHosts(s)
 	s = replaceGroup(s, atHostRe, 1, func(string) bool { return true })
-	s = replaceGroup(s, ipv4Re, 1, isIPv4Literal)
+	s = replaceGroup(s, ipv4MappedRe, 0, func(tok string) bool {
+		ip := net.ParseIP(tok)
+		return ip != nil
+	})
+	s = replaceGroup(s, ipv4Re, 1, keepIPv4)
 	s = replaceGroup(s, ipv6BracketRe, 0, func(tok string) bool {
 		inner := strings.Trim(tok, "[]")
 		return isIPv6Literal(inner)
 	})
 	s = replaceGroup(s, ipv6Re, 1, isIPv6Literal)
-	return s
+	return stripBareHosts(s)
 }
 
 func stripDialHosts(s string) string {
@@ -459,6 +550,99 @@ func stripDialHosts(s string) string {
 		prefix := strings.TrimSuffix(m, sub[1]+port)
 		return prefix + "[host]" + port
 	})
+}
+
+func stripLookupHosts(s string) string {
+	idxs := lookupHostRe.FindAllStringSubmatchIndex(s, -1)
+	if len(idxs) == 0 {
+		return s
+	}
+	var b strings.Builder
+	last := 0
+	wrote := false
+	for _, loc := range idxs {
+		if 5 >= len(loc) {
+			continue
+		}
+		g0, g1 := loc[4], loc[5]
+		if g0 < 0 || g1 < g0 || g0 < last {
+			continue
+		}
+		tok := s[g0:g1]
+		trim := strings.TrimRight(tok, ".,:;")
+		if trim == "" {
+			continue
+		}
+		end := g0 + len(trim)
+		b.WriteString(s[last:g0])
+		b.WriteString("[host]")
+		last = end
+		wrote = true
+	}
+	if !wrote {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+func stripBareHosts(s string) string {
+	idxs := hostNameRe.FindAllStringSubmatchIndex(s, -1)
+	if len(idxs) == 0 {
+		return s
+	}
+	var b strings.Builder
+	last := 0
+	wrote := false
+	for _, loc := range idxs {
+		if 3 >= len(loc) {
+			continue
+		}
+		g0, g1 := loc[2], loc[3]
+		if g0 < 0 || g1 < g0 || g0 < last {
+			continue
+		}
+		tok := s[g0:g1]
+		if !isBareHostname(tok) {
+			continue
+		}
+		if g0 > 0 {
+			c := s[g0-1]
+			if c == '/' || c == '\\' || c == '@' || c == '[' {
+				continue
+			}
+		}
+		b.WriteString(s[last:g0])
+		b.WriteString("[host]")
+		last = g1
+		wrote = true
+	}
+	if !wrote {
+		return s
+	}
+	b.WriteString(s[last:])
+	return b.String()
+}
+
+func isBareHostname(tok string) bool {
+	if tok == "" || tok != strings.ToLower(tok) {
+		return false
+	}
+	parts := strings.Split(tok, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	last := parts[len(parts)-1]
+	if len(last) < 2 {
+		return false
+	}
+	for i := 0; i < len(last); i++ {
+		c := last[i]
+		if c < 'a' || c > 'z' {
+			return false
+		}
+	}
+	return true
 }
 
 func replaceGroup(s string, re *regexp.Regexp, group int, keep func(string) bool) string {
@@ -496,6 +680,23 @@ func replaceGroup(s string, re *regexp.Regexp, group int, keep func(string) bool
 func isIPv4Literal(tok string) bool {
 	ip := net.ParseIP(tok)
 	return ip != nil && ip.To4() != nil
+}
+
+func keepIPv4(tok string) bool {
+	return isIPv4Literal(tok) && !isDottedVersion(tok)
+}
+
+func isDottedVersion(tok string) bool {
+	parts := strings.Split(tok, ".")
+	if len(parts) != 4 {
+		return false
+	}
+	for _, p := range parts {
+		if len(p) != 1 || p[0] < '0' || p[0] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func isIPv6Literal(tok string) bool {
