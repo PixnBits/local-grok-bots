@@ -334,6 +334,7 @@ func (w *walker) field(key string, val any) any {
 		if s, ok := val.(string); ok && sha256Hex(s) {
 			return s
 		}
+		return "[redacted]"
 	}
 	if secretKeyRe.MatchString(key) {
 		if w.opts.detail && scalarSecretValue(val) {

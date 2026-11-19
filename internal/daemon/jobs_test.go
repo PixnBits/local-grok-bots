@@ -167,6 +167,21 @@ func userJobLine(t *testing.T, app *App, botID, id string) string {
 	return ""
 }
 
+func jobOutputLine(t *testing.T, app *App, botID string) string {
+	t.Helper()
+	msgs, err := app.st.ListMessages(botID, "user", "", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range msgs {
+		if m.Kind == store.KindJobOutput {
+			return m.Content
+		}
+	}
+	t.Fatal("no job output")
+	return ""
+}
+
 func waitJobCard(t *testing.T, app *App, botID, id string) permbroker.Pending {
 	t.Helper()
 	deadline := time.Now().Add(90 * time.Second)

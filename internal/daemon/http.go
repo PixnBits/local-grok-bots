@@ -804,9 +804,9 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleDeleteBot(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	a.goneBots.Store(id, struct{}{})
+	a.cancelBot(id)
 	a.stopBotJobs(id, "delete")
 	a.cancelBotApprovals(id, "delete")
-	a.cancelBot(id)
 	a.closeBrokerBot(id)
 	a.credMu.Lock()
 	// Release before removal so a failed delete still rejects the secret.

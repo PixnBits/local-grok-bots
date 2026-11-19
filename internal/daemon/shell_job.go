@@ -94,6 +94,7 @@ func (a *App) execRunShell(ctx context.Context, bot store.Bot, args map[string]a
 	if fresh, err := a.st.GetBot(bot.ID); err == nil {
 		current = fresh
 	}
+	stopStamp := a.jobStopStamp(current.ID)
 	turnPol := a.effPol(current.ID)
 	parent := a.ctx
 	if parent == nil {
@@ -170,7 +171,7 @@ func (a *App) execRunShell(ctx context.Context, bot store.Bot, args map[string]a
 			}
 			timerMu.Unlock()
 			if depth == 0 {
-				if spent || !jobsOn {
+				if spent || !jobsOn || a.jobAdoptBlocked(current.ID, stopStamp) {
 					shellCancel()
 					return
 				}
@@ -452,11 +453,19 @@ func (a *App) execRunShell(ctx context.Context, bot store.Bot, args map[string]a
 			runCancel()
 			return finish(<-done)
 		}
+		if !jobsOn || a.jobAdoptBlocked(current.ID, stopStamp) {
+			runCancel()
+			return finish(<-done)
+		}
 		if !state.CompareAndSwap(0, 1) {
 			runCancel()
 			return finish(<-done)
 		}
 		marker.adopted.Store(true)
+	}
+	if !jobsOn || sink == nil || a.jobAdoptBlocked(current.ID, stopStamp) {
+		runCancel()
+		return finish(<-done)
 	}
 	select {
 	case out := <-done:
@@ -492,7 +501,16 @@ func (a *App) execRunShell(ctx context.Context, bot store.Bot, args map[string]a
 		id: marker.id, botID: current.ID, command: command, pgid: pgid,
 		pidfd: int(pidfd.Swap(0)), logPath: logRel,
 		shellWS: shellWS, sink: sink, lease: lease, cancel: runCancel,
-		started: time.Now(),
+		started: time.Now(), stopStamp: stopStamp, stopStamped: true,
+	}
+	if !a.addLive(live) {
+		if live.claim(store.JobStopped) {
+			live.killGroup()
+		}
+		a.denyJobCards(live)
+		live.closePidfd()
+		runCancel()
+		return finish(<-done)
 	}
 	life := a.jobLifetime(current)
 	live.timer = time.AfterFunc(life, func() {
@@ -503,13 +521,6 @@ func (a *App) execRunShell(ctx context.Context, bot store.Bot, args map[string]a
 		a.denyJobCards(live)
 		runCancel()
 	})
-	if !a.addLive(live) {
-		if live.claim(store.JobStopped) {
-			live.killGroup()
-		}
-		a.denyJobCards(live)
-		runCancel()
-	}
 	handed = true
 	a.noteJobStarted(live)
 	a.wg.Add(1)

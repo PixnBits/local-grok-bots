@@ -244,6 +244,11 @@ type App struct {
 	// jobHalt is set while a bot's jobs are being stopped. addLive refuses
 	// a job that arrives during that window.
 	jobHalt map[string]string
+	// jobStopGen counts stops for one bot. jobStopAll counts a flag-off
+	// that applies to every bot. A shell records both when it starts and
+	// is killed instead of adopted when either value has changed.
+	jobStopGen map[string]uint64
+	jobStopAll uint64
 
 	stt STT
 	// sttSlot is a capacity-1 semaphore. Sending takes the one transcription.

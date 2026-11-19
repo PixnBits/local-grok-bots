@@ -762,7 +762,7 @@ func (a *App) foldInput(botID, runID string, msgs []model.Message, through strin
 			continue
 		}
 		seen[m.ID] = true
-		msgs = append(msgs, mapHist(m, names))
+		msgs = appendModelMessage(msgs, mapHist(m, names))
 		n++
 	}
 	_ = a.st.MarkRunInput(runID, through)
@@ -831,7 +831,7 @@ func (a *App) buildMessagesHist(bot store.Bot, tools []model.Tool) ([]model.Mess
 		if m.Role == "bot" {
 			msg.Content = appendToolUseSummary(msg.Content, toolUseSummary(toolRecsFor(byRun, m)))
 		}
-		out = append(out, msg)
+		out = appendModelMessage(out, msg)
 		if m.Kind == store.KindRunFailed {
 			if text := quoteRunError(a.runErrorFor(m)); text != "" {
 				out = append(out, model.Message{Role: "assistant", Content: text})
@@ -854,6 +854,9 @@ func (a *App) runErrorFor(m store.Message) string {
 }
 
 func mapHist(m store.Message, names map[string]string) model.Message {
+	if m.Kind == store.KindJobOutput {
+		return model.Message{Role: "tool", ToolName: "run_shell", Content: m.Content}
+	}
 	if strings.HasPrefix(m.Thread, "dm:") {
 		other := strings.TrimPrefix(m.Thread, "dm:")
 		name := names[other]
@@ -885,6 +888,30 @@ func mapHist(m store.Message, names map[string]string) model.Message {
 	default:
 		return model.Message{Role: "user", Content: m.Content}
 	}
+}
+
+// appendModelMessage keeps a tool result behind an assistant tool call.
+// Job output is stored on its own, so the history inserts the call the
+// model expects before that result.
+func appendModelMessage(msgs []model.Message, msg model.Message) []model.Message {
+	if msg.Role == "tool" && !prevAssistantToolCall(msgs) {
+		msgs = append(msgs, model.Message{
+			Role: "assistant",
+			ToolCalls: []model.ToolCall{{
+				Name:      "run_shell",
+				Arguments: map[string]any{"command": ""},
+			}},
+		})
+	}
+	return append(msgs, msg)
+}
+
+func prevAssistantToolCall(msgs []model.Message) bool {
+	if len(msgs) == 0 {
+		return false
+	}
+	last := msgs[len(msgs)-1]
+	return last.Role == "assistant" && len(last.ToolCalls) > 0
 }
 
 // zoneLabel names the daemon's zone for the model: the IANA name from TZ
