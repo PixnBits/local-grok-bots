@@ -254,6 +254,12 @@ func TestInterimR6PathMarks(t *testing.T) {
 		{name: "space_quoted", in: `"/home/fixture-user/My Files/` + leaf + `"`, banned: []string{leaf, "My Files"}, mark: "[path]"},
 		{name: "percent_252f", in: "%252Fabs%252F" + leaf, banned: []string{leaf, "%252F", "%2F"}, mark: "[path]"},
 		{name: "percent_252f_lower", in: "%252fabs%252f" + leaf, banned: []string{leaf, "%252f", "%2f"}, mark: "[path]"},
+		{name: "slash_abs", in: "x//abs/" + leaf, banned: []string{leaf}, mark: "[path]"},
+		{name: "slash_home", in: "a/b/home/fixture-user/" + leaf, banned: []string{leaf}, mark: "[path]"},
+		{name: "slash_etc", in: "dir//etc/" + leaf, banned: []string{leaf}, mark: "[path]"},
+		{name: "slash_tilde", in: "a/~fixture-user/" + leaf, banned: []string{leaf}, mark: "[path]"},
+		{name: "backslash_drive", in: `foo\\C:\Users\fixture-user\` + leaf, banned: []string{leaf}, mark: "[path]"},
+		{name: "slash_unc", in: `a/\\srv\share\` + leaf, banned: []string{leaf}, mark: "[path]"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -287,6 +293,7 @@ func TestInterimR6HostMarks(t *testing.T) {
 		{name: "zone_bare", in: "see fe80::1%eth0 now", banned: []string{"fe80::1", "%eth0", "eth0"}, mark: "[host]"},
 		{name: "zone_bracket", in: "see [fe80::1%eth0] now", banned: []string{"fe80::1", "%eth0", "eth0", "[[host]]"}, mark: "[host]", exact: "see [host] now"},
 		{name: "bare_host_port", in: "refused dummy-host.example:22", banned: []string{"dummy-host.example"}, mark: "[host]"},
+		{name: "ipv4_mapped", in: "dial ::ffff:192.0.2.5 x", banned: []string{"ffff", "192.0.2.5"}, mark: "[host]", exact: "dial [host] x"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
