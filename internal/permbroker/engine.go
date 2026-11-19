@@ -72,6 +72,9 @@ type Request struct {
 	// Origin is "native" for a daemon run_shell ask and "hook" for the
 	// CLI socket. Empty keeps the older once-token behaviour.
 	Origin string
+	// Sticky is a mid-job ask. It stays pending until approve or deny,
+	// is not staged behind a checkpoint, and does not mint a once-token.
+	Sticky bool
 	// ResumeID is set only by ResumeEval. A would-be ask then consumes a
 	// one-shot bind for that pending id, or denies. It does not open a
 	// new pending item. The checkpoint is not authority.
@@ -151,6 +154,7 @@ type pendingItem struct {
 	Ruleset    int
 	Classifier string
 	Origin     string
+	Sticky     bool
 }
 
 // Pending is the redacted view returned to an admin.
@@ -181,6 +185,7 @@ type Pending struct {
 	CritReason string        `json:"critical_reason"`
 	GitReason  string        `json:"git_reason,omitempty"`
 	Origin     string        `json:"origin,omitempty"`
+	JobID      string        `json:"job_id,omitempty"`
 }
 
 // PendingPart is one command inside a pending card.
@@ -601,6 +606,17 @@ func (e *Engine) SetBotRuntime(bot, home, userHome string, env []string) {
 	b.Env = append([]string(nil), env...)
 	e.bots[bot] = b
 	e.maybeUpgradeBaselineLocked(bot)
+	e.mu.Unlock()
+}
+
+// SetClock replaces the clock used for expiry. The function must not call
+// the engine. Tests jump it past an approval TTL. Nil is ignored.
+func (e *Engine) SetClock(now func() time.Time) {
+	if e == nil || now == nil {
+		return
+	}
+	e.mu.Lock()
+	e.now = now
 	e.mu.Unlock()
 }
 
@@ -1361,6 +1377,10 @@ func (e *Engine) cancelSessionLocked(bot, session string) {
 		if session != "" && item.SessionID != session {
 			continue
 		}
+		// A sticky mid-job card ends with the job, not with the session.
+		if item.Sticky {
+			continue
+		}
 		e.dead[id] = struct{}{}
 		delete(e.byID, id)
 		delete(e.byKey, collapseKey(item))
@@ -1389,6 +1409,10 @@ func (e *Engine) cancelSessionLocked(bot, session string) {
 func (e *Engine) endTaskLocked(bot, keepTask string) {
 	for id, item := range e.byID {
 		if item.BotID == bot && item.TaskID != keepTask {
+			// A sticky mid-job card stays until the job ends.
+			if item.Sticky {
+				continue
+			}
 			e.dead[id] = struct{}{}
 			delete(e.byID, id)
 			delete(e.byKey, collapseKey(item))
@@ -1407,6 +1431,9 @@ func (e *Engine) endTaskLocked(bot, keepTask string) {
 func (e *Engine) dropTaskLocked(bot, session, keepTask string) {
 	for id, item := range e.byID {
 		if item.BotID == bot && item.SessionID == session && item.TaskID != "" && item.TaskID != keepTask {
+			if item.Sticky {
+				continue
+			}
 			e.dead[id] = struct{}{}
 			delete(e.byID, id)
 			delete(e.byKey, collapseKey(item))
@@ -1613,13 +1640,15 @@ func (e *Engine) ask(req Request, in inspected) Decision {
 		Ruleset:    e.rules.Version,
 		Classifier: in.ClassNote,
 		Origin:     req.Origin,
+		Sticky:     req.Sticky,
 	}
 	e.byID[item.ID] = item
 	e.byKey[key] = item.ID
 	// Stage only asks that belong to a durable run. Direct execTool calls
 	// (no run id) stay visible to ListPending. The run loop hides the card
 	// until the checkpoint file and the waiting status are both durable.
-	if req.Origin == OriginNative && req.RunID != "" {
+	// A sticky mid-job card is shown immediately and is not checkpointed.
+	if req.Origin == OriginNative && req.RunID != "" && !req.Sticky {
 		if e.staged == nil {
 			e.staged = map[string]struct{}{}
 		}
@@ -1687,6 +1716,9 @@ func (e *Engine) pendingView(item *pendingItem) Pending {
 		TaskText:  item.TaskText, Suggest: e.suggestAlways(item),
 		CritReason: item.CritReason, GitReason: item.GitReason,
 		Origin: item.Origin,
+	}
+	if strings.HasPrefix(item.SessionID, "job:") {
+		view.JobID = strings.TrimPrefix(item.SessionID, "job:")
 	}
 	if item.Origin == OriginHook && item.Level == LevelCritical {
 		view.Allowed = withoutScope(view.Allowed, ScopeOnce)
@@ -1833,6 +1865,11 @@ func (e *Engine) Decide(id, decision, scope string) error {
 			if item.Origin == OriginHook && item.Level == LevelCritical {
 				return ErrScope
 			}
+			// A sticky mid-job approval resumes that step. It is not a
+			// once-token, so the usual approval TTL cannot drop it.
+			if item.Sticky {
+				break
+			}
 			// A native critical approval is bound to this pending id.
 			// It is not a once-token. takeToken still refuses critical.
 			if item.Origin == OriginNative && item.Level == LevelCritical {
@@ -1872,7 +1909,7 @@ func (e *Engine) Decide(id, decision, scope string) error {
 		// message. That message drops a task grant, so task, bot, and
 		// global approvals also keep the same one-time token. It stays
 		// held for this task so the grant or rule still decides here.
-		if scope != ScopeOnce {
+		if scope != ScopeOnce && !item.Sticky {
 			e.keepOnceToken(item, item.TaskID)
 		}
 		e.bury(item)
@@ -1975,9 +2012,12 @@ func (e *Engine) ApproveAll(ids []string) (BatchReport, error) {
 			rep.Skipped++
 			continue
 		}
-		if item.Origin == OriginNative && item.Level == LevelCritical {
+		switch {
+		case item.Sticky:
+			// A mid-job approval resumes that step. It does not mint a once-token.
+		case item.Origin == OriginNative && item.Level == LevelCritical:
 			e.keepResumeBind(item)
-		} else {
+		default:
 			e.keepOnceToken(item, "")
 		}
 		e.bury(item)

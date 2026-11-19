@@ -82,6 +82,13 @@ type Request struct {
 	GoToolchain string
 	GoFlags     string
 	GoSumDB     string
+	// Output receives stdout and stderr while the process runs. Nil keeps
+	// the 16 KiB capture and does not read past that. A set writer is given
+	// every byte; it must not return a short write or the copy stops.
+	Output io.Writer
+	// OnStart is called with the process id after a successful start.
+	// Setpgid is set, so the id is also the process group id.
+	OnStart func(pgid int)
 }
 
 // Result is the captured output and the grant events for this command.
@@ -139,6 +146,14 @@ type prepared struct {
 	// goLines is the toolchain environment. Darwin launch reads it because
 	// it does not use env. Linux copies the same lines into env.
 	goLines []string
+	stream  *shellStream
+}
+
+// shellStream is an optional full copy of shell output and a start hook.
+// A nil stream keeps the historical LimitReader capture.
+type shellStream struct {
+	w       io.Writer
+	onStart func(int)
 }
 
 // attachShellEgress starts the in-jail HTTP proxy when the net grant is on.
@@ -267,6 +282,9 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 		return nil, err
 	}
 	p := &prepared{workspace: ws, command: req.Command, jailDir: jailDir, workRel: workRel, dir: dir, before: takeSnap(ws), cleanBash: req.CleanBash, guard: req.Guard}
+	if req.Output != nil || req.OnStart != nil {
+		p.stream = &shellStream{w: req.Output, onStart: req.OnStart}
+	}
 	ok := false
 	defer func() {
 		if !ok {
@@ -754,8 +772,30 @@ func capture(ctx context.Context, cmd *exec.Cmd) (string, string, error) {
 // captureReady runs cmd. started, when set, runs after Start returns,
 // including when Start fails. ready, when set, runs after a successful
 // start and before the command is expected to finish. A ready error kills
-// the process group.
+// the process group. A nil stream stops reading after 16 KiB.
 func captureReady(ctx context.Context, cmd *exec.Cmd, started func(), ready func() error) (string, string, error) {
+	return captureStream(ctx, cmd, started, ready, nil)
+}
+
+// capWriter keeps the first lim bytes and reports every write in full so a
+// paired stream writer is not stopped by the capture cap.
+type capWriter struct {
+	buf *bytes.Buffer
+	lim int
+}
+
+func (c *capWriter) Write(p []byte) (int, error) {
+	if c.buf.Len() < c.lim {
+		n := c.lim - c.buf.Len()
+		if n > len(p) {
+			n = len(p)
+		}
+		_, _ = c.buf.Write(p[:n])
+	}
+	return len(p), nil
+}
+
+func captureStream(ctx context.Context, cmd *exec.Cmd, started func(), ready func() error, stream *shellStream) (string, string, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	var outBuf, errBuf bytes.Buffer
 	stdoutPipe, err := cmd.StdoutPipe()
@@ -773,14 +813,24 @@ func captureReady(ctx context.Context, cmd *exec.Cmd, started func(), ready func
 	if startErr != nil {
 		return "", "", fmt.Errorf("shell sandbox: %w", startErr)
 	}
+	if stream != nil && stream.onStart != nil && cmd.Process != nil {
+		stream.onStart(cmd.Process.Pid)
+	}
+	copyOut := func(dst *bytes.Buffer, src io.Reader) {
+		if stream != nil && stream.w != nil {
+			_, _ = io.Copy(io.MultiWriter(&capWriter{buf: dst, lim: maxCapture + 1}, stream.w), src)
+			return
+		}
+		_, _ = io.Copy(dst, io.LimitReader(src, maxCapture+1))
+	}
 	doneOut := make(chan struct{})
 	doneErr := make(chan struct{})
 	go func() {
-		_, _ = io.Copy(&outBuf, io.LimitReader(stdoutPipe, maxCapture+1))
+		copyOut(&outBuf, stdoutPipe)
 		doneOut <- struct{}{}
 	}()
 	go func() {
-		_, _ = io.Copy(&errBuf, io.LimitReader(stderrPipe, maxCapture+1))
+		copyOut(&errBuf, stderrPipe)
 		doneErr <- struct{}{}
 	}()
 	waitErr := make(chan error, 1)

@@ -804,7 +804,7 @@ func (a *App) interimFresh(botID, through string, seen map[string]bool) ([]model
 			continue
 		}
 		ids = append(ids, m.ID)
-		out = append(out, mapHist(m, names))
+		out = appendModelMessage(out, mapHist(m, names))
 	}
 	return out, ids
 }

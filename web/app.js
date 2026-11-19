@@ -569,7 +569,7 @@ async function loadBots() {
     // A message sent mid-run can start a follow-up run after the stream
     // ended; pick it up so its reply streams in.
     if (b.active_run_id && b.active_run_id !== state.streaming) follow(b.active_run_id);
-    else if (b.pending_permissions > 0 && state.streaming) loadPendingPermissions(state.streaming).catch(() => {});
+    else if (wantsPermissionPoll(b, state.streaming)) loadPendingPermissions(state.streaming || "").catch(() => {});
     if (b.last_run_status === "waiting") {
       state.workingHold = "";
       state.approvalWait = true;
@@ -948,6 +948,7 @@ async function openBot(id, push = true) {
   await loadThread();
   loadState().catch(() => {});
   const b = currentBot();
+  loadPendingPermissions(b && b.active_run_id ? b.active_run_id : "").catch(() => {});
   if (b && b.active_run_id) follow(b.active_run_id);
 }
 async function refreshBot() {
@@ -1754,12 +1755,26 @@ function permissionArgsText(value) {
   try { return JSON.stringify(value, null, 2); } catch (e) { return ""; }
 }
 
+// jobPermissionRec is an unsettled card that belongs to a background job.
+// It stays up when a chat stream stops.
+function jobPermissionRec(rec) {
+  if (!rec || rec.settled) return false;
+  if (rec.persistent === true) return true;
+  return String(rec.runId || "").indexOf("job:") === 0;
+}
+
 function clearPermissionCards() {
-  for (const rec of permCards.values()) {
-    clearInterval(rec.timer);
-    clearTimeout(rec.expire);
+  const drop = [];
+  for (const [id, rec] of permCards) {
+    if (jobPermissionRec(rec)) continue;
+    if (rec) {
+      clearInterval(rec.timer);
+      clearTimeout(rec.expire);
+      if (rec.card && typeof rec.card.remove === "function") rec.card.remove();
+    }
+    drop.push(id);
   }
-  permCards.clear();
+  for (const id of drop) permCards.delete(id);
 }
 
 function mmss(left) {
@@ -1895,6 +1910,9 @@ function showPermissionRequest(payload, runId) {
   const tool = el("div", "perm-tool");
   const titleText = (typeof cardTitle === "function") ? cardTitle(payload) : toolName;
   tool.textContent = titleText;
+  if (payload && payload.job_id) {
+    main.append(el("div", "card-job", "job " + String(payload.job_id)));
+  }
   if (toolName && String(titleText).indexOf(toolName) < 0) {
     const raw = el("span", "sr");
     raw.textContent = toolName;
@@ -1984,6 +2002,7 @@ function showPermissionRequest(payload, runId) {
     card, count, actions, outcome, errLine, inputs, groups, record, digits, barI, announceEl,
     timer: 0, expire: 0, settled: false, server: false, pending: false,
     tool: toolName, args: payload && payload.arguments, runId: run, reqId: id,
+    persistent: !!(payload && payload.persistent === true),
     prevLeft: null, initialLeft: null
   };
   permCards.set(id, rec);
@@ -2336,21 +2355,48 @@ function placeCaret(bubble, text) {
   while (tgt.lastElementChild && /^(P|LI|UL|OL|BLOCKQUOTE|H[1-6])$/.test(tgt.lastElementChild.tagName)) tgt = tgt.lastElementChild;
   if (caret.parentNode !== tgt || tgt.lastChild !== caret) tgt.append(caret);
 }
+function wantsPermissionPoll(bot, streaming) {
+  const waiting = !!(bot && Number(bot.pending_permissions) > 0);
+  if (streaming) return waiting;
+  let jobPending = false;
+  if (typeof permCards !== "undefined" && permCards && typeof permCards.values === "function") {
+    for (const rec of permCards.values()) {
+      if (jobPermissionRec(rec)) { jobPending = true; break; }
+    }
+  }
+  return waiting || jobPending;
+}
 function stopStream() {
+  const live = $("#live");
+  const kept = [];
+  if (typeof permCards !== "undefined" && permCards && typeof permCards.values === "function") {
+    for (const rec of permCards.values()) {
+      if (jobPermissionRec(rec) && rec.card && rec.card.parentNode) kept.push(rec.card);
+    }
+  }
   clearPermissionCards();
   if (state.streamCtl) { state.streamCtl.abort(); state.streamCtl = null; }
   state.streaming = "";
-  $("#live").replaceChildren();
+  if (live && typeof live.replaceChildren === "function") {
+    live.replaceChildren();
+    for (const card of kept) {
+      if (typeof live.append === "function") live.append(card);
+    }
+  }
   setWorking(false);
+  if (wantsPermissionPoll(currentBot(), "")) loadPendingPermissions("").catch(() => {});
 }
 // loadPendingPermissions shows open requests the stream did not replay
 // (the page opened later, or the run's event history was trimmed).
+// A job card stays visible while the bot is idle.
 async function loadPendingPermissions(runId) {
-  if (!state.botId || !runId) return;
+  if (!state.botId) return;
   const data = await api("/api/bots/" + state.botId + "/permissions");
-  if (state.streaming !== runId) return;
+  const streaming = !!(runId && state.streaming === runId);
   for (const p of (data && data.pending) || []) {
-    if (p && p.run_id === runId) showPermissionRequest(p, runId);
+    if (!p) continue;
+    const jobCard = p.persistent === true || (typeof p.run_id === "string" && p.run_id.indexOf("job:") === 0);
+    if (jobCard || (streaming && p.run_id === runId)) showPermissionRequest(p, p.run_id || runId);
   }
 }
 async function follow(runId) {
@@ -8004,6 +8050,8 @@ function renderApprovalCard(item, mode) {
     if (cwd) meta.title = cwd;
     argv.append(meta);
   }
+  const jobID = item.job_id || (String(item.session_id || "").indexOf("job:") === 0 ? String(item.session_id).slice(4) : "");
+  if (jobID) argv.append(el("div", "appr-meta", "job " + jobID));
   if (cwd) {
     const details = document.createElement("details");
     details.className = "appr-details";

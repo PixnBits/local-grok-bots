@@ -240,6 +240,20 @@ type App struct {
 	activity     map[string]time.Time
 	closing      bool
 	wg           sync.WaitGroup
+	// jobs are live background shells. jobWait unblocks a mid-job approval.
+	// jobEarly is a decision that arrived before the waiter was published.
+	jobsMu   sync.Mutex
+	jobs     map[string]*liveJob
+	jobWait  map[string]chan error
+	jobEarly map[string]error
+	// jobHalt is set while a bot's jobs are being stopped. addLive refuses
+	// a job that arrives during that window.
+	jobHalt map[string]string
+	// jobStopGen counts stops for one bot. jobStopAll counts a flag-off
+	// that applies to every bot. A shell records both when it starts and
+	// is killed instead of adopted when either value has changed.
+	jobStopGen map[string]uint64
+	jobStopAll uint64
 
 	stt STT
 	// sttSlot is a capacity-1 semaphore. Sending takes the one transcription.
@@ -419,6 +433,9 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 		resume:     map[string]resumeHold{},
 		pending:    map[string][]model.Message{},
 		activity:   map[string]time.Time{},
+		jobs:       map[string]*liveJob{},
+		jobWait:    map[string]chan error{},
+		jobEarly:   map[string]error{},
 		permTokens: map[string]permBind{},
 		permBase:   httpBase(cfg.BindAddr),
 		stt:        stt,
@@ -474,6 +491,10 @@ func New(cfg config.Config, m model.Client) (*App, error) {
 	}
 	a.seedBrokerBots(bots)
 	a.loadApprovalCheckpoints()
+	if err := a.reconcileLostJobs(); err != nil {
+		a.Shutdown()
+		return nil, err
+	}
 	for _, b := range bots {
 		if b.Status != "paused" {
 			a.kick(b.ID)

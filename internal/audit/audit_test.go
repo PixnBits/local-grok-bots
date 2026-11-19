@@ -55,11 +55,23 @@ func TestRedactValueHidesKeysAndTokens(t *testing.T) {
 	}
 	digest := strings.Repeat("ab", 32)
 	kept := RedactDetail(map[string]any{
-		"body_sha256": digest,
-		"token":       digest,
+		"body_sha256":    digest,
+		"command_sha256": digest,
+		"token":          digest,
 	}).(map[string]any)
-	if kept["body_sha256"] != digest || kept["token"] != "[redacted]" {
+	if kept["body_sha256"] != digest || kept["command_sha256"] != digest || kept["token"] != "[redacted]" {
 		t.Fatalf("digest %#v", kept)
+	}
+	bad := RedactValue(map[string]any{
+		"command_sha256": "not-a-digest",
+		"body_sha256":    "zzzz",
+		"command":        "lgb timer list",
+	}).(map[string]any)
+	if bad["command_sha256"] != "[redacted]" || bad["body_sha256"] != "[redacted]" {
+		t.Fatalf("non-digest %#v", bad)
+	}
+	if bad["command"] != "lgb timer list" {
+		t.Fatalf("command field %#v", bad["command"])
 	}
 }
 

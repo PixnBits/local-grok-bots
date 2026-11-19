@@ -233,6 +233,19 @@ func (a *App) noteGitHubSock(botID, sock string) {
 	a.githubReadSock[botID] = sock
 }
 
+// clearGitHubSock forgets sock only when it is still the one recorded for
+// this bot. A second live job may have replaced it.
+func (a *App) clearGitHubSock(botID, sock string) {
+	if a == nil || sock == "" {
+		return
+	}
+	a.rtMu.Lock()
+	defer a.rtMu.Unlock()
+	if a.githubReadSock[botID] == sock {
+		delete(a.githubReadSock, botID)
+	}
+}
+
 func (a *App) gitHubReadSock(botID string) string {
 	if a == nil {
 		return ""

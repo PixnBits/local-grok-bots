@@ -780,12 +780,19 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, err)
 			return
 		}
+		if *archived {
+			a.stopBotJobs(id, "archive")
+		}
 		if !*archived {
 			a.kick(id)
 		}
 	}
 	if patch.Status != nil && *patch.Status == "paused" {
 		a.cancelBot(id)
+		a.stopBotJobs(id, "pause")
+	}
+	if grantFieldsChanged(old, b) {
+		a.stopBotJobs(id, "grant")
 	}
 	if setIdle {
 		a.kick(id)
@@ -797,8 +804,9 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleDeleteBot(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	a.goneBots.Store(id, struct{}{})
-	a.cancelBotApprovals(id, "delete")
 	a.cancelBot(id)
+	a.stopBotJobs(id, "delete")
+	a.cancelBotApprovals(id, "delete")
 	a.closeBrokerBot(id)
 	a.credMu.Lock()
 	// Release before removal so a failed delete still rejects the secret.

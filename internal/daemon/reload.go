@@ -25,11 +25,13 @@ func (a *App) pol() policy.Policy {
 	return *p
 }
 
-// setPol publishes a copy of p.
+// setPol publishes a copy of p. Turning jobs off stops live jobs after the
+// broker accepts the new policy. Turning jobs on is not a hot change.
 func (a *App) setPol(p policy.Policy) {
 	if a == nil {
 		return
 	}
+	prev := a.pol()
 	if a.broker != nil {
 		if err := a.broker.SetRisks(p.BrokerRisks); err != nil {
 			return
@@ -43,6 +45,9 @@ func (a *App) setPol(p policy.Policy) {
 	cp := p
 	a.polCur.Store(&cp)
 	a.noteClampedLimits(cp)
+	if prev.JobsEnabled() && !cp.JobsEnabled() {
+		a.stopJobsFlagOff()
+	}
 }
 
 // editPol copies the snapshot, applies fn, and publishes the copy.
@@ -141,6 +146,9 @@ func (a *App) consider(gen uint64, fresh policy.Policy) {
 		return
 	}
 	next := a.startPol.WithHot(fresh)
+	if a.pol().JobsEnabled() && !fresh.JobsEnabled() {
+		next.OllamaJobs = false
+	}
 	block, nextSTT := a.prepVoice(next)
 	a.publish(gen, next, block, nextSTT, policy.RestartKeys(a.startPol, fresh))
 }
@@ -175,7 +183,8 @@ func (a *App) publish(gen uint64, next policy.Policy, block string, nextSTT STT,
 		}
 	}
 	prevBlock := a.voiceBlock
-	same := policy.HotEqual(a.pol(), next) && a.voiceBlock == block && sttSame(a.stt, nextSTT)
+	jobsOff := a.pol().JobsEnabled() && !next.JobsEnabled()
+	same := policy.HotEqual(a.pol(), next) && a.voiceBlock == block && sttSame(a.stt, nextSTT) && !jobsOff
 	if !same {
 		a.setPol(next)
 		a.voiceBlock = block

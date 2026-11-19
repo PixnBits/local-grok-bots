@@ -70,13 +70,37 @@ func TestToolSchemasComplete(t *testing.T) {
 			t.Errorf("tool %s missing", want)
 		}
 	}
+	if seen["stop_job"] {
+		t.Error("stop_job is registered while jobs are off")
+	}
 	for _, tool := range toolDefs() {
 		if tool.Name != "run_shell" {
 			continue
 		}
-		if !strings.Contains(tool.Description, "approval card") || strings.Contains(tool.Description, "git push, and SSH") {
+		if tool.Description != runShellDescOff || strings.Contains(tool.Description, "background") {
 			t.Errorf("run_shell description %q", tool.Description)
 		}
+		props, _ := tool.Parameters["properties"].(map[string]any)
+		if props["background"] != nil || props["command"] == nil {
+			t.Errorf("run_shell properties %#v", props)
+		}
+	}
+	on := map[string]bool{}
+	for _, tool := range toolDefsFor(true) {
+		on[tool.Name] = true
+		if tool.Name != "run_shell" {
+			continue
+		}
+		if !strings.Contains(tool.Description, "approval card") || !strings.Contains(tool.Description, "background") || strings.Contains(tool.Description, "git push, and SSH") {
+			t.Errorf("jobs run_shell description %q", tool.Description)
+		}
+		props, _ := tool.Parameters["properties"].(map[string]any)
+		if props["background"] == nil {
+			t.Error("jobs run_shell missing background")
+		}
+	}
+	if !on["stop_job"] {
+		t.Error("stop_job missing while jobs are on")
 	}
 	timer := toolDefs()[2]
 	props := timer.Parameters["properties"].(map[string]any)

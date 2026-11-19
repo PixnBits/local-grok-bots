@@ -79,6 +79,12 @@ type Policy struct {
 	OllamaToolRounds int
 	// OllamaShellTimeout bounds one run_shell call. Zero means the default.
 	OllamaShellTimeout time.Duration
+	// OllamaJobLifetime bounds one background shell after it is adopted.
+	// Zero means DefaultJobLifetime. It is clamped to MaxJobLifetime.
+	OllamaJobLifetime time.Duration
+	// OllamaJobs enables background shells. Default false. Only host or
+	// managed policy sets it. A bot cannot turn it on.
+	OllamaJobs bool
 	// OllamaStallRetriesSet is false when stall_retries was not set. Zero
 	// retries is a real setting and is distinct from the default.
 	OllamaStallRetries    int
@@ -87,18 +93,18 @@ type Policy struct {
 	// policy replaced that key. A ceiling warns only for a local value
 	// managed policy did not replace. Silence defaults use either set flag.
 	localRun, localModel, localFirst, localStall time.Duration
-	localTurn, localPrompt, localShell           time.Duration
+	localTurn, localPrompt, localShell, localJob time.Duration
 	localRetries, localToolRounds                int
 	localRunSet, localModelSet                   bool
 	localFirstSet, localStallSet                 bool
 	localTurnSet, localPromptSet                 bool
 	localRetriesSet, localToolRoundsSet          bool
-	localShellSet                                bool
+	localShellSet, localJobSet                   bool
 	managedRunSet, managedModelSet               bool
 	managedFirstSet, managedStallSet             bool
 	managedTurnSet, managedPromptSet             bool
 	managedRetriesSet, managedToolRoundsSet      bool
-	managedShellSet                              bool
+	managedShellSet, managedJobSet               bool
 	// OllamaKeepAlive is a duration string or an integer number of seconds.
 	// Unset means DefaultOllamaKeepAlive.
 	OllamaKeepAlive    any
@@ -126,6 +132,7 @@ type Policy struct {
 	MaxOllamaStallRetriesSet    bool
 	MaxOllamaToolRounds         int
 	MaxOllamaShellTimeout       time.Duration
+	MaxOllamaJobLifetime        time.Duration
 	// AllowSessionGrants is true only when managed policy set it.
 	AllowSessionGrants bool
 	// ClaudeTransport is how Claude asks this daemon about a tool.
@@ -663,6 +670,10 @@ const (
 	DefaultOllamaKeepAlive          = "30m"
 	DefaultOllamaToolRounds         = 8
 	DefaultOllamaShellTimeout       = 30 * time.Second
+	// DefaultJobLifetime is how long a background shell may run after it
+	// is adopted. MaxJobLifetime is the hard ceiling.
+	DefaultJobLifetime = 2 * time.Hour
+	MaxJobLifetime     = 24 * time.Hour
 	// DefaultEventLoopQuiet is the quiet window for ollama.event_loop.
 	// DefaultEventLoopMaxWait is the longest a batch waits after its first wake-up.
 	DefaultEventLoopQuiet   = 500 * time.Millisecond
@@ -719,6 +730,29 @@ func (p Policy) EffectiveToolRounds() int {
 // Without pidfd signalling the result is at most 30s.
 func (p Policy) EffectiveShellTimeout() time.Duration {
 	d, _ := p.ShellTimeoutCeiling()
+	return d
+}
+
+// JobsEnabled reports whether background shells are on. The default is off.
+func (p Policy) JobsEnabled() bool {
+	return p.OllamaJobs
+}
+
+// EffectiveJobLifetime is how long a background shell may run after it is
+// adopted. An unset value is 2h. A managed max_job_lifetime lowers that.
+// The result is never above 24h.
+func (p Policy) EffectiveJobLifetime() time.Duration {
+	d := p.OllamaJobLifetime
+	if d <= 0 {
+		d = DefaultJobLifetime
+	}
+	ceil := MaxJobLifetime
+	if p.MaxOllamaJobLifetime > 0 && p.MaxOllamaJobLifetime < ceil {
+		ceil = p.MaxOllamaJobLifetime
+	}
+	if d > ceil {
+		d = ceil
+	}
 	return d
 }
 
@@ -1679,6 +1713,10 @@ type ollamaDoc struct {
 	MaxToolRounds         flexText  `toml:"max_tool_rounds" json:"max_tool_rounds"`
 	ShellTimeout          flexText  `toml:"shell_timeout" json:"shell_timeout"`
 	MaxShellTimeout       flexText  `toml:"max_shell_timeout" json:"max_shell_timeout"`
+	JobLifetime           flexText  `toml:"job_lifetime" json:"job_lifetime"`
+	MaxJobLifetime        flexText  `toml:"max_job_lifetime" json:"max_job_lifetime"`
+	// Jobs is the background-shell flag. Nil means the file did not set it.
+	Jobs *bool `toml:"jobs" json:"jobs"`
 	// EventLoop is the interim-reply flag. Quiet and MaxWait are durations.
 	EventLoop        *bool    `toml:"event_loop" json:"event_loop"`
 	EventLoopQuiet   flexText `toml:"event_loop_quiet" json:"event_loop_quiet"`
@@ -1907,6 +1945,8 @@ func (p *Policy) apply(doc document, trusted bool) error {
 		{"cli.max_turn_timeout", doc.CLI.MaxTurnTimeout, &p.MaxTurnTimeout, true},
 		{"ollama.shell_timeout", doc.Ollama.ShellTimeout, &p.OllamaShellTimeout, false},
 		{"ollama.max_shell_timeout", doc.Ollama.MaxShellTimeout, &p.MaxOllamaShellTimeout, true},
+		{"ollama.job_lifetime", doc.Ollama.JobLifetime, &p.OllamaJobLifetime, false},
+		{"ollama.max_job_lifetime", doc.Ollama.MaxJobLifetime, &p.MaxOllamaJobLifetime, true},
 	}
 	if doc.CLI.Permission != nil {
 		timeouts = append(timeouts, struct {
@@ -1922,7 +1962,7 @@ func (p *Policy) apply(doc document, trusted bool) error {
 		}
 		var d time.Duration
 		var err error
-		if t.key == "ollama.shell_timeout" || t.key == "ollama.max_shell_timeout" {
+		if t.key == "ollama.shell_timeout" || t.key == "ollama.max_shell_timeout" || t.key == "ollama.job_lifetime" || t.key == "ollama.max_job_lifetime" {
 			d, err = parseShellTimeout(t.key, t.f.Value)
 		} else {
 			d, err = parseTurnTimeout(t.key, t.f.Value)
@@ -1989,6 +2029,9 @@ func (p *Policy) apply(doc document, trusted bool) error {
 	}
 	if doc.Ollama.EventLoop != nil {
 		p.EventLoop = *doc.Ollama.EventLoop
+	}
+	if doc.Ollama.Jobs != nil {
+		p.OllamaJobs = *doc.Ollama.Jobs
 	}
 	if doc.Ollama.EventLoopQuiet.Set {
 		d, err := parseEventLoopDuration("ollama.event_loop_quiet", doc.Ollama.EventLoopQuiet.Value)
@@ -2436,6 +2479,8 @@ func (p *Policy) recordTimeout(key string, d time.Duration, trusted bool) {
 			p.managedPromptSet = true
 		case "ollama.shell_timeout":
 			p.managedShellSet = true
+		case "ollama.job_lifetime":
+			p.managedJobSet = true
 		}
 		return
 	}
@@ -2454,6 +2499,8 @@ func (p *Policy) recordTimeout(key string, d time.Duration, trusted bool) {
 		p.localPrompt, p.localPromptSet = d, true
 	case "ollama.shell_timeout":
 		p.localShell, p.localShellSet = d, true
+	case "ollama.job_lifetime":
+		p.localJob, p.localJobSet = d, true
 	}
 }
 
@@ -2492,6 +2539,7 @@ func (p *Policy) warnClampedCeilings() {
 		{p.localTurnSet, p.managedTurnSet, p.localTurn, p.MaxTurnTimeout, "cli.turn_timeout", "max_turn_timeout"},
 		{p.localPromptSet, p.managedPromptSet, p.localPrompt, p.MaxPromptTimeout, "cli.permission.prompt_timeout", "max_prompt_timeout"},
 		{p.localShellSet, p.managedShellSet, p.localShell, p.MaxOllamaShellTimeout, "ollama.shell_timeout", "max_shell_timeout"},
+		{p.localJobSet, p.managedJobSet, p.localJob, p.MaxOllamaJobLifetime, "ollama.job_lifetime", "max_job_lifetime"},
 	}
 	for _, it := range items {
 		if !it.localSet || it.managedSet || it.ceiling <= 0 || it.v <= it.ceiling {

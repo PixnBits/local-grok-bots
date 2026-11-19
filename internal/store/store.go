@@ -369,6 +369,10 @@ type Message struct {
 // KindHookNote is a daemon decision note. Only AddHookNote stores it.
 const KindHookNote = "hook_note"
 
+// KindJobOutput is the tool-data copy of a finished job's output.
+// Only AddJobOutput stores it. It is not a user turn.
+const KindJobOutput = "job_output"
+
 // KindRunFailed is a run-failure notice. Only AddRunNotice stores it.
 const KindRunFailed = "run_failed"
 
@@ -601,6 +605,19 @@ CREATE TABLE IF NOT EXISTS perm_suggestions (
   decided_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_perm_suggestions_bot ON perm_suggestions(bot_id, status, created_at);
+CREATE TABLE IF NOT EXISTS jobs (
+  id TEXT PRIMARY KEY,
+  bot_id TEXT NOT NULL,
+  command TEXT NOT NULL,
+  status TEXT NOT NULL,
+  log_path TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  exit_code INTEGER,
+  reason TEXT NOT NULL DEFAULT '',
+  pgid INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, bot_id);
 `)
 	if err != nil {
 		return err
@@ -1555,8 +1572,8 @@ func (s *Store) DeleteMemory(botID, key string) error {
 func (s *Store) AddMessage(m Message) (Message, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Kind is not a caller-controlled field. AddHookNote and AddRunNotice
-	// are the only writers.
+	// Kind is not a caller-controlled field. AddHookNote, AddRunNotice,
+	// and AddJobOutput are the only writers.
 	m.Kind = ""
 	return s.addMessage(m)
 }
@@ -1582,6 +1599,20 @@ func (s *Store) AddRunNotice(m Message) (Message, error) {
 	defer s.mu.Unlock()
 	m.Role = "system"
 	m.Kind = KindRunFailed
+	if m.Thread == "" {
+		m.Thread = "user"
+	}
+	return s.addMessage(m)
+}
+
+// AddJobOutput stores a finished job's output as tool data.
+// The role is tool, so it does not queue a turn. AddMessage clears kind,
+// so a caller cannot forge this.
+func (s *Store) AddJobOutput(m Message) (Message, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m.Role = "tool"
+	m.Kind = KindJobOutput
 	if m.Thread == "" {
 		m.Thread = "user"
 	}

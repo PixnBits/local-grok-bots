@@ -470,14 +470,27 @@ const lgbHelp = `lgb: daemon tools for this bot. Output is text; exit 0 on succe
 A timer's prompt comes back to you as a [scheduled] message.
 Run each lgb command as its own shell call; a chained command (;, &&, |) asks for approval.`
 
+// lgbHelpText is lgb --help. The job sentence is present only when
+// background jobs are enabled.
+func (a *App) lgbHelpText() string {
+	const timer = "A timer's prompt comes back to you as a [scheduled] message."
+	const job = "A timer's prompt comes back to you as a [scheduled] message. A finished background shell comes back as a [job] message."
+	line := timer
+	if a.jobsEnabled() {
+		line = job
+	}
+	return strings.Replace(lgbHelp, timer, line, 1)
+}
+
 // lgbUsage appends the bot-timer limits that are actually in force.
 func (a *App) lgbUsage() string {
+	help := a.lgbHelpText()
 	min, perHour := a.pol().BotTimerLimits()
 	if min == 0 && perHour == 0 {
-		return lgbHelp
+		return help
 	}
 	var b strings.Builder
-	b.WriteString(lgbHelp)
+	b.WriteString(help)
 	b.WriteString("\n")
 	if min > 0 {
 		fmt.Fprintf(&b, "Repeating timers must be at least %s apart (cli.lgb.min_timer_interval).\n", prettyDuration(min))

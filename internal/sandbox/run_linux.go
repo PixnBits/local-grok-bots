@@ -82,15 +82,15 @@ func runBwrap(ctx context.Context, p *prepared, bwrap string) (string, string, e
 		}
 	}
 	if !jailDrops(uid) {
-		return captureReady(ctx, cmd, func() { closeBinds(); note() }, nil)
+		return captureStream(ctx, cmd, func() { closeBinds(); note() }, nil, p.stream)
 	}
-	return captureReady(ctx, cmd, func() { closeBinds(); note() }, func() error {
+	return captureStream(ctx, cmd, func() { closeBinds(); note() }, func() error {
 		if len(extra) >= 2 {
 			_ = extra[0].Close()
 			_ = extra[1].Close()
 		}
 		return finishUserNamespace(ctx, infoR, blockW, uid, gid)
-	})
+	}, p.stream)
 }
 
 func shellChdir(p *prepared) string {
@@ -377,11 +377,11 @@ func runUnshare(ctx context.Context, p *prepared) (string, string, error) {
 	}
 	argv := append(unshareNamespaceArgs(), exe, "--sandbox-stage2", jail, cfgPath)
 	cmd := exec.Command("/usr/bin/unshare", argv...)
-	return captureReady(ctx, cmd, func() {
+	return captureStream(ctx, cmd, func() {
 		if p != nil && p.guard != nil && cmd.Process != nil {
 			p.guard.noteJail(cmd.Process.Pid)
 		}
-	}, nil)
+	}, nil, p.stream)
 }
 
 func stage2FromFile(jail, configPath string) error {

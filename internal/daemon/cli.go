@@ -1924,7 +1924,7 @@ func (a *App) cliPrompt(bot store.Bot, fresh bool, inputs []store.Message) (stri
 	grok := strings.EqualFold(turnPol.EffectiveBackend(), "grok")
 	firstUser := true
 	for _, m := range inputs {
-		if m.Kind == store.KindHookNote {
+		if m.Kind == store.KindHookNote || m.Kind == store.KindJobOutput {
 			if sys.Len() > 0 {
 				sys.WriteString("\n")
 			}

@@ -513,7 +513,16 @@ func (a *App) loadApprovalCheckpoints() {
 }
 
 func (a *App) afterBrokerDecision(id, decision string, snap permbroker.PendingSnapshot) {
-	if a == nil || a.broker == nil || id == "" {
+	if a == nil || id == "" {
+		return
+	}
+	// A mid-job card has no checkpoint. Deliver it before the missing-snap
+	// path can refuse the run that happens to be in progress. A job session
+	// whose waiter is not published yet keeps the decision until it is.
+	if a.finishJobDecision(id, decision, strings.HasPrefix(snap.SessionID, "job:")) {
+		return
+	}
+	if a.broker == nil {
 		return
 	}
 	ck, kind := a.readCheckpoint(id)
