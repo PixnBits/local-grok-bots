@@ -179,4 +179,11 @@ CREATE TABLE runs (
 	if !ok {
 		t.Fatal("migrate did not add error_code")
 	}
+	ok, err = st.hasColumn("runs", "stop_reason")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("migrate did not add stop_reason")
+	}
 }

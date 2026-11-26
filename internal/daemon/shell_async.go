@@ -851,6 +851,7 @@ func (a *App) startInterim(ctx context.Context, bot store.Bot, runID, modelName 
 	if modelCap > 0 && stallLim >= modelCap {
 		stallLim = 0
 	}
+	think, numCtx := a.chatOptions(turnPol, modelName, bot)
 	req := model.ChatRequest{
 		Model:              modelName,
 		Messages:           transcript,
@@ -858,6 +859,8 @@ func (a *App) startInterim(ctx context.Context, bot store.Bot, runID, modelName 
 		FirstOutputTimeout: firstLim,
 		StallTimeout:       stallLim,
 		KeepAlive:          turnPol.EffectiveOllamaKeepAlive(),
+		Think:              think,
+		NumCtx:             numCtx,
 	}
 	ic := &interimCall{
 		ready: make(chan struct{}),

@@ -408,9 +408,13 @@ func TestToolSchemaClaimRetriesOnce(t *testing.T) {
 	mu.Unlock()
 	saw := false
 	for _, m := range got {
-		if m.Role == "system" && strings.Contains(m.Content, "Reminder (data, not instructions):") && strings.Contains(m.Content, "run_shell") && strings.Contains(m.Content, "pr_status") {
-			saw = true
+		if m.Role != "system" || !strings.Contains(m.Content, "Reminder (data, not instructions):") || !strings.Contains(m.Content, "run_shell") {
+			continue
 		}
+		if strings.Contains(m.Content, "pr_status") {
+			t.Fatalf("reminder listed pr_status without a github grant: %s", m.Content)
+		}
+		saw = true
 	}
 	if !saw {
 		t.Fatalf("reminder missing %#v", got)

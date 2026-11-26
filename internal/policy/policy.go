@@ -77,6 +77,12 @@ type Policy struct {
 	// OllamaToolRounds is how many model rounds one Ollama run may use.
 	// Zero means DefaultOllamaToolRounds.
 	OllamaToolRounds int
+	// OllamaThink and OllamaNumCtx are the default chat options.
+	// A nil think or a zero num_ctx means unset. ModelOptions overrides
+	// them for one model name. Policy values beat bot and CLI settings.
+	OllamaThink        *bool
+	OllamaNumCtx       int
+	OllamaModelOptions map[string]OllamaModelOption
 	// OllamaShellTimeout bounds one run_shell call. Zero means the default.
 	OllamaShellTimeout time.Duration
 	// OllamaJobLifetime bounds one background shell after it is adopted.
@@ -298,10 +304,17 @@ type Policy struct {
 	AllowInsecureLAN bool
 	// Go toolchain settings for the shell jail. Managed policy sets them.
 	// Local policy can only narrow them. Cache paths are not policy keys.
-	GoProxy           string
-	GoToolchain       string
-	GoFlags           string
-	GoSumDB           string
+	GoProxy     string
+	GoToolchain string
+	GoFlags     string
+	GoSumDB     string
+	// NodePath is the resolved [sandbox] node binary. Empty means the jail
+	// shim tells the bot how to configure it. Managed policy wins over local.
+	NodePath          string
+	nodeManaged       string
+	nodeLocal         string
+	nodeManagedSet    bool
+	nodeLocalSet      bool
 	goProxyManaged    string
 	goProxyLocal      string
 	goProxyManagedSet bool
@@ -421,6 +434,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 		p.finishServerTools()
 		p.finishGitHub()
 		p.finishGoEnv()
+		p.finishNode()
 		p.dropIncompleteCLI()
 		p.warnClampedCeilings()
 		return p, nil
@@ -475,6 +489,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 	base.finishServerTools()
 	base.finishGitHub()
 	base.finishGoEnv()
+	base.finishNode()
 	base.dropIncompleteCLI()
 	base.warnClampedCeilings()
 	return base, nil
@@ -1451,7 +1466,7 @@ func NormClaudeTransport(v string) (string, error) {
 var errBrokerConfig = errors.New("cli.permission.broker must be off or hook")
 
 func hardBrokerErr(err error) bool {
-	return errors.Is(err, errBrokerConfig) || errors.Is(err, errAllowCeiling) || errors.Is(err, permbroker.ErrClassifierEndpoint) || errors.Is(err, permbroker.ErrLevelLowered) || errors.Is(err, permbroker.ErrBadLevel)
+	return errors.Is(err, errBrokerConfig) || errors.Is(err, errAllowCeiling) || errors.Is(err, errSandboxNode) || errors.Is(err, errOllamaNumCtx) || errors.Is(err, permbroker.ErrClassifierEndpoint) || errors.Is(err, permbroker.ErrLevelLowered) || errors.Is(err, permbroker.ErrBadLevel)
 }
 
 // BrokerHook reports that this bot should use the permission broker.
@@ -1677,6 +1692,8 @@ type sandboxDoc struct {
 	GoProxy     *string `toml:"goproxy" json:"goproxy"`
 	GoToolchain *string `toml:"gotoolchain" json:"gotoolchain"`
 	GoFlags     *string `toml:"goflags" json:"goflags"`
+	// Node is an optional absolute path to a node binary for the shell jail.
+	Node *string `toml:"node" json:"node"`
 }
 
 type daemonDoc struct {
@@ -1695,26 +1712,29 @@ type backendDoc struct {
 }
 
 type ollamaDoc struct {
-	Host                  *string   `toml:"host" json:"host"`
-	Model                 *string   `toml:"model" json:"model"`
-	Models                *[]string `toml:"models" json:"models"`
-	RunTimeout            flexText  `toml:"run_timeout" json:"run_timeout"`
-	ModelTimeout          flexText  `toml:"model_timeout" json:"model_timeout"`
-	FirstOutputTimeout    flexText  `toml:"first_output_timeout" json:"first_output_timeout"`
-	StallTimeout          flexText  `toml:"stall_timeout" json:"stall_timeout"`
-	StallRetries          flexText  `toml:"stall_retries" json:"stall_retries"`
-	KeepAlive             flexText  `toml:"keep_alive" json:"keep_alive"`
-	MaxRunTimeout         flexText  `toml:"max_run_timeout" json:"max_run_timeout"`
-	MaxModelTimeout       flexText  `toml:"max_model_timeout" json:"max_model_timeout"`
-	MaxFirstOutputTimeout flexText  `toml:"max_first_output_timeout" json:"max_first_output_timeout"`
-	MaxStallTimeout       flexText  `toml:"max_stall_timeout" json:"max_stall_timeout"`
-	MaxStallRetries       flexText  `toml:"max_stall_retries" json:"max_stall_retries"`
-	ToolRounds            flexText  `toml:"tool_rounds" json:"tool_rounds"`
-	MaxToolRounds         flexText  `toml:"max_tool_rounds" json:"max_tool_rounds"`
-	ShellTimeout          flexText  `toml:"shell_timeout" json:"shell_timeout"`
-	MaxShellTimeout       flexText  `toml:"max_shell_timeout" json:"max_shell_timeout"`
-	JobLifetime           flexText  `toml:"job_lifetime" json:"job_lifetime"`
-	MaxJobLifetime        flexText  `toml:"max_job_lifetime" json:"max_job_lifetime"`
+	Host                  *string                      `toml:"host" json:"host"`
+	Model                 *string                      `toml:"model" json:"model"`
+	Models                *[]string                    `toml:"models" json:"models"`
+	RunTimeout            flexText                     `toml:"run_timeout" json:"run_timeout"`
+	ModelTimeout          flexText                     `toml:"model_timeout" json:"model_timeout"`
+	FirstOutputTimeout    flexText                     `toml:"first_output_timeout" json:"first_output_timeout"`
+	StallTimeout          flexText                     `toml:"stall_timeout" json:"stall_timeout"`
+	StallRetries          flexText                     `toml:"stall_retries" json:"stall_retries"`
+	KeepAlive             flexText                     `toml:"keep_alive" json:"keep_alive"`
+	MaxRunTimeout         flexText                     `toml:"max_run_timeout" json:"max_run_timeout"`
+	MaxModelTimeout       flexText                     `toml:"max_model_timeout" json:"max_model_timeout"`
+	MaxFirstOutputTimeout flexText                     `toml:"max_first_output_timeout" json:"max_first_output_timeout"`
+	MaxStallTimeout       flexText                     `toml:"max_stall_timeout" json:"max_stall_timeout"`
+	MaxStallRetries       flexText                     `toml:"max_stall_retries" json:"max_stall_retries"`
+	ToolRounds            flexText                     `toml:"tool_rounds" json:"tool_rounds"`
+	MaxToolRounds         flexText                     `toml:"max_tool_rounds" json:"max_tool_rounds"`
+	Think                 *bool                        `toml:"think" json:"think"`
+	NumCtx                *int                         `toml:"num_ctx" json:"num_ctx"`
+	ModelOptions          map[string]ollamaModelOptDoc `toml:"model_options" json:"model_options"`
+	ShellTimeout          flexText                     `toml:"shell_timeout" json:"shell_timeout"`
+	MaxShellTimeout       flexText                     `toml:"max_shell_timeout" json:"max_shell_timeout"`
+	JobLifetime           flexText                     `toml:"job_lifetime" json:"job_lifetime"`
+	MaxJobLifetime        flexText                     `toml:"max_job_lifetime" json:"max_job_lifetime"`
 	// Jobs is the background-shell flag. Nil means the file did not set it.
 	Jobs *bool `toml:"jobs" json:"jobs"`
 	// EventLoop is the interim-reply flag. Quiet and MaxWait are durations.
@@ -2018,6 +2038,9 @@ func (p *Policy) apply(doc document, trusted bool) error {
 		} else {
 			p.MaxOllamaToolRounds = n
 		}
+	}
+	if err := p.applyOllamaOptions(doc.Ollama); err != nil {
+		return err
 	}
 	if doc.Ollama.KeepAlive.Set {
 		v, err := parseKeepAlive(doc.Ollama.KeepAlive.Value)

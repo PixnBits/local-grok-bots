@@ -319,6 +319,7 @@ func (a *App) execRunShell(ctx context.Context, bot store.Bot, args map[string]a
 			GoToolchain:     goEnv.Toolchain,
 			GoFlags:         goEnv.Flags,
 			GoSumDB:         goEnv.SumDB,
+			NodePath:        turnPol.NodePath,
 			Guard:           guard,
 			Output:          sink,
 			OnStart: func(pgid int) {

@@ -158,6 +158,9 @@ func bwrapLaunchArgs(p *prepared) (args []string, extra, bindFiles []*os.File, i
 	}
 	var margs []string
 	margs, bindFiles = mountArgs(p.mounts, len(extra))
+	// The node directory is not part of the base root. Create it before the
+	// read-only bind so the mount has a destination.
+	args = append(args, "--dir", "/opt", "--dir", "/opt/lgb-node", "--dir", JailNodeDir)
 	args = append(args, margs...)
 	for _, e := range p.env {
 		k, v, ok := strings.Cut(e, "=")

@@ -118,6 +118,8 @@ func (a *App) execute(botID, runID string) {
 	retried := 0
 	var lastFirst time.Duration
 	rounds := a.effectiveToolRounds(bot, turnPol)
+	wrapNoted := false
+	wrapAt := rounds - wrapUpReserve(rounds)
 	for round := 0; round < rounds; round++ {
 		if a.finishOllamaCtx(bot, runID, ctx, msgs, "", retried, lastFirst) {
 			return
@@ -151,6 +153,11 @@ func (a *App) execute(botID, runID string) {
 			}
 			mctx, mcancel := a.modelCallContext(ctx, modelCap)
 			var roundText strings.Builder
+			if !wrapNoted && wrapUpReserve(rounds) > 0 && round >= wrapAt {
+				msgs = append(msgs, model.Message{Role: "user", Content: toolRoundWrapUp(granted(bot.Grants, "git"))})
+				wrapNoted = true
+			}
+			think, numCtx := a.chatOptions(turnPol, modelName, bot)
 			callResp, err := a.model.Chat(mctx, model.ChatRequest{
 				Model:              modelName,
 				Messages:           msgs,
@@ -158,6 +165,8 @@ func (a *App) execute(botID, runID string) {
 				FirstOutputTimeout: firstLim,
 				StallTimeout:       stallLim,
 				KeepAlive:          turnPol.EffectiveOllamaKeepAlive(),
+				Think:              think,
+				NumCtx:             numCtx,
 			}, func(tok string) {
 				roundText.WriteString(tok)
 				a.bus.Publish(runID, "token", map[string]string{"text": tok})
@@ -317,8 +326,11 @@ func (a *App) execute(botID, runID string) {
 	ceil, src := turnPol.ToolRoundsCeiling()
 	msg := toolRoundLimitBody(rounds, bot.ToolRounds, ceil, src)
 	a.holdResume(bot.ID, runID, msgs)
-	_, _ = a.finishRunCode(runID, "error", msg, store.ErrorToolRounds)
-	a.bus.Publish(runID, "error", map[string]any{"run_id": runID, "error": msg, "code": store.ErrorToolRounds})
+	_, _ = a.finishRunStopped(runID, "error", msg, store.ErrorToolRounds, store.StopReasonToolRounds)
+	a.bus.Publish(runID, "error", map[string]any{
+		"run_id": runID, "error": msg, "code": store.ErrorToolRounds,
+		"stop_reason": store.StopReasonToolRounds,
+	})
 }
 
 func (a *App) finishInterrupted(botID, runID string, ctx context.Context) {
@@ -349,6 +361,10 @@ func (a *App) finishRun(runID, status, errText string) (bool, error) {
 }
 
 func (a *App) finishRunCode(runID, status, errText, errCode string) (bool, error) {
+	return a.finishRunStopped(runID, status, errText, errCode, "")
+}
+
+func (a *App) finishRunStopped(runID, status, errText, errCode, stopReason string) (bool, error) {
 	// Redact before the notice and the row. quoteRunError truncates later.
 	errText = audit.RedactText(errText)
 	if status != "done" {
@@ -356,7 +372,7 @@ func (a *App) finishRunCode(runID, status, errText, errCode string) (bool, error
 			a.persistRunNotice(run.BotID, runID, status, errText)
 		}
 	}
-	return a.st.FinishRunCode(runID, status, errText, errCode)
+	return a.st.FinishRunStopped(runID, status, errText, errCode, stopReason)
 }
 
 // runNoticeText is the thread line for a run that did not finish done.
@@ -931,14 +947,38 @@ func zoneLabel(now time.Time) string {
 // botTools is the tool list when background jobs are off. Tests that do
 // not hold an App use it. A live turn uses App.botTools.
 func botTools(bot store.Bot) []model.Tool {
-	return toolDefs()
+	return toolsForGrant(toolDefs(), bot)
 }
 
 // botTools is the tool list attached to a model request for bot. Call it
 // once and pass that slice to the chat request and to attachedToolsLine.
 // Background jobs add stop_job only when policy enabled them.
+// GitHub tools are included only when the bot has a github grant.
 func (a *App) botTools(bot store.Bot) []model.Tool {
-	return toolDefsFor(a.jobsEnabled())
+	return toolsForGrant(toolDefsFor(a.jobsEnabled()), bot)
+}
+
+func toolsForGrant(tools []model.Tool, bot store.Bot) []model.Tool {
+	if granted(bot.Grants, "github") {
+		return tools
+	}
+	out := make([]model.Tool, 0, len(tools))
+	for _, tool := range tools {
+		if githubToolName(tool.Name) {
+			continue
+		}
+		out = append(out, tool)
+	}
+	return out
+}
+
+func githubToolName(name string) bool {
+	switch name {
+	case "create_pr", "pr_status", "list_issues", "read_issue", "read_pr", "create_issue", "create_comment":
+		return true
+	default:
+		return false
+	}
 }
 
 // attachedToolsLine names the tools sent with the model request.

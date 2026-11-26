@@ -72,6 +72,8 @@ func configKeyDenied(section, key string) bool {
 		return true
 	case sec == "diff" && k == "external":
 		return true
+	// Host git, including the bare mirror, still refuses remote pushurl.
+	// The jail wrapper's local-only mode is a separate check and does not apply here.
 	case sec == "remote" && k == "pushurl":
 		return true
 	}

@@ -311,7 +311,11 @@ type Bot struct {
 	RunTimeout   DurationMS `json:"run_timeout"`
 	ShellTimeout DurationMS `json:"shell_timeout"`
 	ToolRounds   int        `json:"tool_rounds"`
-	Limits       *BotLimits `json:"limits,omitempty"`
+	// Think is nil when this bot does not set it. False is stored and returned.
+	Think *bool `json:"think,omitempty"`
+	// NumCtx is 0 when this bot does not set a context length.
+	NumCtx int        `json:"num_ctx,omitempty"`
+	Limits *BotLimits `json:"limits,omitempty"`
 }
 
 // BotLimits is the effective run limit view the API returns.
@@ -404,6 +408,10 @@ type Timer struct {
 // ErrorToolRounds is stored on a run that stopped because it used all tool rounds.
 const ErrorToolRounds = "tool_rounds"
 
+// StopReasonToolRounds is the explicit stop reason for that same end.
+// Continue still resumes the held thread; the reason records why the run stopped.
+const StopReasonToolRounds = "tool_rounds_exhausted"
+
 type Run struct {
 	ID         string  `json:"id"`
 	BotID      string  `json:"bot_id"`
@@ -413,6 +421,9 @@ type Run struct {
 	Error      *string `json:"error"`
 	// ErrorCode is a stable reason, not a copy of Error. Empty for other failures.
 	ErrorCode string `json:"error_code,omitempty"`
+	// StopReason is set when the run stopped for a reason Continue can resume,
+	// such as tool rounds. Empty for other endings.
+	StopReason string `json:"stop_reason,omitempty"`
 	// WaitingPendingID is the pending id this run is suspended on.
 	// WaitingSeq is the monotonic per-run sequence of that wait.
 	// A checkpoint restores only when both match.
@@ -546,6 +557,7 @@ CREATE TABLE IF NOT EXISTS runs (
   finished_at TEXT,
   error TEXT,
   error_code TEXT NOT NULL DEFAULT '',
+  stop_reason TEXT NOT NULL DEFAULT '',
   waiting_pending_id TEXT NOT NULL DEFAULT '',
   waiting_seq INTEGER NOT NULL DEFAULT 0
 );
@@ -673,7 +685,10 @@ func (s *Store) evolve() error {
 		{"bots", "run_timeout_ms", "INTEGER NOT NULL DEFAULT 0"},
 		{"bots", "shell_timeout_ms", "INTEGER NOT NULL DEFAULT 0"},
 		{"bots", "tool_rounds", "INTEGER NOT NULL DEFAULT 0"},
+		{"bots", "think", "INTEGER"},
+		{"bots", "num_ctx", "INTEGER NOT NULL DEFAULT 0"},
 		{"runs", "error_code", "TEXT NOT NULL DEFAULT ''"},
+		{"runs", "stop_reason", "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, a := range adds {
 		ok, err := s.hasColumn(a.table, a.col)
@@ -919,6 +934,8 @@ type BotDraft struct {
 	RunTimeout   time.Duration
 	ShellTimeout time.Duration
 	ToolRounds   int
+	Think        *bool
+	NumCtx       int
 }
 
 // CreateBot inserts a bot with a default mark and no label.
@@ -964,15 +981,19 @@ func (s *Store) InsertBot(d BotDraft, by string) (Bot, error) {
 		Mark: mark, Grants: grants, NetAllow: netAllow, SSHAllow: sshAllow, GitHubAllow: ghAllow, ServerTools: tools,
 		Status: "idle", Model: d.Model, CreatedAt: now, UpdatedAt: now,
 		RunTimeout: DurationMS(d.RunTimeout), ShellTimeout: DurationMS(d.ShellTimeout), ToolRounds: d.ToolRounds,
+		Think: d.Think, NumCtx: d.NumCtx,
+	}
+	if err := validBotNumCtx(d.NumCtx); err != nil {
+		return Bot{}, err
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return Bot{}, storageErr(err)
 	}
 	defer tx.Rollback()
-	_, err = tx.Exec(`INSERT INTO bots(id, name, name_lower, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, github_allow, server_tools, status, model, created_at, updated_at, run_timeout_ms, shell_timeout_ms, tool_rounds)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		b.ID, b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, 0, 0, encodeList(grants), encodeList(netAllow), encodeList(sshAllow), encodeList(ghAllow), encodeOptList(tools), b.Status, nullStr(d.Model), b.CreatedAt, b.UpdatedAt, durationToMS(d.RunTimeout), durationToMS(d.ShellTimeout), d.ToolRounds)
+	_, err = tx.Exec(`INSERT INTO bots(id, name, name_lower, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, github_allow, server_tools, status, model, created_at, updated_at, run_timeout_ms, shell_timeout_ms, tool_rounds, think, num_ctx)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		b.ID, b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, 0, 0, encodeList(grants), encodeList(netAllow), encodeList(sshAllow), encodeList(ghAllow), encodeOptList(tools), b.Status, nullStr(d.Model), b.CreatedAt, b.UpdatedAt, durationToMS(d.RunTimeout), durationToMS(d.ShellTimeout), d.ToolRounds, thinkSQL(d.Think), d.NumCtx)
 	if err != nil {
 		if isUnique(err) {
 			return Bot{}, ErrConflict
@@ -1067,7 +1088,7 @@ func (s *Store) attachRun(b *Bot) {
 	}
 }
 
-const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, github_allow, server_tools, status, model, session_id, created_at, updated_at, archived_at, run_timeout_ms, shell_timeout_ms, tool_rounds FROM bots`
+const botSelect = `SELECT id, name, label, description, mark_shape, mark_color, pinned, hidden, grants, net_allow, ssh_allow, github_allow, server_tools, status, model, session_id, created_at, updated_at, archived_at, run_timeout_ms, shell_timeout_ms, tool_rounds, think, num_ctx FROM bots`
 
 func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	var b Bot
@@ -1077,7 +1098,9 @@ func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	var pinned, hidden int
 	var archived sql.NullString
 	var runMS, shellMS, toolRounds int64
-	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &githubAllow, &serverTools, &b.Status, &model, &b.SessionID, &b.CreatedAt, &b.UpdatedAt, &archived, &runMS, &shellMS, &toolRounds)
+	var think sql.NullInt64
+	var numCtx int64
+	err := row.Scan(&b.ID, &b.Name, &b.Label, &b.Description, &shape, &color, &pinned, &hidden, &grants, &netAllow, &sshAllow, &githubAllow, &serverTools, &b.Status, &model, &b.SessionID, &b.CreatedAt, &b.UpdatedAt, &archived, &runMS, &shellMS, &toolRounds, &think, &numCtx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Bot{}, ErrNotFound
 	}
@@ -1125,10 +1148,47 @@ func scanBot(row interface{ Scan(dest ...any) error }, full bool) (Bot, error) {
 	b.RunTimeout = DurationMS(msToDuration(runMS))
 	b.ShellTimeout = DurationMS(msToDuration(shellMS))
 	b.ToolRounds = int(toolRounds)
+	if think.Valid {
+		v := think.Int64 != 0
+		b.Think = &v
+	}
+	b.NumCtx = int(numCtx)
 	if !full {
 		b.Description = ""
 	}
 	return b, nil
+}
+
+func thinkSQL(v *bool) any {
+	if v == nil {
+		return nil
+	}
+	if *v {
+		return 1
+	}
+	return 0
+}
+
+func cloneBool(v *bool) *bool {
+	if v == nil {
+		return nil
+	}
+	c := *v
+	return &c
+}
+
+func sameBoolPtr(a, b *bool) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func validBotNumCtx(n int) error {
+	if n < 0 || n > (1<<20) {
+		return fmt.Errorf("num_ctx must be from 1 to %d", 1<<20)
+	}
+	return nil
 }
 
 func (s *Store) ListBots() ([]Bot, error) {
@@ -1189,6 +1249,10 @@ type BotPatch struct {
 	ShellTimeout    time.Duration
 	ToolRoundsSet   bool
 	ToolRounds      int
+	ThinkSet        bool
+	Think           *bool
+	NumCtxSet       bool
+	NumCtx          int
 	By              string
 }
 
@@ -1311,6 +1375,17 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, Bot, error) {
 	if p.ToolRoundsSet && p.ToolRounds != oldRounds {
 		b.ToolRounds = p.ToolRounds
 	}
+	if p.ThinkSet && !sameBoolPtr(b.Think, p.Think) {
+		b.Think = cloneBool(p.Think)
+		fields = append(fields, "think")
+	}
+	if p.NumCtxSet && p.NumCtx != b.NumCtx {
+		if err := validBotNumCtx(p.NumCtx); err != nil {
+			return Bot{}, Bot{}, err
+		}
+		b.NumCtx = p.NumCtx
+		fields = append(fields, "num_ctx")
+	}
 	limitsChanged := b.RunTimeout.Duration() != oldRun || b.ShellTimeout.Duration() != oldShell || b.ToolRounds != oldRounds
 	if len(fields) == 0 && !limitsChanged {
 		if err := tx.Rollback(); err != nil {
@@ -1327,8 +1402,8 @@ func (s *Store) UpdateBot(id string, p BotPatch) (Bot, Bot, error) {
 	if b.Hidden {
 		hide = 1
 	}
-	_, err = tx.Exec(`UPDATE bots SET name=?, name_lower=?, label=?, description=?, mark_shape=?, mark_color=?, pinned=?, hidden=?, grants=?, net_allow=?, ssh_allow=?, github_allow=?, server_tools=?, model=?, status=?, updated_at=?, run_timeout_ms=?, shell_timeout_ms=?, tool_rounds=? WHERE id=?`,
-		b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, pin, hide, encodeList(b.Grants), encodeList(b.NetAllow), encodeList(b.SSHAllow), encodeList(b.GitHubAllow), encodeOptList(b.ServerTools), nullStr(b.Model), b.Status, b.UpdatedAt, durationToMS(b.RunTimeout.Duration()), durationToMS(b.ShellTimeout.Duration()), b.ToolRounds, b.ID)
+	_, err = tx.Exec(`UPDATE bots SET name=?, name_lower=?, label=?, description=?, mark_shape=?, mark_color=?, pinned=?, hidden=?, grants=?, net_allow=?, ssh_allow=?, github_allow=?, server_tools=?, model=?, status=?, updated_at=?, run_timeout_ms=?, shell_timeout_ms=?, tool_rounds=?, think=?, num_ctx=? WHERE id=?`,
+		b.Name, strings.ToLower(b.Name), b.Label, b.Description, b.Mark.Shape, b.Mark.Color, pin, hide, encodeList(b.Grants), encodeList(b.NetAllow), encodeList(b.SSHAllow), encodeList(b.GitHubAllow), encodeOptList(b.ServerTools), nullStr(b.Model), b.Status, b.UpdatedAt, durationToMS(b.RunTimeout.Duration()), durationToMS(b.ShellTimeout.Duration()), b.ToolRounds, thinkSQL(b.Think), b.NumCtx, b.ID)
 	if err != nil {
 		if isUnique(err) {
 			return Bot{}, Bot{}, ErrConflict
@@ -1895,6 +1970,12 @@ func (s *Store) FinishRun(id, status, errText string) (bool, error) {
 
 // FinishRunCode is FinishRun with a stable error_code. Other failures pass "".
 func (s *Store) FinishRunCode(id, status, errText, errCode string) (bool, error) {
+	return s.FinishRunStopped(id, status, errText, errCode, "")
+}
+
+// FinishRunStopped is FinishRunCode with an explicit stop reason. Empty leaves
+// the column at its default.
+func (s *Store) FinishRunStopped(id, status, errText, errCode, stopReason string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var botID string
@@ -1910,12 +1991,15 @@ func (s *Store) FinishRunCode(id, status, errText, errCode string) (bool, error)
 	if errText != "" {
 		e = errText
 	}
-	if _, err := s.db.Exec(`UPDATE runs SET status=?, finished_at=?, error=?, error_code=? WHERE id=? AND status='running'`, status, now, e, errCode, id); err != nil {
+	if _, err := s.db.Exec(`UPDATE runs SET status=?, finished_at=?, error=?, error_code=?, stop_reason=? WHERE id=? AND status='running'`, status, now, e, errCode, stopReason, id); err != nil {
 		return false, err
 	}
 	detail := map[string]any{"run_id": id, "status": status}
 	if errText != "" {
 		detail["error"] = errText
+	}
+	if stopReason != "" {
+		detail["stop_reason"] = stopReason
 	}
 	if err := s.logUnlocked(botID, "run_finished", detail); err != nil {
 		return false, err
@@ -2018,8 +2102,8 @@ func (s *Store) GetRun(id string) (Run, error) {
 	defer s.mu.Unlock()
 	var r Run
 	var fin, errText sql.NullString
-	err := s.db.QueryRow(`SELECT id, bot_id, status, started_at, finished_at, error, error_code, waiting_pending_id, waiting_seq FROM runs WHERE id=?`, id).
-		Scan(&r.ID, &r.BotID, &r.Status, &r.StartedAt, &fin, &errText, &r.ErrorCode, &r.WaitingPendingID, &r.WaitingSeq)
+	err := s.db.QueryRow(`SELECT id, bot_id, status, started_at, finished_at, error, error_code, stop_reason, waiting_pending_id, waiting_seq FROM runs WHERE id=?`, id).
+		Scan(&r.ID, &r.BotID, &r.Status, &r.StartedAt, &fin, &errText, &r.ErrorCode, &r.StopReason, &r.WaitingPendingID, &r.WaitingSeq)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Run{}, ErrNotFound
 	}
