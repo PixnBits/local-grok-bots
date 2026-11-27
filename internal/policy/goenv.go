@@ -1,7 +1,10 @@
 package policy
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -94,6 +97,19 @@ func (p *Policy) applySandbox(doc *sandboxDoc, trusted bool) error {
 			p.goToolLocalSet = true
 		}
 	}
+	if doc.Node != nil {
+		resolved, err := resolvePolicyNode(*doc.Node)
+		if err != nil {
+			return err
+		}
+		if trusted {
+			p.nodeManaged = resolved
+			p.nodeManagedSet = true
+		} else {
+			p.nodeLocal = resolved
+			p.nodeLocalSet = true
+		}
+	}
 	if doc.GoFlags != nil {
 		v := strings.TrimSpace(*doc.GoFlags)
 		if strings.ContainsAny(v, "\r\n\x00") {
@@ -108,6 +124,48 @@ func (p *Policy) applySandbox(doc *sandboxDoc, trusted bool) error {
 		}
 	}
 	return nil
+}
+
+// errSandboxNode is a startup error. A configured node path that is not a
+// usable binary fail-closes instead of being dropped.
+var errSandboxNode = errors.New("sandbox.node")
+
+func resolvePolicyNode(raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return "", fmt.Errorf("%w is empty", errSandboxNode)
+	}
+	if !filepath.IsAbs(v) {
+		return "", fmt.Errorf("%w must be an absolute path", errSandboxNode)
+	}
+	resolved, err := filepath.EvalSymlinks(v)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", errSandboxNode, err)
+	}
+	st, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", errSandboxNode, err)
+	}
+	if !st.Mode().IsRegular() {
+		return "", fmt.Errorf("%w must be a regular file", errSandboxNode)
+	}
+	if st.Mode()&0o111 == 0 {
+		return "", fmt.Errorf("%w must be executable", errSandboxNode)
+	}
+	return resolved, nil
+}
+
+func (p *Policy) finishNode() {
+	if p == nil {
+		return
+	}
+	if p.nodeManagedSet {
+		p.NodePath = p.nodeManaged
+		return
+	}
+	if p.nodeLocalSet {
+		p.NodePath = p.nodeLocal
+	}
 }
 
 func (p *Policy) finishGoEnv() {

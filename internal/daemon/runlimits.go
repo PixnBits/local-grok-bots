@@ -118,6 +118,45 @@ func toolRoundLimitBody(n, botRounds, ceiling int, ceilingSource string) string 
 	}
 }
 
+// toolRoundWrapUpMark is the stable start of the wrap-up note. Tests match it.
+const toolRoundWrapUpMark = "You are about to run out of tool rounds."
+
+// wrapUpMinRounds is the smallest effective tool-round budget that reserves a
+// final round for wrap-up. Below this the note would consume the budget, so
+// limits of 1, 2, or 3 are unchanged.
+const wrapUpMinRounds = 4
+
+// wrapUpReserve is how many final rounds carry the wrap-up note.
+// Budgets under wrapUpMinRounds reserve nothing. Budgets of 8 or more reserve
+// the last two rounds. Smaller budgets that still meet the minimum reserve
+// the last round. The note is injected once, on the first reserved round.
+func wrapUpReserve(rounds int) int {
+	if rounds < wrapUpMinRounds {
+		return 0
+	}
+	if rounds >= 8 {
+		return 2
+	}
+	return 1
+}
+
+func (a *App) chatOptions(pol policy.Policy, modelName string, bot store.Bot) (*bool, int) {
+	var cliThink *bool
+	var cliNum int
+	if a != nil {
+		cliThink = a.cfg.Think
+		cliNum = a.cfg.NumCtx
+	}
+	return policy.ResolveChatOptions(pol, modelName, bot.Think, bot.NumCtx, cliThink, cliNum)
+}
+
+func toolRoundWrapUp(hasGit bool) string {
+	if hasGit {
+		return toolRoundWrapUpMark + " Stop exploring. If you have uncommitted changes, commit that work on the local branch now. Otherwise write a summary of the current state and the next steps."
+	}
+	return toolRoundWrapUpMark + " Stop exploring and write a summary of the current state and the next steps."
+}
+
 func (a *App) shellCapMessage(bot store.Bot, cap time.Duration) string {
 	pol := policy.Policy{}
 	if a != nil {

@@ -2264,6 +2264,51 @@ fi
 if [ "$sub" != config ]; then
   scan_urls "$@"
 fi
+# Local-only mode tolerates remote transport keys on commands that do not
+# contact a remote. It is on when this bot has no GitHub grant, or when a
+# successful remote listing is empty. A failed listing leaves it off.
+# Push, fetch, pull, clone, ls-remote, remote, and submodule never skip a key.
+# Keys that change local command behavior stay refused.
+local_only=0
+if [ "$hub" != 1 ]; then
+  local_only=1
+elif [ -x "$real" ]; then
+  lo_rems=$(
+    eval "set -- $gitdir_args"
+    "$real" -C "$vet_base" "$@" \
+      -c core.hooksPath=/dev/null \
+      -c core.fsmonitor= \
+      -c core.sshCommand=/bin/false \
+      -c protocol.allow=never \
+      -c safe.directory='*' \
+      remote 2>/dev/null
+  )
+  if [ $? -eq 0 ] && [ -z "$lo_rems" ]; then
+    local_only=1
+  fi
+fi
+local_only_skip_key() {
+  if [ "$local_only" != 1 ]; then
+    return 1
+  fi
+  case "$sub" in
+    status|add|commit|log|diff|show|branch|switch|checkout|rev-parse|stash|restore|reset|blame|ls-files|grep|version|help|describe|name-rev|cat-file|shortlog|var)
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  lo_key=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]') || return 1
+  case "$lo_key" in
+    remote.*.pushurl|remote.*.push)
+      lo_rn=${lo_key#remote.}
+      lo_rn=${lo_rn%.*}
+      remote_name_ok "$lo_rn" || return 1
+      return 0
+      ;;
+  esac
+  return 1
+}
 # Effective config, including included files and worktree config.
 # git config stays available so a refused key can be removed.
 # Command-line pins are not repository keys and are skipped.
@@ -2312,6 +2357,11 @@ if [ "$sub" != config ] && [ -x "$real" ]; then
           ;;
       esac
       config_check_values "$cfg_key"
+      continue
+    fi
+    if local_only_skip_key "$cfg_key"; then
+      sk_key=$(printf '%s' "$cfg_key" | LC_ALL=C tr -c 'A-Za-z0-9._*-' '?' | LC_ALL=C cut -c 1-100)
+      printf '%s\n' "local-only git ${sub} skip ${sk_key}" >> "$log"
       continue
     fi
     say_config_key "$cfg_key"

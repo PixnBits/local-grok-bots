@@ -82,6 +82,10 @@ type Request struct {
 	GoToolchain string
 	GoFlags     string
 	GoSumDB     string
+	// NodePath is the host node binary. Empty installs a shim that explains
+	// how to set [sandbox] node. A set path is checked again here, including
+	// that it is outside the workspace, and bind-mounted read-only.
+	NodePath string
 	// Output receives stdout and stderr while the process runs. Nil keeps
 	// the 16 KiB capture and does not read past that. A set writer is given
 	// every byte; it must not return a short write or the copy stops.
@@ -146,7 +150,9 @@ type prepared struct {
 	// goLines is the toolchain environment. Darwin launch reads it because
 	// it does not use env. Linux copies the same lines into env.
 	goLines []string
-	stream  *shellStream
+	// nodeHost is the host directory mounted at JailNodeDir. Darwin prepends it.
+	nodeHost string
+	stream   *shellStream
 }
 
 // shellStream is an optional full copy of shell output and a start hook.
@@ -497,6 +503,9 @@ func prepare(ctx context.Context, req Request, ws string) (*prepared, error) {
 	if err := installGoWrap(p, ro, rw, req); err != nil {
 		return nil, err
 	}
+	if err := installJailNode(p, ro, req, ws); err != nil {
+		return nil, err
+	}
 	if p.proxy != nil {
 		p.env = append(p.env,
 			"LD_PRELOAD=/lgb/preload.so",
@@ -526,9 +535,20 @@ func dropEnvKeys(env []string, keys ...string) []string {
 	return out
 }
 
+// JailNodeDir is the read-only directory on the jail PATH that holds node.
+const JailNodeDir = "/opt/lgb-node/bin"
+
+// nodeUnsetText is printed by the shim when [sandbox] node is unset.
+const nodeUnsetText = "node is not configured for this jail: set [sandbox] node in policy.toml"
+
 // jailPATH names binaries that are already on the read-only /usr and /bin mounts.
-// Home directories and /snap are not included.
+// Home directories and /snap are not included. JailNodeDir is first so the
+// mounted node, or the unset shim, is the node the shell finds.
 func jailPATH() string {
+	return JailNodeDir + ":" + jailPATHBase()
+}
+
+func jailPATHBase() string {
 	candidates := []string{
 		"/usr/local/go/bin",
 		"/usr/lib/go/bin",

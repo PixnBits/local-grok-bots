@@ -78,7 +78,7 @@ func launch(ctx context.Context, p *prepared) (string, string, error) {
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Dir = dir
 	cmd.Env = []string{
-		"PATH=" + darwinPATH(),
+		"PATH=" + darwinNodePATH(p),
 		"HOME=" + ws,
 		"TMPDIR=" + tmp,
 		"PWD=" + dir,
@@ -93,6 +93,14 @@ func launch(ctx context.Context, p *prepared) (string, string, error) {
 		cmd.Env = dropEnvKeys(cmd.Env, "BASH_ENV", "ENV")
 	}
 	return captureStream(ctx, cmd, nil, nil, p.stream)
+}
+
+func darwinNodePATH(p *prepared) string {
+	base := darwinPATH()
+	if p == nil || p.nodeHost == "" {
+		return base
+	}
+	return p.nodeHost + ":" + base
 }
 
 func darwinPATH() string {

@@ -317,6 +317,13 @@ func (a *App) execTool(ctx context.Context, bot store.Bot, name string, args map
 }
 
 func (a *App) dispatchTool(ctx context.Context, bot store.Bot, name string, args map[string]any) (string, error) {
+	// The model list omits these names without a github grant. Refuse the
+	// same names here, before a tool body reads arguments or calls out.
+	// The stored bot is the one the tool body would use.
+	stored := a.freshBot(bot)
+	if githubToolName(name) && !granted(stored.Grants, "github") {
+		return "", errors.New("github grant required")
+	}
 	switch name {
 	case "list_bots":
 		bots, err := a.st.ListBots()

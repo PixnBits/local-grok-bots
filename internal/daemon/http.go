@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/PixnBits/local-grok-bots/internal/clisession"
+	"github.com/PixnBits/local-grok-bots/internal/policy"
 	"github.com/PixnBits/local-grok-bots/internal/sandbox"
 	"github.com/PixnBits/local-grok-bots/internal/store"
 	"github.com/PixnBits/local-grok-bots/web"
@@ -477,6 +479,8 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 		RunTimeout   *string         `json:"run_timeout"`
 		ShellTimeout *string         `json:"shell_timeout"`
 		ToolRounds   json.RawMessage `json:"tool_rounds"`
+		Think        *bool           `json:"think"`
+		NumCtx       *int            `json:"num_ctx"`
 	}
 	if err := readJSON(w, r, &body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
@@ -531,10 +535,19 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	numCtx := 0
+	if body.NumCtx != nil {
+		if err := validAPINumCtx(*body.NumCtx); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		numCtx = *body.NumCtx
+	}
 	b, err := a.st.InsertBot(store.BotDraft{
 		Name: name, Label: body.Label, Description: description, Mark: mark, Model: modelPtr,
 		Grants: body.Grants, NetAllow: body.NetAllow, SSHAllow: body.SSHAllow, GitHubAllow: body.GitHubAllow, ServerTools: body.ServerTools,
 		RunTimeout: runTO, ShellTimeout: shellTO, ToolRounds: rounds,
+		Think: body.Think, NumCtx: numCtx,
 	}, "user")
 	if err != nil {
 		writeSaveErr(w, err)
@@ -543,6 +556,13 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 	a.notePermCallback()
 	a.auditLimitChanges(store.Bot{}, b, "user")
 	writeJSON(w, http.StatusCreated, a.decorateBot(b))
+}
+
+func validAPINumCtx(n int) error {
+	if n < 1 || n > policy.MaxNumCtx {
+		return fmt.Errorf("num_ctx %d must be from 1 to %d", n, policy.MaxNumCtx)
+	}
+	return nil
 }
 
 func firstText(primary, alias *string) string {
@@ -720,6 +740,40 @@ func (a *App) handlePatchBot(w http.ResponseWriter, r *http.Request) {
 		}
 		patch.ToolRoundsSet = true
 		patch.ToolRounds = n
+	}
+	if v, ok := raw["think"]; ok {
+		if len(v) == 0 || string(v) == "null" {
+			patch.ThinkSet = true
+			patch.Think = nil
+		} else {
+			var on bool
+			if err := json.Unmarshal(v, &on); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "think must be a boolean"})
+				return
+			}
+			patch.ThinkSet = true
+			patch.Think = &on
+		}
+	}
+	if v, ok := raw["num_ctx"]; ok {
+		if len(v) == 0 || string(v) == "null" {
+			patch.NumCtxSet = true
+			patch.NumCtx = 0
+		} else {
+			var n int
+			if err := json.Unmarshal(v, &n); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "num_ctx must be an integer"})
+				return
+			}
+			if n != 0 {
+				if err := validAPINumCtx(n); err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+					return
+				}
+			}
+			patch.NumCtxSet = true
+			patch.NumCtx = n
+		}
 	}
 	var archived *bool
 	if v, ok := raw["archived"]; ok {

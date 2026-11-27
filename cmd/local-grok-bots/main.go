@@ -20,6 +20,8 @@ const usage = `local-grok-bots is a local daemon for a personal bot roster.
   POLICY_PATH           policy.toml
   OLLAMA_URL            http://127.0.0.1:11434
   OLLAMA_MODEL          llama3.2
+  OLLAMA_THINK          unset (true or false; omitted when unset)
+  OLLAMA_NUM_CTX        unset (1..1048576; omitted when unset)
   AUTH_TOKEN            unset
   AUTH_TOKENS_FILE      unset
   SANDBOX_BUILD_BINDS   unset
@@ -31,6 +33,7 @@ const usage = `local-grok-bots is a local daemon for a personal bot roster.
   PERM_CALLBACK_ADDR    127.0.0.1:0
 
 A policy.toml bind overrides BIND_ADDR. Policy [daemon] tls_* overrides TLS_CERT, TLS_KEY, and TLS_SELF_SIGNED. Policy [voice] overrides WHISPER_BIN and WHISPER_MODEL. Policy perm_callback_addr overrides PERM_CALLBACK_ADDR.
+Flags --think, --no-think, --think=true|false, and --num-ctx N override OLLAMA_THINK and OLLAMA_NUM_CTX. Policy [ollama] think, num_ctx, and [ollama.model_options] override the bot and these flags.
 AUTH_TOKENS_FILE is a file of name:token lines. It is read at startup. SIGHUP reloads it when set, and is otherwise ignored (logged). The protected-path snapshot is taken at startup. SIGHUP does not replace it. A successful token reload adds paths that were not already recorded.
 `
 
@@ -51,6 +54,15 @@ func main() {
 	defer signal.Stop(hup)
 	config.ReexecIfNeeded()
 	cfg := config.FromEnv()
+	if err := cfg.ModelEnvError(); err != nil {
+		fmt.Fprintln(os.Stderr, "local-grok-bots:", err)
+		os.Exit(2)
+	}
+	cfg, err := config.ApplyModelArgs(cfg, os.Args[1:])
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "local-grok-bots:", err)
+		os.Exit(2)
+	}
 	app, err := daemon.New(cfg, nil)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "local-grok-bots:", err)

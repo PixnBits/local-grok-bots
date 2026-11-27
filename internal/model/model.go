@@ -39,6 +39,10 @@ type ChatRequest struct {
 	// KeepAlive is Ollama's keep_alive: a duration string or an integer
 	// number of seconds (-1 keeps the model loaded). Nil omits the field.
 	KeepAlive any
+	// Think is Ollama's top-level think flag. Nil omits it. False is sent.
+	Think *bool
+	// NumCtx is options.num_ctx. Zero omits it.
+	NumCtx int
 }
 
 type ChatResponse struct {

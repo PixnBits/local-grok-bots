@@ -75,6 +75,12 @@ func (o *Ollama) Chat(ctx context.Context, req ChatRequest, onToken func(string)
 	if req.KeepAlive != nil && req.KeepAlive != "" {
 		body["keep_alive"] = req.KeepAlive
 	}
+	if req.Think != nil {
+		body["think"] = *req.Think
+	}
+	if req.NumCtx > 0 {
+		body["options"] = map[string]any{"num_ctx": req.NumCtx}
+	}
 	raw, err := json.Marshal(body)
 	if err != nil {
 		return ChatResponse{}, err
