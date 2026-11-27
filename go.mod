@@ -1,22 +1,23 @@
 module github.com/PixnBits/local-grok-bots
 
-go 1.24.0
+go 1.26.0
+
+toolchain go1.27.4
 
 require (
-	github.com/pelletier/go-toml/v2 v2.2.4
-	golang.org/x/sys v0.36.0
-	modernc.org/sqlite v1.37.0
-	mvdan.cc/sh/v3 v3.12.0
+	github.com/pelletier/go-toml/v2 v2.4.3
+	golang.org/x/sys v0.50.0
+	modernc.org/sqlite v1.63.0
+	mvdan.cc/sh/v3 v3.14.1
 )
 
 require (
-	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/mattn/go-isatty v0.0.20 // indirect
-	github.com/ncruces/go-strftime v0.1.9 // indirect
+	github.com/mattn/go-isatty v0.0.24 // indirect
+	github.com/ncruces/go-strftime v1.1.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
-	golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect
-	modernc.org/libc v1.62.1 // indirect
+	modernc.org/libc v1.80.1 // indirect
 	modernc.org/mathutil v1.7.1 // indirect
-	modernc.org/memory v1.9.1 // indirect
+	modernc.org/memory v1.12.1 // indirect
 )
