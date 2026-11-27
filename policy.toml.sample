@@ -80,8 +80,9 @@ model = "llama3.1"
 # shell_timeout = "30s"
 # think and num_ctx are sent on /api/chat when set. think is a boolean
 # (false is sent as false). num_ctx is options.num_ctx, from 1 to 1048576.
-# [ollama.model_options."<name>"] overrides these for that model name.
-# Policy beats a bot's think/num_ctx and the daemon flags --think and --num-ctx.
+# [ollama.model_options."<name>"] overrides the defaults in that same file.
+# Managed policy wins over local policy for each of think and num_ctx on its own.
+# The result beats a bot's think/num_ctx and the daemon flags --think and --num-ctx.
 # think = false
 # num_ctx = 8192
 # [ollama.model_options."qwen3.6:35b"]

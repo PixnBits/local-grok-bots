@@ -77,12 +77,18 @@ type Policy struct {
 	// OllamaToolRounds is how many model rounds one Ollama run may use.
 	// Zero means DefaultOllamaToolRounds.
 	OllamaToolRounds int
-	// OllamaThink and OllamaNumCtx are the default chat options.
-	// A nil think or a zero num_ctx means unset. ModelOptions overrides
-	// them for one model name. Policy values beat bot and CLI settings.
+	// OllamaThink and OllamaNumCtx are the default chat options after
+	// managed and local policy are combined. A nil think or a zero num_ctx
+	// means unset. ModelOptions overrides them for one model name.
+	// For each key the order is managed per-model, managed default, local
+	// per-model, local default. Those beat bot and CLI settings.
 	OllamaThink        *bool
 	OllamaNumCtx       int
 	OllamaModelOptions map[string]OllamaModelOption
+	// ollamaManaged and ollamaLocal are the two files. finishOllamaOptions
+	// copies the winner into the fields above.
+	ollamaManaged ollamaOptSet
+	ollamaLocal   ollamaOptSet
 	// OllamaShellTimeout bounds one run_shell call. Zero means the default.
 	OllamaShellTimeout time.Duration
 	// OllamaJobLifetime bounds one background shell after it is adopted.
@@ -435,6 +441,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 		p.finishGitHub()
 		p.finishGoEnv()
 		p.finishNode()
+		p.finishOllamaOptions()
 		p.dropIncompleteCLI()
 		p.warnClampedCeilings()
 		return p, nil
@@ -490,6 +497,7 @@ func overlayManaged(p Policy, opts Options, fileOK bool) (Policy, error) {
 	base.finishGitHub()
 	base.finishGoEnv()
 	base.finishNode()
+	base.finishOllamaOptions()
 	base.dropIncompleteCLI()
 	base.warnClampedCeilings()
 	return base, nil
@@ -2039,7 +2047,7 @@ func (p *Policy) apply(doc document, trusted bool) error {
 			p.MaxOllamaToolRounds = n
 		}
 	}
-	if err := p.applyOllamaOptions(doc.Ollama); err != nil {
+	if err := p.applyOllamaOptions(doc.Ollama, trusted); err != nil {
 		return err
 	}
 	if doc.Ollama.KeepAlive.Set {

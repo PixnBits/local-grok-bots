@@ -76,6 +76,102 @@ func TestJailNodeMountsResolvedFile(t *testing.T) {
 	}
 }
 
+func TestJailNodeCheckOutsideWorkspace(t *testing.T) {
+	base := canonicalTemp(t)
+	ws := filepath.Join(base, "ws")
+	if err := os.Mkdir(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(base, "outside")
+	if err := os.Mkdir(outside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	good := writeNodeFile(t, outside, 0o755)
+	got, err := checkJailNode(good, ws)
+	if err != nil || got != good {
+		t.Fatalf("outside node %q err %v", got, err)
+	}
+
+	inside := writeNodeFile(t, ws, 0o755)
+	if _, err := checkJailNode(inside, ws); err == nil || !strings.Contains(err.Error(), "outside the workspace") {
+		t.Fatalf("inside: %v", err)
+	}
+
+	link := filepath.Join(outside, "via-link")
+	if err := os.Symlink(inside, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := checkJailNode(link, ws); err == nil || !strings.Contains(err.Error(), "outside the workspace") {
+		t.Fatalf("symlink into workspace: %v", err)
+	}
+
+	real := filepath.Join(base, "real")
+	if err := os.Mkdir(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realNode := writeNodeFile(t, real, 0o755)
+	wsLink := filepath.Join(base, "ws-link")
+	if err := os.Symlink(real, wsLink); err != nil {
+		t.Fatal(err)
+	}
+	// The node path is not under the workspace string. The workspace string
+	// resolves to the directory that holds the node, so the second comparison
+	// is the one that rejects it.
+	if _, err := checkJailNode(realNode, wsLink); err == nil || !strings.Contains(err.Error(), "outside the workspace") {
+		t.Fatalf("symlinked workspace: %v", err)
+	}
+
+	dirNode := filepath.Join(outside, "dir-node")
+	if err := os.Mkdir(dirNode, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := checkJailNode(dirNode, ws); err == nil || !strings.Contains(err.Error(), "regular") {
+		t.Fatalf("directory: %v", err)
+	}
+
+	plain := writeNodeFile(t, outside, 0o644)
+	if _, err := checkJailNode(plain, ws); err == nil || !strings.Contains(err.Error(), "executable") {
+		t.Fatalf("non-exec: %v", err)
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rel, err := filepath.Rel(wd, good)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.IsAbs(rel) {
+		t.Fatalf("relative path is absolute: %s", rel)
+	}
+	if _, err := checkJailNode(rel, ws); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("relative %s: %v", rel, err)
+	}
+}
+
+func canonicalTemp(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	real, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if real != filepath.Clean(dir) {
+		t.Fatalf("temp %s resolves to %s", dir, real)
+	}
+	return dir
+}
+
+func writeNodeFile(t *testing.T, dir string, mode os.FileMode) string {
+	t.Helper()
+	path := filepath.Join(dir, "node-"+mode.String())
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' node-ok\n"), mode); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestJailNodeRejectsInvalid(t *testing.T) {
 	ws := t.TempDir()
 	inside := filepath.Join(ws, "node")

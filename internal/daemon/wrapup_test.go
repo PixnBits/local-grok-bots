@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,6 +79,62 @@ func TestToolRoundWrapUpReservedRounds(t *testing.T) {
 	}
 	if toolCount(cont) != maxToolRounds {
 		t.Fatalf("continue tool results = %d", toolCount(cont))
+	}
+}
+
+func TestWrapUpReserveBands(t *testing.T) {
+	cases := []struct {
+		rounds int
+		want   int
+	}{
+		{0, 0}, {1, 0}, {2, 0}, {3, 0},
+		{4, 1}, {5, 1}, {6, 1}, {7, 1},
+		{8, 2}, {9, 2}, {12, 2},
+	}
+	for _, c := range cases {
+		if got := wrapUpReserve(c.rounds); got != c.want {
+			t.Fatalf("wrapUpReserve(%d) = %d, want %d", c.rounds, got, c.want)
+		}
+	}
+}
+
+func TestToolRoundWrapUpNoteOnLastCallForMidBudget(t *testing.T) {
+	for _, rounds := range []int{4, 7} {
+		rounds := rounds
+		t.Run(fmt.Sprintf("rounds%d", rounds), func(t *testing.T) {
+			mdl := &scriptModel{toolRounds: rounds}
+			app := newApp(t, "", mdl)
+			srv := serve(t, app)
+			res, body := do(t, "POST", srv.URL+"/api/bots", map[string]any{
+				"name": "Mid", "description": "be brief", "tool_rounds": rounds,
+			}, "")
+			if res.StatusCode != 201 {
+				t.Fatalf("create %d %s", res.StatusCode, body)
+			}
+			var bot store.Bot
+			decodeJSON(t, body, &bot)
+			postUser(t, srv.URL, bot.ID, "look")
+			waitBot(t, srv.URL, bot.ID, func(b store.Bot) bool {
+				return b.Status != "running" && b.LastRunStatus == "error"
+			})
+			waitRunReleased(t, app, bot.ID)
+			calls := mdl.snapshot()
+			if len(calls) != rounds {
+				t.Fatalf("calls = %d", len(calls))
+			}
+			if wrapUpReserve(rounds) != 1 {
+				t.Fatalf("reserve = %d", wrapUpReserve(rounds))
+			}
+			for i, call := range calls {
+				n := wrapUpCount(call.Messages)
+				if i < rounds-1 && n != 0 {
+					t.Fatalf("call %d has the note before the last call", i)
+				}
+				if i == rounds-1 && n != 1 {
+					t.Fatalf("last call note count = %d", n)
+				}
+			}
+		})
 	}
 }
 

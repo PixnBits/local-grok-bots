@@ -94,8 +94,9 @@ run_timeout = "10m"
 # A per-bot tool_rounds may only narrow this.
 tool_rounds = 8
 # think (bool) and num_ctx (int, 1..1048576) are sent on /api/chat when set.
-# [ollama.model_options."<model>"] overrides the defaults for that model.
-# Policy beats the bot and the daemon's --think / --num-ctx flags.
+# [ollama.model_options."<model>"] overrides the defaults in that same file.
+# Managed policy wins over local policy for each setting on its own.
+# The result beats the bot and the daemon's --think / --num-ctx flags.
 # think = false
 # num_ctx = 8192
 # Cap on one run_shell call. Default 30s. Whole seconds, at least 1s, up to 24h.

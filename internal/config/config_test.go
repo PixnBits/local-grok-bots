@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestAuthTokensFileFromEnv(t *testing.T) {
 	t.Setenv("AUTH_TOKENS_FILE", "")
@@ -21,6 +24,34 @@ func TestBindAddrDefault(t *testing.T) {
 	t.Setenv("BIND_ADDR", "0.0.0.0:8080")
 	if got := FromEnv().BindAddr; got != "0.0.0.0:8080" {
 		t.Fatalf("override %s", got)
+	}
+}
+
+func TestNumCtxBound(t *testing.T) {
+	t.Setenv("OLLAMA_THINK", "")
+	t.Setenv("OLLAMA_NUM_CTX", "1048577")
+	if err := FromEnv().ModelEnvError(); err == nil || !strings.Contains(err.Error(), "1048576") {
+		t.Fatalf("OLLAMA_NUM_CTX 1048577: %v", err)
+	}
+	t.Setenv("OLLAMA_NUM_CTX", "1048576")
+	cfg := FromEnv()
+	if err := cfg.ModelEnvError(); err != nil || cfg.NumCtx != 1048576 {
+		t.Fatalf("OLLAMA_NUM_CTX 1048576: %d %v", cfg.NumCtx, err)
+	}
+
+	if _, err := ApplyModelArgs(Config{}, []string{"--num-ctx", "1048577"}); err == nil || !strings.Contains(err.Error(), "1048576") {
+		t.Fatalf("--num-ctx 1048577: %v", err)
+	}
+	if _, err := ApplyModelArgs(Config{}, []string{"--num-ctx=1048577"}); err == nil {
+		t.Fatal("--num-ctx=1048577 accepted")
+	}
+	got, err := ApplyModelArgs(Config{}, []string{"--num-ctx", "1048576"})
+	if err != nil || got.NumCtx != 1048576 {
+		t.Fatalf("--num-ctx 1048576: %d %v", got.NumCtx, err)
+	}
+	got, err = ApplyModelArgs(Config{}, []string{"--num-ctx=1048576"})
+	if err != nil || got.NumCtx != 1048576 {
+		t.Fatalf("--num-ctx=1048576: %d %v", got.NumCtx, err)
 	}
 }
 

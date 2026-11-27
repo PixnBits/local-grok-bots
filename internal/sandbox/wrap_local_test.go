@@ -144,15 +144,51 @@ func TestGitWrapLocalOnlyDangerousKeysStayRefused(t *testing.T) {
 	commitRepo(t, dir, "a.txt", "a\n")
 	gitCmd(t, dir, "config", "user.name", "Ada")
 	gitCmd(t, dir, "config", "user.email", "ada@example.com")
-	for _, key := range []string{"core.hooksPath", "core.fsmonitor", "alias.st"} {
+	for _, key := range []string{
+		"core.hooksPath", "core.fsmonitor", "alias.st",
+		"remote.origin.receivepack", "remote.origin.uploadpack",
+		"url.base.pushInsteadOf", "remote.ori@gin.pushurl",
+	} {
 		gitCmd(t, dir, "config", key, "true")
 		for _, args := range [][]string{{"status"}, {"commit", "-m", "no"}} {
 			out, err := runInstalledWrap(t, wrap, dir, nil, args...)
-			if err == nil || !strings.Contains(out, "configuration is not allowed") {
+			mark := strings.ToLower(refusedKeyMark(key))
+			if err == nil || !strings.Contains(out, "configuration is not allowed") || !strings.Contains(strings.ToLower(out), mark) {
 				t.Fatalf("%s %v: %v\n%s", key, args, err, out)
 			}
 		}
 		gitCmd(t, dir, "config", "--unset", key)
+	}
+}
+
+func refusedKeyMark(key string) string {
+	switch key {
+	case "remote.origin.receivepack":
+		return "receivepack"
+	case "remote.origin.uploadpack":
+		return "uploadpack"
+	case "url.base.pushInsteadOf":
+		return "pushInsteadOf"
+	case "remote.ori@gin.pushurl":
+		return "ori?gin"
+	default:
+		return key
+	}
+}
+
+func TestGitWrapProbeFailureStaysRefused(t *testing.T) {
+	work := t.TempDir()
+	wrap, _ := installGitWrapLogged(t, work, gitWrapOpts{Grant: true, Hub: true})
+	src := filepath.Join(work, "src")
+	commitRepo(t, src, "f.txt", "hi\n")
+	dir := filepath.Join(work, "repo")
+	commitRepo(t, dir, "a.txt", "a\n")
+	gitCmd(t, dir, "remote", "add", "origin", "file://"+src)
+	gitCmd(t, dir, "config", "--replace-all", "remote.origin.fetch", "::")
+	withPushURL(t, dir, "origin", "disabled")
+	out, err := runInstalledWrap(t, wrap, dir, nil, "status")
+	if err == nil || !strings.Contains(out, "configuration is not allowed") || !strings.Contains(out, "pushurl") {
+		t.Fatalf("probe failure status: %v\n%s", err, out)
 	}
 }
 

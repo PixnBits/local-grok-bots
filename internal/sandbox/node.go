@@ -68,6 +68,11 @@ func checkJailNode(raw, workspace string) (string, error) {
 	}
 	if wsReal, werr := filepath.EvalSymlinks(ws); werr == nil {
 		wsReal = filepath.Clean(wsReal)
+		// The workspace string already covered this node when it is canonical.
+		// A workspace path that resolves somewhere else still needs the check below.
+		if wsReal == ws {
+			wsReal = ""
+		}
 		if pathHolds(wsReal, resolved) || pathHolds(resolved, wsReal) {
 			return "", fmt.Errorf("sandbox node must be outside the workspace")
 		}

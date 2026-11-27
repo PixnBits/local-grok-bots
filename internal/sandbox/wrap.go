@@ -2265,9 +2265,10 @@ if [ "$sub" != config ]; then
   scan_urls "$@"
 fi
 # Local-only mode tolerates remote transport keys on commands that do not
-# contact a remote. It is on when this bot has no GitHub grant, or when the
-# workspace has no remote. Push, fetch, pull, clone, ls-remote, remote, and
-# submodule never skip a key. Keys that change local command behavior stay refused.
+# contact a remote. It is on when this bot has no GitHub grant, or when a
+# successful remote listing is empty. A failed listing leaves it off.
+# Push, fetch, pull, clone, ls-remote, remote, and submodule never skip a key.
+# Keys that change local command behavior stay refused.
 local_only=0
 if [ "$hub" != 1 ]; then
   local_only=1
@@ -2281,8 +2282,8 @@ elif [ -x "$real" ]; then
       -c protocol.allow=never \
       -c safe.directory='*' \
       remote 2>/dev/null
-  ) || lo_rems=
-  if [ -z "$lo_rems" ]; then
+  )
+  if [ $? -eq 0 ] && [ -z "$lo_rems" ]; then
     local_only=1
   fi
 fi

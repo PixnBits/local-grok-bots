@@ -560,7 +560,7 @@ func (a *App) handleCreateBot(w http.ResponseWriter, r *http.Request) {
 
 func validAPINumCtx(n int) error {
 	if n < 1 || n > policy.MaxNumCtx {
-		return fmt.Errorf("num_ctx must be from 1 to %d", policy.MaxNumCtx)
+		return fmt.Errorf("num_ctx %d must be from 1 to %d", n, policy.MaxNumCtx)
 	}
 	return nil
 }
