@@ -1672,6 +1672,9 @@ func decode(body []byte, path string) (document, error) {
 		}
 		return doc, nil
 	}
+	if err := rejectTOML11Inline(body); err != nil {
+		return document{}, err
+	}
 	dec := toml.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&doc); err != nil {

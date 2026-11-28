@@ -1,0 +1,13 @@
+sandbox = { goproxy = "off", gotoolchain = "local" }
+
+[daemon]
+bind = "127.0.0.1:11434"
+allowed_hosts = ["voice.example", "::1"]
+
+[backend]
+backend = "ollama"
+allow = ["ollama", "claude",]
+
+[cli.permission]
+allow = ["Bash(git status*)", "Read"]
+deny = ["Bash(rm *)"]
