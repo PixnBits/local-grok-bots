@@ -1,0 +1,25 @@
+{
+  "Loaded": true,
+  "CLIPermitted": true,
+  "DaemonJail": true,
+  "Bind": "127.0.0.1:11434",
+  "HasBind": true,
+  "Backend": "ollama",
+  "Allow": [
+    "ollama",
+    "claude"
+  ],
+  "ToolAllow": [
+    "Bash(git status*)",
+    "Read"
+  ],
+  "ToolDeny": [
+    "Bash(rm *)"
+  ],
+  "GoProxy": "off",
+  "GoToolchain": "local",
+  "AllowedHosts": [
+    "voice.example",
+    "::1"
+  ]
+}
